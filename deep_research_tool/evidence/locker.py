@@ -70,7 +70,8 @@ class Evidence:
         if not self.citation_key:
             self.citation_key = self._generate_citation_key()
 
-        if not self.content_hash and self.content_excerpt:
+        # Always generate content_hash for deduplication (using url+title at minimum)
+        if not self.content_hash:
             self.content_hash = self._generate_content_hash()
 
         if not self.citation_text:
