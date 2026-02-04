@@ -499,3 +499,281 @@ Return as JSON:
             self.session.completed_at = datetime.now().isoformat()
 
         return self.session
+
+    def expand_section_content(
+        self,
+        section_ids: List[str],
+        additional_iterations: int = 2,
+        focus_on_gaps: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Expand content for specific sections by running additional research.
+
+        This is used when content is shorter than the target page/character count.
+        Runs additional research iterations focused on expanding the specified sections.
+
+        Args:
+            section_ids: List of section IDs to expand
+            additional_iterations: Number of additional iterations per section
+            focus_on_gaps: Whether to focus on previously identified gaps
+
+        Returns:
+            Dictionary with expansion results
+        """
+        if not self.session or not self.session.research_plan:
+            raise ValueError("Research session not initialized")
+
+        self._report_progress(
+            f"Expanding content for {len(section_ids)} sections...",
+            0
+        )
+
+        expansion_results = {
+            "sections_expanded": [],
+            "characters_added": 0,
+            "new_sources": 0,
+        }
+
+        toc = self.session.research_plan.table_of_contents
+        sections_map = {s.section: s for s in toc.get_flat_sections()}
+
+        for idx, section_id in enumerate(section_ids):
+            section = sections_map.get(section_id)
+            if not section:
+                continue
+
+            progress = ((idx + 1) / len(section_ids)) * 100
+            self._report_progress(
+                f"Expanding section {section_id}: {section.title}",
+                progress * 0.8  # Leave 20% for synthesis
+            )
+
+            # Get existing content and gaps
+            existing_content = self.session.section_contents.get(section_id, {})
+            existing_text = existing_content.get("content", "")
+            original_length = len(existing_text)
+            gaps = existing_content.get("gaps", [])
+
+            # Collect new content parts
+            new_content_parts: List[ExtractedContent] = []
+
+            # Run additional iterations
+            for iteration in range(additional_iterations):
+                iter_record = ResearchIteration(
+                    iteration_number=len(self.session.iterations) + 1,
+                    section=section_id,
+                )
+
+                # Generate queries focusing on gaps or expanding content
+                if focus_on_gaps and gaps:
+                    queries = self.query_generator.generate_follow_up_queries(
+                        section, existing_text, gaps
+                    )
+                    iter_record.gaps_identified = gaps
+                else:
+                    # Generate deeper queries for the section
+                    queries = self._generate_expansion_queries(
+                        section, existing_text
+                    )
+
+                iter_record.queries_executed = queries
+
+                # Execute searches
+                for query in queries[:3]:
+                    try:
+                        results = self.search.search(query)
+                        iter_record.sources_found += len(results)
+
+                        for result in results[:3]:
+                            try:
+                                # Skip if we already have this source
+                                existing_sources = existing_content.get("sources", [])
+                                if result.url in existing_sources:
+                                    continue
+
+                                page = self.search.get_page_content(result.url)
+
+                                extracted = self.content_extractor.extract_relevant_content(
+                                    raw_content=page.text_content,
+                                    source_url=result.url,
+                                    source_title=result.title,
+                                    section_context=f"{section.section}. {section.title}",
+                                    research_query=query,
+                                )
+
+                                if extracted.relevance_score >= 0.3:
+                                    new_content_parts.append(extracted)
+                                    iter_record.content_extracted += 1
+
+                                    self.evidence_locker.add_evidence(
+                                        url=result.url,
+                                        title=result.title,
+                                        content_excerpt=extracted.processed_content[:500],
+                                        evidence_type=EvidenceType.WEB_PAGE,
+                                        search_query=query,
+                                        section_reference=section_id,
+                                        relevance_score=extracted.relevance_score,
+                                    )
+
+                                    expansion_results["new_sources"] += 1
+
+                            except Exception as e:
+                                print(f"Content extraction error: {e}")
+                                continue
+
+                        time.sleep(0.5)
+
+                    except Exception as e:
+                        print(f"Search error: {e}")
+                        continue
+
+                iter_record.completed_at = datetime.now().isoformat()
+                self.session.iterations.append(iter_record)
+
+            # Merge new content with existing
+            if new_content_parts:
+                merged = self._merge_expanded_content(
+                    section=section,
+                    existing_content=existing_content,
+                    new_parts=new_content_parts,
+                )
+
+                self.session.section_contents[section_id] = merged
+                characters_added = len(merged.get("content", "")) - original_length
+                expansion_results["characters_added"] += max(0, characters_added)
+                expansion_results["sections_expanded"].append(section_id)
+
+        # Re-synthesize findings with new content
+        self._report_progress("Re-synthesizing with expanded content...", 90)
+        self._synthesize_findings()
+
+        self._report_progress("Content expansion complete", 100)
+
+        return expansion_results
+
+    def _generate_expansion_queries(
+        self,
+        section: TableOfContentsItem,
+        existing_content: str,
+    ) -> List[str]:
+        """
+        Generate queries to expand section content with more depth.
+
+        Args:
+            section: Section to expand
+            existing_content: Existing content
+
+        Returns:
+            List of expansion queries
+        """
+        prompt = f"""Based on this section and its existing content, generate search queries to find additional detailed information.
+
+Section: {section.section}. {section.title}
+Description: {section.description}
+
+Existing Content (summary):
+{existing_content[:1000]}...
+
+Generate 3 search queries that would find:
+1. More detailed data or statistics related to this topic
+2. Expert opinions or analysis on this topic
+3. Case studies or specific examples
+
+Return as JSON array: ["query1", "query2", "query3"]"""
+
+        try:
+            response = self.llm.generate(prompt)
+            content = response.content
+            start = content.find("[")
+            end = content.rfind("]") + 1
+            if start != -1 and end > start:
+                queries = json.loads(content[start:end])
+                return queries[:3]
+        except Exception:
+            pass
+
+        # Fallback queries
+        return [
+            f"{section.title} detailed analysis",
+            f"{section.title} statistics data",
+            f"{section.title} examples cases",
+        ]
+
+    def _merge_expanded_content(
+        self,
+        section: TableOfContentsItem,
+        existing_content: Dict[str, Any],
+        new_parts: List[ExtractedContent],
+    ) -> Dict[str, Any]:
+        """
+        Merge new content with existing section content.
+
+        Args:
+            section: Section being expanded
+            existing_content: Existing section content
+            new_parts: New extracted content parts
+
+        Returns:
+            Merged content dictionary
+        """
+        # Synthesize new content
+        new_synthesized = self.content_extractor.synthesize_section_content(
+            section_title=section.title,
+            section_description=section.description,
+            extracted_contents=new_parts,
+            requirements=self.session.requirements if self.session else "",
+        )
+
+        existing_text = existing_content.get("content", "")
+        new_text = new_synthesized.get("content", "")
+
+        # Use LLM to merge content coherently
+        merge_prompt = f"""Merge the existing content with new additional content for this section.
+The result should be a coherent, well-structured section that includes all information without repetition.
+
+Section: {section.title}
+
+EXISTING CONTENT:
+{existing_text}
+
+NEW ADDITIONAL CONTENT:
+{new_text}
+
+Create a merged version that:
+1. Integrates all information naturally
+2. Avoids repetition
+3. Maintains good flow and structure
+4. Preserves all important facts and citations
+
+Return the merged content as a single text block (no JSON, just the merged text):"""
+
+        try:
+            response = self.llm.generate(merge_prompt)
+            merged_text = response.content.strip()
+        except Exception:
+            # Fallback: just append
+            merged_text = existing_text + "\n\n" + new_text
+
+        # Merge sources
+        existing_sources = existing_content.get("sources", [])
+        new_sources = [ec.source_url for ec in new_parts]
+        all_sources = list(set(existing_sources + new_sources))
+
+        # Merge images
+        existing_images = existing_content.get("images", [])
+        new_images = [img for ec in new_parts for img in ec.images]
+        all_images = (existing_images + new_images)[:5]
+
+        # Update gaps (remove gaps that may have been addressed)
+        remaining_gaps = new_synthesized.get("information_gaps", [])
+
+        return {
+            "title": section.title,
+            "content": merged_text,
+            "summary": new_synthesized.get("summary", existing_content.get("summary", "")),
+            "confidence": new_synthesized.get("confidence_level", "medium"),
+            "sources": all_sources,
+            "images": all_images,
+            "gaps": remaining_gaps,
+            "expanded": True,
+        }

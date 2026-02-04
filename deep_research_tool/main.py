@@ -14,6 +14,7 @@ from .research.researcher import Researcher, ResearchSession
 from .evidence.locker import EvidenceLocker
 from .verification.verifier import Verifier
 from .report.generator import ReportGenerator
+from .report.length_controller import ContentLengthController, LengthTarget
 from .utils.document_reader import DocumentReader, auto_detect_additional_documents
 
 
@@ -172,6 +173,12 @@ class DeepResearchTool:
 
         evidence_locker = self.researcher.get_evidence_locker()
 
+        # Check if content expansion is needed (target specified and content too short)
+        session = self._expand_if_needed(
+            session=session,
+            progress_callback=progress_callback,
+        )
+
         # Export evidence
         evidence_json = evidence_locker.export_to_json()
         evidence_csv = evidence_locker.export_to_csv()
@@ -221,6 +228,8 @@ class DeepResearchTool:
             evidence_locker=evidence_locker,
             format=self.config.report.format,
             verification_result=verification_result,
+            target_pages=self.config.report.target_pages,
+            target_characters=self.config.report.target_characters,
         )
 
         # Clean up search client if selenium
@@ -248,6 +257,85 @@ class DeepResearchTool:
             content_parts.append(section_data.get("content", ""))
 
         return "\n\n".join(content_parts)
+
+    def _expand_if_needed(
+        self,
+        session: ResearchSession,
+        progress_callback: Callable[[str, float], None] = None,
+    ) -> ResearchSession:
+        """
+        Check if content needs expansion and expand if necessary.
+
+        This is called when target pages/characters are specified and
+        the generated content is shorter than the target.
+
+        Args:
+            session: Research session with content
+            progress_callback: Progress callback function
+
+        Returns:
+            Session with potentially expanded content
+        """
+        # Check if target is specified
+        target_pages = self.config.report.target_pages
+        target_characters = self.config.report.target_characters
+
+        if target_pages is None and target_characters is None:
+            return session
+
+        # Create length controller
+        length_target = LengthTarget(
+            target_pages=target_pages,
+            target_characters=target_characters,
+        )
+
+        controller = ContentLengthController(
+            target=length_target,
+            format_type=self.config.report.format.value,
+            language=self.config.research.language,
+        )
+
+        # Check if expansion is needed
+        expansion_req = controller.get_expansion_requirement(session.section_contents)
+
+        if not expansion_req.needs_expansion:
+            return session
+
+        # Report progress
+        if progress_callback:
+            progress_callback(
+                f"Content is {expansion_req.current_characters:,} chars, "
+                f"target is {expansion_req.target_characters:,} chars. "
+                f"Running additional research...",
+                80
+            )
+
+        # Calculate how many additional iterations to run
+        additional_iterations = controller.estimate_additional_iterations(expansion_req)
+
+        if progress_callback:
+            progress_callback(
+                f"Expanding {len(expansion_req.sections_to_expand)} sections "
+                f"with {additional_iterations} additional iterations each...",
+                82
+            )
+
+        # Run expansion
+        expansion_result = self.researcher.expand_section_content(
+            section_ids=expansion_req.sections_to_expand,
+            additional_iterations=additional_iterations,
+            focus_on_gaps=True,
+        )
+
+        if progress_callback:
+            progress_callback(
+                f"Added {expansion_result['characters_added']:,} characters "
+                f"from {expansion_result['new_sources']} new sources",
+                85
+            )
+
+        # Return the updated session
+        return self.researcher.get_session()
 
     def quick_research(
         self,
@@ -320,6 +408,8 @@ def run_research(
     additional_documents: List[str] = None,
     enable_verification: bool = True,
     verbose: bool = False,
+    target_pages: int = None,
+    target_characters: int = None,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -338,6 +428,8 @@ def run_research(
         additional_documents: List of additional document paths
         enable_verification: Enable hallucination verification
         verbose: Verbose output
+        target_pages: Target page count for output (approximate)
+        target_characters: Target character count for output
         **kwargs: Additional configuration options
 
     Returns:
@@ -349,6 +441,7 @@ def run_research(
             provider="anthropic",
             iterations=5,
             output_format="docx",
+            target_pages=10,  # Target ~10 pages
         )
         print(f"Report: {result['report_path']}")
     """
@@ -372,6 +465,8 @@ def run_research(
         additional_documents=additional_documents,
         enable_verification=enable_verification,
         verbose=verbose,
+        target_pages=target_pages,
+        target_characters=target_characters,
         **api_key_param,
         **kwargs,
     )
