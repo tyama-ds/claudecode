@@ -430,6 +430,193 @@ def verify(
         sys.exit(1)
 
 
+@cli.command("add-figures")
+@click.argument("session_path", type=click.Path(exists=True))
+@click.option(
+    "--report", "-r",
+    type=click.Path(exists=True),
+    help="Path to report file (auto-detected if not specified)"
+)
+@click.option(
+    "--output-dir", "-o",
+    type=click.Path(),
+    default=None,
+    help="Output directory for figures"
+)
+@click.option(
+    "--include-images/--no-images",
+    default=True,
+    help="Include images from web sources"
+)
+@click.option(
+    "--include-tables/--no-tables",
+    default=True,
+    help="Include extracted tables"
+)
+@click.option(
+    "--include-charts/--no-charts",
+    default=True,
+    help="Include generated charts"
+)
+@click.option(
+    "--provider", "-p",
+    type=click.Choice(["openai", "anthropic"]),
+    default=None,
+    help="LLM provider for content analysis (optional)"
+)
+@click.option(
+    "--max-images",
+    type=int,
+    default=2,
+    help="Maximum images per section"
+)
+def add_figures(
+    session_path: str,
+    report: Optional[str],
+    output_dir: Optional[str],
+    include_images: bool,
+    include_tables: bool,
+    include_charts: bool,
+    provider: Optional[str],
+    max_images: int,
+):
+    """
+    Add figures and tables to an existing report.
+
+    SESSION_PATH is the path to the session JSON file.
+
+    This command extracts figures from referenced web sources and
+    creates tables/charts from numerical data in the content.
+
+    Examples:
+        deep-research add-figures session.json
+        deep-research add-figures session.json --include-charts
+        deep-research add-figures session.json --provider openai
+    """
+    print_banner()
+
+    try:
+        from .research.researcher import ResearchSession
+        from .evidence.locker import EvidenceLocker
+        from .report.figure_table_generator import (
+            FigureTableGenerator,
+            add_figures_to_report,
+        )
+
+        # Load session
+        session_path = Path(session_path)
+        session = ResearchSession.load(session_path)
+        console.print(f"Loaded session: {session.session_id}")
+
+        # Find report file if not specified
+        session_dir = session_path.parent
+        if report:
+            report_path = Path(report)
+        else:
+            # Look for report in common locations
+            possible_reports = [
+                session_dir / "reports" / f"research_report_{session.session_id}.md",
+                session_dir / f"research_report_{session.session_id}.md",
+                session_dir / "reports" / f"research_report_{session.session_id}.html",
+            ]
+            report_path = None
+            for p in possible_reports:
+                if p.exists():
+                    report_path = p
+                    break
+
+            if not report_path:
+                console.print("[red]Error: Could not find report file. Please specify with --report[/red]")
+                sys.exit(1)
+
+        console.print(f"Report file: {report_path}")
+
+        # Load evidence
+        evidence_path = session_dir / "evidence" / f"evidence_{session.session_id}.json"
+        if evidence_path.exists():
+            evidence_locker = EvidenceLocker.load_from_json(evidence_path)
+            console.print(f"Loaded evidence: {len(evidence_locker.get_all_evidence())} items")
+        else:
+            evidence_locker = EvidenceLocker(research_id=session.session_id)
+            console.print("[yellow]Warning: Evidence file not found[/yellow]")
+
+        # Create LLM client if provider specified
+        llm_client = None
+        if provider:
+            from .api import get_client
+            llm_client = get_client(provider)
+            console.print(f"Using {provider} for content analysis")
+
+        # Set output directory
+        if output_dir:
+            figures_dir = Path(output_dir)
+        else:
+            figures_dir = report_path.parent / "figures"
+        figures_dir.mkdir(parents=True, exist_ok=True)
+
+        console.print(f"\n[bold]Generating figures and tables...[/bold]")
+        console.print(f"  - Images: {'Yes' if include_images else 'No'}")
+        console.print(f"  - Tables: {'Yes' if include_tables else 'No'}")
+        console.print(f"  - Charts: {'Yes' if include_charts else 'No'}")
+        console.print(f"  - Max images per section: {max_images}")
+        console.print()
+
+        # Create generator
+        generator = FigureTableGenerator(
+            llm_client=llm_client,
+            output_dir=figures_dir,
+            language="ja",
+            max_images_per_section=max_images,
+        )
+
+        # Generate figures and tables
+        collection = generator.generate_figures_and_tables(
+            session=session,
+            evidence_locker=evidence_locker,
+            include_images=include_images,
+            include_tables=include_tables,
+            include_charts=include_charts,
+        )
+
+        # Show summary
+        table = Table(title="Generated Content")
+        table.add_column("Type", style="cyan")
+        table.add_column("Count", style="green")
+
+        table.add_row("Figures (Images)", str(len(collection.figures)))
+        table.add_row("Tables", str(len(collection.tables)))
+        table.add_row("Charts", str(len(collection.charts)))
+
+        console.print(table)
+
+        # Add to report if markdown
+        if report_path.suffix == '.md':
+            with open(report_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            updated_content = generator.add_figures_to_markdown(content, collection)
+
+            output_path = report_path.parent / f"{report_path.stem}_with_figures.md"
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(updated_content)
+
+            console.print(f"\n[green]Updated report: {output_path}[/green]")
+        else:
+            console.print(f"\n[yellow]Note: Automatic insertion only supported for Markdown.[/yellow]")
+            console.print(f"Figures saved to: {figures_dir}")
+
+        # Export collection metadata
+        collection_path = figures_dir / "figures_tables.json"
+        generator.export_collection(collection, collection_path)
+        console.print(f"Collection metadata: {collection_path}")
+
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        import traceback
+        console.print(traceback.format_exc())
+        sys.exit(1)
+
+
 @cli.command()
 def info():
     """Display information about the tool and configuration."""
@@ -447,6 +634,7 @@ def info():
         ("pypdf", "PyPDF"),
         ("fitz", "PyMuPDF"),
         ("reportlab", "ReportLab"),
+        ("matplotlib", "Matplotlib (Charts)"),
         ("bs4", "BeautifulSoup"),
         ("rich", "Rich"),
         ("click", "Click"),

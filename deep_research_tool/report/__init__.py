@@ -10,6 +10,15 @@ from .length_controller import (
     estimate_page_count,
     get_length_summary,
 )
+from .figure_table_generator import (
+    FigureTableGenerator,
+    FigureTableCollection,
+    Figure,
+    TableData,
+    FigureType,
+    ChartType,
+    add_figures_to_report,
+)
 
 __all__ = [
     "ReportGenerator",
@@ -19,4 +28,11 @@ __all__ = [
     "LengthInfo",
     "estimate_page_count",
     "get_length_summary",
+    "FigureTableGenerator",
+    "FigureTableCollection",
+    "Figure",
+    "TableData",
+    "FigureType",
+    "ChartType",
+    "add_figures_to_report",
 ]
