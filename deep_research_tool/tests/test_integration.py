@@ -283,6 +283,258 @@ class TestReportGenerator:
             assert report_path.exists()
             assert report_path.suffix == ".html"
 
+    def test_generate_pdf_report(self):
+        """Test generating PDF report."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from deep_research_tool.research.query_generator import TableOfContentsItem
+
+            session = ResearchSession(
+                query="Test PDF research",
+                requirements="Test requirements",
+            )
+            session.research_plan = ResearchPlan(
+                title="Test PDF Report",
+                summary="Test summary for PDF",
+                table_of_contents=TableOfContents(
+                    title="Test PDF Report",
+                    items=[
+                        TableOfContentsItem(
+                            section="1",
+                            title="Introduction",
+                            description="Test intro",
+                            subsections=[],
+                        ),
+                    ],
+                ),
+            )
+            session.section_contents = {
+                "_executive_summary": {
+                    "executive_summary": "This is the executive summary for PDF.",
+                    "key_findings": ["Finding 1", "Finding 2", "Finding 3"],
+                },
+                "1": {
+                    "title": "Introduction",
+                    "content": "This is the introduction content for the PDF report.",
+                    "summary": "Brief intro summary",
+                },
+            }
+
+            locker = EvidenceLocker(output_dir=Path(tmpdir) / "evidence")
+            locker.add_evidence(
+                url="https://example.com/pdf-source",
+                title="PDF Test Source",
+                content_excerpt="Content for PDF citation",
+            )
+
+            generator = ReportGenerator(output_dir=Path(tmpdir) / "reports")
+            report_path = generator.generate_report(
+                session=session,
+                evidence_locker=locker,
+                format=ReportFormat.PDF,
+            )
+
+            assert report_path.exists()
+            assert report_path.suffix == ".pdf"
+            # Check file is not empty
+            assert report_path.stat().st_size > 0
+
+    def test_generate_docx_report(self):
+        """Test generating Word document report."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from deep_research_tool.research.query_generator import TableOfContentsItem
+
+            session = ResearchSession(
+                query="Test DOCX research",
+                requirements="Test requirements",
+            )
+            session.research_plan = ResearchPlan(
+                title="Test Word Document",
+                summary="Test summary for DOCX",
+                table_of_contents=TableOfContents(
+                    title="Test Word Document",
+                    items=[
+                        TableOfContentsItem(
+                            section="1",
+                            title="Overview",
+                            description="Test overview",
+                            subsections=[
+                                TableOfContentsItem(
+                                    section="1.1",
+                                    title="Background",
+                                    description="Background info",
+                                ),
+                            ],
+                        ),
+                    ],
+                ),
+            )
+            session.section_contents = {
+                "_executive_summary": {
+                    "executive_summary": "This is the executive summary for Word document.",
+                    "key_findings": ["Key finding A", "Key finding B"],
+                },
+                "1": {
+                    "title": "Overview",
+                    "content": "This is the overview content for the Word document report.\n\nSecond paragraph here.",
+                    "summary": "Brief overview",
+                },
+                "1.1": {
+                    "title": "Background",
+                    "content": "Background content with details.",
+                    "summary": "Background summary",
+                },
+            }
+
+            locker = EvidenceLocker(output_dir=Path(tmpdir) / "evidence")
+            locker.add_evidence(
+                url="https://example.com/docx-source-1",
+                title="Word Test Source 1",
+                content_excerpt="Content for citation 1",
+            )
+            locker.add_evidence(
+                url="https://example.com/docx-source-2",
+                title="Word Test Source 2",
+                content_excerpt="Content for citation 2",
+            )
+
+            generator = ReportGenerator(output_dir=Path(tmpdir) / "reports")
+            report_path = generator.generate_report(
+                session=session,
+                evidence_locker=locker,
+                format=ReportFormat.DOCX,
+            )
+
+            assert report_path.exists()
+            assert report_path.suffix == ".docx"
+            # Check file is not empty
+            assert report_path.stat().st_size > 0
+
+            # Verify DOCX content using python-docx
+            from docx import Document
+            doc = Document(report_path)
+            full_text = "\n".join([p.text for p in doc.paragraphs])
+            assert "Test Word Document" in full_text or len(doc.paragraphs) > 0
+
+    def test_generate_pdf_with_verification(self):
+        """Test generating PDF with verification results."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session = ResearchSession(query="Verified PDF")
+            session.research_plan = ResearchPlan(
+                title="Verified PDF Report",
+                summary="Summary",
+                table_of_contents=TableOfContents(title="Verified", items=[]),
+            )
+            session.section_contents = {}
+
+            locker = EvidenceLocker(output_dir=Path(tmpdir) / "evidence")
+
+            # Create verification result
+            verification = VerificationResult(
+                document_title="Verified PDF Report",
+                total_claims=10,
+                high_confidence_count=6,
+                medium_confidence_count=2,
+                low_confidence_count=1,
+                unsupported_count=1,
+                overall_reliability_score=0.8,
+            )
+
+            generator = ReportGenerator(output_dir=Path(tmpdir) / "reports")
+            report_path = generator.generate_report(
+                session=session,
+                evidence_locker=locker,
+                format=ReportFormat.PDF,
+                verification_result=verification,
+            )
+
+            assert report_path.exists()
+            assert report_path.suffix == ".pdf"
+            assert report_path.stat().st_size > 0
+
+    def test_generate_docx_with_quality_filtering(self):
+        """Test generating DOCX with quality filtering."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from deep_research_tool.evidence.locker import QualityCategory, SourceType
+
+            session = ResearchSession(query="Quality Filtered DOCX")
+            session.research_plan = ResearchPlan(
+                title="Quality Filtered Report",
+                summary="Summary",
+                table_of_contents=TableOfContents(title="Filtered", items=[]),
+            )
+            session.section_contents = {}
+
+            locker = EvidenceLocker(output_dir=Path(tmpdir) / "evidence")
+            # Add evidence with different quality levels
+            locker.add_evidence(
+                url="https://gov.example.com/report",
+                title="Government Report",
+                content_excerpt="High quality content",
+                quality_category=QualityCategory.AUTHORITATIVE,
+                source_type=SourceType.OFFICIAL,
+            )
+            locker.add_evidence(
+                url="https://blog.example.com/post",
+                title="Blog Post",
+                content_excerpt="Lower quality content",
+                quality_category=QualityCategory.LOW,
+                source_type=SourceType.BLOG,
+            )
+
+            generator = ReportGenerator(output_dir=Path(tmpdir) / "reports")
+            report_path = generator.generate_report(
+                session=session,
+                evidence_locker=locker,
+                format=ReportFormat.DOCX,
+                min_quality=QualityCategory.HIGH,
+            )
+
+            assert report_path.exists()
+            assert report_path.suffix == ".docx"
+
+    def test_all_formats_generation(self):
+        """Test generating reports in all supported formats."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session = ResearchSession(query="All Formats Test")
+            session.research_plan = ResearchPlan(
+                title="Multi-Format Report",
+                summary="Testing all formats",
+                table_of_contents=TableOfContents(title="Multi", items=[]),
+            )
+            session.section_contents = {
+                "_executive_summary": {
+                    "executive_summary": "Test summary",
+                    "key_findings": ["Finding"],
+                }
+            }
+
+            locker = EvidenceLocker(output_dir=Path(tmpdir) / "evidence")
+            locker.add_evidence(
+                url="https://example.com/source",
+                title="Test Source",
+                content_excerpt="Test content",
+            )
+
+            generator = ReportGenerator(output_dir=Path(tmpdir) / "reports")
+
+            formats_to_test = [
+                (ReportFormat.MARKDOWN, ".md"),
+                (ReportFormat.HTML, ".html"),
+                (ReportFormat.PDF, ".pdf"),
+                (ReportFormat.DOCX, ".docx"),
+            ]
+
+            for fmt, expected_suffix in formats_to_test:
+                report_path = generator.generate_report(
+                    session=session,
+                    evidence_locker=locker,
+                    format=fmt,
+                    filename=f"test_{fmt.value}",
+                )
+                assert report_path.exists(), f"Failed to generate {fmt.value}"
+                assert report_path.suffix == expected_suffix, f"Wrong suffix for {fmt.value}"
+                assert report_path.stat().st_size > 0, f"Empty file for {fmt.value}"
+
 
 class TestDuckDuckGoSearch:
     """Test DuckDuckGo search with mocked API."""
