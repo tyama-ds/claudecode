@@ -15,6 +15,7 @@ from ..evidence.locker import EvidenceLocker, Evidence, EvidenceType
 from ..search.base import SearchResult
 from .query_generator import QueryGenerator, ResearchPlan, TableOfContents, TableOfContentsItem
 from .content_extractor import ContentExtractor, ExtractedContent
+from .site_crawler import SiteCrawler, CrawlResult, extract_keywords_from_topic
 
 
 class ResearchState(str, Enum):
@@ -135,6 +136,11 @@ class Researcher:
         language: str = "ja",
         output_dir: Path = None,
         progress_callback: Callable[[str, float], None] = None,
+        extended_mode: bool = False,
+        crawl_max_pages: int = 10,
+        crawl_max_depth: int = 2,
+        crawl_max_sites: int = 3,
+        crawl_relevance_threshold: float = 0.3,
     ):
         """
         Initialize Researcher.
@@ -147,6 +153,11 @@ class Researcher:
             language: Target language
             output_dir: Directory for output files
             progress_callback: Callback for progress updates (message, percentage)
+            extended_mode: Enable extended mode (deep site crawling)
+            crawl_max_pages: Max pages to crawl per site in extended mode
+            crawl_max_depth: Max link depth from seed URL
+            crawl_max_sites: Max sites to crawl per search
+            crawl_relevance_threshold: Min relevance score to include page
         """
         self.llm = llm_client
         self.search = search_client
@@ -162,6 +173,20 @@ class Researcher:
         self.session: Optional[ResearchSession] = None
         self.evidence_locker: Optional[EvidenceLocker] = None
         self.progress_callback = progress_callback
+
+        # Extended mode settings
+        self.extended_mode = extended_mode
+        self.site_crawler: Optional[SiteCrawler] = None
+        if extended_mode:
+            self.site_crawler = SiteCrawler(
+                search_client=search_client,
+                llm_client=llm_client,
+                max_pages=crawl_max_pages,
+                max_depth=crawl_max_depth,
+                relevance_threshold=crawl_relevance_threshold,
+                language=language,
+            )
+            self.crawl_max_sites = crawl_max_sites
 
     def _report_progress(self, message: str, percentage: float) -> None:
         """Report progress to callback if available."""
@@ -313,10 +338,12 @@ class Researcher:
                 iter_record.queries_executed = queries
 
                 # Execute searches
+                all_initial_results: List[SearchResult] = []
                 for query in queries[:3]:  # Limit queries per iteration
                     try:
                         results = self.search.search(query)
                         iter_record.sources_found += len(results)
+                        all_initial_results.extend(results[:3])
 
                         # Extract content from top results
                         for result in results[:3]:  # Top 3 results per query
@@ -371,6 +398,25 @@ class Researcher:
                         print(f"Search error for query '{query}': {e}")
                         continue
 
+                # Extended mode: crawl sites from search results
+                if self.extended_mode and self.site_crawler and iteration == 1:
+                    # Reset page counter at start of each section
+                    self.site_crawler.reset_page_counter()
+
+                    extended_result = self._conduct_extended_research(
+                        section=section,
+                        initial_results=all_initial_results,
+                        section_content_parts=section_content_parts,
+                    )
+
+                    # Use suggested queries from crawling for next iterations
+                    if extended_result.get("suggested_queries"):
+                        available_queries = extended_result["suggested_queries"] + available_queries
+
+                    iter_record.sources_found += sum(
+                        cr.pages_crawled for cr in extended_result.get("crawl_results", [])
+                    )
+
                 iter_record.completed_at = datetime.now().isoformat()
                 self.session.iterations.append(iter_record)
 
@@ -406,6 +452,97 @@ class Researcher:
                 section.sources = [ec.source_url for ec in section_content_parts]
 
             section.status = "completed"
+
+    def _conduct_extended_research(
+        self,
+        section: TableOfContentsItem,
+        initial_results: List[SearchResult],
+        section_content_parts: List[ExtractedContent],
+    ) -> Dict[str, Any]:
+        """
+        Conduct extended research by crawling sites from initial search results.
+
+        Args:
+            section: Current section being researched
+            initial_results: Initial search results with URLs to crawl
+            section_content_parts: Existing content parts to add to
+
+        Returns:
+            Dictionary with crawl results and suggested queries
+        """
+        if not self.site_crawler:
+            return {"crawl_results": [], "suggested_queries": []}
+
+        self._report_progress(
+            f"Extended mode: Crawling sites for {section.section}",
+            -1
+        )
+
+        # Extract keywords from section
+        keywords = extract_keywords_from_topic(
+            f"{section.title} {section.description}"
+        )
+
+        # Get existing content summary
+        existing_content = "\n".join(
+            ec.processed_content[:500] for ec in section_content_parts
+        )
+
+        # Get seed URLs from initial results
+        seed_urls = [r.url for r in initial_results[:5]]
+
+        # Crawl sites
+        crawl_results = self.site_crawler.crawl_multiple_sites(
+            seed_urls=seed_urls,
+            research_topic=f"{section.title}",
+            keywords=keywords,
+            section_context=f"{section.section}. {section.title}",
+            existing_content=existing_content,
+            max_sites=self.crawl_max_sites,
+        )
+
+        all_suggested_queries = []
+
+        # Process crawl results
+        for crawl_result in crawl_results:
+            self._report_progress(
+                f"Found {crawl_result.pages_relevant} relevant pages at {crawl_result.root_domain}",
+                -1
+            )
+
+            # Add discovered topics to suggested queries
+            all_suggested_queries.extend(crawl_result.suggested_queries)
+
+            # Extract content from relevant crawled pages
+            for crawled_page in crawl_result.crawled_pages:
+                if crawled_page.relevance_score >= 0.3:
+                    # Create ExtractedContent from crawled page
+                    extracted = self.content_extractor.extract_relevant_content(
+                        raw_content=crawled_page.content,
+                        source_url=crawled_page.url,
+                        source_title=crawled_page.title,
+                        section_context=f"{section.section}. {section.title}",
+                        research_query=f"{section.title} (crawled)",
+                    )
+
+                    if extracted.relevance_score >= 0.3:
+                        section_content_parts.append(extracted)
+
+                        # Add to evidence locker
+                        self.evidence_locker.add_evidence(
+                            url=crawled_page.url,
+                            title=crawled_page.title,
+                            content_excerpt=extracted.processed_content[:500],
+                            evidence_type=EvidenceType.WEB_PAGE,
+                            search_query=f"crawled from {crawl_result.root_domain}",
+                            section_reference=section.section,
+                            relevance_score=extracted.relevance_score,
+                        )
+
+        return {
+            "crawl_results": crawl_results,
+            "suggested_queries": list(set(all_suggested_queries))[:5],
+        }
 
     def _synthesize_findings(self) -> None:
         """Synthesize all findings into cohesive content."""

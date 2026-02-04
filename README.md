@@ -12,6 +12,7 @@ AIを活用した自動リサーチツール。OpenAI/Anthropic APIとWeb検索�
 - **複数形式での出力**: Markdown, DOCX, PDF, HTML形式でレポート生成
 - **追加文書サポート**: 既存のPDFやレポートを参照として入力可能
 - **図表自動生成**: レポートに図や表を自動で追加
+- **Extended Mode**: 検索結果のサイトを深くクローリングして詳細情報を収集
 - **出力量調整**: ページ数・文字数を指定してレポートの長さを制御
 
 ## インストール
@@ -300,7 +301,160 @@ with open("./output/reports/report_with_figures.md", "w") as f:
 
 ---
 
-## 追加機能3：出力量の調整（ページ数・文字数指定）
+## 追加機能3：Extended Mode（深層サイトクローリング）
+
+### 概要
+
+Extended Modeは、通常の検索に加えて、検索結果のWebサイトを深くクローリングし、より詳細で包括的な情報を収集する機能です。検索結果のURLだけでなく、そのサイト内の関連ページも探索して情報を収集します。
+
+### 使用イメージ
+
+```
+通常モード:
+検索クエリ: "日本のEV市場"
+    ↓
+検索結果: 10件のURL
+    ↓
+各URLのページ内容を取得
+    ↓
+レポート生成
+
+Extended Mode:
+検索クエリ: "日本のEV市場"
+    ↓
+検索結果: 10件のURL
+    ↓
+各URLのサイトをクローリング（最大50ページ）
+    ├─ site1.com/ev-market → /ev-market/japan → /ev-market/trends
+    ├─ site2.com/industry → /industry/auto → /industry/ev
+    └─ ...
+    ↓
+関連性の高いページから情報を抽出
+    ↓
+発見したトピックから追加クエリを生成
+    ↓
+より詳細で包括的なレポート生成
+```
+
+### 安全対策（無限ループ防止）
+
+Extended Modeは以下の安全対策を実装しています：
+
+| 制限 | 値 | 説明 |
+|-----|---|------|
+| グローバル上限 | **50ページ** | 全体で最大50ページまで |
+| 1サイトあたり | 10ページ | デフォルト設定 |
+| 最大深度 | 2階層 | シードURLから2リンク先まで |
+| 最大サイト数 | 3サイト | 1検索あたり |
+| 同一ドメイン制限 | あり | 外部リンクは追跡しない |
+
+### クローリングの仕組み
+
+```
+BFS（幅優先探索）アルゴリズム:
+
+シードURL (深度0)
+    ├─ /page1 (深度1) → 関連度スコア 0.8 → 採用
+    │     ├─ /page1/sub1 (深度2) → 関連度スコア 0.3 → 不採用
+    │     └─ /page1/sub2 (深度2) → 関連度スコア 0.7 → 採用
+    ├─ /page2 (深度1) → 関連度スコア 0.2 → 不採用
+    └─ /page3 (深度1) → 関連度スコア 0.9 → 採用
+          └─ 深度2ページ...
+
+処理フロー:
+1. 訪問済みURLをセットで管理（重複アクセス防止）
+2. 深度がmax_depthを超えたらスキップ
+3. ページ数がmax_pagesを超えたら終了
+4. グローバル上限(50)に達したら即座に終了
+5. 関連度スコアが閾値未満のページは結果から除外
+```
+
+### CLIでの使用
+
+```bash
+# Extended Modeを有効化
+deep-research research "市場分析" --extended-mode
+
+# クローリング設定をカスタマイズ
+deep-research research "技術調査" \
+    --extended-mode \
+    --crawl-max-pages 15 \
+    --crawl-max-depth 3 \
+    --crawl-max-sites 5
+
+# 他のオプションと組み合わせ
+deep-research research "競合分析" \
+    --extended-mode \
+    --provider anthropic \
+    --iterations 5 \
+    --output-format pdf \
+    --target-pages 20
+```
+
+### Pythonでの使用
+
+```python
+from deep_research_tool import run_research
+
+# Extended Modeでリサーチ
+result = run_research(
+    query="日本のAI産業の動向",
+    provider="anthropic",
+    iterations=5,
+    output_format="pdf",
+    extended_mode=True,          # Extended Mode有効化
+    crawl_max_pages=15,          # 1サイトあたり最大15ページ
+    crawl_max_depth=2,           # 最大深度2
+    crawl_max_sites=5,           # 最大5サイトをクローリング
+)
+
+print(f"レポート: {result['report_path']}")
+```
+
+### 詳細な設定（Config使用）
+
+```python
+from deep_research_tool import DeepResearchTool
+from deep_research_tool.config import create_config
+
+config = create_config(
+    provider="anthropic",
+    research_iterations=5,
+    output_format="docx",
+
+    # Extended Mode設定
+    extended_mode=True,
+    crawl_max_pages=10,      # 1サイトあたり最大10ページ
+    crawl_max_depth=2,       # シードURLから最大2階層
+    crawl_max_sites=3,       # 最大3サイトをクローリング
+)
+
+tool = DeepResearchTool(config)
+result = tool.run(
+    query="再生可能エネルギー市場",
+    requirements="詳細な市場データと事例を含める",
+)
+```
+
+### Extended Modeが適しているケース
+
+| ケース | 説明 |
+|-------|------|
+| 専門的な調査 | 特定サイト内の詳細情報が必要な場合 |
+| 包括的なレポート | より多くの情報源が必要な場合 |
+| ニッチなトピック | 検索結果だけでは情報が不足する場合 |
+| 企業サイトの調査 | 企業の公式サイト内を深く調査したい場合 |
+
+### 注意事項
+
+- クローリングには時間がかかります（通常の2-3倍）
+- 対象サイトのrobots.txtを尊重します
+- 過度なアクセスを避けるため、リクエスト間に0.5秒の遅延を設けています
+- グローバル上限（50ページ）は安全のため変更できません
+
+---
+
+## 追加機能4：出力量の調整（ページ数・文字数指定）
 
 ### 概要
 
@@ -689,6 +843,10 @@ report_path = generator.generate_report(
 | `verification_strictness` | 検証の厳密さ (low/medium/high) | medium |
 | `target_pages` | 目標ページ数 | None (無制限) |
 | `target_characters` | 目標文字数 | None (無制限) |
+| `extended_mode` | Extended Mode有効化 | False |
+| `crawl_max_pages` | 1サイトあたり最大クローリングページ数 | 10 |
+| `crawl_max_depth` | シードURLからの最大深度 | 2 |
+| `crawl_max_sites` | クローリング対象の最大サイト数 | 3 |
 
 ---
 
@@ -711,7 +869,8 @@ deep_research_tool/
 ├── research/            # リサーチコアロジック
 │   ├── query_generator.py
 │   ├── content_extractor.py
-│   └── researcher.py
+│   ├── researcher.py
+│   └── site_crawler.py  # Extended Mode用サイトクローラー
 ├── verification/        # ハルシネーション検証
 │   └── verifier.py
 ├── evidence/            # Evidence Locker

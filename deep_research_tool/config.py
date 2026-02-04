@@ -106,6 +106,13 @@ class ResearchConfig:
     save_evidence: bool = True
     evidence_format: str = "json"
 
+    # Extended mode settings (deep site crawling)
+    extended_mode: bool = False
+    crawl_max_pages: int = 10  # Max pages to crawl per site
+    crawl_max_depth: int = 2   # Max link depth from seed URL
+    crawl_max_sites: int = 3   # Max sites to crawl per search
+    crawl_relevance_threshold: float = 0.3  # Min relevance to include page
+
 
 @dataclass
 class ReportConfig:
@@ -216,6 +223,10 @@ def create_config(
     verbose: bool = False,
     target_pages: Optional[int] = None,
     target_characters: Optional[int] = None,
+    extended_mode: bool = False,
+    crawl_max_pages: int = 10,
+    crawl_max_depth: int = 2,
+    crawl_max_sites: int = 3,
     **kwargs
 ) -> Config:
     """
@@ -235,6 +246,10 @@ def create_config(
         verbose: Enable verbose logging
         target_pages: Target page count for output (approximate)
         target_characters: Target character count for output
+        extended_mode: Enable extended mode (deep site crawling)
+        crawl_max_pages: Max pages to crawl per site in extended mode
+        crawl_max_depth: Max link depth from seed URL in extended mode
+        crawl_max_sites: Max sites to crawl per search in extended mode
         **kwargs: Additional keyword arguments
 
     Returns:
@@ -262,6 +277,10 @@ def create_config(
         min_iterations=research_iterations,
         max_iterations=kwargs.get("max_iterations", research_iterations + 5),
         language=kwargs.get("language", "ja"),
+        extended_mode=extended_mode,
+        crawl_max_pages=crawl_max_pages,
+        crawl_max_depth=crawl_max_depth,
+        crawl_max_sites=crawl_max_sites,
     )
 
     report_config = ReportConfig(
