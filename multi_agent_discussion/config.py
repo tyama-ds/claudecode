@@ -8,8 +8,11 @@ from typing import Optional, List
 
 class LLMProvider(str, Enum):
     """Supported LLM providers."""
-    OPENAI = "openai"
-    ANTHROPIC = "anthropic"
+    OPENAI = "openai"          # ChatGPT (GPT-4, GPT-4o, etc.)
+    ANTHROPIC = "anthropic"    # Claude
+    GOOGLE = "google"          # Gemini
+    OLLAMA = "ollama"          # Llama (local via Ollama)
+    XAI = "xai"                # Grok
 
 
 class AgentRole(str, Enum):
@@ -32,10 +35,20 @@ class DiscussionState(str, Enum):
 class LLMConfig:
     """Configuration for LLM API."""
     provider: LLMProvider = LLMProvider.OPENAI
+    # API Keys
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
+    google_api_key: Optional[str] = None
+    xai_api_key: Optional[str] = None
+    # Model names
     openai_model: str = "gpt-4o-mini"
     anthropic_model: str = "claude-3-5-sonnet-20241022"
+    google_model: str = "gemini-1.5-flash"
+    ollama_model: str = "llama3.2"
+    xai_model: str = "grok-beta"
+    # Ollama settings
+    ollama_base_url: str = "http://localhost:11434"
+    # Common settings
     temperature: float = 0.7
     max_tokens: int = 2048
 
@@ -45,22 +58,32 @@ class LLMConfig:
             self.openai_api_key = os.getenv("OPENAI_API_KEY")
         if self.anthropic_api_key is None:
             self.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+        if self.google_api_key is None:
+            self.google_api_key = os.getenv("GOOGLE_API_KEY")
+        if self.xai_api_key is None:
+            self.xai_api_key = os.getenv("XAI_API_KEY")
 
     def get_api_key(self) -> Optional[str]:
         """Get the API key for the current provider."""
-        if self.provider == LLMProvider.OPENAI:
-            return self.openai_api_key
-        elif self.provider == LLMProvider.ANTHROPIC:
-            return self.anthropic_api_key
-        return None
+        key_map = {
+            LLMProvider.OPENAI: self.openai_api_key,
+            LLMProvider.ANTHROPIC: self.anthropic_api_key,
+            LLMProvider.GOOGLE: self.google_api_key,
+            LLMProvider.XAI: self.xai_api_key,
+            LLMProvider.OLLAMA: None,  # Ollama doesn't require API key
+        }
+        return key_map.get(self.provider)
 
     def get_model(self) -> str:
         """Get the model name for the current provider."""
-        if self.provider == LLMProvider.OPENAI:
-            return self.openai_model
-        elif self.provider == LLMProvider.ANTHROPIC:
-            return self.anthropic_model
-        return self.openai_model
+        model_map = {
+            LLMProvider.OPENAI: self.openai_model,
+            LLMProvider.ANTHROPIC: self.anthropic_model,
+            LLMProvider.GOOGLE: self.google_model,
+            LLMProvider.OLLAMA: self.ollama_model,
+            LLMProvider.XAI: self.xai_model,
+        }
+        return model_map.get(self.provider, self.openai_model)
 
 
 @dataclass
@@ -122,8 +145,8 @@ class Config:
         """Validate the configuration and return list of errors."""
         errors = []
 
-        # Check API key
-        if not self.llm.get_api_key():
+        # Check API key (Ollama doesn't require one)
+        if self.llm.provider != LLMProvider.OLLAMA and not self.llm.get_api_key():
             errors.append(
                 f"API key for {self.llm.provider.value} is not set. "
                 "Please set the environment variable or provide it in config."
@@ -157,28 +180,38 @@ def create_config(
     participant_personas: Optional[List[dict]] = None,
     max_rounds: int = 5,
     output_language: str = "ja",
+    ollama_base_url: Optional[str] = None,
 ) -> Config:
     """
     Create a configuration with sensible defaults.
 
     Args:
         topic: The topic to discuss
-        provider: LLM provider ("openai" or "anthropic")
+        provider: LLM provider ("openai", "anthropic", "google", "ollama", "xai")
         model: Model name (uses default if not specified)
         participant_personas: List of dicts with 'name' and 'persona' keys
         max_rounds: Maximum number of discussion rounds
         output_language: Output language code
+        ollama_base_url: Base URL for Ollama (default: http://localhost:11434)
 
     Returns:
         Configured Config object
     """
     # Create LLM config
     llm_config = LLMConfig(provider=LLMProvider(provider))
+    if ollama_base_url:
+        llm_config.ollama_base_url = ollama_base_url
     if model:
-        if provider == "openai":
-            llm_config.openai_model = model
-        else:
-            llm_config.anthropic_model = model
+        model_attr_map = {
+            "openai": "openai_model",
+            "anthropic": "anthropic_model",
+            "google": "google_model",
+            "ollama": "ollama_model",
+            "xai": "xai_model",
+        }
+        attr = model_attr_map.get(provider)
+        if attr:
+            setattr(llm_config, attr, model)
 
     # Create discussion config
     discussion_config = DiscussionConfig(

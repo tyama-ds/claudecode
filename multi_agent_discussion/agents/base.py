@@ -68,7 +68,6 @@ class BaseAgent(ABC):
 
         provider = self.llm_config.provider
         api_key = self.llm_config.get_api_key()
-        model = self.llm_config.get_model()
 
         if provider == LLMProvider.OPENAI:
             try:
@@ -76,12 +75,44 @@ class BaseAgent(ABC):
                 return OpenAI(api_key=api_key)
             except ImportError:
                 raise ImportError("openai package is required for OpenAI provider")
+
         elif provider == LLMProvider.ANTHROPIC:
             try:
                 from anthropic import Anthropic
                 return Anthropic(api_key=api_key)
             except ImportError:
                 raise ImportError("anthropic package is required for Anthropic provider")
+
+        elif provider == LLMProvider.GOOGLE:
+            try:
+                import google.generativeai as genai
+                genai.configure(api_key=api_key)
+                return genai
+            except ImportError:
+                raise ImportError("google-generativeai package is required for Google provider")
+
+        elif provider == LLMProvider.OLLAMA:
+            try:
+                from openai import OpenAI
+                # Ollama provides OpenAI-compatible API
+                return OpenAI(
+                    base_url=f"{self.llm_config.ollama_base_url}/v1",
+                    api_key="ollama",  # Ollama doesn't require API key
+                )
+            except ImportError:
+                raise ImportError("openai package is required for Ollama provider")
+
+        elif provider == LLMProvider.XAI:
+            try:
+                from openai import OpenAI
+                # xAI provides OpenAI-compatible API
+                return OpenAI(
+                    base_url="https://api.x.ai/v1",
+                    api_key=api_key,
+                )
+            except ImportError:
+                raise ImportError("openai package is required for xAI provider")
+
         else:
             raise ValueError(f"Unsupported provider: {provider}")
 
@@ -123,6 +154,38 @@ class BaseAgent(ABC):
                 messages=messages,
             )
             return response.content[0].text
+
+        elif provider == LLMProvider.GOOGLE:
+            # Google Gemini API
+            genai_model = self.client.GenerativeModel(
+                model_name=model,
+                system_instruction=system_prompt,
+            )
+            # Convert messages to Gemini format
+            chat_history = []
+            for msg in messages:
+                role = "user" if msg["role"] == "user" else "model"
+                chat_history.append({"role": role, "parts": [msg["content"]]})
+
+            chat = genai_model.start_chat(history=chat_history[:-1] if chat_history else [])
+            last_message = chat_history[-1]["parts"][0] if chat_history else ""
+            response = chat.send_message(last_message)
+            return response.text
+
+        elif provider in (LLMProvider.OLLAMA, LLMProvider.XAI):
+            # Both use OpenAI-compatible API
+            full_messages = []
+            if system_prompt:
+                full_messages.append({"role": "system", "content": system_prompt})
+            full_messages.extend(messages)
+
+            response = self.client.chat.completions.create(
+                model=model,
+                messages=full_messages,
+                temperature=self.llm_config.temperature,
+                max_tokens=self.llm_config.max_tokens,
+            )
+            return response.choices[0].message.content
 
         else:
             raise ValueError(f"Unsupported provider: {provider}")
