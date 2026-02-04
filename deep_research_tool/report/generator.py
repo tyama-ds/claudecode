@@ -8,7 +8,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
-from ..evidence.locker import EvidenceLocker
+from ..evidence.locker import EvidenceLocker, QualityCategory, SourceType
+from ..evidence.quality_evaluator import get_quality_summary
 from ..research.researcher import ResearchSession
 from ..verification.verifier import VerificationResult
 
@@ -38,6 +39,7 @@ class ReportGenerator:
         include_toc: bool = True,
         include_citations: bool = True,
         include_images: bool = True,
+        include_quality_summary: bool = True,
         language: str = "ja",
     ):
         """
@@ -48,6 +50,7 @@ class ReportGenerator:
             include_toc: Include table of contents
             include_citations: Include citations/references
             include_images: Include images in report
+            include_quality_summary: Include quality statistics summary
             language: Report language
         """
         self.output_dir = output_dir or Path("./output/reports")
@@ -55,6 +58,7 @@ class ReportGenerator:
         self.include_toc = include_toc
         self.include_citations = include_citations
         self.include_images = include_images
+        self.include_quality_summary = include_quality_summary
         self.language = language
 
     def generate_report(
@@ -64,6 +68,9 @@ class ReportGenerator:
         format: ReportFormat = ReportFormat.MARKDOWN,
         verification_result: VerificationResult = None,
         filename: str = None,
+        min_quality: QualityCategory = None,
+        quality_categories: List[QualityCategory] = None,
+        source_types: List[SourceType] = None,
     ) -> Path:
         """
         Generate a complete research report.
@@ -74,6 +81,9 @@ class ReportGenerator:
             format: Output format
             verification_result: Optional verification results
             filename: Custom filename (without extension)
+            min_quality: Minimum quality category for citations
+            quality_categories: Specific quality categories to include
+            source_types: Source types to include in citations
 
         Returns:
             Path to generated report
@@ -81,21 +91,31 @@ class ReportGenerator:
         if not filename:
             filename = f"research_report_{session.session_id}"
 
+        # Create a filtered evidence list if quality filters are specified
+        if min_quality or quality_categories or source_types:
+            filtered_evidence = evidence_locker.filter_evidence(
+                min_quality=min_quality,
+                quality_categories=quality_categories,
+                source_types=source_types,
+            )
+        else:
+            filtered_evidence = None  # Use all evidence
+
         if format == ReportFormat.MARKDOWN:
             return self._generate_markdown(
-                session, evidence_locker, verification_result, filename
+                session, evidence_locker, verification_result, filename, filtered_evidence
             )
         elif format == ReportFormat.DOCX:
             return self._generate_docx(
-                session, evidence_locker, verification_result, filename
+                session, evidence_locker, verification_result, filename, filtered_evidence
             )
         elif format == ReportFormat.PDF:
             return self._generate_pdf(
-                session, evidence_locker, verification_result, filename
+                session, evidence_locker, verification_result, filename, filtered_evidence
             )
         elif format == ReportFormat.HTML:
             return self._generate_html(
-                session, evidence_locker, verification_result, filename
+                session, evidence_locker, verification_result, filename, filtered_evidence
             )
         else:
             raise ValueError(f"Unsupported format: {format}")
@@ -106,10 +126,14 @@ class ReportGenerator:
         evidence_locker: EvidenceLocker,
         verification_result: VerificationResult,
         filename: str,
+        filtered_evidence: List = None,
     ) -> Path:
         """Generate Markdown report."""
         plan = session.research_plan
         content_parts = []
+
+        # Use filtered evidence or all evidence
+        evidence_list = filtered_evidence if filtered_evidence is not None else evidence_locker.get_all_evidence()
 
         # Title and metadata
         content_parts.append(f"# {plan.title if plan else session.query}\n")
@@ -183,13 +207,57 @@ class ReportGenerator:
             if verification_result.hallucination_risk_count > 0:
                 content_parts.append(f"\n**Hallucination Risks:** {verification_result.hallucination_risk_count} claims flagged\n")
 
+        # Quality Summary
+        if self.include_quality_summary:
+            content_parts.append("\n---\n")
+            content_parts.append("## Source Quality Summary\n")
+            quality_stats = evidence_locker.get_quality_statistics()
+
+            if self.language == "ja":
+                content_parts.append(f"**総エビデンス数:** {quality_stats['total_evidence']}\n")
+                content_parts.append(f"**高品質情報の割合:** {quality_stats['high_quality_percentage']}%\n")
+                content_parts.append(f"**平均品質スコア:** {quality_stats['average_quality_score']}\n\n")
+
+                content_parts.append("### 品質カテゴリ分布\n")
+                content_parts.append("| カテゴリ | 件数 |\n")
+                content_parts.append("|----------|------|\n")
+                category_labels = {
+                    "authoritative": "権威的",
+                    "high": "高品質",
+                    "medium": "中品質",
+                    "low": "低品質",
+                    "unverified": "未検証",
+                }
+                for cat, count in quality_stats.get("quality_distribution", {}).items():
+                    label = category_labels.get(cat, cat)
+                    content_parts.append(f"| {label} | {count} |\n")
+            else:
+                content_parts.append(f"**Total Evidence:** {quality_stats['total_evidence']}\n")
+                content_parts.append(f"**High Quality Percentage:** {quality_stats['high_quality_percentage']}%\n")
+                content_parts.append(f"**Average Quality Score:** {quality_stats['average_quality_score']}\n\n")
+
+                content_parts.append("### Quality Distribution\n")
+                content_parts.append("| Category | Count |\n")
+                content_parts.append("|----------|-------|\n")
+                for cat, count in quality_stats.get("quality_distribution", {}).items():
+                    content_parts.append(f"| {cat.title()} | {count} |\n")
+
+            # Note if filtering was applied
+            if filtered_evidence is not None:
+                total_all = len(evidence_locker.get_all_evidence())
+                if self.language == "ja":
+                    content_parts.append(f"\n*注: このレポートでは品質フィルタリングにより {len(evidence_list)}/{total_all} 件のエビデンスを使用しています。*\n")
+                else:
+                    content_parts.append(f"\n*Note: This report uses {len(evidence_list)}/{total_all} evidence items after quality filtering.*\n")
+
         # References
         if self.include_citations:
             content_parts.append("\n---\n")
             content_parts.append("## References\n")
 
-            for i, evidence in enumerate(evidence_locker.get_all_evidence(), 1):
-                content_parts.append(f"{i}. {evidence.citation_text}\n")
+            for i, evidence in enumerate(evidence_list, 1):
+                quality_badge = self._get_quality_badge(evidence.quality_category)
+                content_parts.append(f"{i}. {quality_badge} {evidence.citation_text}\n")
 
         # Write file
         filepath = self.output_dir / f"{filename}.md"
@@ -198,12 +266,24 @@ class ReportGenerator:
 
         return filepath
 
+    def _get_quality_badge(self, quality: QualityCategory) -> str:
+        """Get quality badge for citation."""
+        badges = {
+            QualityCategory.AUTHORITATIVE: "[A]",
+            QualityCategory.HIGH: "[H]",
+            QualityCategory.MEDIUM: "[M]",
+            QualityCategory.LOW: "[L]",
+            QualityCategory.UNVERIFIED: "[?]",
+        }
+        return badges.get(quality, "")
+
     def _generate_docx(
         self,
         session: ResearchSession,
         evidence_locker: EvidenceLocker,
         verification_result: VerificationResult,
         filename: str,
+        filtered_evidence: List = None,
     ) -> Path:
         """Generate Word document report."""
         try:
@@ -217,6 +297,9 @@ class ReportGenerator:
 
         doc = Document()
         plan = session.research_plan
+
+        # Use filtered evidence or all evidence
+        evidence_list = filtered_evidence if filtered_evidence is not None else evidence_locker.get_all_evidence()
 
         # Title
         title = doc.add_heading(plan.title if plan else session.query, 0)
@@ -293,11 +376,22 @@ class ReportGenerator:
             table.rows[4].cells[0].text = "Unsupported"
             table.rows[4].cells[1].text = str(verification_result.unsupported_count)
 
+        # Quality Summary
+        if self.include_quality_summary:
+            doc.add_heading("Source Quality Summary", level=1)
+            quality_stats = evidence_locker.get_quality_statistics()
+            doc.add_paragraph(
+                f"Total Evidence: {quality_stats['total_evidence']}\n"
+                f"High Quality Percentage: {quality_stats['high_quality_percentage']}%\n"
+                f"Average Quality Score: {quality_stats['average_quality_score']}"
+            )
+
         # References
         if self.include_citations:
             doc.add_heading("References", level=1)
-            for i, evidence in enumerate(evidence_locker.get_all_evidence(), 1):
-                doc.add_paragraph(f"{i}. {evidence.citation_text}")
+            for i, evidence in enumerate(evidence_list, 1):
+                quality_badge = self._get_quality_badge(evidence.quality_category)
+                doc.add_paragraph(f"{i}. {quality_badge} {evidence.citation_text}")
 
         # Save
         filepath = self.output_dir / f"{filename}.docx"
@@ -311,6 +405,7 @@ class ReportGenerator:
         evidence_locker: EvidenceLocker,
         verification_result: VerificationResult,
         filename: str,
+        filtered_evidence: List = None,
     ) -> Path:
         """Generate PDF report using reportlab."""
         try:
@@ -335,6 +430,9 @@ class ReportGenerator:
         story = []
 
         plan = session.research_plan
+
+        # Use filtered evidence or all evidence
+        evidence_list = filtered_evidence if filtered_evidence is not None else evidence_locker.get_all_evidence()
 
         # Custom styles
         title_style = ParagraphStyle(
@@ -472,10 +570,11 @@ class ReportGenerator:
             story.append(PageBreak())
             story.append(Paragraph("References", heading1_style))
 
-            for i, evidence in enumerate(evidence_locker.get_all_evidence(), 1):
+            for i, evidence in enumerate(evidence_list, 1):
+                quality_badge = self._get_quality_badge(evidence.quality_category)
                 safe_citation = evidence.citation_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 try:
-                    story.append(Paragraph(f"{i}. {safe_citation[:200]}", body_style))
+                    story.append(Paragraph(f"{i}. {quality_badge} {safe_citation[:200]}", body_style))
                 except Exception:
                     story.append(Paragraph(f"{i}. [Citation formatting error]", body_style))
 
@@ -490,9 +589,13 @@ class ReportGenerator:
         evidence_locker: EvidenceLocker,
         verification_result: VerificationResult,
         filename: str,
+        filtered_evidence: List = None,
     ) -> Path:
         """Generate HTML report."""
         plan = session.research_plan
+
+        # Use filtered evidence or all evidence
+        evidence_list = filtered_evidence if filtered_evidence is not None else evidence_locker.get_all_evidence()
 
         # Build content sections
         sections_html = []
@@ -572,17 +675,62 @@ class ReportGenerator:
             </section>
             """
 
+        # Quality Summary
+        quality_html = ""
+        if self.include_quality_summary:
+            quality_stats = evidence_locker.get_quality_statistics()
+            quality_rows = "".join(
+                f"<tr><td>{cat.title()}</td><td>{count}</td></tr>"
+                for cat, count in quality_stats.get("quality_distribution", {}).items()
+            )
+            filter_note = ""
+            if filtered_evidence is not None:
+                total_all = len(evidence_locker.get_all_evidence())
+                filter_note = f'<p class="filter-note">This report uses {len(evidence_list)}/{total_all} evidence items after quality filtering.</p>'
+
+            quality_html = f"""
+            <section class="quality-summary">
+                <h2>Source Quality Summary</h2>
+                <div class="quality-stats">
+                    <div class="stat-item">
+                        <span class="stat-value">{quality_stats['total_evidence']}</span>
+                        <span class="stat-label">Total Evidence</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-value">{quality_stats['high_quality_percentage']}%</span>
+                        <span class="stat-label">High Quality</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-value">{quality_stats['average_quality_score']}</span>
+                        <span class="stat-label">Avg. Score</span>
+                    </div>
+                </div>
+                <table class="quality-table">
+                    <tr><th>Category</th><th>Count</th></tr>
+                    {quality_rows}
+                </table>
+                {filter_note}
+            </section>
+            """
+
         # References
         references_html = ""
         if self.include_citations:
             refs = "".join(
-                f"<li>{e.citation_text}</li>"
-                for e in evidence_locker.get_all_evidence()
+                f'<li><span class="quality-badge quality-{e.quality_category.value}">{self._get_quality_badge(e.quality_category)}</span> {e.citation_text}</li>'
+                for e in evidence_list
             )
             references_html = f"""
             <section class="references">
                 <h2>References</h2>
                 <ol>{refs}</ol>
+                <div class="quality-legend">
+                    <span class="legend-item"><span class="quality-badge quality-authoritative">[A]</span> Authoritative</span>
+                    <span class="legend-item"><span class="quality-badge quality-high">[H]</span> High</span>
+                    <span class="legend-item"><span class="quality-badge quality-medium">[M]</span> Medium</span>
+                    <span class="legend-item"><span class="quality-badge quality-low">[L]</span> Low</span>
+                    <span class="legend-item"><span class="quality-badge quality-unverified">[?]</span> Unverified</span>
+                </div>
             </section>
             """
 
@@ -653,6 +801,23 @@ class ReportGenerator:
         .references {{ margin-top: 40px; padding-top: 20px; border-top: 2px solid var(--border-color); }}
         .references ol {{ padding-left: 25px; }}
         .references li {{ margin: 10px 0; font-size: 0.9em; }}
+        .quality-summary {{ background: #e8f4fd; padding: 25px; border-radius: 8px; margin: 30px 0; }}
+        .quality-stats {{ display: flex; justify-content: space-around; margin: 20px 0; flex-wrap: wrap; }}
+        .stat-item {{ text-align: center; padding: 15px; }}
+        .stat-value {{ font-size: 2em; font-weight: bold; color: var(--primary-color); display: block; }}
+        .stat-label {{ font-size: 0.9em; color: #666; }}
+        .quality-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+        .quality-table th, .quality-table td {{ padding: 10px; border: 1px solid var(--border-color); text-align: left; }}
+        .quality-table th {{ background: var(--primary-color); color: white; }}
+        .filter-note {{ font-style: italic; color: #666; margin-top: 15px; }}
+        .quality-badge {{ font-weight: bold; margin-right: 5px; padding: 2px 6px; border-radius: 3px; font-size: 0.8em; }}
+        .quality-authoritative {{ background: #28a745; color: white; }}
+        .quality-high {{ background: #17a2b8; color: white; }}
+        .quality-medium {{ background: #ffc107; color: #333; }}
+        .quality-low {{ background: #fd7e14; color: white; }}
+        .quality-unverified {{ background: #6c757d; color: white; }}
+        .quality-legend {{ margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 5px; }}
+        .legend-item {{ margin-right: 15px; display: inline-block; }}
         @media print {{
             body {{ max-width: none; }}
             .toc {{ page-break-after: always; }}
@@ -670,6 +835,7 @@ class ReportGenerator:
     {exec_html}
     {''.join(sections_html)}
     {verification_html}
+    {quality_html}
     {references_html}
 
     <footer style="margin-top: 40px; text-align: center; color: #666; font-size: 0.8em;">

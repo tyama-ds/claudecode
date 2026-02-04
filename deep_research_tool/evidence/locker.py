@@ -27,6 +27,92 @@ class EvidenceType(str, Enum):
     OTHER = "other"
 
 
+class QualityCategory(str, Enum):
+    """Information quality categories."""
+    AUTHORITATIVE = "authoritative"  # Government, academic, established research
+    HIGH = "high"  # Major news outlets, verified experts, peer-reviewed
+    MEDIUM = "medium"  # Reputable blogs, industry publications
+    LOW = "low"  # User-generated, forums, unverified
+    UNVERIFIED = "unverified"  # Sources that couldn't be evaluated
+
+
+class SourceType(str, Enum):
+    """Types of source origins."""
+    OFFICIAL = "official"  # Government, official organizations
+    ACADEMIC = "academic"  # Universities, research institutions
+    NEWS = "news"  # News media outlets
+    BLOG = "blog"  # Personal or company blogs
+    SOCIAL = "social"  # Social media
+    COMMERCIAL = "commercial"  # Commercial/product sites
+    WIKI = "wiki"  # Wikipedia and similar
+    FORUM = "forum"  # Forums, Q&A sites
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class QualityIndicators:
+    """Indicators for source quality assessment."""
+    has_author: bool = False
+    has_date: bool = False
+    has_citations: bool = False
+    has_professional_tone: bool = False
+    is_primary_source: bool = False
+    is_peer_reviewed: bool = False
+    domain_authority: float = 0.0  # 0-1 scale
+    content_depth: float = 0.0  # 0-1 scale
+    factual_consistency: float = 0.0  # 0-1 scale
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "has_author": self.has_author,
+            "has_date": self.has_date,
+            "has_citations": self.has_citations,
+            "has_professional_tone": self.has_professional_tone,
+            "is_primary_source": self.is_primary_source,
+            "is_peer_reviewed": self.is_peer_reviewed,
+            "domain_authority": self.domain_authority,
+            "content_depth": self.content_depth,
+            "factual_consistency": self.factual_consistency,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "QualityIndicators":
+        """Create from dictionary."""
+        return cls(**data)
+
+    def calculate_score(self) -> float:
+        """Calculate overall quality score from indicators."""
+        score = 0.0
+        weights = {
+            "has_author": 0.1,
+            "has_date": 0.05,
+            "has_citations": 0.15,
+            "has_professional_tone": 0.1,
+            "is_primary_source": 0.15,
+            "is_peer_reviewed": 0.2,
+            "domain_authority": 0.1,
+            "content_depth": 0.075,
+            "factual_consistency": 0.075,
+        }
+        if self.has_author:
+            score += weights["has_author"]
+        if self.has_date:
+            score += weights["has_date"]
+        if self.has_citations:
+            score += weights["has_citations"]
+        if self.has_professional_tone:
+            score += weights["has_professional_tone"]
+        if self.is_primary_source:
+            score += weights["is_primary_source"]
+        if self.is_peer_reviewed:
+            score += weights["is_peer_reviewed"]
+        score += self.domain_authority * weights["domain_authority"]
+        score += self.content_depth * weights["content_depth"]
+        score += self.factual_consistency * weights["factual_consistency"]
+        return min(1.0, score)
+
+
 @dataclass
 class Evidence:
     """A single piece of evidence/source."""
@@ -61,6 +147,13 @@ class Evidence:
     # Quality indicators
     reliability_score: float = 0.0  # 0-1 scale
     relevance_score: float = 0.0  # 0-1 scale
+
+    # Quality categorization
+    quality_category: QualityCategory = QualityCategory.UNVERIFIED
+    source_type: SourceType = SourceType.UNKNOWN
+    quality_indicators: QualityIndicators = field(default_factory=QualityIndicators)
+    quality_notes: str = ""  # Notes about the quality assessment
+    potential_biases: List[str] = field(default_factory=list)
 
     # Additional metadata
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -150,6 +243,9 @@ class Evidence:
         """Convert to dictionary for serialization."""
         data = asdict(self)
         data["evidence_type"] = self.evidence_type.value
+        data["quality_category"] = self.quality_category.value
+        data["source_type"] = self.source_type.value
+        data["quality_indicators"] = self.quality_indicators.to_dict()
         return data
 
     @classmethod
@@ -158,6 +254,12 @@ class Evidence:
         data = data.copy()
         if "evidence_type" in data:
             data["evidence_type"] = EvidenceType(data["evidence_type"])
+        if "quality_category" in data:
+            data["quality_category"] = QualityCategory(data["quality_category"])
+        if "source_type" in data:
+            data["source_type"] = SourceType(data["source_type"])
+        if "quality_indicators" in data and isinstance(data["quality_indicators"], dict):
+            data["quality_indicators"] = QualityIndicators.from_dict(data["quality_indicators"])
         return cls(**data)
 
     def to_bibtex(self) -> str:
@@ -296,6 +398,211 @@ class EvidenceLocker:
         if evidence_id in self._evidence:
             self._evidence[evidence_id].relevance_score = max(0, min(1, score))
 
+    def update_quality(
+        self,
+        evidence_id: str,
+        quality_category: QualityCategory = None,
+        source_type: SourceType = None,
+        quality_indicators: QualityIndicators = None,
+        quality_notes: str = None,
+        potential_biases: List[str] = None,
+    ) -> None:
+        """
+        Update quality information for evidence.
+
+        Args:
+            evidence_id: Evidence ID
+            quality_category: Quality category
+            source_type: Source type
+            quality_indicators: Quality indicators
+            quality_notes: Notes about quality
+            potential_biases: List of potential biases
+        """
+        if evidence_id not in self._evidence:
+            return
+
+        evidence = self._evidence[evidence_id]
+        if quality_category is not None:
+            evidence.quality_category = quality_category
+        if source_type is not None:
+            evidence.source_type = source_type
+        if quality_indicators is not None:
+            evidence.quality_indicators = quality_indicators
+        if quality_notes is not None:
+            evidence.quality_notes = quality_notes
+        if potential_biases is not None:
+            evidence.potential_biases = potential_biases
+
+    def get_evidence_by_quality(
+        self,
+        min_quality: QualityCategory = None,
+        quality_categories: List[QualityCategory] = None,
+    ) -> List[Evidence]:
+        """
+        Get evidence filtered by quality category.
+
+        Args:
+            min_quality: Minimum quality category (AUTHORITATIVE > HIGH > MEDIUM > LOW > UNVERIFIED)
+            quality_categories: Specific quality categories to include
+
+        Returns:
+            List of evidence matching the quality criteria
+        """
+        quality_order = [
+            QualityCategory.AUTHORITATIVE,
+            QualityCategory.HIGH,
+            QualityCategory.MEDIUM,
+            QualityCategory.LOW,
+            QualityCategory.UNVERIFIED,
+        ]
+
+        if quality_categories:
+            return [
+                e for e in self._evidence.values()
+                if e.quality_category in quality_categories
+            ]
+
+        if min_quality:
+            min_index = quality_order.index(min_quality)
+            allowed_categories = quality_order[:min_index + 1]
+            return [
+                e for e in self._evidence.values()
+                if e.quality_category in allowed_categories
+            ]
+
+        return list(self._evidence.values())
+
+    def get_evidence_by_source_type(
+        self,
+        source_types: List[SourceType],
+    ) -> List[Evidence]:
+        """
+        Get evidence filtered by source type.
+
+        Args:
+            source_types: List of source types to include
+
+        Returns:
+            List of evidence matching the source types
+        """
+        return [
+            e for e in self._evidence.values()
+            if e.source_type in source_types
+        ]
+
+    def get_high_quality_evidence(self) -> List[Evidence]:
+        """Get only AUTHORITATIVE and HIGH quality evidence."""
+        return self.get_evidence_by_quality(
+            quality_categories=[QualityCategory.AUTHORITATIVE, QualityCategory.HIGH]
+        )
+
+    def get_verified_evidence(self) -> List[Evidence]:
+        """Get all evidence except UNVERIFIED."""
+        return self.get_evidence_by_quality(min_quality=QualityCategory.LOW)
+
+    def filter_evidence(
+        self,
+        min_quality: QualityCategory = None,
+        quality_categories: List[QualityCategory] = None,
+        source_types: List[SourceType] = None,
+        min_reliability: float = None,
+        min_relevance: float = None,
+        section: str = None,
+    ) -> List[Evidence]:
+        """
+        Filter evidence by multiple criteria.
+
+        Args:
+            min_quality: Minimum quality category
+            quality_categories: Specific quality categories to include
+            source_types: Source types to include
+            min_reliability: Minimum reliability score (0-1)
+            min_relevance: Minimum relevance score (0-1)
+            section: Filter by section reference
+
+        Returns:
+            List of evidence matching all criteria
+        """
+        # Start with all evidence or section evidence
+        if section:
+            evidence_list = self.get_section_evidence(section)
+        else:
+            evidence_list = list(self._evidence.values())
+
+        # Apply quality category filter
+        if quality_categories:
+            evidence_list = [e for e in evidence_list if e.quality_category in quality_categories]
+        elif min_quality:
+            quality_order = [
+                QualityCategory.AUTHORITATIVE,
+                QualityCategory.HIGH,
+                QualityCategory.MEDIUM,
+                QualityCategory.LOW,
+                QualityCategory.UNVERIFIED,
+            ]
+            min_index = quality_order.index(min_quality)
+            allowed_categories = quality_order[:min_index + 1]
+            evidence_list = [e for e in evidence_list if e.quality_category in allowed_categories]
+
+        # Apply source type filter
+        if source_types:
+            evidence_list = [e for e in evidence_list if e.source_type in source_types]
+
+        # Apply reliability filter
+        if min_reliability is not None:
+            evidence_list = [e for e in evidence_list if e.reliability_score >= min_reliability]
+
+        # Apply relevance filter
+        if min_relevance is not None:
+            evidence_list = [e for e in evidence_list if e.relevance_score >= min_relevance]
+
+        return evidence_list
+
+    def get_quality_statistics(self) -> Dict[str, Any]:
+        """Get statistics about evidence quality distribution."""
+        evidence_list = list(self._evidence.values())
+
+        if not evidence_list:
+            return {
+                "total_evidence": 0,
+                "quality_distribution": {},
+                "source_type_distribution": {},
+                "average_quality_score": 0,
+                "high_quality_count": 0,
+                "high_quality_percentage": 0,
+            }
+
+        # Quality distribution
+        quality_counts = {}
+        for e in evidence_list:
+            cat = e.quality_category.value
+            quality_counts[cat] = quality_counts.get(cat, 0) + 1
+
+        # Source type distribution
+        source_type_counts = {}
+        for e in evidence_list:
+            st = e.source_type.value
+            source_type_counts[st] = source_type_counts.get(st, 0) + 1
+
+        # Calculate average quality score from indicators
+        quality_scores = [e.quality_indicators.calculate_score() for e in evidence_list]
+        avg_quality_score = sum(quality_scores) / len(quality_scores)
+
+        # High quality count
+        high_quality_count = sum(
+            1 for e in evidence_list
+            if e.quality_category in [QualityCategory.AUTHORITATIVE, QualityCategory.HIGH]
+        )
+
+        return {
+            "total_evidence": len(evidence_list),
+            "quality_distribution": quality_counts,
+            "source_type_distribution": source_type_counts,
+            "average_quality_score": round(avg_quality_score, 3),
+            "high_quality_count": high_quality_count,
+            "high_quality_percentage": round(high_quality_count / len(evidence_list) * 100, 1),
+        }
+
     def generate_citation(self, evidence_id: str, style: str = "apa") -> str:
         """
         Generate formatted citation for evidence.
@@ -361,7 +668,9 @@ class EvidenceLocker:
             "id", "citation_key", "evidence_type", "url", "title",
             "author", "publisher", "published_date", "content_excerpt",
             "accessed_at", "search_query", "section_reference",
-            "reliability_score", "relevance_score", "citation_text"
+            "reliability_score", "relevance_score",
+            "quality_category", "source_type", "quality_score", "quality_notes",
+            "citation_text"
         ]
 
         with open(filepath, "w", newline="", encoding="utf-8") as f:
@@ -384,6 +693,10 @@ class EvidenceLocker:
                     "section_reference": evidence.section_reference,
                     "reliability_score": evidence.reliability_score,
                     "relevance_score": evidence.relevance_score,
+                    "quality_category": evidence.quality_category.value,
+                    "source_type": evidence.source_type.value,
+                    "quality_score": evidence.quality_indicators.calculate_score(),
+                    "quality_notes": evidence.quality_notes,
                     "citation_text": evidence.citation_text,
                 }
                 writer.writerow(row)
