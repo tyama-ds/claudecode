@@ -43,6 +43,28 @@ class LengthInfo:
         }
 
 
+@dataclass
+class ExpansionRequirement:
+    """Requirements for content expansion."""
+    needs_expansion: bool
+    target_characters: int
+    current_characters: int
+    expansion_ratio: float
+    sections_to_expand: List[str]
+    characters_needed: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "needs_expansion": self.needs_expansion,
+            "target_characters": self.target_characters,
+            "current_characters": self.current_characters,
+            "expansion_ratio": round(self.expansion_ratio, 2),
+            "sections_to_expand": self.sections_to_expand,
+            "characters_needed": self.characters_needed,
+        }
+
+
 class ContentLengthController:
     """
     Control content length to meet page or character targets.
@@ -370,6 +392,185 @@ class ContentLengthController:
 
         ratio = length_info.total_characters / target_chars
         return 0.9 <= ratio <= 1.1
+
+    def get_expansion_requirement(
+        self,
+        section_contents: Dict[str, Dict[str, Any]],
+    ) -> ExpansionRequirement:
+        """
+        Calculate expansion requirements.
+
+        Args:
+            section_contents: Dictionary of section contents
+
+        Returns:
+            ExpansionRequirement with expansion details
+        """
+        if not self.target.has_target():
+            return ExpansionRequirement(
+                needs_expansion=False,
+                target_characters=0,
+                current_characters=0,
+                expansion_ratio=1.0,
+                sections_to_expand=[],
+                characters_needed=0,
+            )
+
+        length_info = self.calculate_length(section_contents)
+        target_chars = self.target.get_target_characters()
+
+        if target_chars is None:
+            return ExpansionRequirement(
+                needs_expansion=False,
+                target_characters=0,
+                current_characters=length_info.total_characters,
+                expansion_ratio=1.0,
+                sections_to_expand=[],
+                characters_needed=0,
+            )
+
+        ratio = target_chars / max(length_info.total_characters, 1)
+
+        # Need expansion if content is less than 90% of target
+        if ratio <= 1.1:
+            return ExpansionRequirement(
+                needs_expansion=False,
+                target_characters=target_chars,
+                current_characters=length_info.total_characters,
+                expansion_ratio=ratio,
+                sections_to_expand=[],
+                characters_needed=0,
+            )
+
+        # Calculate how much more content is needed
+        characters_needed = target_chars - length_info.total_characters
+
+        # Identify sections that could be expanded
+        # Prioritize sections with less content relative to others
+        sections_to_expand = self._identify_sections_to_expand(
+            section_contents,
+            length_info,
+            characters_needed,
+        )
+
+        return ExpansionRequirement(
+            needs_expansion=True,
+            target_characters=target_chars,
+            current_characters=length_info.total_characters,
+            expansion_ratio=ratio,
+            sections_to_expand=sections_to_expand,
+            characters_needed=characters_needed,
+        )
+
+    def _identify_sections_to_expand(
+        self,
+        section_contents: Dict[str, Dict[str, Any]],
+        length_info: LengthInfo,
+        characters_needed: int,
+    ) -> List[str]:
+        """
+        Identify which sections should be expanded.
+
+        Prioritizes:
+        1. Sections with low confidence
+        2. Sections with identified gaps
+        3. Shorter sections relative to average
+
+        Args:
+            section_contents: Dictionary of section contents
+            length_info: Current length information
+            characters_needed: How many characters needed
+
+        Returns:
+            List of section IDs to expand
+        """
+        sections_to_expand = []
+        regular_sections = {
+            k: v for k, v in section_contents.items()
+            if not k.startswith("_") and isinstance(v, dict)
+        }
+
+        if not regular_sections:
+            return sections_to_expand
+
+        # Calculate average section length
+        section_lengths = [
+            length_info.section_lengths.get(k, 0)
+            for k in regular_sections.keys()
+        ]
+        avg_length = sum(section_lengths) / len(section_lengths) if section_lengths else 0
+
+        # Score sections for expansion priority
+        section_scores = []
+        for section_id, content in regular_sections.items():
+            score = 0
+            current_length = length_info.section_lengths.get(section_id, 0)
+
+            # Lower confidence = higher priority for expansion
+            confidence = content.get("confidence", "medium")
+            if confidence == "low":
+                score += 3
+            elif confidence == "medium":
+                score += 1
+
+            # Has gaps = higher priority
+            gaps = content.get("gaps", [])
+            if gaps:
+                score += len(gaps)
+
+            # Shorter than average = higher priority
+            if current_length < avg_length * 0.8:
+                score += 2
+            elif current_length < avg_length:
+                score += 1
+
+            section_scores.append((section_id, score, current_length))
+
+        # Sort by score (higher first), then by length (shorter first)
+        section_scores.sort(key=lambda x: (-x[1], x[2]))
+
+        # Select sections until we have enough potential expansion targets
+        # Estimate ~500-1000 chars per additional research iteration
+        chars_per_iteration = 750
+        iterations_needed = max(1, characters_needed // chars_per_iteration)
+
+        # Select top sections, but at least cover all if iterations needed > sections
+        num_sections = min(
+            max(iterations_needed // 2, 1),
+            len(section_scores)
+        )
+
+        # Always include at least 1 section, up to 3
+        num_sections = max(1, min(3, num_sections))
+
+        sections_to_expand = [s[0] for s in section_scores[:num_sections]]
+
+        return sections_to_expand
+
+    def estimate_additional_iterations(
+        self,
+        expansion_requirement: ExpansionRequirement,
+    ) -> int:
+        """
+        Estimate how many additional iterations are needed.
+
+        Args:
+            expansion_requirement: Expansion requirements
+
+        Returns:
+            Estimated number of additional iterations
+        """
+        if not expansion_requirement.needs_expansion:
+            return 0
+
+        # Estimate ~500-1000 characters per iteration per section
+        chars_per_iteration = 750
+        sections = max(1, len(expansion_requirement.sections_to_expand))
+
+        iterations = expansion_requirement.characters_needed // (chars_per_iteration * sections)
+
+        # At least 1, at most 5 additional iterations
+        return max(1, min(5, iterations))
 
 
 def estimate_page_count(

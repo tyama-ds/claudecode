@@ -10,6 +10,7 @@ from deep_research_tool.report.length_controller import (
     ContentLengthController,
     LengthTarget,
     LengthInfo,
+    ExpansionRequirement,
     estimate_page_count,
     get_length_summary,
 )
@@ -446,3 +447,174 @@ class TestConfigIntegration:
         )
         assert config.report.target_pages == 10
         assert config.report.target_characters == 30000
+
+
+class TestExpansionRequirement:
+    """Test ExpansionRequirement dataclass."""
+
+    def test_to_dict(self):
+        """Test serialization."""
+        req = ExpansionRequirement(
+            needs_expansion=True,
+            target_characters=25000,
+            current_characters=10000,
+            expansion_ratio=2.5,
+            sections_to_expand=["1", "2"],
+            characters_needed=15000,
+        )
+        data = req.to_dict()
+        assert data["needs_expansion"] is True
+        assert data["target_characters"] == 25000
+        assert data["current_characters"] == 10000
+        assert data["expansion_ratio"] == 2.5
+        assert data["sections_to_expand"] == ["1", "2"]
+        assert data["characters_needed"] == 15000
+
+
+class TestContentExpansion:
+    """Test content expansion functionality."""
+
+    def test_get_expansion_requirement_no_target(self):
+        """Test expansion requirement with no target."""
+        controller = ContentLengthController()
+        section_contents = {"1": {"content": "A" * 5000}}
+        req = controller.get_expansion_requirement(section_contents)
+
+        assert req.needs_expansion is False
+        assert req.sections_to_expand == []
+
+    def test_get_expansion_requirement_content_sufficient(self):
+        """Test expansion requirement when content is sufficient."""
+        target = LengthTarget(target_characters=5000)
+        controller = ContentLengthController(target=target)
+        section_contents = {"1": {"content": "A" * 5000}}
+        req = controller.get_expansion_requirement(section_contents)
+
+        assert req.needs_expansion is False
+
+    def test_get_expansion_requirement_content_too_short(self):
+        """Test expansion requirement when content is too short."""
+        target = LengthTarget(target_characters=20000)
+        controller = ContentLengthController(target=target)
+        section_contents = {
+            "1": {"content": "A" * 5000, "confidence": "medium"},
+            "2": {"content": "B" * 3000, "confidence": "low"},
+        }
+        req = controller.get_expansion_requirement(section_contents)
+
+        assert req.needs_expansion is True
+        assert req.target_characters == 20000
+        assert req.current_characters == 8000
+        assert req.expansion_ratio > 1.0
+        assert req.characters_needed == 12000
+        assert len(req.sections_to_expand) > 0
+
+    def test_identify_sections_to_expand_prioritizes_low_confidence(self):
+        """Test that low confidence sections are prioritized."""
+        target = LengthTarget(target_characters=30000)
+        controller = ContentLengthController(target=target)
+        section_contents = {
+            "1": {"content": "A" * 3000, "confidence": "high"},
+            "2": {"content": "B" * 3000, "confidence": "low"},
+            "3": {"content": "C" * 3000, "confidence": "medium"},
+        }
+        req = controller.get_expansion_requirement(section_contents)
+
+        # Section 2 (low confidence) should be prioritized
+        assert "2" in req.sections_to_expand
+
+    def test_identify_sections_to_expand_prioritizes_gaps(self):
+        """Test that sections with gaps are prioritized."""
+        target = LengthTarget(target_characters=30000)
+        controller = ContentLengthController(target=target)
+        section_contents = {
+            "1": {"content": "A" * 3000, "gaps": []},
+            "2": {"content": "B" * 3000, "gaps": ["gap1", "gap2", "gap3"]},
+            "3": {"content": "C" * 3000, "gaps": ["gap1"]},
+        }
+        req = controller.get_expansion_requirement(section_contents)
+
+        # Section 2 (most gaps) should be prioritized
+        assert "2" in req.sections_to_expand
+
+    def test_identify_sections_to_expand_prioritizes_shorter(self):
+        """Test that shorter sections are prioritized."""
+        target = LengthTarget(target_characters=30000)
+        controller = ContentLengthController(target=target)
+        section_contents = {
+            "1": {"content": "A" * 5000},
+            "2": {"content": "B" * 1000},  # Shortest
+            "3": {"content": "C" * 3000},
+        }
+        req = controller.get_expansion_requirement(section_contents)
+
+        # Section 2 (shortest) should be prioritized
+        assert "2" in req.sections_to_expand
+
+    def test_estimate_additional_iterations_no_expansion(self):
+        """Test iteration estimation when no expansion needed."""
+        controller = ContentLengthController()
+        req = ExpansionRequirement(
+            needs_expansion=False,
+            target_characters=0,
+            current_characters=0,
+            expansion_ratio=1.0,
+            sections_to_expand=[],
+            characters_needed=0,
+        )
+        iterations = controller.estimate_additional_iterations(req)
+        assert iterations == 0
+
+    def test_estimate_additional_iterations_small_expansion(self):
+        """Test iteration estimation for small expansion."""
+        controller = ContentLengthController()
+        req = ExpansionRequirement(
+            needs_expansion=True,
+            target_characters=10000,
+            current_characters=8000,
+            expansion_ratio=1.25,
+            sections_to_expand=["1"],
+            characters_needed=2000,
+        )
+        iterations = controller.estimate_additional_iterations(req)
+        assert iterations >= 1
+        assert iterations <= 5
+
+    def test_estimate_additional_iterations_large_expansion(self):
+        """Test iteration estimation for large expansion."""
+        controller = ContentLengthController()
+        req = ExpansionRequirement(
+            needs_expansion=True,
+            target_characters=30000,
+            current_characters=5000,
+            expansion_ratio=6.0,
+            sections_to_expand=["1", "2"],
+            characters_needed=25000,
+        )
+        iterations = controller.estimate_additional_iterations(req)
+        # Should be capped at 5
+        assert iterations == 5
+
+    def test_expansion_within_tolerance(self):
+        """Test that content within 10% tolerance doesn't need expansion."""
+        target = LengthTarget(target_characters=10000)
+        controller = ContentLengthController(target=target)
+        # 9500 is within 10% of 10000
+        section_contents = {"1": {"content": "A" * 9500}}
+        req = controller.get_expansion_requirement(section_contents)
+
+        assert req.needs_expansion is False
+
+    def test_expansion_skips_special_sections(self):
+        """Test that special sections (starting with _) are skipped."""
+        target = LengthTarget(target_characters=30000)
+        controller = ContentLengthController(target=target)
+        section_contents = {
+            "_executive_summary": {"content": "Summary " * 100},
+            "1": {"content": "A" * 3000},
+            "2": {"content": "B" * 3000},
+        }
+        req = controller.get_expansion_requirement(section_contents)
+
+        # Special sections should not be in expansion list
+        assert "_executive_summary" not in req.sections_to_expand

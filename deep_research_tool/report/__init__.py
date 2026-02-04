@@ -7,6 +7,7 @@ from .length_controller import (
     ContentLengthController,
     LengthTarget,
     LengthInfo,
+    ExpansionRequirement,
     estimate_page_count,
     get_length_summary,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "ContentLengthController",
     "LengthTarget",
     "LengthInfo",
+    "ExpansionRequirement",
     "estimate_page_count",
     "get_length_summary",
     "FigureTableGenerator",
