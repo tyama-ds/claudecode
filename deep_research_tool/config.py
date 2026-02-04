@@ -119,6 +119,10 @@ class ReportConfig:
     include_citations: bool = True
     include_toc: bool = True
 
+    # Output length control
+    target_pages: Optional[int] = None  # Target page count (approximate)
+    target_characters: Optional[int] = None  # Target character count
+
     # Evidence locker settings
     export_evidence_csv: bool = True
     export_evidence_json: bool = True
@@ -210,6 +214,8 @@ def create_config(
     additional_documents: Optional[List[str]] = None,
     enable_verification: bool = True,
     verbose: bool = False,
+    target_pages: Optional[int] = None,
+    target_characters: Optional[int] = None,
     **kwargs
 ) -> Config:
     """
@@ -227,6 +233,8 @@ def create_config(
         additional_documents: List of additional document paths
         enable_verification: Enable hallucination verification
         verbose: Enable verbose logging
+        target_pages: Target page count for output (approximate)
+        target_characters: Target character count for output
         **kwargs: Additional keyword arguments
 
     Returns:
@@ -259,6 +267,8 @@ def create_config(
     report_config = ReportConfig(
         format=ReportFormat(output_format),
         output_dir=Path(output_dir),
+        target_pages=target_pages,
+        target_characters=target_characters,
     )
 
     docs = []

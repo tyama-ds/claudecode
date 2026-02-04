@@ -43,6 +43,12 @@ def print_config_summary(config: Config):
     table.add_row("Output Format", config.report.format.value)
     table.add_row("Output Directory", str(config.report.output_dir))
 
+    # Show output length targets if set
+    if config.report.target_pages:
+        table.add_row("Target Pages", str(config.report.target_pages))
+    if config.report.target_characters:
+        table.add_row("Target Characters", f"{config.report.target_characters:,}")
+
     console.print(table)
     console.print()
 
@@ -108,6 +114,18 @@ def cli():
     help="Enable/disable verification"
 )
 @click.option(
+    "--target-pages",
+    type=int,
+    default=None,
+    help="Target page count for output (approximate, e.g., 10 for ~10 pages)"
+)
+@click.option(
+    "--target-characters",
+    type=int,
+    default=None,
+    help="Target character count for output"
+)
+@click.option(
     "--verbose", "-v",
     is_flag=True,
     help="Verbose output"
@@ -133,6 +151,8 @@ def research(
     requirements: str,
     documents: tuple,
     verify: bool,
+    target_pages: Optional[int],
+    target_characters: Optional[int],
     verbose: bool,
     openai_key: Optional[str],
     anthropic_key: Optional[str],
@@ -160,6 +180,8 @@ def research(
         additional_documents=list(documents) if documents else None,
         enable_verification=verify,
         verbose=verbose,
+        target_pages=target_pages,
+        target_characters=target_characters,
     )
 
     # Validate config
@@ -227,11 +249,33 @@ def research(
     default=None,
     help="Output report format (default: use original)"
 )
-def report(session_path: str, output_format: Optional[str]):
+@click.option(
+    "--target-pages",
+    type=int,
+    default=None,
+    help="Target page count for output (approximate)"
+)
+@click.option(
+    "--target-characters",
+    type=int,
+    default=None,
+    help="Target character count for output"
+)
+def report(
+    session_path: str,
+    output_format: Optional[str],
+    target_pages: Optional[int],
+    target_characters: Optional[int],
+):
     """
     Generate a report from a saved research session.
 
     SESSION_PATH is the path to the session JSON file.
+
+    Examples:
+        deep-research report session.json --output-format pdf
+        deep-research report session.json --target-pages 10
+        deep-research report session.json --target-characters 25000
     """
     print_banner()
 
@@ -262,10 +306,21 @@ def report(session_path: str, output_format: Optional[str]):
 
         # Generate report
         generator = ReportGenerator(output_dir=session_dir / "reports")
+
+        # Show current length info before adjustment
+        length_info = generator.get_length_info(session, fmt)
+        console.print(f"Current content: {length_info.total_characters:,} characters (~{length_info.estimated_pages:.1f} pages)")
+
+        if target_pages or target_characters:
+            target_desc = f"{target_pages} pages" if target_pages else f"{target_characters:,} characters"
+            console.print(f"Target: {target_desc}")
+
         report_path = generator.generate_report(
             session=session,
             evidence_locker=evidence_locker,
             format=fmt,
+            target_pages=target_pages,
+            target_characters=target_characters,
         )
 
         console.print(f"\n[green]Report generated: {report_path}[/green]")

@@ -221,6 +221,8 @@ class DeepResearchTool:
             evidence_locker=evidence_locker,
             format=self.config.report.format,
             verification_result=verification_result,
+            target_pages=self.config.report.target_pages,
+            target_characters=self.config.report.target_characters,
         )
 
         # Clean up search client if selenium
@@ -320,6 +322,8 @@ def run_research(
     additional_documents: List[str] = None,
     enable_verification: bool = True,
     verbose: bool = False,
+    target_pages: int = None,
+    target_characters: int = None,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -338,6 +342,8 @@ def run_research(
         additional_documents: List of additional document paths
         enable_verification: Enable hallucination verification
         verbose: Verbose output
+        target_pages: Target page count for output (approximate)
+        target_characters: Target character count for output
         **kwargs: Additional configuration options
 
     Returns:
@@ -349,6 +355,7 @@ def run_research(
             provider="anthropic",
             iterations=5,
             output_format="docx",
+            target_pages=10,  # Target ~10 pages
         )
         print(f"Report: {result['report_path']}")
     """
@@ -372,6 +379,8 @@ def run_research(
         additional_documents=additional_documents,
         enable_verification=enable_verification,
         verbose=verbose,
+        target_pages=target_pages,
+        target_characters=target_characters,
         **api_key_param,
         **kwargs,
     )

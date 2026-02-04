@@ -6,12 +6,18 @@ import re
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 from ..evidence.locker import EvidenceLocker, QualityCategory, SourceType
 from ..evidence.quality_evaluator import get_quality_summary
 from ..research.researcher import ResearchSession
 from ..verification.verifier import VerificationResult
+from .length_controller import (
+    ContentLengthController,
+    LengthTarget,
+    LengthInfo,
+    get_length_summary,
+)
 
 
 class ReportFormat(str, Enum):
@@ -71,6 +77,8 @@ class ReportGenerator:
         min_quality: QualityCategory = None,
         quality_categories: List[QualityCategory] = None,
         source_types: List[SourceType] = None,
+        target_pages: int = None,
+        target_characters: int = None,
     ) -> Path:
         """
         Generate a complete research report.
@@ -84,6 +92,8 @@ class ReportGenerator:
             min_quality: Minimum quality category for citations
             quality_categories: Specific quality categories to include
             source_types: Source types to include in citations
+            target_pages: Target page count (approximate)
+            target_characters: Target character count
 
         Returns:
             Path to generated report
@@ -101,24 +111,130 @@ class ReportGenerator:
         else:
             filtered_evidence = None  # Use all evidence
 
+        # Apply content length adjustment if targets are specified
+        adjusted_session = self._apply_length_adjustment(
+            session=session,
+            format=format,
+            target_pages=target_pages,
+            target_characters=target_characters,
+        )
+
         if format == ReportFormat.MARKDOWN:
             return self._generate_markdown(
-                session, evidence_locker, verification_result, filename, filtered_evidence
+                adjusted_session, evidence_locker, verification_result, filename, filtered_evidence
             )
         elif format == ReportFormat.DOCX:
             return self._generate_docx(
-                session, evidence_locker, verification_result, filename, filtered_evidence
+                adjusted_session, evidence_locker, verification_result, filename, filtered_evidence
             )
         elif format == ReportFormat.PDF:
             return self._generate_pdf(
-                session, evidence_locker, verification_result, filename, filtered_evidence
+                adjusted_session, evidence_locker, verification_result, filename, filtered_evidence
             )
         elif format == ReportFormat.HTML:
             return self._generate_html(
-                session, evidence_locker, verification_result, filename, filtered_evidence
+                adjusted_session, evidence_locker, verification_result, filename, filtered_evidence
             )
         else:
             raise ValueError(f"Unsupported format: {format}")
+
+    def _apply_length_adjustment(
+        self,
+        session: ResearchSession,
+        format: ReportFormat,
+        target_pages: int = None,
+        target_characters: int = None,
+    ) -> ResearchSession:
+        """
+        Apply content length adjustment to meet page/character targets.
+
+        Args:
+            session: Original research session
+            format: Output format
+            target_pages: Target page count
+            target_characters: Target character count
+
+        Returns:
+            Session with adjusted content (or original if no targets)
+        """
+        # No adjustment needed if no targets specified
+        if target_pages is None and target_characters is None:
+            return session
+
+        # Create length target
+        length_target = LengthTarget(
+            target_pages=target_pages,
+            target_characters=target_characters,
+        )
+
+        # Create controller
+        controller = ContentLengthController(
+            target=length_target,
+            format_type=format.value,
+            language=self.language,
+        )
+
+        # Check if adjustment is needed
+        needs_adj, ratio = controller.needs_adjustment(session.section_contents)
+
+        if not needs_adj:
+            return session
+
+        # Create a copy of the session with adjusted content
+        adjusted_contents = controller.adjust_content(
+            session.section_contents,
+            adjustment_ratio=ratio,
+        )
+
+        # Create a modified session (shallow copy with new section_contents)
+        # We don't modify the original session
+        from copy import copy
+        adjusted_session = copy(session)
+        adjusted_session.section_contents = adjusted_contents
+
+        return adjusted_session
+
+    def get_length_info(
+        self,
+        session: ResearchSession,
+        format: ReportFormat = ReportFormat.PDF,
+    ) -> LengthInfo:
+        """
+        Get length information for a research session.
+
+        Args:
+            session: Research session
+            format: Output format for estimation
+
+        Returns:
+            LengthInfo with character count and page estimate
+        """
+        controller = ContentLengthController(
+            format_type=format.value,
+            language=self.language,
+        )
+        return controller.calculate_length(session.section_contents)
+
+    def get_length_summary(
+        self,
+        session: ResearchSession,
+        format: ReportFormat = ReportFormat.PDF,
+    ) -> str:
+        """
+        Get human-readable length summary for a session.
+
+        Args:
+            session: Research session
+            format: Output format for estimation
+
+        Returns:
+            Summary string
+        """
+        return get_length_summary(
+            section_contents=session.section_contents,
+            format_type=format.value,
+            language=self.language,
+        )
 
     def _generate_markdown(
         self,
