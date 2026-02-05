@@ -847,6 +847,85 @@ report_path = generator.generate_report(
 | `crawl_max_pages` | 1サイトあたり最大クローリングページ数 | 10 |
 | `crawl_max_depth` | シードURLからの最大深度 | 2 |
 | `crawl_max_sites` | クローリング対象の最大サイト数 | 3 |
+| `http_proxy` | HTTPプロキシURL | None |
+| `https_proxy` | HTTPSプロキシURL | None |
+| `verify_ssl` | SSL証明書検証 | True |
+
+---
+
+## プロキシ設定
+
+企業ネットワークなどプロキシ経由でインターネットにアクセスする環境向けの設定です。
+
+### 使用方法
+
+#### 方法1: `run_research`で直接指定
+
+```python
+from deep_research_tool import run_research
+
+result = run_research(
+    query="市場分析レポート",
+    provider="openai",
+    api_key="sk-your-api-key",
+    http_proxy="http://proxy.company.com:8080",
+    https_proxy="http://proxy.company.com:8080",
+    verify_ssl=True,  # 自己署名証明書の場合はFalse
+)
+```
+
+#### 方法2: `create_config`で詳細設定
+
+```python
+from deep_research_tool import DeepResearchTool, create_config
+
+config = create_config(
+    provider="anthropic",
+    anthropic_api_key="sk-ant-your-key",
+    http_proxy="http://proxy.company.com:8080",
+    https_proxy="http://proxy.company.com:8080",
+    proxy_username="user",      # 認証が必要な場合
+    proxy_password="password",
+    verify_ssl=False,           # 自己署名証明書の場合
+)
+
+tool = DeepResearchTool(config)
+result = tool.run(query="AI動向調査")
+```
+
+#### 方法3: 環境変数（自動読み込み）
+
+```python
+import os
+
+# 環境変数を設定
+os.environ["HTTP_PROXY"] = "http://proxy.company.com:8080"
+os.environ["HTTPS_PROXY"] = "http://proxy.company.com:8080"
+
+# 環境変数から自動的に読み込まれる
+from deep_research_tool import run_research
+
+result = run_research(
+    query="市場分析",
+    api_key="sk-your-key",
+)
+```
+
+### プロキシ設定パラメータ
+
+| パラメータ | 説明 | 例 |
+|-----------|------|---|
+| `http_proxy` | HTTPプロキシURL | `http://proxy:8080` |
+| `https_proxy` | HTTPSプロキシURL | `http://proxy:8080` |
+| `proxy_username` | プロキシ認証ユーザー名 | `user123` |
+| `proxy_password` | プロキシ認証パスワード | `pass456` |
+| `verify_ssl` | SSL証明書検証 | `True` / `False` |
+
+### 注意事項
+
+- `verify_ssl=False`は自己署名証明書を使用するプロキシ環境でのみ使用してください
+- 認証情報（`proxy_username`, `proxy_password`）はコードに直接書かず、環境変数や設定ファイルから読み込むことを推奨します
+- プロキシ設定はLLM API（OpenAI/Anthropic）とWeb検索（DuckDuckGo）の両方に適用されます
 
 ---
 
