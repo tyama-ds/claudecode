@@ -88,8 +88,7 @@ deep-research research "競合他社分析" \
 ### Pythonでの使用
 
 ```python
-from deep_research_tool import DeepResearchTool
-from deep_research_tool.config import create_config
+from deep_research_tool import DeepResearchTool, create_config
 
 # 設定を作成
 config = create_config(
@@ -414,8 +413,7 @@ print(f"レポート: {result['report_path']}")
 ### 詳細な設定（Config使用）
 
 ```python
-from deep_research_tool import DeepResearchTool
-from deep_research_tool.config import create_config
+from deep_research_tool import DeepResearchTool, create_config
 
 config = create_config(
     provider="anthropic",
