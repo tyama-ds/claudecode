@@ -90,6 +90,9 @@ class DeepResearchTool:
             provider=self.config.api.provider.value,
             api_key=self.config.api.get_active_api_key(),
             model=self.config.api.get_active_model(),
+            http_proxy=self.config.proxy.http_proxy,
+            https_proxy=self.config.proxy.https_proxy,
+            verify_ssl=self.config.proxy.verify_ssl,
         )
 
     def _create_search_client(self):
@@ -100,6 +103,11 @@ class DeepResearchTool:
             "extract_images": self.config.search.extract_images,
             "max_images": self.config.search.max_images_per_page,
         }
+
+        # Add proxy settings
+        if self.config.proxy.is_configured():
+            kwargs["proxies"] = self.config.proxy.get_proxies_dict()
+            kwargs["verify_ssl"] = self.config.proxy.verify_ssl
 
         if self.config.search.method == SearchMethod.SELENIUM:
             kwargs["headless"] = self.config.search.headless
@@ -419,6 +427,9 @@ def run_research(
     crawl_max_pages: int = 10,
     crawl_max_depth: int = 2,
     crawl_max_sites: int = 3,
+    http_proxy: str = None,
+    https_proxy: str = None,
+    verify_ssl: bool = True,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -443,6 +454,9 @@ def run_research(
         crawl_max_pages: Max pages to crawl per site in extended mode
         crawl_max_depth: Max link depth from seed URL
         crawl_max_sites: Max sites to crawl per search
+        http_proxy: HTTP proxy URL (e.g., "http://proxy.example.com:8080")
+        https_proxy: HTTPS proxy URL
+        verify_ssl: Verify SSL certificates (set False for self-signed certs)
         **kwargs: Additional configuration options
 
     Returns:
@@ -464,6 +478,13 @@ def run_research(
             extended_mode=True,
             crawl_max_pages=15,
             crawl_max_sites=5,
+        )
+
+        # With proxy settings
+        result = run_research(
+            "Market analysis",
+            http_proxy="http://proxy.company.com:8080",
+            https_proxy="http://proxy.company.com:8080",
         )
     """
     from .config import create_config
@@ -492,6 +513,9 @@ def run_research(
         crawl_max_pages=crawl_max_pages,
         crawl_max_depth=crawl_max_depth,
         crawl_max_sites=crawl_max_sites,
+        http_proxy=http_proxy,
+        https_proxy=https_proxy,
+        verify_ssl=verify_ssl,
         **api_key_param,
         **kwargs,
     )

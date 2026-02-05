@@ -31,6 +31,61 @@ class ReportFormat(str, Enum):
 
 
 @dataclass
+class ProxyConfig:
+    """Configuration for HTTP proxy settings."""
+
+    # Proxy URL (e.g., "http://proxy.example.com:8080")
+    http_proxy: Optional[str] = None
+    https_proxy: Optional[str] = None
+
+    # Authentication (if required)
+    proxy_username: Optional[str] = None
+    proxy_password: Optional[str] = None
+
+    # SSL verification
+    verify_ssl: bool = True
+
+    def __post_init__(self):
+        """Load proxy settings from environment if not provided."""
+        if self.http_proxy is None:
+            self.http_proxy = os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
+        if self.https_proxy is None:
+            self.https_proxy = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
+
+    def get_proxies_dict(self) -> Optional[dict]:
+        """Get proxies dict for requests library."""
+        if not self.http_proxy and not self.https_proxy:
+            return None
+
+        proxies = {}
+        if self.http_proxy:
+            proxies["http"] = self._add_auth_to_url(self.http_proxy)
+        if self.https_proxy:
+            proxies["https"] = self._add_auth_to_url(self.https_proxy)
+
+        return proxies if proxies else None
+
+    def _add_auth_to_url(self, url: str) -> str:
+        """Add authentication to proxy URL if credentials provided."""
+        if not self.proxy_username or not self.proxy_password:
+            return url
+
+        from urllib.parse import urlparse, urlunparse
+
+        parsed = urlparse(url)
+        netloc = f"{self.proxy_username}:{self.proxy_password}@{parsed.hostname}"
+        if parsed.port:
+            netloc += f":{parsed.port}"
+
+        return urlunparse((parsed.scheme, netloc, parsed.path,
+                          parsed.params, parsed.query, parsed.fragment))
+
+    def is_configured(self) -> bool:
+        """Check if any proxy is configured."""
+        return bool(self.http_proxy or self.https_proxy)
+
+
+@dataclass
 class APIConfig:
     """Configuration for LLM API access."""
 
@@ -143,6 +198,7 @@ class Config:
     search: SearchConfig = field(default_factory=SearchConfig)
     research: ResearchConfig = field(default_factory=ResearchConfig)
     report: ReportConfig = field(default_factory=ReportConfig)
+    proxy: ProxyConfig = field(default_factory=ProxyConfig)
 
     # Additional document settings
     additional_documents: List[Path] = field(default_factory=list)
@@ -227,6 +283,11 @@ def create_config(
     crawl_max_pages: int = 10,
     crawl_max_depth: int = 2,
     crawl_max_sites: int = 3,
+    http_proxy: Optional[str] = None,
+    https_proxy: Optional[str] = None,
+    proxy_username: Optional[str] = None,
+    proxy_password: Optional[str] = None,
+    verify_ssl: bool = True,
     **kwargs
 ) -> Config:
     """
@@ -250,6 +311,11 @@ def create_config(
         crawl_max_pages: Max pages to crawl per site in extended mode
         crawl_max_depth: Max link depth from seed URL in extended mode
         crawl_max_sites: Max sites to crawl per search in extended mode
+        http_proxy: HTTP proxy URL (e.g., "http://proxy.example.com:8080")
+        https_proxy: HTTPS proxy URL
+        proxy_username: Proxy authentication username
+        proxy_password: Proxy authentication password
+        verify_ssl: Verify SSL certificates (set False for self-signed certs)
         **kwargs: Additional keyword arguments
 
     Returns:
@@ -290,6 +356,14 @@ def create_config(
         target_characters=target_characters,
     )
 
+    proxy_config = ProxyConfig(
+        http_proxy=http_proxy,
+        https_proxy=https_proxy,
+        proxy_username=proxy_username,
+        proxy_password=proxy_password,
+        verify_ssl=verify_ssl,
+    )
+
     docs = []
     if additional_documents:
         docs = [Path(doc) for doc in additional_documents]
@@ -299,6 +373,7 @@ def create_config(
         search=search_config,
         research=research_config,
         report=report_config,
+        proxy=proxy_config,
         additional_documents=docs,
         process_additional_documents=bool(additional_documents),
         enable_verification=enable_verification,
