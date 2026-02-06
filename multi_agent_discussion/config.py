@@ -48,12 +48,14 @@ class LLMConfig:
     xai_model: str = "grok-beta"
     # Ollama settings
     ollama_base_url: str = "http://localhost:11434"
+    # Proxy settings
+    proxy_url: Optional[str] = None  # e.g., "http://proxy.example.com:8080"
     # Common settings
     temperature: float = 0.7
     max_tokens: int = 2048
 
     def __post_init__(self):
-        """Load API keys from environment if not provided."""
+        """Load API keys and proxy from environment if not provided."""
         if self.openai_api_key is None:
             self.openai_api_key = os.getenv("OPENAI_API_KEY")
         if self.anthropic_api_key is None:
@@ -62,6 +64,9 @@ class LLMConfig:
             self.google_api_key = os.getenv("GOOGLE_API_KEY")
         if self.xai_api_key is None:
             self.xai_api_key = os.getenv("XAI_API_KEY")
+        # Load proxy from environment if not provided
+        if self.proxy_url is None:
+            self.proxy_url = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
 
     def get_api_key(self) -> Optional[str]:
         """Get the API key for the current provider."""
