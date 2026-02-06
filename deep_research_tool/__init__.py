@@ -17,12 +17,15 @@ Features:
 __version__ = "0.1.0"
 __author__ = "Deep Research Tool Team"
 
-from .config import Config, ResearchConfig
-from .main import DeepResearchTool
+from .config import Config, ResearchConfig, create_config, ProxyConfig
+from .main import DeepResearchTool, run_research
 
 __all__ = [
     "Config",
     "ResearchConfig",
+    "ProxyConfig",
+    "create_config",
     "DeepResearchTool",
+    "run_research",
     "__version__",
 ]

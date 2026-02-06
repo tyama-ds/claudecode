@@ -31,6 +31,9 @@ class AnthropicClient(BaseLLMClient):
         model: Optional[str] = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        http_proxy: Optional[str] = None,
+        https_proxy: Optional[str] = None,
+        verify_ssl: bool = True,
     ):
         """
         Initialize Anthropic client.
@@ -40,6 +43,9 @@ class AnthropicClient(BaseLLMClient):
             model: Model name or alias (default: claude-3-5-sonnet)
             temperature: Sampling temperature
             max_tokens: Maximum tokens in response
+            http_proxy: HTTP proxy URL (e.g., "http://proxy:8080")
+            https_proxy: HTTPS proxy URL
+            verify_ssl: Verify SSL certificates
         """
         # Resolve model alias if provided
         resolved_model = self._resolve_model(model) if model else self.DEFAULT_MODEL
@@ -50,6 +56,9 @@ class AnthropicClient(BaseLLMClient):
             temperature=temperature,
             max_tokens=max_tokens,
         )
+        self._http_proxy = http_proxy
+        self._https_proxy = https_proxy
+        self._verify_ssl = verify_ssl
         self._initialize_client()
 
     def _resolve_model(self, model: str) -> str:
@@ -60,7 +69,28 @@ class AnthropicClient(BaseLLMClient):
         """Initialize the Anthropic client."""
         try:
             import anthropic
-            self._client = anthropic.Anthropic(api_key=self.api_key)
+
+            # Configure HTTP client with proxy if specified
+            http_client = None
+            if self._http_proxy or self._https_proxy:
+                try:
+                    import httpx
+                    proxy_url = self._https_proxy or self._http_proxy
+                    http_client = httpx.Client(
+                        proxy=proxy_url,
+                        verify=self._verify_ssl,
+                    )
+                except ImportError:
+                    print("Warning: httpx not installed, proxy settings ignored")
+
+            if http_client:
+                self._client = anthropic.Anthropic(
+                    api_key=self.api_key,
+                    http_client=http_client,
+                )
+            else:
+                self._client = anthropic.Anthropic(api_key=self.api_key)
+
         except ImportError:
             raise ImportError(
                 "Anthropic package not installed. Install with: pip install anthropic"

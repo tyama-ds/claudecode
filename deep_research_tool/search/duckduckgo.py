@@ -21,6 +21,8 @@ class DuckDuckGoSearch(BaseSearchClient):
         safe_search: str = "moderate",
         extract_images: bool = True,
         max_images: int = 5,
+        proxies: dict = None,
+        verify_ssl: bool = True,
     ):
         """
         Initialize DuckDuckGo search client.
@@ -32,6 +34,8 @@ class DuckDuckGoSearch(BaseSearchClient):
             safe_search: Safe search level (off, moderate, strict)
             extract_images: Whether to extract images from pages
             max_images: Maximum number of images to extract per page
+            proxies: Proxy settings dict (e.g., {"http": "http://proxy:8080", "https": "http://proxy:8080"})
+            verify_ssl: Verify SSL certificates
         """
         super().__init__(
             max_results=max_results,
@@ -41,6 +45,8 @@ class DuckDuckGoSearch(BaseSearchClient):
         )
         self.region = region
         self.safe_search = safe_search
+        self.proxies = proxies
+        self.verify_ssl = verify_ssl
         self._ddgs = None
 
     def _get_ddgs(self):
@@ -48,7 +54,14 @@ class DuckDuckGoSearch(BaseSearchClient):
         if self._ddgs is None:
             try:
                 from duckduckgo_search import DDGS
-                self._ddgs = DDGS()
+
+                # DDGS supports proxy via proxies parameter
+                if self.proxies:
+                    proxy_url = self.proxies.get("https") or self.proxies.get("http")
+                    self._ddgs = DDGS(proxy=proxy_url)
+                else:
+                    self._ddgs = DDGS()
+
             except ImportError:
                 raise ImportError(
                     "duckduckgo-search package not installed. "
@@ -226,6 +239,8 @@ class DuckDuckGoSearch(BaseSearchClient):
                 headers=headers,
                 timeout=self.timeout,
                 allow_redirects=True,
+                proxies=self.proxies,
+                verify=self.verify_ssl,
             )
             response.raise_for_status()
             response.encoding = response.apparent_encoding

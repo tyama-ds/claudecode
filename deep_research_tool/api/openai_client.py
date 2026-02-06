@@ -20,6 +20,9 @@ class OpenAIClient(BaseLLMClient):
         model: Optional[str] = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        http_proxy: Optional[str] = None,
+        https_proxy: Optional[str] = None,
+        verify_ssl: bool = True,
     ):
         """
         Initialize OpenAI client.
@@ -29,6 +32,9 @@ class OpenAIClient(BaseLLMClient):
             model: Model name (default: gpt-4o-mini)
             temperature: Sampling temperature
             max_tokens: Maximum tokens in response
+            http_proxy: HTTP proxy URL (e.g., "http://proxy:8080")
+            https_proxy: HTTPS proxy URL
+            verify_ssl: Verify SSL certificates
         """
         super().__init__(
             api_key=api_key or os.getenv("OPENAI_API_KEY"),
@@ -36,13 +42,34 @@ class OpenAIClient(BaseLLMClient):
             temperature=temperature,
             max_tokens=max_tokens,
         )
+        self._http_proxy = http_proxy
+        self._https_proxy = https_proxy
+        self._verify_ssl = verify_ssl
         self._initialize_client()
 
     def _initialize_client(self) -> None:
         """Initialize the OpenAI client."""
         try:
             from openai import OpenAI
-            self._client = OpenAI(api_key=self.api_key)
+
+            # Configure HTTP client with proxy if specified
+            http_client = None
+            if self._http_proxy or self._https_proxy:
+                try:
+                    import httpx
+                    proxy_url = self._https_proxy or self._http_proxy
+                    http_client = httpx.Client(
+                        proxy=proxy_url,
+                        verify=self._verify_ssl,
+                    )
+                except ImportError:
+                    print("Warning: httpx not installed, proxy settings ignored")
+
+            if http_client:
+                self._client = OpenAI(api_key=self.api_key, http_client=http_client)
+            else:
+                self._client = OpenAI(api_key=self.api_key)
+
         except ImportError:
             raise ImportError(
                 "OpenAI package not installed. Install with: pip install openai"
