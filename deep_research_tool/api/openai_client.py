@@ -150,6 +150,10 @@ class OpenAIClient(BaseLLMClient):
             if k not in excluded_keys:
                 api_params[k] = v
 
+        # Debug: Print API params to verify correct parameter is used
+        print(f"[DEBUG OpenAI] Model: {model}, Using max_completion_tokens: {self._requires_max_completion_tokens(model)}")
+        print(f"[DEBUG OpenAI] API params keys: {list(api_params.keys())}")
+
         # Make API call
         response = self._client.chat.completions.create(**api_params)
 
