@@ -93,23 +93,27 @@ class DuckDuckGoSearch(BaseSearchClient):
             if self.proxies:
                 proxy_url = self.proxies.get("https") or self.proxies.get("http")
 
-            # Try to create DDGS instance with various parameter combinations
-            # Different versions support different parameters
-            try:
-                if proxy_url:
-                    self._ddgs = DDGS(proxy=proxy_url, timeout=self.timeout)
-                else:
-                    self._ddgs = DDGS(timeout=self.timeout)
-            except TypeError:
-                # Older versions might not support timeout parameter
+            # Suppress deprecation warnings during instantiation
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+
+                # Try to create DDGS instance with various parameter combinations
+                # Different versions support different parameters
                 try:
                     if proxy_url:
-                        self._ddgs = DDGS(proxy=proxy_url)
+                        self._ddgs = DDGS(proxy=proxy_url, timeout=self.timeout)
                     else:
+                        self._ddgs = DDGS(timeout=self.timeout)
+                except TypeError:
+                    # Older versions might not support timeout parameter
+                    try:
+                        if proxy_url:
+                            self._ddgs = DDGS(proxy=proxy_url)
+                        else:
+                            self._ddgs = DDGS()
+                    except Exception as e:
+                        print(f"Warning: Failed to initialize DDGS with proxy: {e}")
                         self._ddgs = DDGS()
-                except Exception as e:
-                    print(f"Warning: Failed to initialize DDGS with proxy: {e}")
-                    self._ddgs = DDGS()
 
         return self._ddgs
 
