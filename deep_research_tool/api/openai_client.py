@@ -23,6 +23,7 @@ class OpenAIClient(BaseLLMClient):
         http_proxy: Optional[str] = None,
         https_proxy: Optional[str] = None,
         verify_ssl: bool = True,
+        timeout: int = 120,
     ):
         """
         Initialize OpenAI client.
@@ -35,6 +36,7 @@ class OpenAIClient(BaseLLMClient):
             http_proxy: HTTP proxy URL (e.g., "http://proxy:8080")
             https_proxy: HTTPS proxy URL
             verify_ssl: Verify SSL certificates
+            timeout: Request timeout in seconds (default: 120)
         """
         super().__init__(
             api_key=api_key or os.getenv("OPENAI_API_KEY"),
@@ -45,6 +47,7 @@ class OpenAIClient(BaseLLMClient):
         self._http_proxy = http_proxy
         self._https_proxy = https_proxy
         self._verify_ssl = verify_ssl
+        self._timeout = timeout
         self._initialize_client()
 
     def _initialize_client(self) -> None:
@@ -61,6 +64,7 @@ class OpenAIClient(BaseLLMClient):
                     http_client = httpx.Client(
                         proxy=proxy_url,
                         verify=self._verify_ssl,
+                        timeout=httpx.Timeout(self._timeout),
                     )
                 except ImportError:
                     print("Warning: httpx not installed, proxy settings ignored")
@@ -68,7 +72,7 @@ class OpenAIClient(BaseLLMClient):
             if http_client:
                 self._client = OpenAI(api_key=self.api_key, http_client=http_client)
             else:
-                self._client = OpenAI(api_key=self.api_key)
+                self._client = OpenAI(api_key=self.api_key, timeout=self._timeout)
 
         except ImportError:
             raise ImportError(
