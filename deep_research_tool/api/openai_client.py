@@ -75,6 +75,13 @@ class OpenAIClient(BaseLLMClient):
                 "OpenAI package not installed. Install with: pip install openai"
             )
 
+    def _requires_max_completion_tokens(self, model: str) -> bool:
+        """Check if model requires max_completion_tokens instead of max_tokens."""
+        # Models that require max_completion_tokens
+        new_models = ['o1', 'o3', 'gpt-4o', 'gpt-4o-mini', 'gpt-4o-2024']
+        model_lower = model.lower()
+        return any(new_model in model_lower for new_model in new_models)
+
     def chat(
         self,
         messages: List[Message],
@@ -108,15 +115,31 @@ class OpenAIClient(BaseLLMClient):
                 "content": msg.content
             })
 
+        # Determine the correct token limit parameter based on model
+        model = kwargs.get("model", self.model)
+        token_limit = kwargs.get("max_tokens", self.max_tokens)
+
+        # Build API call parameters
+        api_params = {
+            "model": model,
+            "messages": api_messages,
+            "temperature": kwargs.get("temperature", self.temperature),
+        }
+
+        # Use correct parameter name based on model
+        if self._requires_max_completion_tokens(model):
+            api_params["max_completion_tokens"] = token_limit
+        else:
+            api_params["max_tokens"] = token_limit
+
+        # Add any additional kwargs (excluding already handled ones)
+        excluded_keys = {"model", "temperature", "max_tokens", "max_completion_tokens"}
+        for k, v in kwargs.items():
+            if k not in excluded_keys:
+                api_params[k] = v
+
         # Make API call
-        response = self._client.chat.completions.create(
-            model=kwargs.get("model", self.model),
-            messages=api_messages,
-            temperature=kwargs.get("temperature", self.temperature),
-            max_tokens=kwargs.get("max_tokens", self.max_tokens),
-            **{k: v for k, v in kwargs.items()
-               if k not in ["model", "temperature", "max_tokens"]}
-        )
+        response = self._client.chat.completions.create(**api_params)
 
         # Extract response
         choice = response.choices[0]

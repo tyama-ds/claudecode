@@ -256,6 +256,247 @@ Return as JSON:
             "confidence_level": "low",
         }
 
+    def synthesize_section_content_enhanced(
+        self,
+        section_title: str,
+        section_description: str,
+        extracted_contents: List[ExtractedContent],
+        requirements: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Enhanced multi-pass content synthesis for better report quality.
+
+        This method generates content in three phases:
+        1. Generate detailed outline with key points
+        2. Generate detailed content for each point
+        3. Integrate all content into cohesive section
+
+        Args:
+            section_title: Title of the section
+            section_description: Description of what the section should cover
+            extracted_contents: List of extracted content from sources
+            requirements: Original research requirements
+
+        Returns:
+            Dictionary with synthesized content and metadata
+        """
+        lang_instruction = (
+            "Write in Japanese." if self.language == "ja"
+            else f"Write in {self.language}."
+        )
+
+        # Prepare source summaries
+        source_summaries = []
+        for i, ec in enumerate(extracted_contents, 1):
+            summary = f"""[SOURCE {i}] {ec.source_title}
+URL: {ec.source_url}
+Content: {ec.processed_content[:1500]}
+Key Points: {', '.join(ec.key_points[:3]) if ec.key_points else 'N/A'}
+"""
+            source_summaries.append(summary)
+
+        sources_text = "\n---\n".join(source_summaries)
+
+        # Phase 1: Generate detailed outline
+        print(f"[DEBUG] Phase 1: Generating outline for {section_title}")
+        outline = self._generate_section_outline(
+            section_title, section_description, sources_text, requirements, lang_instruction
+        )
+
+        if not outline:
+            print(f"[WARNING] Outline generation failed, falling back to basic synthesis")
+            return self.synthesize_section_content(
+                section_title, section_description, extracted_contents, requirements
+            )
+
+        # Phase 2: Generate detailed content for each outline point
+        print(f"[DEBUG] Phase 2: Generating content for {len(outline)} outline points")
+        detailed_sections = []
+        for i, point in enumerate(outline):
+            print(f"[DEBUG] Generating content for point {i+1}: {point.get('title', '')[:30]}...")
+            point_content = self._generate_point_content(
+                section_title, point, sources_text, lang_instruction
+            )
+            detailed_sections.append({
+                "title": point.get("title", f"Point {i+1}"),
+                "content": point_content
+            })
+
+        # Phase 3: Integrate all content
+        print(f"[DEBUG] Phase 3: Integrating {len(detailed_sections)} sections")
+        final_content = self._integrate_content(
+            section_title, section_description, detailed_sections, lang_instruction
+        )
+
+        # Collect source references
+        source_refs = list(range(1, len(extracted_contents) + 1))
+
+        return {
+            "content": final_content,
+            "summary": self._generate_section_summary(section_title, final_content, lang_instruction),
+            "source_references": source_refs,
+            "analysis_points": [s["title"] for s in detailed_sections],
+            "information_gaps": [],
+            "confidence_level": "medium" if len(extracted_contents) >= 2 else "low",
+            "outline": outline,
+        }
+
+    def _generate_section_outline(
+        self,
+        section_title: str,
+        section_description: str,
+        sources_text: str,
+        requirements: str,
+        lang_instruction: str,
+    ) -> List[Dict[str, str]]:
+        """Generate a detailed outline for the section."""
+        prompt = f"""Section: {section_title}
+Description: {section_description}
+Requirements: {requirements if requirements else "Comprehensive analysis"}
+
+Available Sources:
+{sources_text[:6000]}
+
+{lang_instruction}
+
+Based on the available sources, create a detailed outline for this section.
+The outline should have 4-6 key points that comprehensively cover the topic.
+
+Return as JSON array:
+[
+    {{"title": "Point title", "description": "What this point should cover", "key_facts": ["fact1", "fact2"]}},
+    ...
+]"""
+
+        try:
+            response = self.llm.generate(prompt)
+            content = response.content
+            start = content.find("[")
+            end = content.rfind("]") + 1
+            if start != -1 and end > start:
+                outline = json.loads(content[start:end])
+                if outline and len(outline) > 0:
+                    return outline
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"[WARNING] Outline parsing failed: {e}")
+
+        # Fallback: create basic outline
+        return [
+            {"title": "Overview", "description": f"Overview of {section_title}", "key_facts": []},
+            {"title": "Key Findings", "description": "Main findings from research", "key_facts": []},
+            {"title": "Analysis", "description": "Analysis and interpretation", "key_facts": []},
+        ]
+
+    def _generate_point_content(
+        self,
+        section_title: str,
+        point: Dict[str, Any],
+        sources_text: str,
+        lang_instruction: str,
+    ) -> str:
+        """Generate detailed content for a single outline point."""
+        prompt = f"""Section: {section_title}
+Point to elaborate: {point.get('title', '')}
+Point description: {point.get('description', '')}
+Key facts to include: {', '.join(point.get('key_facts', []))}
+
+Available Sources:
+{sources_text[:5000]}
+
+{lang_instruction}
+
+Write detailed content (300-500 characters) for this specific point.
+
+IMPORTANT:
+1. Use factual information from the sources
+2. Cite sources as [SOURCE N] where appropriate
+3. Be specific and informative
+4. Do not include a title or heading, just the content paragraph(s)
+
+Write the content directly (no JSON):"""
+
+        try:
+            response = self.llm.generate(prompt)
+            content = response.content.strip()
+            # Remove any JSON wrapping if present
+            if content.startswith("{") or content.startswith("["):
+                try:
+                    data = json.loads(content)
+                    if isinstance(data, dict) and "content" in data:
+                        content = data["content"]
+                except:
+                    pass
+            return content if content else f"{point.get('title', '')}: Information could not be generated."
+        except Exception as e:
+            print(f"[WARNING] Point content generation failed: {e}")
+            return f"{point.get('title', '')}: Information could not be generated due to an error."
+
+    def _integrate_content(
+        self,
+        section_title: str,
+        section_description: str,
+        detailed_sections: List[Dict[str, str]],
+        lang_instruction: str,
+    ) -> str:
+        """Integrate multiple content sections into cohesive text."""
+        sections_text = "\n\n".join(
+            f"### {s['title']}\n{s['content']}"
+            for s in detailed_sections
+        )
+
+        prompt = f"""Section: {section_title}
+Description: {section_description}
+
+Content parts to integrate:
+{sections_text}
+
+{lang_instruction}
+
+Integrate these content parts into a cohesive, well-structured section.
+
+Requirements:
+1. Maintain all factual information and citations [SOURCE N]
+2. Ensure smooth transitions between topics
+3. Remove any redundancy
+4. Keep the section well-organized with clear flow
+5. Do not add information not present in the original parts
+
+Write the integrated content directly (no JSON, no section title):"""
+
+        try:
+            response = self.llm.generate(prompt)
+            content = response.content.strip()
+            if content:
+                return content
+        except Exception as e:
+            print(f"[WARNING] Content integration failed: {e}")
+
+        # Fallback: just join the sections
+        return "\n\n".join(s['content'] for s in detailed_sections)
+
+    def _generate_section_summary(
+        self,
+        section_title: str,
+        content: str,
+        lang_instruction: str,
+    ) -> str:
+        """Generate a brief summary of the section content."""
+        prompt = f"""Section: {section_title}
+
+Content:
+{content[:2000]}
+
+{lang_instruction}
+
+Write a brief summary (2-3 sentences) of this section's key points.
+Write the summary directly (no JSON):"""
+
+        try:
+            response = self.llm.generate(prompt)
+            return response.content.strip()
+        except Exception:
+            return f"Summary of {section_title}"
+
     def evaluate_source_quality(
         self,
         source_url: str,
