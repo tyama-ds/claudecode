@@ -23,6 +23,7 @@ class OpenAIClient(BaseLLMClient):
         http_proxy: Optional[str] = None,
         https_proxy: Optional[str] = None,
         verify_ssl: bool = True,
+        timeout: int = 120,
     ):
         """
         Initialize OpenAI client.
@@ -35,6 +36,7 @@ class OpenAIClient(BaseLLMClient):
             http_proxy: HTTP proxy URL (e.g., "http://proxy:8080")
             https_proxy: HTTPS proxy URL
             verify_ssl: Verify SSL certificates
+            timeout: Request timeout in seconds (default: 120)
         """
         super().__init__(
             api_key=api_key or os.getenv("OPENAI_API_KEY"),
@@ -45,6 +47,7 @@ class OpenAIClient(BaseLLMClient):
         self._http_proxy = http_proxy
         self._https_proxy = https_proxy
         self._verify_ssl = verify_ssl
+        self._timeout = timeout
         self._initialize_client()
 
     def _initialize_client(self) -> None:
@@ -61,6 +64,7 @@ class OpenAIClient(BaseLLMClient):
                     http_client = httpx.Client(
                         proxy=proxy_url,
                         verify=self._verify_ssl,
+                        timeout=httpx.Timeout(self._timeout),
                     )
                 except ImportError:
                     print("Warning: httpx not installed, proxy settings ignored")
@@ -68,7 +72,7 @@ class OpenAIClient(BaseLLMClient):
             if http_client:
                 self._client = OpenAI(api_key=self.api_key, http_client=http_client)
             else:
-                self._client = OpenAI(api_key=self.api_key)
+                self._client = OpenAI(api_key=self.api_key, timeout=self._timeout)
 
         except ImportError:
             raise ImportError(
@@ -76,11 +80,23 @@ class OpenAIClient(BaseLLMClient):
             )
 
     def _requires_max_completion_tokens(self, model: str) -> bool:
-        """Check if model requires max_completion_tokens instead of max_tokens."""
-        # Models that require max_completion_tokens
-        new_models = ['o1', 'o3', 'gpt-4o', 'gpt-4o-mini', 'gpt-4o-2024']
+        """Check if model requires max_completion_tokens instead of max_tokens.
+
+        As of late 2024, most OpenAI models prefer max_completion_tokens.
+        Only very old models (gpt-3.5-turbo, gpt-4 without suffix) use max_tokens.
+        """
         model_lower = model.lower()
-        return any(new_model in model_lower for new_model in new_models)
+
+        # Old models that still use max_tokens
+        legacy_models = ['gpt-3.5-turbo', 'gpt-4-turbo', 'gpt-4-0314', 'gpt-4-0613']
+
+        # Check if it's a legacy model
+        for legacy in legacy_models:
+            if model_lower == legacy or model_lower.startswith(legacy + '-'):
+                return False
+
+        # All other models (gpt-4o, o1, o3, etc.) use max_completion_tokens
+        return True
 
     def chat(
         self,
@@ -137,6 +153,10 @@ class OpenAIClient(BaseLLMClient):
         for k, v in kwargs.items():
             if k not in excluded_keys:
                 api_params[k] = v
+
+        # Debug: Print API params to verify correct parameter is used
+        print(f"[DEBUG OpenAI] Model: {model}, Using max_completion_tokens: {self._requires_max_completion_tokens(model)}")
+        print(f"[DEBUG OpenAI] API params keys: {list(api_params.keys())}")
 
         # Make API call
         response = self._client.chat.completions.create(**api_params)
