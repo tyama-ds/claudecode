@@ -344,12 +344,20 @@ class DeepResearchTool:
         # Get source texts from evidence locker
         source_texts = {}
         for evidence in evidence_locker.get_all_evidence():
-            if hasattr(evidence, 'source_id') and hasattr(evidence, 'content'):
-                source_texts[evidence.source_id] = evidence.content
+            # Use evidence_id as the key and content_excerpt as the source text
+            if evidence.evidence_id and evidence.content_excerpt:
+                source_texts[evidence.evidence_id] = evidence.content_excerpt
 
         # Process each section
         deep_think_results = {}
         section_count = len([k for k in session.section_contents.keys() if not k.startswith("_")])
+
+        # Handle empty session gracefully
+        if section_count == 0:
+            if progress_callback:
+                progress_callback("DeepThink: No sections to process", 90)
+            return session, deep_think_results
+
         processed = 0
 
         for section_num, section_data in session.section_contents.items():
@@ -363,7 +371,7 @@ class DeepResearchTool:
             # Progress update
             processed += 1
             if progress_callback:
-                progress = 85 + (processed / section_count * 5)
+                progress = 85 + (processed / max(section_count, 1) * 5)
                 progress_callback(f"DeepThink: Processing section {section_num}...", progress)
 
             # Apply DeepThink

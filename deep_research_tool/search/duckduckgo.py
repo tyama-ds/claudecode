@@ -1,8 +1,11 @@
 """
 DuckDuckGo search client implementation.
+
+Supports both the new 'ddgs' package and legacy 'duckduckgo-search' package.
 """
 
 import time
+import warnings
 from typing import List, Optional
 import requests
 from bs4 import BeautifulSoup
@@ -11,7 +14,7 @@ from .base import BaseSearchClient, SearchResult, PageContent
 
 
 class DuckDuckGoSearch(BaseSearchClient):
-    """DuckDuckGo search client using duckduckgo-search library."""
+    """DuckDuckGo search client using ddgs or duckduckgo-search library."""
 
     def __init__(
         self,
@@ -48,31 +51,73 @@ class DuckDuckGoSearch(BaseSearchClient):
         self.proxies = proxies
         self.verify_ssl = verify_ssl
         self._ddgs = None
+        self._ddgs_class = None
+        self._using_new_package = False
 
-    def _get_ddgs(self):
-        """Get or create DuckDuckGo search instance."""
-        if self._ddgs is None:
-            try:
+    def _get_ddgs_class(self):
+        """Get the DDGS class from either ddgs or duckduckgo_search package."""
+        if self._ddgs_class is not None:
+            return self._ddgs_class
+
+        # Try the new 'ddgs' package first (preferred)
+        try:
+            from ddgs import DDGS
+            self._ddgs_class = DDGS
+            self._using_new_package = True
+            return DDGS
+        except ImportError:
+            pass
+
+        # Fall back to 'duckduckgo_search' package
+        try:
+            # Suppress the deprecation warning
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
                 from duckduckgo_search import DDGS
+            self._ddgs_class = DDGS
+            self._using_new_package = False
+            return DDGS
+        except ImportError:
+            raise ImportError(
+                "Neither 'ddgs' nor 'duckduckgo-search' package is installed. "
+                "Install with: pip install ddgs"
+            )
 
-                # DDGS supports proxy via proxies parameter
-                if self.proxies:
-                    proxy_url = self.proxies.get("https") or self.proxies.get("http")
-                    self._ddgs = DDGS(proxy=proxy_url)
+    def _get_ddgs(self, force_new: bool = False):
+        """Get or create DuckDuckGo search instance."""
+        if self._ddgs is None or force_new:
+            DDGS = self._get_ddgs_class()
+
+            # Prepare proxy URL
+            proxy_url = None
+            if self.proxies:
+                proxy_url = self.proxies.get("https") or self.proxies.get("http")
+
+            # Try to create DDGS instance with various parameter combinations
+            # Different versions support different parameters
+            try:
+                if proxy_url:
+                    self._ddgs = DDGS(proxy=proxy_url, timeout=self.timeout)
                 else:
+                    self._ddgs = DDGS(timeout=self.timeout)
+            except TypeError:
+                # Older versions might not support timeout parameter
+                try:
+                    if proxy_url:
+                        self._ddgs = DDGS(proxy=proxy_url)
+                    else:
+                        self._ddgs = DDGS()
+                except Exception as e:
+                    print(f"Warning: Failed to initialize DDGS with proxy: {e}")
                     self._ddgs = DDGS()
 
-            except ImportError:
-                raise ImportError(
-                    "duckduckgo-search package not installed. "
-                    "Install with: pip install duckduckgo-search"
-                )
         return self._ddgs
 
     def search(
         self,
         query: str,
         max_results: Optional[int] = None,
+        retry_count: int = 2,
         **kwargs
     ) -> List[SearchResult]:
         """
@@ -81,40 +126,63 @@ class DuckDuckGoSearch(BaseSearchClient):
         Args:
             query: The search query
             max_results: Override default max results
+            retry_count: Number of retries on failure
             **kwargs: Additional search parameters
 
         Returns:
             List of search results
         """
-        ddgs = self._get_ddgs()
         max_results = max_results or self.max_results
 
-        try:
-            results = ddgs.text(
-                query,
-                region=kwargs.get("region", self.region),
-                safesearch=kwargs.get("safe_search", self.safe_search),
-                max_results=max_results,
-            )
+        for attempt in range(retry_count + 1):
+            try:
+                ddgs = self._get_ddgs(force_new=(attempt > 0))
 
-            search_results = []
-            for result in results:
-                search_results.append(SearchResult(
-                    title=result.get("title", ""),
-                    url=result.get("href", result.get("link", "")),
-                    snippet=result.get("body", result.get("snippet", "")),
-                    metadata={
-                        "source": "duckduckgo",
-                        "query": query,
-                    }
-                ))
+                # Try to perform the search
+                results = ddgs.text(
+                    query,
+                    region=kwargs.get("region", self.region),
+                    safesearch=kwargs.get("safe_search", self.safe_search),
+                    max_results=max_results,
+                )
 
-            return search_results
+                # Convert generator/list to list
+                results_list = list(results) if results else []
 
-        except Exception as e:
-            # Return empty results on error, log the error
-            print(f"DuckDuckGo search error: {e}")
-            return []
+                if not results_list and attempt < retry_count:
+                    print(f"DuckDuckGo search returned empty results, retrying... (attempt {attempt + 1})")
+                    time.sleep(1)
+                    continue
+
+                search_results = []
+                for result in results_list:
+                    url = result.get("href", result.get("link", result.get("url", "")))
+                    if url:  # Only add if we have a valid URL
+                        search_results.append(SearchResult(
+                            title=result.get("title", ""),
+                            url=url,
+                            snippet=result.get("body", result.get("snippet", result.get("description", ""))),
+                            metadata={
+                                "source": "duckduckgo",
+                                "query": query,
+                            }
+                        ))
+
+                return search_results
+
+            except Exception as e:
+                error_msg = str(e)
+                print(f"DuckDuckGo search error (attempt {attempt + 1}): {error_msg}")
+
+                if attempt < retry_count:
+                    # Reset the DDGS instance for next attempt
+                    self._ddgs = None
+                    time.sleep(1 * (attempt + 1))  # Exponential backoff
+                    continue
+
+        # Return empty results after all retries failed
+        print(f"DuckDuckGo search failed after {retry_count + 1} attempts for query: {query}")
+        return []
 
     def search_news(
         self,
