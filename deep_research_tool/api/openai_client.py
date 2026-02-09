@@ -76,11 +76,23 @@ class OpenAIClient(BaseLLMClient):
             )
 
     def _requires_max_completion_tokens(self, model: str) -> bool:
-        """Check if model requires max_completion_tokens instead of max_tokens."""
-        # Models that require max_completion_tokens
-        new_models = ['o1', 'o3', 'gpt-4o', 'gpt-4o-mini', 'gpt-4o-2024']
+        """Check if model requires max_completion_tokens instead of max_tokens.
+
+        As of late 2024, most OpenAI models prefer max_completion_tokens.
+        Only very old models (gpt-3.5-turbo, gpt-4 without suffix) use max_tokens.
+        """
         model_lower = model.lower()
-        return any(new_model in model_lower for new_model in new_models)
+
+        # Old models that still use max_tokens
+        legacy_models = ['gpt-3.5-turbo', 'gpt-4-turbo', 'gpt-4-0314', 'gpt-4-0613']
+
+        # Check if it's a legacy model
+        for legacy in legacy_models:
+            if model_lower == legacy or model_lower.startswith(legacy + '-'):
+                return False
+
+        # All other models (gpt-4o, o1, o3, etc.) use max_completion_tokens
+        return True
 
     def chat(
         self,
