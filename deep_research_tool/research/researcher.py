@@ -450,6 +450,22 @@ class Researcher:
 
                 section.content = synthesized.get("content", "")
                 section.sources = [ec.source_url for ec in section_content_parts]
+            else:
+                # No content extracted, add placeholder
+                placeholder_text = f"Information for this section could not be gathered automatically. "
+                if self.language == "ja":
+                    placeholder_text = f"このセクションの情報を自動的に収集できませんでした。追加のリサーチが必要です。"
+
+                self.session.section_contents[section.section] = {
+                    "title": section.title,
+                    "content": placeholder_text,
+                    "summary": "",
+                    "confidence": "low",
+                    "sources": [],
+                    "images": [],
+                    "gaps": [f"All content for section '{section.title}'"],
+                }
+                section.content = placeholder_text
 
             section.status = "completed"
 

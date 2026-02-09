@@ -9,6 +9,7 @@ from typing import Optional, List, Dict, Any, Callable
 
 from .config import Config, LLMProvider, SearchMethod, ReportFormat
 from .api import get_client
+from .api.base import get_token_stats, reset_token_stats
 from .search import get_search_client
 from .research.researcher import Researcher, ResearchSession
 from .evidence.locker import EvidenceLocker
@@ -295,6 +296,9 @@ class DeepResearchTool:
         if hasattr(self.search_client, 'close'):
             self.search_client.close()
 
+        # Get token usage statistics
+        token_stats = get_token_stats()
+
         return {
             "session_id": session.session_id,
             "report_path": str(report_path),
@@ -305,6 +309,7 @@ class DeepResearchTool:
             "evidence_locker": evidence_locker,
             "verification_result": verification_result,
             "deep_think_results": deep_think_results,
+            "token_usage": token_stats.to_dict(),
         }
 
     def _get_content_for_verification(self, session: ResearchSession) -> str:
@@ -694,23 +699,106 @@ def run_research(
         **kwargs,
     )
 
+    # Reset token stats before running
+    reset_token_stats()
+
     tool = DeepResearchTool(config)
 
     def progress_callback(message: str, percentage: float):
         if verbose and percentage >= 0:
             print(f"[{percentage:5.1f}%] {message}")
 
-    return tool.run(
+    result = tool.run(
         query=query,
         requirements=requirements,
         progress_callback=progress_callback if verbose else None,
     )
+
+    # Display token usage summary if verbose
+    if verbose:
+        token_stats = get_token_stats()
+        language = config.research.language if hasattr(config.research, 'language') else "en"
+        print("\n" + token_stats.get_summary(language))
+
+    return result
+
+
+def diagnose_session(result: Dict[str, Any]) -> str:
+    """
+    Diagnose the research session to identify content issues.
+
+    Args:
+        result: The result dictionary from run_research()
+
+    Returns:
+        Diagnostic report as a string
+    """
+    lines = ["=" * 50, "Research Session Diagnostic Report", "=" * 50, ""]
+
+    session = result.get("session")
+    if not session:
+        lines.append("ERROR: No session object in result")
+        return "\n".join(lines)
+
+    # Check research plan
+    lines.append(f"Session ID: {session.session_id}")
+    lines.append(f"State: {session.state}")
+    lines.append(f"Query: {session.query}")
+    lines.append("")
+
+    if session.research_plan:
+        plan = session.research_plan
+        lines.append(f"Research Plan: {plan.title}")
+        lines.append(f"  - Sections: {len(plan.table_of_contents.items)}")
+        lines.append(f"  - Search Queries: {len(plan.search_queries)}")
+        lines.append("")
+
+        # List sections
+        lines.append("Table of Contents:")
+        for item in plan.table_of_contents.items:
+            lines.append(f"  [{item.section}] {item.title}")
+            for sub in item.subsections:
+                lines.append(f"    [{sub.section}] {sub.title}")
+        lines.append("")
+    else:
+        lines.append("WARNING: No research plan created")
+        lines.append("")
+
+    # Check section contents
+    lines.append("Section Contents:")
+    if session.section_contents:
+        for section_key, content_data in session.section_contents.items():
+            if section_key.startswith("_"):
+                lines.append(f"  [{section_key}]: (metadata)")
+                continue
+
+            content = content_data.get("content", "")
+            content_len = len(content) if content else 0
+            sources_count = len(content_data.get("sources", []))
+            confidence = content_data.get("confidence", "unknown")
+
+            status = "OK" if content_len > 100 else "SHORT" if content_len > 0 else "EMPTY"
+            lines.append(f"  [{section_key}] {content_data.get('title', 'Unknown')}")
+            lines.append(f"      Content: {content_len} chars ({status})")
+            lines.append(f"      Sources: {sources_count}")
+            lines.append(f"      Confidence: {confidence}")
+
+            if content_len > 0 and content_len <= 200:
+                lines.append(f"      Preview: {content[:100]}...")
+    else:
+        lines.append("  WARNING: No section contents found!")
+
+    lines.append("")
+    lines.append("=" * 50)
+
+    return "\n".join(lines)
 
 
 # Export for notebook/script usage
 __all__ = [
     "DeepResearchTool",
     "run_research",
+    "diagnose_session",
     "Config",
     "LLMProvider",
     "SearchMethod",

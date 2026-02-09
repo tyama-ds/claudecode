@@ -120,11 +120,17 @@ Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
             if start != -1 and end > start:
                 data = json.loads(content[start:end])
 
+                # Use processed_content from LLM, fall back to truncated raw content if empty
+                processed = data.get("processed_content", "")
+                if not processed or len(processed.strip()) < 10:
+                    # LLM returned empty or very short content, use raw content
+                    processed = truncated_content[:2000]
+
                 return ExtractedContent(
                     source_url=source_url,
                     source_title=source_title,
                     raw_content=raw_content,
-                    processed_content=data.get("processed_content", ""),
+                    processed_content=processed,
                     key_points=data.get("key_points", []),
                     quotes=data.get("quotes", []),
                     relevance_score=float(data.get("relevance_score", 0.5)),
@@ -217,18 +223,32 @@ Return as JSON:
 
         response = self.llm.generate(prompt)
 
+        # Prepare fallback content in case JSON parsing fails or content is empty
+        fallback_content = "\n\n".join(
+            ec.processed_content for ec in extracted_contents if ec.processed_content
+        )
+
         try:
             content = response.content
             start = content.find("{")
             end = content.rfind("}") + 1
             if start != -1 and end > start:
-                return json.loads(content[start:end])
+                result = json.loads(content[start:end])
+
+                # Check if content is empty or too short, use fallback
+                result_content = result.get("content", "")
+                if not result_content or len(result_content.strip()) < 10:
+                    result["content"] = fallback_content
+                    if not result.get("summary"):
+                        result["summary"] = "Content compiled from multiple sources"
+
+                return result
         except (json.JSONDecodeError, ValueError):
             pass
 
         # Fallback
         return {
-            "content": "\n\n".join(ec.processed_content for ec in extracted_contents),
+            "content": fallback_content,
             "summary": "Content synthesized from multiple sources",
             "source_references": list(range(1, len(extracted_contents) + 1)),
             "analysis_points": [],

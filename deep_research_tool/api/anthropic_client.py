@@ -6,7 +6,7 @@ import os
 import json
 from typing import Optional, List
 
-from .base import BaseLLMClient, Message, MessageRole, LLMResponse
+from .base import BaseLLMClient, Message, MessageRole, LLMResponse, TokenUsage, get_token_stats
 
 
 class AnthropicClient(BaseLLMClient):
@@ -156,6 +156,15 @@ class AnthropicClient(BaseLLMClient):
             "completion_tokens": response.usage.output_tokens,
             "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
         }
+
+        # Record token usage to global tracker
+        token_usage = TokenUsage(
+            prompt_tokens=response.usage.input_tokens,
+            completion_tokens=response.usage.output_tokens,
+            total_tokens=response.usage.input_tokens + response.usage.output_tokens,
+            model=response.model,
+        )
+        get_token_stats().add_usage(token_usage)
 
         return LLMResponse(
             content=content,
