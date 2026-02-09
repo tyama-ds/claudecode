@@ -141,6 +141,7 @@ class Researcher:
         crawl_max_depth: int = 2,
         crawl_max_sites: int = 3,
         crawl_relevance_threshold: float = 0.3,
+        use_enhanced_synthesis: bool = True,
     ):
         """
         Initialize Researcher.
@@ -158,6 +159,7 @@ class Researcher:
             crawl_max_depth: Max link depth from seed URL
             crawl_max_sites: Max sites to crawl per search
             crawl_relevance_threshold: Min relevance score to include page
+            use_enhanced_synthesis: Use multi-pass content generation for better quality
         """
         self.llm = llm_client
         self.search = search_client
@@ -169,6 +171,9 @@ class Researcher:
 
         self.query_generator = QueryGenerator(llm_client, language)
         self.content_extractor = ContentExtractor(llm_client, language)
+
+        # Use enhanced multi-pass content generation for better quality
+        self.use_enhanced_synthesis = use_enhanced_synthesis
 
         self.session: Optional[ResearchSession] = None
         self.evidence_locker: Optional[EvidenceLocker] = None
@@ -293,8 +298,18 @@ class Researcher:
         sections = toc.get_flat_sections()
         total_sections = len(sections)
 
+        # Debug: Log sections to be processed
+        print(f"[DEBUG] Research loop starting with {total_sections} sections:")
+        for s in sections:
+            print(f"  - {s.section}: {s.title}")
+
+        if total_sections == 0:
+            print("[ERROR] No sections found in table of contents!")
+            return
+
         # Initial queries from plan
         available_queries = list(self.session.research_plan.search_queries)
+        print(f"[DEBUG] Initial search queries: {len(available_queries)}")
 
         for section_idx, section in enumerate(sections):
             section_progress_base = 10 + (section_idx / total_sections) * 70
@@ -336,17 +351,21 @@ class Researcher:
                     )
 
                 iter_record.queries_executed = queries
+                print(f"[DEBUG] Section {section.section} iteration {iteration}: executing {len(queries[:3])} queries")
 
                 # Execute searches
                 all_initial_results: List[SearchResult] = []
                 for query in queries[:3]:  # Limit queries per iteration
+                    print(f"[DEBUG] Searching: {query[:50]}...")
                     try:
                         results = self.search.search(query)
+                        print(f"[DEBUG] Search returned {len(results)} results")
                         iter_record.sources_found += len(results)
                         all_initial_results.extend(results[:3])
 
                         # Extract content from top results
                         for result in results[:3]:  # Top 3 results per query
+                            print(f"[DEBUG] Processing: {result.url[:60]}...")
                             try:
                                 # Get full page content
                                 page = self.search.get_page_content(result.url)
@@ -360,9 +379,11 @@ class Researcher:
                                     research_query=query,
                                 )
 
+                                print(f"[DEBUG] Extracted relevance_score: {extracted.relevance_score}")
                                 if extracted.relevance_score >= 0.3:
                                     section_content_parts.append(extracted)
                                     iter_record.content_extracted += 1
+                                    print(f"[DEBUG] Content added. Total parts: {len(section_content_parts)}")
 
                                     # Add to evidence locker
                                     self.evidence_locker.add_evidence(
@@ -427,13 +448,29 @@ class Researcher:
                     break
 
             # Synthesize section content
+            print(f"[DEBUG] Section {section.section} complete. Content parts: {len(section_content_parts)}")
             if section_content_parts:
-                synthesized = self.content_extractor.synthesize_section_content(
-                    section_title=section.title,
-                    section_description=section.description,
-                    extracted_contents=section_content_parts,
-                    requirements=self.session.requirements,
-                )
+                print(f"[DEBUG] Synthesizing content for section {section.section}...")
+
+                # Use enhanced multi-pass synthesis for better quality
+                if self.use_enhanced_synthesis:
+                    print(f"[DEBUG] Using enhanced multi-pass synthesis")
+                    synthesized = self.content_extractor.synthesize_section_content_enhanced(
+                        section_title=section.title,
+                        section_description=section.description,
+                        extracted_contents=section_content_parts,
+                        requirements=self.session.requirements,
+                    )
+                else:
+                    synthesized = self.content_extractor.synthesize_section_content(
+                        section_title=section.title,
+                        section_description=section.description,
+                        extracted_contents=section_content_parts,
+                        requirements=self.session.requirements,
+                    )
+
+                content_preview = synthesized.get("content", "")[:100]
+                print(f"[DEBUG] Synthesized content preview: {content_preview}...")
 
                 self.session.section_contents[section.section] = {
                     "title": section.title,
@@ -450,8 +487,10 @@ class Researcher:
 
                 section.content = synthesized.get("content", "")
                 section.sources = [ec.source_url for ec in section_content_parts]
+                print(f"[DEBUG] Section {section.section} saved to section_contents")
             else:
                 # No content extracted, add placeholder
+                print(f"[WARNING] No content extracted for section {section.section}, using placeholder")
                 placeholder_text = f"Information for this section could not be gathered automatically. "
                 if self.language == "ja":
                     placeholder_text = f"このセクションの情報を自動的に収集できませんでした。追加のリサーチが必要です。"
@@ -468,6 +507,9 @@ class Researcher:
                 section.content = placeholder_text
 
             section.status = "completed"
+
+        # Debug: Log final section contents
+        print(f"[DEBUG] Research loop completed. Section contents keys: {list(self.session.section_contents.keys())}")
 
     def _conduct_extended_research(
         self,
