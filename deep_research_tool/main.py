@@ -9,6 +9,7 @@ from typing import Optional, List, Dict, Any, Callable
 
 from .config import Config, LLMProvider, SearchMethod, ReportFormat
 from .api import get_client
+from .api.base import get_token_stats, reset_token_stats
 from .search import get_search_client
 from .research.researcher import Researcher, ResearchSession
 from .evidence.locker import EvidenceLocker
@@ -295,6 +296,9 @@ class DeepResearchTool:
         if hasattr(self.search_client, 'close'):
             self.search_client.close()
 
+        # Get token usage statistics
+        token_stats = get_token_stats()
+
         return {
             "session_id": session.session_id,
             "report_path": str(report_path),
@@ -305,6 +309,7 @@ class DeepResearchTool:
             "evidence_locker": evidence_locker,
             "verification_result": verification_result,
             "deep_think_results": deep_think_results,
+            "token_usage": token_stats.to_dict(),
         }
 
     def _get_content_for_verification(self, session: ResearchSession) -> str:
@@ -694,17 +699,28 @@ def run_research(
         **kwargs,
     )
 
+    # Reset token stats before running
+    reset_token_stats()
+
     tool = DeepResearchTool(config)
 
     def progress_callback(message: str, percentage: float):
         if verbose and percentage >= 0:
             print(f"[{percentage:5.1f}%] {message}")
 
-    return tool.run(
+    result = tool.run(
         query=query,
         requirements=requirements,
         progress_callback=progress_callback if verbose else None,
     )
+
+    # Display token usage summary if verbose
+    if verbose:
+        token_stats = get_token_stats()
+        language = config.research.language if hasattr(config.research, 'language') else "en"
+        print("\n" + token_stats.get_summary(language))
+
+    return result
 
 
 # Export for notebook/script usage

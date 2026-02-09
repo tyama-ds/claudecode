@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Optional, Callable
 from dataclasses import dataclass
 
+from .api.base import get_token_stats, reset_token_stats
+
 
 @dataclass
 class GUIConfig:
@@ -866,6 +868,9 @@ This helps gather more comprehensive information from diverse sources."""
         try:
             from .main import run_research
 
+            # Reset token stats before running
+            reset_token_stats()
+
             def progress_callback(message: str, progress: float):
                 self.root.after(0, lambda: self._update_progress(message, progress))
 
@@ -892,10 +897,26 @@ This helps gather more comprehensive information from diverse sources."""
         self._log("=" * 50)
         self._log("Research completed!")
 
-        if result and hasattr(result, "report_path"):
-            self._log(f"Report saved to: {result.report_path}")
+        if result:
+            if isinstance(result, dict) and "report_path" in result:
+                self._log(f"Report saved to: {result['report_path']}")
+            elif hasattr(result, "report_path"):
+                self._log(f"Report saved to: {result.report_path}")
 
-        messagebox.showinfo("Complete", "Research completed successfully!")
+        # Display token usage summary
+        token_stats = get_token_stats()
+        language = self.var_language.get()
+        self._log("")
+        self._log(token_stats.get_summary(language))
+
+        # Build completion message with token info
+        completion_msg = "Research completed successfully!\n\n"
+        completion_msg += f"Total tokens used: {token_stats.total_tokens:,}\n"
+        completion_msg += f"  - Input: {token_stats.total_prompt_tokens:,}\n"
+        completion_msg += f"  - Output: {token_stats.total_completion_tokens:,}\n"
+        completion_msg += f"API calls: {token_stats.total_calls}"
+
+        messagebox.showinfo("Complete", completion_msg)
 
     def _on_research_error(self, error: str):
         """Handle research error."""

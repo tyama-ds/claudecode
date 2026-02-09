@@ -21,6 +21,7 @@ __author__ = "Deep Research Tool Team"
 
 from .config import Config, ResearchConfig, create_config, ProxyConfig
 from .main import DeepResearchTool, run_research
+from .api.base import get_token_stats, reset_token_stats, TokenUsageStats
 
 
 def launch_gui():
@@ -37,5 +38,8 @@ __all__ = [
     "DeepResearchTool",
     "run_research",
     "launch_gui",
+    "get_token_stats",
+    "reset_token_stats",
+    "TokenUsageStats",
     "__version__",
 ]

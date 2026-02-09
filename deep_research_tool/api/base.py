@@ -4,8 +4,9 @@ Base class for LLM API clients.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 from enum import Enum
+from datetime import datetime
 
 
 class MessageRole(str, Enum):
@@ -20,6 +21,119 @@ class Message:
     """A single message in a conversation."""
     role: MessageRole
     content: str
+
+
+@dataclass
+class TokenUsage:
+    """Token usage for a single API call."""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    model: str = ""
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "model": self.model,
+            "timestamp": self.timestamp,
+        }
+
+
+@dataclass
+class TokenUsageStats:
+    """Aggregated token usage statistics."""
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    total_tokens: int = 0
+    total_calls: int = 0
+    calls_by_model: Dict[str, int] = field(default_factory=dict)
+    tokens_by_model: Dict[str, int] = field(default_factory=dict)
+    history: List[TokenUsage] = field(default_factory=list)
+
+    def add_usage(self, usage: TokenUsage) -> None:
+        """Add a usage record to the statistics."""
+        self.total_prompt_tokens += usage.prompt_tokens
+        self.total_completion_tokens += usage.completion_tokens
+        self.total_tokens += usage.total_tokens
+        self.total_calls += 1
+
+        # Track by model
+        model = usage.model or "unknown"
+        self.calls_by_model[model] = self.calls_by_model.get(model, 0) + 1
+        self.tokens_by_model[model] = self.tokens_by_model.get(model, 0) + usage.total_tokens
+
+        # Keep history
+        self.history.append(usage)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "total_prompt_tokens": self.total_prompt_tokens,
+            "total_completion_tokens": self.total_completion_tokens,
+            "total_tokens": self.total_tokens,
+            "total_calls": self.total_calls,
+            "calls_by_model": self.calls_by_model,
+            "tokens_by_model": self.tokens_by_model,
+        }
+
+    def get_summary(self, language: str = "en") -> str:
+        """Get a human-readable summary of token usage."""
+        if language == "ja":
+            lines = [
+                "=== トークン使用量 ===",
+                f"総トークン数: {self.total_tokens:,}",
+                f"  - 入力: {self.total_prompt_tokens:,}",
+                f"  - 出力: {self.total_completion_tokens:,}",
+                f"API呼び出し回数: {self.total_calls}",
+            ]
+            if self.tokens_by_model:
+                lines.append("モデル別:")
+                for model, tokens in sorted(self.tokens_by_model.items(),
+                                            key=lambda x: x[1], reverse=True):
+                    calls = self.calls_by_model.get(model, 0)
+                    lines.append(f"  {model}: {tokens:,} tokens ({calls} calls)")
+        else:
+            lines = [
+                "=== Token Usage ===",
+                f"Total tokens: {self.total_tokens:,}",
+                f"  - Input: {self.total_prompt_tokens:,}",
+                f"  - Output: {self.total_completion_tokens:,}",
+                f"API calls: {self.total_calls}",
+            ]
+            if self.tokens_by_model:
+                lines.append("By model:")
+                for model, tokens in sorted(self.tokens_by_model.items(),
+                                            key=lambda x: x[1], reverse=True):
+                    calls = self.calls_by_model.get(model, 0)
+                    lines.append(f"  {model}: {tokens:,} tokens ({calls} calls)")
+
+        return "\n".join(lines)
+
+    def reset(self) -> None:
+        """Reset all statistics."""
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+        self.total_tokens = 0
+        self.total_calls = 0
+        self.calls_by_model.clear()
+        self.tokens_by_model.clear()
+        self.history.clear()
+
+
+# Global token usage tracker
+_global_token_stats = TokenUsageStats()
+
+
+def get_token_stats() -> TokenUsageStats:
+    """Get the global token usage statistics."""
+    return _global_token_stats
+
+
+def reset_token_stats() -> None:
+    """Reset the global token usage statistics."""
+    _global_token_stats.reset()
 
 
 @dataclass
