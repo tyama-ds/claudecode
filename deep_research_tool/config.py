@@ -146,6 +146,31 @@ class SearchConfig:
 
 
 @dataclass
+class DeepThinkConfig:
+    """Configuration for DeepThink reasoning enhancement."""
+
+    # Main toggle
+    enabled: bool = False
+
+    # Reasoning depth (0.0 = conservative, 1.0 = exploratory)
+    level: float = 0.5
+
+    # Number of reasoning iterations
+    reasoning_iterations: int = 3
+
+    # Consistency checking
+    consistency_threshold: float = 0.3
+    consistency_mode: str = "warn"  # warn, revise, strict
+
+    # Quality thresholds
+    fidelity_threshold: float = 0.7
+
+    # Hidden parameters (internal use)
+    _expansion_tolerance: float = 0.2
+    _deviation_weights: tuple = (0.4, 0.4, 0.2)  # semantic, logical, contradiction
+
+
+@dataclass
 class ResearchConfig:
     """Configuration for research process."""
 
@@ -199,6 +224,7 @@ class Config:
     research: ResearchConfig = field(default_factory=ResearchConfig)
     report: ReportConfig = field(default_factory=ReportConfig)
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
+    deep_think: DeepThinkConfig = field(default_factory=DeepThinkConfig)
 
     # Additional document settings
     additional_documents: List[Path] = field(default_factory=list)
@@ -288,6 +314,13 @@ def create_config(
     proxy_username: Optional[str] = None,
     proxy_password: Optional[str] = None,
     verify_ssl: bool = True,
+    # DeepThink parameters
+    deep_think: bool = False,
+    deep_think_level: float = 0.5,
+    reasoning_iterations: int = 3,
+    consistency_threshold: float = 0.3,
+    consistency_mode: str = "warn",
+    fidelity_threshold: float = 0.7,
     **kwargs
 ) -> Config:
     """
@@ -316,6 +349,12 @@ def create_config(
         proxy_username: Proxy authentication username
         proxy_password: Proxy authentication password
         verify_ssl: Verify SSL certificates (set False for self-signed certs)
+        deep_think: Enable DeepThink reasoning enhancement
+        deep_think_level: Reasoning depth level (0.0-1.0, 0=conservative, 1=exploratory)
+        reasoning_iterations: Number of reasoning iterations for DeepThink
+        consistency_threshold: Threshold for consistency check (0.0-1.0)
+        consistency_mode: How to handle consistency issues ('warn', 'revise', 'strict')
+        fidelity_threshold: Minimum source fidelity score (0.0-1.0)
         **kwargs: Additional keyword arguments
 
     Returns:
@@ -364,6 +403,17 @@ def create_config(
         verify_ssl=verify_ssl,
     )
 
+    deep_think_config = DeepThinkConfig(
+        enabled=deep_think,
+        level=deep_think_level,
+        reasoning_iterations=reasoning_iterations,
+        consistency_threshold=consistency_threshold,
+        consistency_mode=consistency_mode,
+        fidelity_threshold=fidelity_threshold,
+        _expansion_tolerance=kwargs.get("_expansion_tolerance", 0.2),
+        _deviation_weights=kwargs.get("_deviation_weights", (0.4, 0.4, 0.2)),
+    )
+
     docs = []
     if additional_documents:
         docs = [Path(doc) for doc in additional_documents]
@@ -374,6 +424,7 @@ def create_config(
         research=research_config,
         report=report_config,
         proxy=proxy_config,
+        deep_think=deep_think_config,
         additional_documents=docs,
         process_additional_documents=bool(additional_documents),
         enable_verification=enable_verification,

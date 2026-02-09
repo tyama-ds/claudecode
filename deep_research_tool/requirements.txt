@@ -23,6 +23,10 @@ reportlab>=4.2.0  # For PDF generation
 # Data Processing
 pandas>=2.2.0
 pydantic>=2.7.0
+numpy>=1.26.0
+
+# DeepThink - Embeddings and Similarity
+sentence-transformers>=2.2.0
 
 # Image Processing
 Pillow>=10.3.0

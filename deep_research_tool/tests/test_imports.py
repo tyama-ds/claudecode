@@ -130,6 +130,35 @@ def test_main_imports():
     print("main imports: OK")
 
 
+def test_thinking_imports():
+    """Test thinking module imports."""
+    from deep_research_tool.thinking import (
+        DeepThinkConfig,
+        DeepThinkProcessor,
+        DeepThinkMetrics,
+        MetricsConfig,
+        LogicValidator,
+        ValidationConfig,
+        ValidationLevel,
+        ReasoningStep,
+        ReasoningChain,
+        ReasoningType,
+        ConsistencyMode,
+        ConsistencyCheckResult,
+        DeepThinkResult,
+        ExtensionConfig,
+        DeepThinkExtension,
+        SectionExtension,
+        ReportExtension,
+        DeepThinkMixin,
+        create_extension_for_module,
+    )
+    assert DeepThinkConfig is not None
+    assert DeepThinkProcessor is not None
+    assert DeepThinkMetrics is not None
+    print("thinking imports: OK")
+
+
 def test_package_imports():
     """Test package-level imports."""
     from deep_research_tool import (
@@ -152,5 +181,6 @@ if __name__ == "__main__":
     test_report_imports()
     test_utils_imports()
     test_main_imports()
+    test_thinking_imports()
     test_package_imports()
     print("\nAll import tests passed!")
