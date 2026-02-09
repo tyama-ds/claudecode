@@ -876,7 +876,7 @@ This helps gather more comprehensive information from diverse sources."""
 
             topic = config.pop("topic")
             result = run_research(
-                topic=topic,
+                query=topic,
                 progress_callback=progress_callback,
                 **config
             )
