@@ -6,9 +6,30 @@ Supports both environment variables and direct parameter passing.
 
 import os
 from enum import Enum
-from typing import Optional, List
+from typing import Optional, List, Dict
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+# Language to region mapping for multilingual search
+LANGUAGE_REGION_MAP: Dict[str, Dict[str, str]] = {
+    "ja": {"region": "jp-jp", "name": "Japanese", "native": "日本語"},
+    "en": {"region": "us-en", "name": "English", "native": "English"},
+    "zh": {"region": "cn-zh", "name": "Chinese", "native": "中文"},
+    "ko": {"region": "kr-kr", "name": "Korean", "native": "한국어"},
+    "de": {"region": "de-de", "name": "German", "native": "Deutsch"},
+    "fr": {"region": "fr-fr", "name": "French", "native": "Français"},
+    "es": {"region": "es-es", "name": "Spanish", "native": "Español"},
+    "pt": {"region": "br-pt", "name": "Portuguese", "native": "Português"},
+    "ru": {"region": "ru-ru", "name": "Russian", "native": "Русский"},
+    "it": {"region": "it-it", "name": "Italian", "native": "Italiano"},
+    "nl": {"region": "nl-nl", "name": "Dutch", "native": "Nederlands"},
+    "pl": {"region": "pl-pl", "name": "Polish", "native": "Polski"},
+    "ar": {"region": "xa-ar", "name": "Arabic", "native": "العربية"},
+    "hi": {"region": "in-en", "name": "Hindi", "native": "हिन्दी"},
+    "th": {"region": "th-th", "name": "Thai", "native": "ไทย"},
+    "vi": {"region": "vn-vi", "name": "Vietnamese", "native": "Tiếng Việt"},
+}
 
 
 class LLMProvider(str, Enum):
@@ -95,13 +116,33 @@ class APIConfig:
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
 
-    # Model settings
-    openai_model: str = "gpt-4o-mini"
+    # Model settings (updated with GPT-5 series)
+    openai_model: str = "gpt-5-mini"
     anthropic_model: str = "claude-3-5-sonnet-20241022"
 
     # API parameters
     temperature: float = 0.7
     max_tokens: int = 4096
+
+    # Available models for reference
+    OPENAI_MODELS: tuple = (
+        "gpt-5",
+        "gpt-5-mini",
+        "gpt-5-thinking",
+        "gpt-5-thinking-mini",
+        "gpt-5-nano",
+        "gpt-4o",
+        "gpt-4o-mini",
+        "gpt-4-turbo",
+        "gpt-4",
+        "gpt-3.5-turbo",
+    )
+    ANTHROPIC_MODELS: tuple = (
+        "claude-3-5-sonnet-20241022",
+        "claude-3-opus-20240229",
+        "claude-3-sonnet-20240229",
+        "claude-3-haiku-20240307",
+    )
 
     def __post_init__(self):
         """Load API keys from environment if not provided."""
@@ -143,6 +184,51 @@ class SearchConfig:
     # Content extraction settings
     extract_images: bool = True
     max_images_per_page: int = 5
+
+
+@dataclass
+class MultilingualSearchConfig:
+    """Configuration for multilingual search mode."""
+
+    # Main toggle
+    enabled: bool = False
+
+    # Languages to search in (ISO 639-1 codes)
+    search_languages: List[str] = field(default_factory=lambda: ["ja", "en"])
+
+    # Results per language
+    results_per_language: int = 10
+
+    # Query translation method: "llm" (use LLM), "none" (search as-is)
+    query_translation: str = "llm"
+
+    # Whether to translate extracted content to output language
+    translate_results: bool = True
+
+    # Language weights for relevance scoring (higher = more important)
+    language_weights: Dict[str, float] = field(default_factory=lambda: {
+        "ja": 1.0, "en": 1.0, "zh": 0.9, "ko": 0.9,
+        "de": 0.8, "fr": 0.8, "es": 0.8, "ru": 0.8
+    })
+
+    # Deduplication threshold (0.0-1.0, higher = stricter)
+    dedup_threshold: float = 0.85
+
+    # Maximum concurrent language searches
+    max_concurrent_searches: int = 3
+
+    # Include language statistics in report
+    include_language_stats: bool = True
+
+    def get_language_weight(self, lang: str) -> float:
+        """Get weight for a language, defaulting to 0.5 for unknown."""
+        return self.language_weights.get(lang, 0.5)
+
+    def get_region_for_language(self, lang: str) -> str:
+        """Get search region for a language code."""
+        if lang in LANGUAGE_REGION_MAP:
+            return LANGUAGE_REGION_MAP[lang]["region"]
+        return "wt-wt"  # Default to worldwide
 
 
 @dataclass
@@ -225,6 +311,7 @@ class Config:
     report: ReportConfig = field(default_factory=ReportConfig)
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
     deep_think: DeepThinkConfig = field(default_factory=DeepThinkConfig)
+    multilingual: MultilingualSearchConfig = field(default_factory=MultilingualSearchConfig)
 
     # Additional document settings
     additional_documents: List[Path] = field(default_factory=list)
@@ -321,6 +408,12 @@ def create_config(
     consistency_threshold: float = 0.3,
     consistency_mode: str = "warn",
     fidelity_threshold: float = 0.7,
+    # Multilingual search parameters
+    multilingual: bool = False,
+    search_languages: Optional[List[str]] = None,
+    results_per_language: int = 10,
+    query_translation: str = "llm",
+    translate_results: bool = True,
     **kwargs
 ) -> Config:
     """
@@ -355,6 +448,11 @@ def create_config(
         consistency_threshold: Threshold for consistency check (0.0-1.0)
         consistency_mode: How to handle consistency issues ('warn', 'revise', 'strict')
         fidelity_threshold: Minimum source fidelity score (0.0-1.0)
+        multilingual: Enable multilingual search mode
+        search_languages: List of language codes to search (e.g., ['ja', 'en', 'zh'])
+        results_per_language: Number of results per language
+        query_translation: Query translation method ('llm' or 'none')
+        translate_results: Whether to translate results to output language
         **kwargs: Additional keyword arguments
 
     Returns:
@@ -414,6 +512,17 @@ def create_config(
         _deviation_weights=kwargs.get("_deviation_weights", (0.4, 0.4, 0.2)),
     )
 
+    multilingual_config = MultilingualSearchConfig(
+        enabled=multilingual,
+        search_languages=search_languages if search_languages else ["ja", "en"],
+        results_per_language=results_per_language,
+        query_translation=query_translation,
+        translate_results=translate_results,
+        dedup_threshold=kwargs.get("dedup_threshold", 0.85),
+        max_concurrent_searches=kwargs.get("max_concurrent_searches", 3),
+        include_language_stats=kwargs.get("include_language_stats", True),
+    )
+
     docs = []
     if additional_documents:
         docs = [Path(doc) for doc in additional_documents]
@@ -425,6 +534,7 @@ def create_config(
         report=report_config,
         proxy=proxy_config,
         deep_think=deep_think_config,
+        multilingual=multilingual_config,
         additional_documents=docs,
         process_additional_documents=bool(additional_documents),
         enable_verification=enable_verification,

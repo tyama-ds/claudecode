@@ -155,6 +155,15 @@ class Evidence:
     quality_notes: str = ""  # Notes about the quality assessment
     potential_biases: List[str] = field(default_factory=list)
 
+    # Multilingual support
+    source_language: str = ""  # ISO 639-1 code (e.g., "ja", "en", "zh")
+    original_title: str = ""  # Title in original language
+    original_content: str = ""  # Content in original language
+    translated_title: str = ""  # Translated title (if applicable)
+    translated_content: str = ""  # Translated content (if applicable)
+    translation_confidence: float = 1.0  # Confidence in translation (0-1)
+    is_translated: bool = False  # Whether content was translated
+
     # Additional metadata
     metadata: Dict[str, Any] = field(default_factory=dict)
 
