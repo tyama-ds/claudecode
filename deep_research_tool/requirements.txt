@@ -6,7 +6,8 @@ openai>=1.40.0
 anthropic>=0.34.0
 
 # Web Search
-duckduckgo-search>=6.2.0
+# Note: ddgs is the new package name (formerly duckduckgo-search)
+ddgs>=6.5.0
 
 # Web Scraping with Selenium
 selenium>=4.20.0
@@ -23,6 +24,10 @@ reportlab>=4.2.0  # For PDF generation
 # Data Processing
 pandas>=2.2.0
 pydantic>=2.7.0
+numpy>=1.26.0
+
+# DeepThink - Embeddings and Similarity
+sentence-transformers>=2.2.0
 
 # Image Processing
 Pillow>=10.3.0

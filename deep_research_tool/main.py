@@ -16,6 +16,8 @@ from .verification.verifier import Verifier
 from .report.generator import ReportGenerator
 from .report.length_controller import ContentLengthController, LengthTarget
 from .utils.document_reader import DocumentReader, auto_detect_additional_documents
+from .thinking import DeepThinkProcessor, DeepThinkConfig as ThinkingConfig
+from .thinking.reasoning_chain import ConsistencyMode
 
 
 class DeepResearchTool:
@@ -77,6 +79,41 @@ class DeepResearchTool:
         self.researcher = None
         self.verifier = None
         self.report_generator = None
+        self.deep_think_processor = None
+
+        # Initialize DeepThink if enabled
+        if self.config.deep_think.enabled:
+            self._init_deep_think()
+
+    def _init_deep_think(self) -> None:
+        """Initialize DeepThink processor."""
+        # Map config consistency_mode string to enum
+        mode_map = {
+            "warn": ConsistencyMode.WARN,
+            "revise": ConsistencyMode.REVISE,
+            "strict": ConsistencyMode.STRICT,
+        }
+        consistency_mode = mode_map.get(
+            self.config.deep_think.consistency_mode,
+            ConsistencyMode.WARN
+        )
+
+        thinking_config = ThinkingConfig(
+            enabled=True,
+            level=self.config.deep_think.level,
+            reasoning_iterations=self.config.deep_think.reasoning_iterations,
+            consistency_threshold=self.config.deep_think.consistency_threshold,
+            consistency_mode=consistency_mode,
+            fidelity_threshold=self.config.deep_think.fidelity_threshold,
+            _expansion_tolerance=self.config.deep_think._expansion_tolerance,
+            _deviation_weights=self.config.deep_think._deviation_weights,
+        )
+
+        self.deep_think_processor = DeepThinkProcessor(
+            llm_client=self.llm_client,
+            config=thinking_config,
+            language=self.config.research.language,
+        )
 
     def _validate_config(self) -> None:
         """Validate configuration."""
@@ -192,6 +229,15 @@ class DeepResearchTool:
             progress_callback=progress_callback,
         )
 
+        # Apply DeepThink processing if enabled
+        deep_think_results = None
+        if self.config.deep_think.enabled and self.deep_think_processor:
+            session, deep_think_results = self._apply_deep_think(
+                session=session,
+                evidence_locker=evidence_locker,
+                progress_callback=progress_callback,
+            )
+
         # Export evidence
         evidence_json = evidence_locker.export_to_json()
         evidence_csv = evidence_locker.export_to_csv()
@@ -258,6 +304,7 @@ class DeepResearchTool:
             "session": session,
             "evidence_locker": evidence_locker,
             "verification_result": verification_result,
+            "deep_think_results": deep_think_results,
         }
 
     def _get_content_for_verification(self, session: ResearchSession) -> str:
@@ -270,6 +317,88 @@ class DeepResearchTool:
             content_parts.append(section_data.get("content", ""))
 
         return "\n\n".join(content_parts)
+
+    def _apply_deep_think(
+        self,
+        session: ResearchSession,
+        evidence_locker: EvidenceLocker,
+        progress_callback: Callable[[str, float], None] = None,
+    ) -> tuple:
+        """
+        Apply DeepThink processing to session content.
+
+        Processes each section with DeepThink for enhanced reasoning
+        and consistency checking.
+
+        Args:
+            session: Research session with content
+            evidence_locker: Evidence locker with source texts
+            progress_callback: Progress callback function
+
+        Returns:
+            Tuple of (updated session, dict of DeepThink results per section)
+        """
+        if progress_callback:
+            progress_callback("DeepThink: Processing sections...", 85)
+
+        # Get source texts from evidence locker
+        source_texts = {}
+        for evidence in evidence_locker.get_all_evidence():
+            # Use evidence_id as the key and content_excerpt as the source text
+            if evidence.evidence_id and evidence.content_excerpt:
+                source_texts[evidence.evidence_id] = evidence.content_excerpt
+
+        # Process each section
+        deep_think_results = {}
+        section_count = len([k for k in session.section_contents.keys() if not k.startswith("_")])
+
+        # Handle empty session gracefully
+        if section_count == 0:
+            if progress_callback:
+                progress_callback("DeepThink: No sections to process", 90)
+            return session, deep_think_results
+
+        processed = 0
+
+        for section_num, section_data in session.section_contents.items():
+            if section_num.startswith("_"):
+                continue
+
+            content = section_data.get("content", "")
+            if not content:
+                continue
+
+            # Progress update
+            processed += 1
+            if progress_callback:
+                progress = 85 + (processed / max(section_count, 1) * 5)
+                progress_callback(f"DeepThink: Processing section {section_num}...", progress)
+
+            # Apply DeepThink
+            result = self.deep_think_processor.process(
+                content=content,
+                source_texts=source_texts,
+            )
+
+            # Update section content with processed content
+            session.section_contents[section_num]["content"] = result.processed_content
+
+            # Store result metrics
+            deep_think_results[section_num] = {
+                "is_valid": result.is_valid,
+                "confidence": result.overall_confidence,
+                "metrics": result.metrics_summary,
+                "consistency": result.consistency_result.to_dict() if result.consistency_result else None,
+            }
+
+            # Add DeepThink info to section data
+            session.section_contents[section_num]["deep_think"] = deep_think_results[section_num]
+
+        if progress_callback:
+            avg_confidence = sum(r["confidence"] for r in deep_think_results.values()) / len(deep_think_results) if deep_think_results else 0
+            progress_callback(f"DeepThink: Complete (avg confidence: {avg_confidence:.2f})", 90)
+
+        return session, deep_think_results
 
     def _expand_if_needed(
         self,
@@ -430,6 +559,12 @@ def run_research(
     http_proxy: str = None,
     https_proxy: str = None,
     verify_ssl: bool = True,
+    # DeepThink parameters
+    deep_think: bool = False,
+    deep_think_level: float = 0.5,
+    reasoning_iterations: int = 3,
+    consistency_threshold: float = 0.3,
+    consistency_mode: str = "warn",
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -457,6 +592,11 @@ def run_research(
         http_proxy: HTTP proxy URL (e.g., "http://proxy.example.com:8080")
         https_proxy: HTTPS proxy URL
         verify_ssl: Verify SSL certificates (set False for self-signed certs)
+        deep_think: Enable DeepThink reasoning enhancement
+        deep_think_level: Reasoning depth (0.0=conservative, 1.0=exploratory)
+        reasoning_iterations: Number of reasoning iterations
+        consistency_threshold: Threshold for consistency check
+        consistency_mode: How to handle consistency issues ('warn', 'revise', 'strict')
         **kwargs: Additional configuration options
 
     Returns:
@@ -485,6 +625,14 @@ def run_research(
             "Market analysis",
             http_proxy="http://proxy.company.com:8080",
             https_proxy="http://proxy.company.com:8080",
+        )
+
+        # With DeepThink for enhanced reasoning
+        result = run_research(
+            "Complex scientific topic",
+            deep_think=True,
+            deep_think_level=0.7,
+            consistency_mode="revise",
         )
     """
     from .config import create_config
@@ -516,6 +664,11 @@ def run_research(
         http_proxy=http_proxy,
         https_proxy=https_proxy,
         verify_ssl=verify_ssl,
+        deep_think=deep_think,
+        deep_think_level=deep_think_level,
+        reasoning_iterations=reasoning_iterations,
+        consistency_threshold=consistency_threshold,
+        consistency_mode=consistency_mode,
         **api_key_param,
         **kwargs,
     )

@@ -515,6 +515,70 @@ class ReportGenerator:
 
         return filepath
 
+    def _register_japanese_fonts(self):
+        """Register Japanese fonts for PDF generation."""
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        import os
+
+        # Try to register a Japanese font
+        font_registered = False
+        registered_font_name = None
+
+        # Common Japanese font paths on different systems
+        japanese_fonts = [
+            # Linux - Noto fonts (most common)
+            ("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc", "NotoSansCJK"),
+            ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "NotoSansCJK"),
+            ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", "NotoSansCJK"),
+            # Linux - other fonts
+            ("/usr/share/fonts/truetype/takao-gothic/TakaoPGothic.ttf", "TakaoPGothic"),
+            ("/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf", "IPAGothic"),
+            ("/usr/share/fonts/truetype/vlgothic/VL-Gothic-Regular.ttf", "VLGothic"),
+            ("/usr/share/fonts/truetype/fonts-japanese-gothic.ttf", "JapaneseGothic"),
+            # Google fonts location
+            ("/usr/share/fonts/truetype/noto/NotoSansJP-Regular.ttf", "NotoSansJP"),
+            # macOS
+            ("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc", "Hiragino"),
+            ("/Library/Fonts/Arial Unicode.ttf", "ArialUnicode"),
+            # Windows
+            ("C:/Windows/Fonts/msgothic.ttc", "MSGothic"),
+            ("C:/Windows/Fonts/meiryo.ttc", "Meiryo"),
+            ("C:/Windows/Fonts/YuGothic.ttc", "YuGothic"),
+        ]
+
+        for font_path, font_name in japanese_fonts:
+            if os.path.exists(font_path):
+                try:
+                    pdfmetrics.registerFont(TTFont(font_name, font_path))
+                    font_registered = True
+                    registered_font_name = font_name
+                    break
+                except Exception as e:
+                    # Font might be in use or incompatible
+                    continue
+
+        # Try CID fonts as fallback (built into reportlab for Asian languages)
+        if not font_registered:
+            try:
+                from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+                pdfmetrics.registerFont(UnicodeCIDFont('HeiseiKakuGo-W5'))
+                registered_font_name = 'HeiseiKakuGo-W5'
+                font_registered = True
+            except Exception:
+                pass
+
+            if not font_registered:
+                try:
+                    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+                    pdfmetrics.registerFont(UnicodeCIDFont('HeiseiMin-W3'))
+                    registered_font_name = 'HeiseiMin-W3'
+                    font_registered = True
+                except Exception:
+                    pass
+
+        return registered_font_name
+
     def _generate_pdf(
         self,
         session: ResearchSession,
@@ -523,7 +587,7 @@ class ReportGenerator:
         filename: str,
         filtered_evidence: List = None,
     ) -> Path:
-        """Generate PDF report using reportlab."""
+        """Generate PDF report using reportlab with Japanese font support."""
         try:
             from reportlab.lib import colors
             from reportlab.lib.pagesizes import A4
@@ -550,10 +614,20 @@ class ReportGenerator:
         # Use filtered evidence or all evidence
         evidence_list = filtered_evidence if filtered_evidence is not None else evidence_locker.get_all_evidence()
 
-        # Custom styles
+        # Register Japanese fonts if language is Japanese
+        japanese_font = None
+        if self.language == "ja":
+            japanese_font = self._register_japanese_fonts()
+
+        # Determine fonts to use
+        base_font = japanese_font if japanese_font else 'Helvetica'
+        base_font_bold = japanese_font if japanese_font else 'Helvetica-Bold'
+
+        # Custom styles with Japanese font support
         title_style = ParagraphStyle(
             'CustomTitle',
             parent=styles['Heading1'],
+            fontName=base_font,
             fontSize=24,
             spaceAfter=30,
             alignment=1,  # Center
@@ -562,6 +636,7 @@ class ReportGenerator:
         heading1_style = ParagraphStyle(
             'CustomH1',
             parent=styles['Heading1'],
+            fontName=base_font,
             fontSize=16,
             spaceBefore=20,
             spaceAfter=10,
@@ -570,6 +645,7 @@ class ReportGenerator:
         heading2_style = ParagraphStyle(
             'CustomH2',
             parent=styles['Heading2'],
+            fontName=base_font,
             fontSize=14,
             spaceBefore=15,
             spaceAfter=8,
@@ -578,9 +654,11 @@ class ReportGenerator:
         body_style = ParagraphStyle(
             'CustomBody',
             parent=styles['Normal'],
+            fontName=base_font,
             fontSize=11,
             spaceBefore=6,
             spaceAfter=6,
+            wordWrap='CJK',  # Enable CJK word wrapping
         )
 
         # Title
