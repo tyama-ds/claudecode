@@ -565,6 +565,11 @@ def run_research(
     reasoning_iterations: int = 3,
     consistency_threshold: float = 0.3,
     consistency_mode: str = "warn",
+    # Multilingual parameters
+    multilingual: bool = False,
+    search_languages: List[str] = None,
+    results_per_language: int = 10,
+    translate_results: bool = True,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -597,6 +602,10 @@ def run_research(
         reasoning_iterations: Number of reasoning iterations
         consistency_threshold: Threshold for consistency check
         consistency_mode: How to handle consistency issues ('warn', 'revise', 'strict')
+        multilingual: Enable multilingual search mode
+        search_languages: List of language codes to search (e.g., ['ja', 'en', 'zh'])
+        results_per_language: Number of results per language
+        translate_results: Whether to translate results to output language
         **kwargs: Additional configuration options
 
     Returns:
@@ -634,6 +643,14 @@ def run_research(
             deep_think_level=0.7,
             consistency_mode="revise",
         )
+
+        # With multilingual search
+        result = run_research(
+            "量子コンピュータの現状",
+            multilingual=True,
+            search_languages=["ja", "en", "zh", "de"],
+            results_per_language=10,
+        )
     """
     from .config import create_config
 
@@ -669,6 +686,10 @@ def run_research(
         reasoning_iterations=reasoning_iterations,
         consistency_threshold=consistency_threshold,
         consistency_mode=consistency_mode,
+        multilingual=multilingual,
+        search_languages=search_languages,
+        results_per_language=results_per_language,
+        translate_results=translate_results,
         **api_key_param,
         **kwargs,
     )

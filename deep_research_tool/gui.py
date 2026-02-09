@@ -27,7 +27,7 @@ class GUIConfig:
     provider: str = "openai"
     openai_api_key: str = ""
     anthropic_api_key: str = ""
-    openai_model: str = "gpt-4o-mini"
+    openai_model: str = "gpt-5-mini"
     anthropic_model: str = "claude-3-5-sonnet-20241022"
     temperature: float = 0.7
     max_tokens: int = 4096
@@ -109,7 +109,7 @@ class DeepResearchGUI:
         self.var_provider = tk.StringVar(value="openai")
         self.var_openai_key = tk.StringVar(value=os.getenv("OPENAI_API_KEY", ""))
         self.var_anthropic_key = tk.StringVar(value=os.getenv("ANTHROPIC_API_KEY", ""))
-        self.var_openai_model = tk.StringVar(value="gpt-4o-mini")
+        self.var_openai_model = tk.StringVar(value="gpt-5-mini")
         self.var_anthropic_model = tk.StringVar(value="claude-3-5-sonnet-20241022")
         self.var_temperature = tk.DoubleVar(value=0.7)
         self.var_max_tokens = tk.IntVar(value=4096)
@@ -156,6 +156,21 @@ class DeepResearchGUI:
         # Misc
         self.var_verbose = tk.BooleanVar(value=False)
 
+        # Multilingual
+        self.var_multilingual = tk.BooleanVar(value=False)
+        self.var_search_languages = {
+            "ja": tk.BooleanVar(value=True),
+            "en": tk.BooleanVar(value=True),
+            "zh": tk.BooleanVar(value=False),
+            "ko": tk.BooleanVar(value=False),
+            "de": tk.BooleanVar(value=False),
+            "fr": tk.BooleanVar(value=False),
+            "es": tk.BooleanVar(value=False),
+            "ru": tk.BooleanVar(value=False),
+        }
+        self.var_results_per_language = tk.IntVar(value=10)
+        self.var_translate_results = tk.BooleanVar(value=True)
+
     def _build_ui(self):
         """Build the main user interface."""
         # Main container
@@ -175,6 +190,7 @@ class DeepResearchGUI:
         self._build_search_tab(notebook)
         self._build_deep_think_tab(notebook)
         self._build_report_tab(notebook)
+        self._build_multilingual_tab(notebook)
         self._build_proxy_tab(notebook)
 
         # Bottom section with buttons and log
@@ -297,7 +313,8 @@ class DeepResearchGUI:
         row.pack(fill=tk.X, pady=5)
         ttk.Label(row, text="Model:", width=20, anchor="w").pack(side=tk.LEFT)
         ttk.Combobox(row, textvariable=self.var_openai_model,
-                     values=["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo"],
+                     values=["gpt-5", "gpt-5-mini", "gpt-5-thinking", "gpt-5-thinking-mini",
+                            "gpt-5-nano", "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4"],
                      width=25).pack(side=tk.LEFT)
 
         # Anthropic Settings
@@ -501,6 +518,76 @@ class DeepResearchGUI:
         ttk.Checkbutton(row, text="Verbose Output",
                         variable=self.var_verbose).pack(side=tk.LEFT)
 
+    def _build_multilingual_tab(self, notebook):
+        """Build the Multilingual Search tab."""
+        frame = ttk.Frame(notebook, padding="10")
+        notebook.add(frame, text="Multilingual")
+
+        # Enable Multilingual
+        row = ttk.Frame(frame)
+        row.pack(fill=tk.X, pady=5)
+        ttk.Checkbutton(row, text="Enable Multilingual Search",
+                        variable=self.var_multilingual).pack(side=tk.LEFT)
+
+        ttk.Separator(frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=15)
+
+        # Language Selection
+        ttk.Label(frame, text="Search Languages", font=("", 10, "bold")).pack(anchor="w")
+        ttk.Label(frame, text="Select languages to search in:",
+                  foreground="gray").pack(anchor="w", pady=(0, 10))
+
+        # Language checkboxes in a grid
+        lang_frame = ttk.Frame(frame)
+        lang_frame.pack(fill=tk.X, pady=5)
+
+        languages = [
+            ("ja", "Japanese (日本語)"),
+            ("en", "English"),
+            ("zh", "Chinese (中文)"),
+            ("ko", "Korean (한국어)"),
+            ("de", "German (Deutsch)"),
+            ("fr", "French (Français)"),
+            ("es", "Spanish (Español)"),
+            ("ru", "Russian (Русский)"),
+        ]
+
+        for i, (code, name) in enumerate(languages):
+            row_num = i // 2
+            col_num = i % 2
+            cb = ttk.Checkbutton(lang_frame, text=name,
+                                 variable=self.var_search_languages[code])
+            cb.grid(row=row_num, column=col_num, sticky="w", padx=10, pady=2)
+
+        # Results per language
+        ttk.Separator(frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=15)
+
+        row = ttk.Frame(frame)
+        row.pack(fill=tk.X, pady=5)
+        ttk.Label(row, text="Results per Language:", width=25, anchor="w").pack(side=tk.LEFT)
+        ttk.Scale(row, from_=5, to=20, variable=self.var_results_per_language,
+                  orient=tk.HORIZONTAL, length=200).pack(side=tk.LEFT)
+        ttk.Label(row, textvariable=self.var_results_per_language, width=5).pack(side=tk.LEFT)
+
+        # Translate results
+        row = ttk.Frame(frame)
+        row.pack(fill=tk.X, pady=5)
+        ttk.Checkbutton(row, text="Translate results to output language",
+                        variable=self.var_translate_results).pack(side=tk.LEFT)
+
+        # Description
+        ttk.Separator(frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=15)
+        desc_text = """Multilingual search enables searching across multiple languages:
+
+- Query Translation: Your search query is translated to each selected language
+- Parallel Search: Searches are performed in all languages simultaneously
+- Result Aggregation: Results are combined and deduplicated
+- Source Tracking: Each source's original language is recorded
+
+This helps gather more comprehensive information from diverse sources."""
+
+        desc_label = ttk.Label(frame, text=desc_text, justify=tk.LEFT, foreground="gray")
+        desc_label.pack(anchor="w")
+
     def _build_proxy_tab(self, notebook):
         """Build the Proxy Settings tab."""
         frame = ttk.Frame(notebook, padding="10")
@@ -599,7 +686,7 @@ class DeepResearchGUI:
         self.var_min_iterations.set(3)
         self.var_max_iterations.set(10)
         self.var_provider.set("openai")
-        self.var_openai_model.set("gpt-4o-mini")
+        self.var_openai_model.set("gpt-5-mini")
         self.var_anthropic_model.set("claude-3-5-sonnet-20241022")
         self.var_temperature.set(0.7)
         self.var_max_tokens.set(4096)
@@ -627,6 +714,13 @@ class DeepResearchGUI:
         self.var_verification_strictness.set("medium")
         self.var_verify_ssl.set(True)
         self.var_verbose.set(False)
+
+        # Multilingual defaults
+        self.var_multilingual.set(False)
+        for code, var in self.var_search_languages.items():
+            var.set(code in ["ja", "en"])  # Only ja and en by default
+        self.var_results_per_language.set(10)
+        self.var_translate_results.set(True)
 
         self._log("Settings reset to defaults")
 
@@ -714,6 +808,17 @@ class DeepResearchGUI:
             except ValueError:
                 pass
 
+        # Multilingual
+        config["multilingual"] = self.var_multilingual.get()
+        if self.var_multilingual.get():
+            selected_languages = [
+                code for code, var in self.var_search_languages.items()
+                if var.get()
+            ]
+            config["search_languages"] = selected_languages if selected_languages else ["ja", "en"]
+        config["results_per_language"] = self.var_results_per_language.get()
+        config["translate_results"] = self.var_translate_results.get()
+
         # Proxy
         if self.var_http_proxy.get().strip():
             config["http_proxy"] = self.var_http_proxy.get().strip()
@@ -744,6 +849,9 @@ class DeepResearchGUI:
         self._log(f"Provider: {config['provider']}")
         self._log(f"DeepThink: {'Enabled' if config['deep_think'] else 'Disabled'}")
         self._log(f"Extended Mode: {'Enabled' if config['extended_mode'] else 'Disabled'}")
+        self._log(f"Multilingual: {'Enabled' if config['multilingual'] else 'Disabled'}")
+        if config['multilingual'] and 'search_languages' in config:
+            self._log(f"  Languages: {', '.join(config['search_languages'])}")
 
         # Run research in background thread
         self.research_thread = threading.Thread(

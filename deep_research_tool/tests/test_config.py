@@ -30,14 +30,14 @@ class TestAPIConfig:
         """Test default configuration values."""
         config = APIConfig()
         assert config.provider == LLMProvider.OPENAI
-        assert config.openai_model == "gpt-4o-mini"
+        assert config.openai_model == "gpt-5-mini"
         assert config.temperature == 0.7
         assert config.max_tokens == 4096
 
     def test_get_active_model_openai(self):
         """Test getting active model for OpenAI."""
         config = APIConfig(provider=LLMProvider.OPENAI)
-        assert config.get_active_model() == "gpt-4o-mini"
+        assert config.get_active_model() == "gpt-5-mini"
 
     def test_get_active_model_anthropic(self):
         """Test getting active model for Anthropic."""
