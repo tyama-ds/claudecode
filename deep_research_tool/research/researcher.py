@@ -290,7 +290,7 @@ class Researcher:
         return self.session
 
     def _conduct_research_loop(self) -> None:
-        """Execute the main research loop with immediate content generation."""
+        """Execute the main research loop."""
         if not self.session or not self.session.research_plan:
             raise ValueError("Research session not properly initialized")
 
@@ -320,283 +320,196 @@ class Researcher:
             )
 
             section.status = "in_progress"
+            section_content_parts: List[ExtractedContent] = []
 
-            # Process section with immediate content generation
-            self._process_section_with_immediate_generation(
-                section=section,
-                available_queries=available_queries,
-                section_idx=section_idx,
-                total_sections=total_sections,
-            )
+            # Research iterations for this section
+            iteration = 0
+            while iteration < self.max_iterations:
+                iteration += 1
+                iter_record = ResearchIteration(
+                    iteration_number=iteration,
+                    section=section.section,
+                )
 
-            # Remove used queries
-            if available_queries:
-                available_queries = available_queries[3:]
+                # Get queries for this iteration
+                if iteration == 1 and available_queries:
+                    # Use initial queries from plan
+                    queries = available_queries[:3]
+                    available_queries = available_queries[3:]
+                else:
+                    # Generate follow-up queries
+                    current_content = "\n".join(
+                        ec.processed_content for ec in section_content_parts
+                    )
+                    gaps = self.query_generator.identify_gaps(
+                        section, current_content, self.session.requirements
+                    )
+                    iter_record.gaps_identified = gaps
+
+                    queries = self.query_generator.generate_follow_up_queries(
+                        section, current_content, gaps
+                    )
+
+                iter_record.queries_executed = queries
+                print(f"[DEBUG] Section {section.section} iteration {iteration}: executing {len(queries[:3])} queries")
+
+                # Execute searches
+                all_initial_results: List[SearchResult] = []
+                for query in queries[:3]:  # Limit queries per iteration
+                    print(f"[DEBUG] Searching: {query[:50]}...")
+                    try:
+                        results = self.search.search(query)
+                        print(f"[DEBUG] Search returned {len(results)} results")
+                        iter_record.sources_found += len(results)
+                        all_initial_results.extend(results[:3])
+
+                        # Extract content from top results
+                        for result in results[:3]:  # Top 3 results per query
+                            print(f"[DEBUG] Processing: {result.url[:60]}...")
+                            try:
+                                # Get full page content
+                                page = self.search.get_page_content(result.url)
+
+                                # Extract relevant content
+                                extracted = self.content_extractor.extract_relevant_content(
+                                    raw_content=page.text_content,
+                                    source_url=result.url,
+                                    source_title=result.title,
+                                    section_context=f"{section.section}. {section.title}",
+                                    research_query=query,
+                                )
+
+                                print(f"[DEBUG] Extracted relevance_score: {extracted.relevance_score}")
+                                if extracted.relevance_score >= 0.3:
+                                    section_content_parts.append(extracted)
+                                    iter_record.content_extracted += 1
+                                    print(f"[DEBUG] Content added. Total parts: {len(section_content_parts)}")
+
+                                    # Add to evidence locker
+                                    self.evidence_locker.add_evidence(
+                                        url=result.url,
+                                        title=result.title,
+                                        content_excerpt=extracted.processed_content[:500],
+                                        evidence_type=EvidenceType.WEB_PAGE,
+                                        search_query=query,
+                                        section_reference=section.section,
+                                        relevance_score=extracted.relevance_score,
+                                    )
+
+                                    # Handle images
+                                    if page.images:
+                                        relevant_images = self.content_extractor.extract_images_with_context(
+                                            page.images[:5],
+                                            page.text_content[:1000],
+                                            f"{section.section}. {section.title}",
+                                        )
+                                        extracted.images = [
+                                            img for img in relevant_images
+                                            if img.get("relevance") in ["high", "medium"]
+                                        ]
+
+                            except Exception as e:
+                                print(f"Content extraction error for {result.url}: {e}")
+                                continue
+
+                        # Small delay to avoid rate limiting
+                        time.sleep(0.5)
+
+                    except Exception as e:
+                        print(f"Search error for query '{query}': {e}")
+                        continue
+
+                # Extended mode: crawl sites from search results
+                if self.extended_mode and self.site_crawler and iteration == 1:
+                    # Reset page counter at start of each section
+                    self.site_crawler.reset_page_counter()
+
+                    extended_result = self._conduct_extended_research(
+                        section=section,
+                        initial_results=all_initial_results,
+                        section_content_parts=section_content_parts,
+                    )
+
+                    # Use suggested queries from crawling for next iterations
+                    if extended_result.get("suggested_queries"):
+                        available_queries = extended_result["suggested_queries"] + available_queries
+
+                    iter_record.sources_found += sum(
+                        cr.pages_crawled for cr in extended_result.get("crawl_results", [])
+                    )
+
+                iter_record.completed_at = datetime.now().isoformat()
+                self.session.iterations.append(iter_record)
+
+                # Check if we have enough content
+                if (iteration >= self.min_iterations and
+                    len(section_content_parts) >= 3 and
+                    len(iter_record.gaps_identified) <= 2):
+                    break
+
+            # Synthesize section content
+            print(f"[DEBUG] Section {section.section} complete. Content parts: {len(section_content_parts)}")
+            if section_content_parts:
+                print(f"[DEBUG] Synthesizing content for section {section.section}...")
+
+                # Use enhanced multi-pass synthesis for better quality
+                if self.use_enhanced_synthesis:
+                    print(f"[DEBUG] Using enhanced multi-pass synthesis")
+                    synthesized = self.content_extractor.synthesize_section_content_enhanced(
+                        section_title=section.title,
+                        section_description=section.description,
+                        extracted_contents=section_content_parts,
+                        requirements=self.session.requirements,
+                    )
+                else:
+                    synthesized = self.content_extractor.synthesize_section_content(
+                        section_title=section.title,
+                        section_description=section.description,
+                        extracted_contents=section_content_parts,
+                        requirements=self.session.requirements,
+                    )
+
+                content_preview = synthesized.get("content", "")[:100]
+                print(f"[DEBUG] Synthesized content preview: {content_preview}...")
+
+                self.session.section_contents[section.section] = {
+                    "title": section.title,
+                    "content": synthesized.get("content", ""),
+                    "summary": synthesized.get("summary", ""),
+                    "confidence": synthesized.get("confidence_level", "medium"),
+                    "sources": [ec.source_url for ec in section_content_parts],
+                    "images": [
+                        img for ec in section_content_parts
+                        for img in ec.images
+                    ][:5],  # Limit images per section
+                    "gaps": synthesized.get("information_gaps", []),
+                }
+
+                section.content = synthesized.get("content", "")
+                section.sources = [ec.source_url for ec in section_content_parts]
+                print(f"[DEBUG] Section {section.section} saved to section_contents")
+            else:
+                # No content extracted, add placeholder
+                print(f"[WARNING] No content extracted for section {section.section}, using placeholder")
+                placeholder_text = f"Information for this section could not be gathered automatically. "
+                if self.language == "ja":
+                    placeholder_text = f"このセクションの情報を自動的に収集できませんでした。追加のリサーチが必要です。"
+
+                self.session.section_contents[section.section] = {
+                    "title": section.title,
+                    "content": placeholder_text,
+                    "summary": "",
+                    "confidence": "low",
+                    "sources": [],
+                    "images": [],
+                    "gaps": [f"All content for section '{section.title}'"],
+                }
+                section.content = placeholder_text
 
             section.status = "completed"
 
         # Debug: Log final section contents
         print(f"[DEBUG] Research loop completed. Section contents keys: {list(self.session.section_contents.keys())}")
-
-        # Final coherence check
-        self._check_report_coherence()
-
-    def _process_section_with_immediate_generation(
-        self,
-        section: TableOfContentsItem,
-        available_queries: List[str],
-        section_idx: int,
-        total_sections: int,
-    ) -> None:
-        """
-        Process a section with immediate content generation after research.
-
-        This method:
-        1. Searches for information
-        2. Extracts relevant content
-        3. Immediately generates section content (not waiting until the end)
-        """
-        section_content_parts: List[ExtractedContent] = []
-
-        # Research iterations for this section
-        iteration = 0
-        while iteration < self.max_iterations:
-            iteration += 1
-            iter_record = ResearchIteration(
-                iteration_number=iteration,
-                section=section.section,
-            )
-
-            # Get queries for this iteration
-            if iteration == 1 and available_queries:
-                queries = available_queries[:3]
-            else:
-                current_content = "\n".join(
-                    ec.processed_content for ec in section_content_parts
-                )
-                gaps = self.query_generator.identify_gaps(
-                    section, current_content, self.session.requirements
-                )
-                iter_record.gaps_identified = gaps
-                queries = self.query_generator.generate_follow_up_queries(
-                    section, current_content, gaps
-                )
-
-            if not queries:
-                print(f"[WARNING] No queries generated for section {section.section}")
-                break
-
-            iter_record.queries_executed = queries
-            print(f"[DEBUG] Section {section.section} iteration {iteration}: executing {len(queries[:3])} queries")
-
-            # Execute searches and extract content
-            for query in queries[:3]:
-                print(f"[DEBUG] Searching: {query[:50]}...")
-                try:
-                    results = self.search.search(query)
-                    print(f"[DEBUG] Search returned {len(results)} results")
-                    iter_record.sources_found += len(results)
-
-                    for result in results[:3]:
-                        print(f"[DEBUG] Processing: {result.url[:60]}...")
-                        try:
-                            page = self.search.get_page_content(result.url)
-
-                            extracted = self.content_extractor.extract_relevant_content(
-                                raw_content=page.text_content,
-                                source_url=result.url,
-                                source_title=result.title,
-                                section_context=f"{section.section}. {section.title}",
-                                research_query=query,
-                            )
-
-                            print(f"[DEBUG] Extracted relevance_score: {extracted.relevance_score}")
-
-                            # Lower threshold to 0.2 to get more content
-                            if extracted.relevance_score >= 0.2:
-                                section_content_parts.append(extracted)
-                                iter_record.content_extracted += 1
-                                print(f"[DEBUG] Content added. Total parts: {len(section_content_parts)}")
-
-                                self.evidence_locker.add_evidence(
-                                    url=result.url,
-                                    title=result.title,
-                                    content_excerpt=extracted.processed_content[:500],
-                                    evidence_type=EvidenceType.WEB_PAGE,
-                                    search_query=query,
-                                    section_reference=section.section,
-                                    relevance_score=extracted.relevance_score,
-                                )
-                            else:
-                                # Even low relevance content can be useful - add with note
-                                if extracted.processed_content and len(extracted.processed_content) > 100:
-                                    print(f"[DEBUG] Low relevance but adding anyway: {extracted.relevance_score}")
-                                    section_content_parts.append(extracted)
-
-                        except Exception as e:
-                            print(f"[ERROR] Content extraction error for {result.url}: {e}")
-                            continue
-
-                    time.sleep(0.3)
-
-                except Exception as e:
-                    print(f"[ERROR] Search error for query '{query}': {e}")
-                    continue
-
-            iter_record.completed_at = datetime.now().isoformat()
-            self.session.iterations.append(iter_record)
-
-            # Check if we have enough content
-            if iteration >= self.min_iterations and len(section_content_parts) >= 2:
-                break
-
-        # IMMEDIATE CONTENT GENERATION after research for this section
-        print(f"[DEBUG] Section {section.section} research complete. Parts: {len(section_content_parts)}")
-        self._generate_and_save_section_content(section, section_content_parts)
-
-    def _generate_and_save_section_content(
-        self,
-        section: TableOfContentsItem,
-        section_content_parts: List[ExtractedContent],
-    ) -> None:
-        """
-        Immediately generate and save content for a section.
-        This is called right after research for each section completes.
-        """
-        print(f"[DEBUG] Generating content for section {section.section}...")
-
-        if section_content_parts:
-            # Use enhanced multi-pass synthesis
-            if self.use_enhanced_synthesis:
-                print(f"[DEBUG] Using enhanced multi-pass synthesis")
-                synthesized = self.content_extractor.synthesize_section_content_enhanced(
-                    section_title=section.title,
-                    section_description=section.description,
-                    extracted_contents=section_content_parts,
-                    requirements=self.session.requirements,
-                )
-            else:
-                synthesized = self.content_extractor.synthesize_section_content(
-                    section_title=section.title,
-                    section_description=section.description,
-                    extracted_contents=section_content_parts,
-                    requirements=self.session.requirements,
-                )
-
-            content = synthesized.get("content", "")
-            print(f"[DEBUG] Generated content length: {len(content)} chars")
-
-            if not content or len(content) < 50:
-                # Fallback: create content from raw extracted parts
-                print(f"[WARNING] Synthesis returned empty, using fallback")
-                content = self._create_fallback_content(section, section_content_parts)
-
-            self.session.section_contents[section.section] = {
-                "title": section.title,
-                "content": content,
-                "summary": synthesized.get("summary", ""),
-                "confidence": synthesized.get("confidence_level", "medium"),
-                "sources": [ec.source_url for ec in section_content_parts],
-                "images": [img for ec in section_content_parts for img in ec.images][:5],
-                "gaps": synthesized.get("information_gaps", []),
-            }
-
-            section.content = content
-            section.sources = [ec.source_url for ec in section_content_parts]
-            print(f"[DEBUG] Section {section.section} saved with {len(content)} chars")
-
-        else:
-            # No content extracted - generate placeholder with explanation
-            print(f"[WARNING] No content extracted for section {section.section}")
-            placeholder = self._create_placeholder_content(section)
-
-            self.session.section_contents[section.section] = {
-                "title": section.title,
-                "content": placeholder,
-                "summary": "",
-                "confidence": "low",
-                "sources": [],
-                "images": [],
-                "gaps": [f"All content for section '{section.title}'"],
-            }
-            section.content = placeholder
-
-    def _create_fallback_content(
-        self,
-        section: TableOfContentsItem,
-        parts: List[ExtractedContent],
-    ) -> str:
-        """Create fallback content from raw extracted parts."""
-        if not parts:
-            return self._create_placeholder_content(section)
-
-        content_pieces = []
-        for i, part in enumerate(parts[:5], 1):
-            if part.processed_content:
-                content_pieces.append(f"{part.processed_content[:500]}")
-
-        if content_pieces:
-            combined = "\n\n".join(content_pieces)
-            if self.language == "ja":
-                return f"【{section.title}】\n\n{combined}"
-            return f"**{section.title}**\n\n{combined}"
-
-        return self._create_placeholder_content(section)
-
-    def _create_placeholder_content(self, section: TableOfContentsItem) -> str:
-        """Create placeholder content for sections with no data."""
-        if self.language == "ja":
-            return f"このセクション「{section.title}」の情報を自動的に収集できませんでした。追加のリサーチが必要です。"
-        return f"Information for section '{section.title}' could not be gathered automatically. Additional research is needed."
-
-    def _check_report_coherence(self) -> None:
-        """
-        Check the logical coherence of the entire report.
-        Uses LLM to verify sections flow naturally.
-        """
-        if not self.session or not self.session.section_contents:
-            print("[WARNING] No content to check for coherence")
-            return
-
-        print(f"[DEBUG] Checking report coherence...")
-
-        # Prepare content summary for coherence check
-        sections_text = []
-        for section_id, content in self.session.section_contents.items():
-            if section_id.startswith("_"):
-                continue
-            title = content.get("title", section_id)
-            text = content.get("content", "")[:500]
-            sections_text.append(f"Section {section_id}: {title}\n{text}...")
-
-        if not sections_text:
-            print("[WARNING] No sections to check")
-            return
-
-        coherence_prompt = f"""Review the following report sections and identify any logical inconsistencies or gaps:
-
-{chr(10).join(sections_text)}
-
-Return JSON:
-{{
-    "is_coherent": true/false,
-    "issues": ["issue1", "issue2"],
-    "suggestions": ["suggestion1", "suggestion2"]
-}}"""
-
-        try:
-            response = self.llm.generate(coherence_prompt)
-            content = response.content
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start != -1 and end > start:
-                result = json.loads(content[start:end])
-                self.session.section_contents["_coherence_check"] = result
-                print(f"[DEBUG] Coherence check: {result.get('is_coherent', 'unknown')}")
-                if result.get("issues"):
-                    print(f"[DEBUG] Issues found: {result['issues']}")
-        except Exception as e:
-            print(f"[WARNING] Coherence check failed: {e}")
 
     def _conduct_extended_research(
         self,
