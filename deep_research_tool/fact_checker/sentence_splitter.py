@@ -61,8 +61,9 @@ class SentenceSplitter:
     }
 
     # URL pattern for reference extraction
+    # Only match URL-safe characters (ASCII letters, digits, and common URL symbols)
     URL_PATTERN = re.compile(
-        r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[/\w\.-]*(?:\?[^\s]*)?'
+        r'https?://[A-Za-z0-9](?:[A-Za-z0-9._~:/?#\[\]@!$&\'()*+,;=-]|%[0-9A-Fa-f]{2})*'
     )
 
     def __init__(
@@ -197,9 +198,10 @@ class SentenceSplitter:
 
     def _split_japanese(self, text: str) -> List[str]:
         """Split Japanese text into sentences."""
-        # Pattern for Japanese sentence endings
+        # Pattern for Japanese sentence endings and English sentence endings
         # Handle 。」 (closing quote after period) as single ending
-        pattern = r'([。！？．…]+[」』）\)】]?|(?<=[^0-9])[.!?]+(?:\s|$))'
+        # Also handle English ". " (period+space before uppercase) in mixed text
+        pattern = r'([。！？．…]+[」』）\)】]?|(?<=[^0-9])[.!?]+(?=\s+[A-Z])|(?<=[^0-9])[.!?]+(?:\s|$))'
 
         parts = re.split(pattern, text)
 
@@ -210,7 +212,7 @@ class SentenceSplitter:
             if not part:
                 continue
 
-            if re.match(r'^[。！？．…]+[」』）\)】]?$', part) or re.match(r'^[.!?]+$', part):
+            if re.match(r'^[。！？．…]+[」』）\)】]?$', part) or re.match(r'^[.!?]+$', part.strip()):
                 # This is an ending, append to current
                 current += part
                 if current.strip():
