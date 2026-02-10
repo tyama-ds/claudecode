@@ -140,13 +140,9 @@ class OpenAIClient(BaseLLMClient):
             "model": model,
             "messages": api_messages,
             "temperature": kwargs.get("temperature", self.temperature),
+            # Always use max_completion_tokens for all OpenAI models (2024+ API requirement)
+            "max_completion_tokens": token_limit,
         }
-
-        # Use correct parameter name based on model
-        if self._requires_max_completion_tokens(model):
-            api_params["max_completion_tokens"] = token_limit
-        else:
-            api_params["max_tokens"] = token_limit
 
         # Add any additional kwargs (excluding already handled ones)
         excluded_keys = {"model", "temperature", "max_tokens", "max_completion_tokens"}
@@ -155,8 +151,7 @@ class OpenAIClient(BaseLLMClient):
                 api_params[k] = v
 
         # Debug: Print API params to verify correct parameter is used
-        print(f"[DEBUG OpenAI] Model: {model}, Using max_completion_tokens: {self._requires_max_completion_tokens(model)}")
-        print(f"[DEBUG OpenAI] API params keys: {list(api_params.keys())}")
+        print(f"[DEBUG OpenAI] Model: {model}, max_completion_tokens: {token_limit}")
 
         # Make API call
         response = self._client.chat.completions.create(**api_params)
