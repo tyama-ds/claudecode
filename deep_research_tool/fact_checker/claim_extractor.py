@@ -95,9 +95,9 @@ class ClaimExtractor:
 
     # Patterns indicating temporal claims
     TEMPORAL_PATTERNS = [
-        r'\b\d{4}年',  # Japanese year
-        r'\b(?:19|20)\d{2}\b',  # Western year
-        r'\b\d{1,2}月\d{1,2}日\b',  # Japanese date
+        r'(?:^|(?<=\s)|(?<=[^\d]))(\d{4})年',  # Japanese year (no \b needed)
+        r'(?:^|\s)(?:19|20)\d{2}(?:\s|$|[,.\)])',  # Western year
+        r'\d{1,2}月\d{1,2}日',  # Japanese date
         r'\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:,\s*\d{4})?',
         r'\b(?:first|second|third|last|next|previous)\s+(?:year|month|week|day|century|decade)\b',
         r'(?:昨年|今年|来年|先月|今月|来月|昨日|今日|明日)',
@@ -225,17 +225,42 @@ class ClaimExtractor:
         """Detect claim types using patterns."""
         detected = []
 
+        has_statistical = False
+        has_temporal = False
+
         # Check statistical patterns
         for pattern in self.STATISTICAL_PATTERNS:
             if re.search(pattern, text, re.IGNORECASE):
-                detected.append(ClaimType.STATISTICAL)
+                has_statistical = True
                 break
 
         # Check temporal patterns
         for pattern in self.TEMPORAL_PATTERNS:
             if re.search(pattern, text, re.IGNORECASE):
-                detected.append(ClaimType.TEMPORAL)
+                has_temporal = True
                 break
+
+        # If both statistical and temporal are detected, check if the number
+        # is primarily a year reference (e.g. "2021年に開催") rather than a
+        # quantity. Year patterns like "YYYY年に" are temporal, not statistical.
+        if has_statistical and has_temporal:
+            # Check if the statistical match is only a year reference
+            stat_matches = []
+            for pattern in self.STATISTICAL_PATTERNS:
+                m = re.search(pattern, text, re.IGNORECASE)
+                if m:
+                    stat_matches.append(m.group())
+            year_only = all(re.match(r'^\d{4}年$', m.strip()) for m in stat_matches)
+            if year_only:
+                # It's a year reference, prioritize temporal
+                detected.append(ClaimType.TEMPORAL)
+            else:
+                detected.append(ClaimType.STATISTICAL)
+                detected.append(ClaimType.TEMPORAL)
+        elif has_temporal:
+            detected.append(ClaimType.TEMPORAL)
+        elif has_statistical:
+            detected.append(ClaimType.STATISTICAL)
 
         # Check causal patterns
         for pattern in self.CAUSAL_PATTERNS:

@@ -110,12 +110,12 @@ class TestSentenceSplitter:
 
     def test_min_sentence_length(self):
         """Test minimum sentence length filtering."""
-        splitter = SentenceSplitter(method=SplitMethod.RULE_BASED, min_sentence_length=20)
+        splitter = SentenceSplitter(method=SplitMethod.RULE_BASED, min_sentence_length=10)
 
         text = "短い。これは十分に長い文章です。"
         sentences = splitter.split(text)
 
-        # "短い。" should be filtered out
+        # "短い。" (3 chars) should be filtered out, "これは十分に長い文章です。" (13 chars) passes
         assert len(sentences) == 1
         assert "十分に長い" in sentences[0].text
 

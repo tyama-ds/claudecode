@@ -49,6 +49,7 @@ class ReportFormat(str, Enum):
     DOCX = "docx"
     PDF = "pdf"
     MARKDOWN = "markdown"
+    HTML = "html"
 
 
 @dataclass

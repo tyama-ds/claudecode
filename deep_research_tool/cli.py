@@ -126,6 +126,30 @@ def cli():
     help="Target character count for output"
 )
 @click.option(
+    "--extended-mode",
+    is_flag=True,
+    default=False,
+    help="Enable extended mode (deep site crawling for more comprehensive results)"
+)
+@click.option(
+    "--crawl-max-pages",
+    type=int,
+    default=10,
+    help="Max pages to crawl per site in extended mode (default: 10)"
+)
+@click.option(
+    "--crawl-max-depth",
+    type=int,
+    default=2,
+    help="Max link depth from seed URL in extended mode (default: 2)"
+)
+@click.option(
+    "--crawl-max-sites",
+    type=int,
+    default=3,
+    help="Max sites to crawl per search in extended mode (default: 3)"
+)
+@click.option(
     "--verbose", "-v",
     is_flag=True,
     help="Verbose output"
@@ -153,6 +177,10 @@ def research(
     verify: bool,
     target_pages: Optional[int],
     target_characters: Optional[int],
+    extended_mode: bool,
+    crawl_max_pages: int,
+    crawl_max_depth: int,
+    crawl_max_sites: int,
     verbose: bool,
     openai_key: Optional[str],
     anthropic_key: Optional[str],
@@ -182,6 +210,10 @@ def research(
         verbose=verbose,
         target_pages=target_pages,
         target_characters=target_characters,
+        extended_mode=extended_mode,
+        crawl_max_pages=crawl_max_pages,
+        crawl_max_depth=crawl_max_depth,
+        crawl_max_sites=crawl_max_sites,
     )
 
     # Validate config
@@ -331,7 +363,7 @@ def report(
 
 
 @cli.command()
-@click.argument("report_path", type=click.Path(exists=True))
+@click.argument("input_path", type=click.Path(exists=True))
 @click.option(
     "--evidence", "-e",
     type=click.Path(exists=True),
@@ -355,7 +387,7 @@ def report(
     help="LLM provider for verification"
 )
 def verify(
-    report_path: str,
+    input_path: str,
     evidence: Optional[str],
     output: Optional[str],
     strictness: str,
@@ -364,7 +396,16 @@ def verify(
     """
     Verify a research report for potential hallucinations.
 
-    REPORT_PATH is the path to the report file to verify.
+    INPUT_PATH can be either a session JSON file or a report file (markdown, docx, etc.).
+
+    If a session JSON is provided, the report content and evidence are loaded from
+    the session automatically. If a report file is provided, the evidence must be
+    specified separately with --evidence.
+
+    Examples:
+        deep-research verify ./output/session_abc123.json
+        deep-research verify ./output/session_abc123.json --strictness high
+        deep-research verify ./report.md --evidence ./evidence.json
     """
     print_banner()
 
@@ -373,19 +414,51 @@ def verify(
         from .evidence.locker import EvidenceLocker
         from .verification.verifier import Verifier
 
-        # Read report content
-        report_path = Path(report_path)
-        with open(report_path, "r", encoding="utf-8") as f:
-            content = f.read()
+        input_path = Path(input_path)
 
-        console.print(f"Verifying: {report_path.name}")
-        console.print(f"Content length: {len(content)} characters")
+        # Determine if input is a session JSON or a report file
+        if input_path.suffix == ".json" and "session" in input_path.stem:
+            # Load from session
+            from .research.researcher import ResearchSession
 
-        # Load or create evidence locker
-        if evidence:
-            evidence_locker = EvidenceLocker.load_from_json(Path(evidence))
+            session = ResearchSession.load(input_path)
+            console.print(f"Loaded session: {session.session_id}")
+
+            # Extract content from session
+            content_parts = []
+            for section_num, section_data in session.section_contents.items():
+                if section_num.startswith("_"):
+                    continue
+                content_parts.append(section_data.get("content", ""))
+            content = "\n\n".join(content_parts)
+
+            doc_title = session.research_plan.title if session.research_plan else session.query
+
+            # Try to load evidence from session directory
+            if evidence:
+                evidence_locker = EvidenceLocker.load_from_json(Path(evidence))
+            else:
+                session_dir = input_path.parent
+                evidence_path = session_dir / "evidence" / f"evidence_{session.session_id}.json"
+                if evidence_path.exists():
+                    evidence_locker = EvidenceLocker.load_from_json(evidence_path)
+                    console.print(f"Loaded evidence: {len(evidence_locker.get_all_evidence())} items")
+                else:
+                    evidence_locker = EvidenceLocker()
+                    console.print("[yellow]Warning: Evidence file not found[/yellow]")
         else:
-            evidence_locker = EvidenceLocker()
+            # Load report file directly
+            with open(input_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            doc_title = input_path.stem
+
+            # Load or create evidence locker
+            if evidence:
+                evidence_locker = EvidenceLocker.load_from_json(Path(evidence))
+            else:
+                evidence_locker = EvidenceLocker()
+
+        console.print(f"Content length: {len(content):,} characters")
 
         # Initialize verifier
         llm_client = get_client(provider)
@@ -397,7 +470,7 @@ def verify(
         result = verifier.verify_content(
             content=content,
             evidence_locker=evidence_locker,
-            document_title=report_path.stem,
+            document_title=doc_title,
             strictness=strictness,
         )
 
@@ -420,7 +493,7 @@ def verify(
         if output:
             output_path = Path(output)
         else:
-            output_path = report_path.parent / f"{report_path.stem}_verification.html"
+            output_path = input_path.parent / f"{input_path.stem}_verification.html"
 
         verifier.generate_verification_report_html(result, output_path)
         console.print(f"\n[green]Verification report: {output_path}[/green]")
