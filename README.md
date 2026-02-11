@@ -14,6 +14,11 @@ AIを活用した自動リサーチツール。OpenAI/Anthropic APIとWeb検索�
 - **図表自動生成**: レポートに図や表を自動で追加
 - **Extended Mode**: 検索結果のサイトを深くクローリングして詳細情報を収集
 - **出力量調整**: ページ数・文字数を指定してレポートの長さを制御
+- **段階的コンテンツ生成**: Multi-Pass Synthesisによる高品質なレポート生成
+- **論理的整合性チェック**: レポート全体の論理的な流れを自動検証
+- **トークン使用量追跡**: API呼び出しのトークン消費を詳細に追跡
+- **DeepThink推論強化**: 複雑なトピックに対する深い推論機能
+- **多言語検索**: 複数言語での同時検索と結果統合
 
 ## インストール
 
@@ -565,6 +570,152 @@ report_path = generator.generate_report(
 
 ---
 
+## 追加機能5：多言語検索（Multilingual Search）
+
+### 概要
+
+複数の言語で同時に検索を行い、より広範な情報を収集する機能です。検索クエリをLLMで自動翻訳し、各言語で並列検索を実行。結果を重複排除・統合してレポートに反映します。
+
+### 使用イメージ
+
+```
+検索クエリ: "日本のEV市場の現状"
+    ↓
+【クエリ翻訳】
+├─ 日本語: "日本のEV市場の現状"（原文）
+├─ English: "Current state of Japan's EV market"
+├─ 中文: "日本电动汽车市场现状"
+└─ 한국어: "일본 전기차 시장 현황"
+    ↓
+【並列検索】
+├─ 日本語検索 → 10件の結果
+├─ 英語検索 → 10件の結果
+├─ 中国語検索 → 10件の結果
+└─ 韓国語検索 → 10件の結果
+    ↓
+【重複排除・統合】
+├─ URL重複を除去
+├─ タイトル類似度で重複検出
+└─ 言語重み付けでスコアリング
+    ↓
+結果: 30件のユニークな検索結果（言語横断）
+```
+
+### 対応言語
+
+| コード | 言語 | ネイティブ名 |
+|--------|------|-------------|
+| `ja` | Japanese | 日本語 |
+| `en` | English | English |
+| `zh` | Chinese | 中文 |
+| `ko` | Korean | 한국어 |
+| `de` | German | Deutsch |
+| `fr` | French | Français |
+| `es` | Spanish | Español |
+| `pt` | Portuguese | Português |
+| `ru` | Russian | Русский |
+| `it` | Italian | Italiano |
+| `nl` | Dutch | Nederlands |
+| `pl` | Polish | Polski |
+| `ar` | Arabic | العربية |
+| `hi` | Hindi | हिन्दी |
+| `th` | Thai | ไทย |
+| `vi` | Vietnamese | Tiếng Việt |
+
+### CLIでの使用
+
+```bash
+# 日本語と英語で検索（デフォルト）
+deep-research research "市場分析" --multilingual
+
+# 検索言語を指定
+deep-research research "AI技術動向" \
+    --multilingual \
+    --search-languages ja,en,zh,ko
+
+# 言語あたりの結果数を指定
+deep-research research "競合分析" \
+    --multilingual \
+    --search-languages ja,en,de,fr \
+    --results-per-language 15
+```
+
+### Pythonでの使用
+
+```python
+from deep_research_tool import run_research
+
+# 多言語検索でリサーチ
+result = run_research(
+    query="再生可能エネルギー市場の最新動向",
+    provider="anthropic",
+    iterations=5,
+    output_format="pdf",
+    multilingual=True,                    # 多言語検索を有効化
+    search_languages=["ja", "en", "zh"],  # 検索言語
+    results_per_language=10,              # 言語あたりの結果数
+    translate_results=True,               # 結果を出力言語に翻訳
+)
+
+print(f"レポート: {result['report_path']}")
+```
+
+### 詳細な設定（Config使用）
+
+```python
+from deep_research_tool import DeepResearchTool, create_config
+
+config = create_config(
+    provider="anthropic",
+    research_iterations=5,
+    output_format="docx",
+
+    # 多言語検索設定
+    multilingual=True,
+    search_languages=["ja", "en", "zh", "ko"],
+    results_per_language=10,
+    query_translation="llm",     # "llm" または "none"
+    translate_results=True,      # 結果を翻訳するか
+)
+
+tool = DeepResearchTool(config)
+result = tool.run(
+    query="グローバルAI規制の動向",
+    requirements="各国の規制状況を比較すること",
+)
+```
+
+### 設定パラメータ
+
+| パラメータ | 説明 | デフォルト |
+|-----------|------|----------|
+| `multilingual` | 多言語検索の有効化 | `False` |
+| `search_languages` | 検索言語リスト | `["ja", "en"]` |
+| `results_per_language` | 言語あたりの結果数 | `10` |
+| `query_translation` | クエリ翻訳方法（`llm`/`none`） | `"llm"` |
+| `translate_results` | 結果を出力言語に翻訳 | `True` |
+| `dedup_threshold` | 重複判定の閾値（0.0-1.0） | `0.85` |
+| `max_concurrent_searches` | 同時検索数 | `3` |
+
+### 多言語検索が有効なケース
+
+| ケース | 説明 |
+|-------|------|
+| グローバルトピック | 複数国で異なる視点の情報が存在する場合 |
+| 学術・技術調査 | 英語文献と母国語文献の両方が必要な場合 |
+| 市場調査 | 各国市場の情報を横断的に収集したい場合 |
+| 規制・法令調査 | 各国の法規制を比較分析したい場合 |
+| 競合分析 | グローバル企業の各地域での動向を調査する場合 |
+
+### 注意事項
+
+- クエリ翻訳にはLLM APIを使用するため、追加のトークンを消費します
+- 検索言語数に比例して検索時間が増加します（並列処理で軽減）
+- 一部の言語では検索エンジンの対応が限定的な場合があります
+- 翻訳精度は使用するLLMモデルに依存します
+
+---
+
 ## 詳細ワークフロー：クエリ入力からレポート出力まで
 
 以下は、ユーザーがリサーチクエリを入力してからレポートが出力されるまでの詳細なワークフローです。
@@ -848,6 +999,12 @@ report_path = generator.generate_report(
 | `http_proxy` | HTTPプロキシURL | None |
 | `https_proxy` | HTTPSプロキシURL | None |
 | `verify_ssl` | SSL証明書検証 | True |
+| `multilingual` | 多言語検索の有効化 | False |
+| `search_languages` | 検索言語リスト | ["ja", "en"] |
+| `results_per_language` | 言語あたりの結果数 | 10 |
+| `query_translation` | クエリ翻訳方法 (llm/none) | llm |
+| `translate_results` | 結果を出力言語に翻訳 | True |
+| `use_enhanced_synthesis` | Multi-Pass Synthesis有効化 | True |
 
 ---
 

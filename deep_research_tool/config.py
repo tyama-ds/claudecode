@@ -280,6 +280,9 @@ class ResearchConfig:
     crawl_max_sites: int = 3   # Max sites to crawl per search
     crawl_relevance_threshold: float = 0.3  # Min relevance to include page
 
+    # Enhanced synthesis settings
+    use_enhanced_synthesis: bool = True  # Use multi-pass content generation
+
 
 @dataclass
 class ReportConfig:
@@ -415,6 +418,8 @@ def create_config(
     results_per_language: int = 10,
     query_translation: str = "llm",
     translate_results: bool = True,
+    # Enhanced synthesis
+    use_enhanced_synthesis: bool = True,
     **kwargs
 ) -> Config:
     """
@@ -454,6 +459,7 @@ def create_config(
         results_per_language: Number of results per language
         query_translation: Query translation method ('llm' or 'none')
         translate_results: Whether to translate results to output language
+        use_enhanced_synthesis: Use multi-pass content generation for better quality
         **kwargs: Additional keyword arguments
 
     Returns:
@@ -485,6 +491,7 @@ def create_config(
         crawl_max_pages=crawl_max_pages,
         crawl_max_depth=crawl_max_depth,
         crawl_max_sites=crawl_max_sites,
+        use_enhanced_synthesis=use_enhanced_synthesis,
     )
 
     report_config = ReportConfig(

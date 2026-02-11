@@ -212,6 +212,7 @@ class DeepResearchTool:
             crawl_max_depth=self.config.research.crawl_max_depth,
             crawl_max_sites=self.config.research.crawl_max_sites,
             crawl_relevance_threshold=self.config.research.crawl_relevance_threshold,
+            use_enhanced_synthesis=self.config.research.use_enhanced_synthesis,
         )
 
         # Conduct research
@@ -575,6 +576,8 @@ def run_research(
     search_languages: List[str] = None,
     results_per_language: int = 10,
     translate_results: bool = True,
+    # Enhanced synthesis
+    use_enhanced_synthesis: bool = True,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -611,6 +614,7 @@ def run_research(
         search_languages: List of language codes to search (e.g., ['ja', 'en', 'zh'])
         results_per_language: Number of results per language
         translate_results: Whether to translate results to output language
+        use_enhanced_synthesis: Use multi-pass content generation for better quality
         **kwargs: Additional configuration options
 
     Returns:
@@ -695,6 +699,7 @@ def run_research(
         search_languages=search_languages,
         results_per_language=results_per_language,
         translate_results=translate_results,
+        use_enhanced_synthesis=use_enhanced_synthesis,
         **api_key_param,
         **kwargs,
     )
