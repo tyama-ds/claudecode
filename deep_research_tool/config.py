@@ -265,6 +265,10 @@ class ResearchConfig:
     min_iterations: int = 3
     max_iterations: int = 10
 
+    # Search depth settings
+    max_queries_per_iteration: int = 3  # Max queries to execute per iteration
+    max_pages_per_query: int = 3        # Max pages to process per query
+
     # Content settings
     max_content_length: int = 50000
     language: str = "ja"  # Default to Japanese
@@ -420,6 +424,9 @@ def create_config(
     translate_results: bool = True,
     # Enhanced synthesis
     use_enhanced_synthesis: bool = True,
+    # Search depth parameters
+    max_queries_per_iteration: int = 3,
+    max_pages_per_query: int = 3,
     **kwargs
 ) -> Config:
     """
@@ -460,6 +467,8 @@ def create_config(
         query_translation: Query translation method ('llm' or 'none')
         translate_results: Whether to translate results to output language
         use_enhanced_synthesis: Use multi-pass content generation for better quality
+        max_queries_per_iteration: Max queries to execute per research iteration (default: 3)
+        max_pages_per_query: Max pages to process per search query (default: 3)
         **kwargs: Additional keyword arguments
 
     Returns:
@@ -486,6 +495,8 @@ def create_config(
     research_config = ResearchConfig(
         min_iterations=research_iterations,
         max_iterations=kwargs.get("max_iterations", research_iterations + 5),
+        max_queries_per_iteration=max_queries_per_iteration,
+        max_pages_per_query=max_pages_per_query,
         language=kwargs.get("language", "ja"),
         extended_mode=extended_mode,
         crawl_max_pages=crawl_max_pages,

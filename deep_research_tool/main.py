@@ -12,6 +12,7 @@ from .api import get_client
 from .api.base import get_token_stats, reset_token_stats
 from .search import get_search_client
 from .research.researcher import Researcher, ResearchSession
+from .research.manual_researcher import ManualResearcher, ManualTableOfContents
 from .evidence.locker import EvidenceLocker
 from .verification.verifier import Verifier
 from .report.generator import ReportGenerator
@@ -204,6 +205,8 @@ class DeepResearchTool:
             search_client=self.search_client,
             min_iterations=self.config.research.min_iterations,
             max_iterations=self.config.research.max_iterations,
+            max_queries_per_iteration=self.config.research.max_queries_per_iteration,
+            max_pages_per_query=self.config.research.max_pages_per_query,
             language=self.config.research.language,
             output_dir=self.config.report.output_dir,
             progress_callback=progress_callback,
@@ -578,6 +581,9 @@ def run_research(
     translate_results: bool = True,
     # Enhanced synthesis
     use_enhanced_synthesis: bool = True,
+    # Search depth parameters
+    max_queries_per_iteration: int = 3,
+    max_pages_per_query: int = 3,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -615,6 +621,8 @@ def run_research(
         results_per_language: Number of results per language
         translate_results: Whether to translate results to output language
         use_enhanced_synthesis: Use multi-pass content generation for better quality
+        max_queries_per_iteration: Max queries to execute per research iteration (default: 3)
+        max_pages_per_query: Max pages to process per search query (default: 3)
         **kwargs: Additional configuration options
 
     Returns:
@@ -700,6 +708,8 @@ def run_research(
         results_per_language=results_per_language,
         translate_results=translate_results,
         use_enhanced_synthesis=use_enhanced_synthesis,
+        max_queries_per_iteration=max_queries_per_iteration,
+        max_pages_per_query=max_pages_per_query,
         **api_key_param,
         **kwargs,
     )
@@ -799,13 +809,353 @@ def diagnose_session(result: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# Manual search mode convenience function
+def run_manual_research(
+    evidence_file: str,
+    topic: str,
+    provider: str = "openai",
+    api_key: str = None,
+    model: str = None,
+    output_format: str = "docx",
+    output_dir: str = "./output",
+    requirements: str = "",
+    enable_verification: bool = True,
+    verbose: bool = False,
+    target_pages: int = None,
+    target_characters: int = None,
+    # Manual mode specific parameters
+    auto_toc: bool = True,
+    manual_toc: ManualTableOfContents = None,
+    manual_toc_sections: List[str] = None,
+    column_mapping: Dict[str, str] = None,
+    file_encoding: str = "utf-8",
+    # DeepThink parameters
+    deep_think: bool = False,
+    deep_think_level: float = 0.5,
+    reasoning_iterations: int = 3,
+    consistency_threshold: float = 0.3,
+    consistency_mode: str = "warn",
+    # Enhanced synthesis
+    use_enhanced_synthesis: bool = True,
+    **kwargs
+) -> Dict[str, Any]:
+    """
+    Run research using pre-collected evidence from CSV/XLSX file.
+
+    This is the "manual search mode" that uses evidence you've already
+    collected instead of conducting web searches.
+
+    Args:
+        evidence_file: Path to CSV or XLSX file containing evidence
+        topic: Research topic/title
+        provider: LLM provider ('openai' or 'anthropic')
+        api_key: API key (optional, uses env var if not provided)
+        model: Model name (optional, uses default)
+        output_format: Report format ('markdown', 'docx', 'pdf', 'html')
+        output_dir: Output directory
+        requirements: Research requirements
+        enable_verification: Enable hallucination verification
+        verbose: Verbose output
+        target_pages: Target page count for output
+        target_characters: Target character count for output
+        auto_toc: Auto-generate table of contents from evidence (default: True)
+        manual_toc: Manual table of contents object (for complex structures)
+        manual_toc_sections: Simple list of section titles (alternative to manual_toc)
+        column_mapping: Custom column name mapping for evidence file
+        file_encoding: Encoding for CSV files
+        deep_think: Enable DeepThink reasoning enhancement
+        deep_think_level: Reasoning depth (0.0-1.0)
+        reasoning_iterations: Number of reasoning iterations
+        consistency_threshold: Threshold for consistency check
+        consistency_mode: How to handle consistency issues
+        use_enhanced_synthesis: Use multi-pass content generation
+        **kwargs: Additional configuration options
+
+    Returns:
+        Dictionary with research results including report_path
+
+    Example:
+        # Basic usage with auto-generated TOC
+        result = run_manual_research(
+            evidence_file="collected_data.csv",
+            topic="Market Analysis 2024",
+            output_format="docx",
+        )
+
+        # With manual section list
+        result = run_manual_research(
+            evidence_file="research_data.xlsx",
+            topic="Technology Trends Report",
+            auto_toc=False,
+            manual_toc_sections=[
+                "Executive Summary",
+                "Market Overview",
+                "Technology Trends",
+                "Competitive Analysis",
+                "Recommendations",
+            ],
+        )
+
+        # With detailed manual TOC
+        from deep_research_tool import ManualTableOfContents
+
+        toc = ManualTableOfContents(
+            title="Comprehensive Analysis Report",
+            sections=[
+                {"section": "1", "title": "Introduction", "description": "Background"},
+                {"section": "2", "title": "Methodology", "description": "Research approach"},
+                {"section": "3", "title": "Findings", "subsections": [
+                    {"section": "3.1", "title": "Key Finding 1"},
+                    {"section": "3.2", "title": "Key Finding 2"},
+                ]},
+                {"section": "4", "title": "Conclusion"},
+            ]
+        )
+        result = run_manual_research(
+            evidence_file="data.csv",
+            topic="Analysis Report",
+            auto_toc=False,
+            manual_toc=toc,
+        )
+
+        # With custom column mapping
+        result = run_manual_research(
+            evidence_file="custom_format.csv",
+            topic="Research Report",
+            column_mapping={
+                "title": "Source Name",
+                "content": "Description",
+                "url": "Link",
+            },
+        )
+
+    Expected CSV/XLSX columns (flexible, case-insensitive):
+        - No. / ID: Evidence number/ID
+        - Title: Source title
+        - Contents / Content: Main content
+        - URL: Source URL
+        - Author: Author name
+        - Date: Publication date
+        - Others / Notes: Additional notes
+        - Section: Section reference (optional, for pre-categorized evidence)
+    """
+    from .config import create_config
+
+    # Determine API key parameter
+    api_key_param = {}
+    if api_key:
+        if provider == "openai":
+            api_key_param["openai_api_key"] = api_key
+        else:
+            api_key_param["anthropic_api_key"] = api_key
+
+    # Create config
+    config = create_config(
+        provider=provider,
+        model=model,
+        output_format=output_format,
+        output_dir=output_dir,
+        enable_verification=enable_verification,
+        verbose=verbose,
+        target_pages=target_pages,
+        target_characters=target_characters,
+        deep_think=deep_think,
+        deep_think_level=deep_think_level,
+        reasoning_iterations=reasoning_iterations,
+        consistency_threshold=consistency_threshold,
+        consistency_mode=consistency_mode,
+        use_enhanced_synthesis=use_enhanced_synthesis,
+        **api_key_param,
+        **kwargs,
+    )
+
+    # Reset token stats
+    reset_token_stats()
+
+    # Create LLM client
+    llm_client = get_client(
+        provider=config.api.provider.value,
+        api_key=config.api.get_active_api_key(),
+        model=config.api.get_active_model(),
+    )
+
+    # Create manual researcher
+    researcher = ManualResearcher(
+        llm_client=llm_client,
+        language=config.research.language,
+        output_dir=config.report.output_dir,
+        progress_callback=lambda msg, pct: print(f"[{pct:5.1f}%] {msg}") if verbose and pct >= 0 else None,
+        use_enhanced_synthesis=use_enhanced_synthesis,
+    )
+
+    # Load evidence from file
+    if verbose:
+        print(f"Loading evidence from: {evidence_file}")
+
+    researcher.load_evidence_from_file(
+        file_path=evidence_file,
+        column_mapping=column_mapping,
+        encoding=file_encoding,
+    )
+
+    evidence_count = len(researcher.get_evidence_locker().get_all_evidence())
+    if verbose:
+        print(f"Loaded {evidence_count} evidence items")
+
+    # Handle manual TOC options
+    toc_to_use = None
+    if not auto_toc:
+        if manual_toc:
+            toc_to_use = manual_toc
+        elif manual_toc_sections:
+            toc_to_use = ManualTableOfContents.from_list(topic, manual_toc_sections)
+        else:
+            raise ValueError(
+                "When auto_toc=False, you must provide either "
+                "manual_toc or manual_toc_sections"
+            )
+
+    # Conduct research
+    session = researcher.conduct_research(
+        topic=topic,
+        requirements=requirements,
+        auto_toc=auto_toc,
+        manual_toc=toc_to_use,
+    )
+
+    evidence_locker = researcher.get_evidence_locker()
+
+    # Apply DeepThink if enabled
+    deep_think_results = None
+    if config.deep_think.enabled:
+        from .thinking import DeepThinkProcessor, DeepThinkConfig as ThinkingConfig
+        from .thinking.reasoning_chain import ConsistencyMode
+
+        mode_map = {
+            "warn": ConsistencyMode.WARN,
+            "revise": ConsistencyMode.REVISE,
+            "strict": ConsistencyMode.STRICT,
+        }
+
+        thinking_config = ThinkingConfig(
+            enabled=True,
+            level=config.deep_think.level,
+            reasoning_iterations=config.deep_think.reasoning_iterations,
+            consistency_threshold=config.deep_think.consistency_threshold,
+            consistency_mode=mode_map.get(config.deep_think.consistency_mode, ConsistencyMode.WARN),
+            fidelity_threshold=config.deep_think.fidelity_threshold,
+        )
+
+        processor = DeepThinkProcessor(
+            llm_client=llm_client,
+            config=thinking_config,
+            language=config.research.language,
+        )
+
+        # Get source texts
+        source_texts = {
+            e.evidence_id: e.content_excerpt
+            for e in evidence_locker.get_all_evidence()
+            if e.evidence_id and e.content_excerpt
+        }
+
+        # Process sections
+        deep_think_results = {}
+        for section_num, section_data in session.section_contents.items():
+            if section_num.startswith("_"):
+                continue
+
+            content = section_data.get("content", "")
+            if not content:
+                continue
+
+            result = processor.process(content=content, source_texts=source_texts)
+            session.section_contents[section_num]["content"] = result.processed_content
+            deep_think_results[section_num] = {
+                "is_valid": result.is_valid,
+                "confidence": result.overall_confidence,
+            }
+
+    # Export evidence
+    evidence_json = evidence_locker.export_to_json()
+    evidence_csv = evidence_locker.export_to_csv()
+
+    # Verification
+    verification_html = None
+    verification_result = None
+    if enable_verification:
+        verifier = Verifier(
+            llm_client=llm_client,
+            language=config.research.language,
+        )
+
+        content_parts = []
+        for section_num, section_data in session.section_contents.items():
+            if section_num.startswith("_"):
+                continue
+            content_parts.append(section_data.get("content", ""))
+
+        content_for_verification = "\n\n".join(content_parts)
+
+        verification_result = verifier.verify_content(
+            content=content_for_verification,
+            evidence_locker=evidence_locker,
+            document_title=topic,
+            strictness=config.verification_strictness,
+        )
+
+        verification_html = config.report.output_dir / f"verification_{session.session_id}.html"
+        verifier.generate_verification_report_html(verification_result, verification_html)
+
+    # Generate report
+    report_generator = ReportGenerator(
+        output_dir=config.report.output_dir / "reports",
+        include_toc=config.report.include_toc,
+        include_citations=config.report.include_citations,
+        include_images=config.report.include_images,
+        language=config.research.language,
+    )
+
+    report_path = report_generator.generate_report(
+        session=session,
+        evidence_locker=evidence_locker,
+        format=config.report.format,
+        verification_result=verification_result,
+        target_pages=target_pages,
+        target_characters=target_characters,
+    )
+
+    # Get token stats
+    token_stats = get_token_stats()
+
+    if verbose:
+        print(f"\nReport generated: {report_path}")
+        print(token_stats.get_summary(config.research.language))
+
+    return {
+        "session_id": session.session_id,
+        "report_path": str(report_path),
+        "evidence_json": str(evidence_json),
+        "evidence_csv": str(evidence_csv),
+        "verification_html": str(verification_html) if verification_html else None,
+        "session": session,
+        "evidence_locker": evidence_locker,
+        "verification_result": verification_result,
+        "deep_think_results": deep_think_results,
+        "token_usage": token_stats.to_dict(),
+        "evidence_count": evidence_count,
+    }
+
+
 # Export for notebook/script usage
 __all__ = [
     "DeepResearchTool",
     "run_research",
+    "run_manual_research",
     "diagnose_session",
     "Config",
     "LLMProvider",
     "SearchMethod",
     "ReportFormat",
+    "ManualTableOfContents",
 ]

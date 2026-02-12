@@ -98,6 +98,34 @@ class OpenAIClient(BaseLLMClient):
         # All other models (gpt-4o, o1, o3, etc.) use max_completion_tokens
         return True
 
+    def _supports_temperature(self, model: str) -> bool:
+        """Check if model supports custom temperature parameter.
+
+        Some models (o1, o3, gpt-5 series) only support temperature=1 (default).
+        This includes reasoning models and newer generation models.
+        """
+        model_lower = model.lower()
+
+        # Model series prefixes that do NOT support custom temperature
+        # These are typically reasoning models or newer generation models
+        no_temperature_prefixes = [
+            'o1',      # o1, o1-mini, o1-preview, o1-pro, o1.5, etc.
+            'o3',      # o3, o3-mini, o3.1, etc.
+            'o4',      # Future o4 series (anticipated)
+            'gpt-5',   # gpt-5, gpt-5-mini, gpt-5.2, gpt-5.2-turbo, etc.
+            'gpt-6',   # Future gpt-6 series (anticipated)
+        ]
+
+        for prefix in no_temperature_prefixes:
+            # Match: exact, prefix-, prefix., prefixmini (e.g., gpt-5, gpt-5-mini, gpt-5.2, gpt-5mini)
+            if (model_lower == prefix or
+                model_lower.startswith(prefix + '-') or
+                model_lower.startswith(prefix + '.') or
+                model_lower.startswith(prefix + 'mini')):
+                return False
+
+        return True
+
     def chat(
         self,
         messages: List[Message],
@@ -139,7 +167,6 @@ class OpenAIClient(BaseLLMClient):
         api_params = {
             "model": model,
             "messages": api_messages,
-            "temperature": kwargs.get("temperature", self.temperature),
         }
 
         # Use correct parameter name based on model
@@ -148,6 +175,10 @@ class OpenAIClient(BaseLLMClient):
         else:
             api_params["max_tokens"] = token_limit
 
+        # Only add temperature if the model supports it (o1, o3, gpt-5 series don't)
+        if self._supports_temperature(model):
+            api_params["temperature"] = kwargs.get("temperature", self.temperature)
+
         # Add any additional kwargs (excluding already handled ones)
         excluded_keys = {"model", "temperature", "max_tokens", "max_completion_tokens"}
         for k, v in kwargs.items():
@@ -155,8 +186,8 @@ class OpenAIClient(BaseLLMClient):
                 api_params[k] = v
 
         # Debug: Print API params to verify correct parameter is used
-        print(f"[DEBUG OpenAI] Model: {model}, Using max_completion_tokens: {self._requires_max_completion_tokens(model)}")
-        print(f"[DEBUG OpenAI] API params keys: {list(api_params.keys())}")
+        supports_temp = self._supports_temperature(model)
+        print(f"[DEBUG OpenAI] Model: {model}, max_completion_tokens: {token_limit}, temperature_supported: {supports_temp}")
 
         # Make API call
         response = self._client.chat.completions.create(**api_params)
