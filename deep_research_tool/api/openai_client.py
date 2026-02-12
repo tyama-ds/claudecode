@@ -109,15 +109,19 @@ class OpenAIClient(BaseLLMClient):
         # Model series prefixes that do NOT support custom temperature
         # These are typically reasoning models or newer generation models
         no_temperature_prefixes = [
-            'o1',      # o1, o1-mini, o1-preview, o1-pro, etc.
-            'o3',      # o3, o3-mini, etc.
+            'o1',      # o1, o1-mini, o1-preview, o1-pro, o1.5, etc.
+            'o3',      # o3, o3-mini, o3.1, etc.
             'o4',      # Future o4 series (anticipated)
-            'gpt-5',   # gpt-5, gpt-5-mini, gpt-5-turbo, etc.
+            'gpt-5',   # gpt-5, gpt-5-mini, gpt-5.2, gpt-5.2-turbo, etc.
             'gpt-6',   # Future gpt-6 series (anticipated)
         ]
 
         for prefix in no_temperature_prefixes:
-            if model_lower == prefix or model_lower.startswith(prefix + '-') or model_lower.startswith(prefix + 'mini'):
+            # Match: exact, prefix-, prefix., prefixmini (e.g., gpt-5, gpt-5-mini, gpt-5.2, gpt-5mini)
+            if (model_lower == prefix or
+                model_lower.startswith(prefix + '-') or
+                model_lower.startswith(prefix + '.') or
+                model_lower.startswith(prefix + 'mini')):
                 return False
 
         return True
