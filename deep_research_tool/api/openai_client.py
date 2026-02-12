@@ -101,15 +101,23 @@ class OpenAIClient(BaseLLMClient):
     def _supports_temperature(self, model: str) -> bool:
         """Check if model supports custom temperature parameter.
 
-        Some models (o1, o3 series) only support temperature=1 (default).
+        Some models (o1, o3, gpt-5 series) only support temperature=1 (default).
+        This includes reasoning models and newer generation models.
         """
         model_lower = model.lower()
 
-        # Models that do NOT support custom temperature
-        no_temperature_models = ['o1', 'o3', 'o1-mini', 'o1-preview', 'o3-mini']
+        # Model series prefixes that do NOT support custom temperature
+        # These are typically reasoning models or newer generation models
+        no_temperature_prefixes = [
+            'o1',      # o1, o1-mini, o1-preview, o1-pro, etc.
+            'o3',      # o3, o3-mini, etc.
+            'o4',      # Future o4 series (anticipated)
+            'gpt-5',   # gpt-5, gpt-5-mini, gpt-5-turbo, etc.
+            'gpt-6',   # Future gpt-6 series (anticipated)
+        ]
 
-        for no_temp in no_temperature_models:
-            if model_lower == no_temp or model_lower.startswith(no_temp + '-'):
+        for prefix in no_temperature_prefixes:
+            if model_lower == prefix or model_lower.startswith(prefix + '-') or model_lower.startswith(prefix + 'mini'):
                 return False
 
         return True
