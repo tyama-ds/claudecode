@@ -98,6 +98,22 @@ class OpenAIClient(BaseLLMClient):
         # All other models (gpt-4o, o1, o3, etc.) use max_completion_tokens
         return True
 
+    def _supports_temperature(self, model: str) -> bool:
+        """Check if model supports custom temperature parameter.
+
+        Some models (o1, o3 series) only support temperature=1 (default).
+        """
+        model_lower = model.lower()
+
+        # Models that do NOT support custom temperature
+        no_temperature_models = ['o1', 'o3', 'o1-mini', 'o1-preview', 'o3-mini']
+
+        for no_temp in no_temperature_models:
+            if model_lower == no_temp or model_lower.startswith(no_temp + '-'):
+                return False
+
+        return True
+
     def chat(
         self,
         messages: List[Message],
@@ -139,10 +155,13 @@ class OpenAIClient(BaseLLMClient):
         api_params = {
             "model": model,
             "messages": api_messages,
-            "temperature": kwargs.get("temperature", self.temperature),
             # Always use max_completion_tokens for all OpenAI models (2024+ API requirement)
             "max_completion_tokens": token_limit,
         }
+
+        # Only add temperature if the model supports it (o1, o3 series don't)
+        if self._supports_temperature(model):
+            api_params["temperature"] = kwargs.get("temperature", self.temperature)
 
         # Add any additional kwargs (excluding already handled ones)
         excluded_keys = {"model", "temperature", "max_tokens", "max_completion_tokens"}
@@ -151,7 +170,8 @@ class OpenAIClient(BaseLLMClient):
                 api_params[k] = v
 
         # Debug: Print API params to verify correct parameter is used
-        print(f"[DEBUG OpenAI] Model: {model}, max_completion_tokens: {token_limit}")
+        supports_temp = self._supports_temperature(model)
+        print(f"[DEBUG OpenAI] Model: {model}, max_completion_tokens: {token_limit}, temperature_supported: {supports_temp}")
 
         # Make API call
         response = self._client.chat.completions.create(**api_params)
