@@ -924,9 +924,21 @@ def add_figures_to_report(
         evidence_locker=evidence_locker,
     )
 
-    # Read existing report
-    with open(report_path, 'r', encoding='utf-8') as f:
-        content = f.read()
+    # Read existing report with encoding fallback
+    content = None
+    encodings = ['utf-8', 'utf-8-sig', 'cp932', 'shift_jis', 'latin-1']
+    for encoding in encodings:
+        try:
+            with open(report_path, 'r', encoding=encoding) as f:
+                content = f.read()
+            break
+        except UnicodeDecodeError:
+            continue
+
+    if content is None:
+        # Last resort: read with errors='replace'
+        with open(report_path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
 
     # Add figures and tables
     if report_path.suffix == '.md':
