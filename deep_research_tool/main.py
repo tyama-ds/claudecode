@@ -204,6 +204,8 @@ class DeepResearchTool:
             search_client=self.search_client,
             min_iterations=self.config.research.min_iterations,
             max_iterations=self.config.research.max_iterations,
+            max_queries_per_iteration=self.config.research.max_queries_per_iteration,
+            max_pages_per_query=self.config.research.max_pages_per_query,
             language=self.config.research.language,
             output_dir=self.config.report.output_dir,
             progress_callback=progress_callback,
@@ -578,6 +580,9 @@ def run_research(
     translate_results: bool = True,
     # Enhanced synthesis
     use_enhanced_synthesis: bool = True,
+    # Search depth parameters
+    max_queries_per_iteration: int = 3,
+    max_pages_per_query: int = 3,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -615,6 +620,8 @@ def run_research(
         results_per_language: Number of results per language
         translate_results: Whether to translate results to output language
         use_enhanced_synthesis: Use multi-pass content generation for better quality
+        max_queries_per_iteration: Max queries to execute per research iteration (default: 3)
+        max_pages_per_query: Max pages to process per search query (default: 3)
         **kwargs: Additional configuration options
 
     Returns:
@@ -700,6 +707,8 @@ def run_research(
         results_per_language=results_per_language,
         translate_results=translate_results,
         use_enhanced_synthesis=use_enhanced_synthesis,
+        max_queries_per_iteration=max_queries_per_iteration,
+        max_pages_per_query=max_pages_per_query,
         **api_key_param,
         **kwargs,
     )

@@ -4,6 +4,7 @@ DuckDuckGo search client implementation.
 Supports both the new 'ddgs' package and legacy 'duckduckgo-search' package.
 """
 
+import io
 import time
 import warnings
 from typing import List, Optional
@@ -11,6 +12,14 @@ import requests
 from bs4 import BeautifulSoup
 
 from .base import BaseSearchClient, SearchResult, PageContent
+
+
+# PDF extraction support (optional)
+try:
+    from PyPDF2 import PdfReader
+    PDF_SUPPORT = True
+except ImportError:
+    PDF_SUPPORT = False
 
 
 class DuckDuckGoSearch(BaseSearchClient):
@@ -289,6 +298,7 @@ class DuckDuckGoSearch(BaseSearchClient):
     ) -> PageContent:
         """
         Extract content from a URL using requests and BeautifulSoup.
+        Supports both HTML pages and PDF documents.
 
         Args:
             url: The URL to fetch
@@ -315,6 +325,15 @@ class DuckDuckGoSearch(BaseSearchClient):
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
+
+            # Check if content is PDF (by Content-Type header or URL)
+            content_type = response.headers.get("Content-Type", "").lower()
+            is_pdf = "application/pdf" in content_type or self._is_pdf_url(url)
+
+            if is_pdf:
+                return self._extract_pdf_content(response, url)
+
+            # Continue with HTML processing
             response.encoding = response.apparent_encoding
 
             soup = BeautifulSoup(response.text, "lxml")
@@ -422,6 +441,80 @@ class DuckDuckGoSearch(BaseSearchClient):
             })
 
         return links[:50]  # Limit to 50 links
+
+    def _is_pdf_url(self, url: str) -> bool:
+        """Check if URL points to a PDF file."""
+        url_lower = url.lower()
+        return url_lower.endswith('.pdf') or '/pdf/' in url_lower
+
+    def _extract_pdf_content(self, response: requests.Response, url: str) -> PageContent:
+        """
+        Extract text content from a PDF response.
+
+        Args:
+            response: HTTP response containing PDF binary data
+            url: The source URL
+
+        Returns:
+            PageContent with extracted text
+        """
+        if not PDF_SUPPORT:
+            return PageContent(
+                url=url,
+                title="PDF Document",
+                text_content="[PDF content extraction requires PyPDF2. Install with: pip install PyPDF2]",
+                metadata={"error": "PyPDF2 not installed", "content_type": "application/pdf"},
+            )
+
+        try:
+            # Read PDF from response content
+            pdf_file = io.BytesIO(response.content)
+            reader = PdfReader(pdf_file)
+
+            # Extract title from metadata if available
+            title = "PDF Document"
+            if reader.metadata:
+                title = reader.metadata.get("/Title", "PDF Document") or "PDF Document"
+
+            # Extract text from all pages
+            text_parts = []
+            for page_num, page in enumerate(reader.pages, 1):
+                try:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text_parts.append(f"[Page {page_num}]\n{page_text}")
+                except Exception as e:
+                    text_parts.append(f"[Page {page_num}] (extraction failed: {e})")
+
+            text_content = "\n\n".join(text_parts)
+
+            # Clean up the extracted text
+            text_content = self._clean_text(text_content)
+
+            # Extract metadata
+            metadata = {
+                "content_type": "application/pdf",
+                "pages": len(reader.pages),
+            }
+            if reader.metadata:
+                for key in ["/Author", "/Subject", "/Creator", "/Producer"]:
+                    if reader.metadata.get(key):
+                        metadata[key.lstrip("/")] = reader.metadata.get(key)
+
+            return PageContent(
+                url=url,
+                title=title,
+                text_content=text_content,
+                metadata=metadata,
+            )
+
+        except Exception as e:
+            return PageContent(
+                url=url,
+                title="PDF Document",
+                text_content=f"[Failed to extract PDF content: {str(e)}]",
+                metadata={"error": str(e), "content_type": "application/pdf"},
+            )
 
     def _extract_metadata(self, soup: BeautifulSoup) -> dict:
         """Extract metadata from page."""

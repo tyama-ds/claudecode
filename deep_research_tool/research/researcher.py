@@ -133,6 +133,8 @@ class Researcher:
         search_client,
         min_iterations: int = 3,
         max_iterations: int = 10,
+        max_queries_per_iteration: int = 3,
+        max_pages_per_query: int = 3,
         language: str = "ja",
         output_dir: Path = None,
         progress_callback: Callable[[str, float], None] = None,
@@ -151,6 +153,8 @@ class Researcher:
             search_client: Web search client
             min_iterations: Minimum research iterations per section
             max_iterations: Maximum research iterations per section
+            max_queries_per_iteration: Maximum queries to execute per iteration
+            max_pages_per_query: Maximum pages to process per search query
             language: Target language
             output_dir: Directory for output files
             progress_callback: Callback for progress updates (message, percentage)
@@ -165,6 +169,8 @@ class Researcher:
         self.search = search_client
         self.min_iterations = min_iterations
         self.max_iterations = max_iterations
+        self.max_queries_per_iteration = max_queries_per_iteration
+        self.max_pages_per_query = max_pages_per_query
         self.language = language
         self.output_dir = output_dir or Path("./output")
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -331,7 +337,7 @@ class Researcher:
 
             # Remove used queries
             if available_queries:
-                available_queries = available_queries[3:]
+                available_queries = available_queries[self.max_queries_per_iteration:]
 
             section.status = "completed"
 
@@ -369,7 +375,7 @@ class Researcher:
 
             # Get queries for this iteration
             if iteration == 1 and available_queries:
-                queries = available_queries[:3]
+                queries = available_queries[:self.max_queries_per_iteration]
             else:
                 current_content = "\n".join(
                     ec.processed_content for ec in section_content_parts
@@ -387,17 +393,17 @@ class Researcher:
                 break
 
             iter_record.queries_executed = queries
-            print(f"[DEBUG] Section {section.section} iteration {iteration}: executing {len(queries[:3])} queries")
+            print(f"[DEBUG] Section {section.section} iteration {iteration}: executing {len(queries[:self.max_queries_per_iteration])} queries")
 
             # Execute searches and extract content
-            for query in queries[:3]:
+            for query in queries[:self.max_queries_per_iteration]:
                 print(f"[DEBUG] Searching: {query[:50]}...")
                 try:
                     results = self.search.search(query)
                     print(f"[DEBUG] Search returned {len(results)} results")
                     iter_record.sources_found += len(results)
 
-                    for result in results[:3]:
+                    for result in results[:self.max_pages_per_query]:
                         print(f"[DEBUG] Processing: {result.url[:60]}...")
                         try:
                             page = self.search.get_page_content(result.url)
@@ -861,12 +867,12 @@ Return as JSON:
                 iter_record.queries_executed = queries
 
                 # Execute searches
-                for query in queries[:3]:
+                for query in queries[:self.max_queries_per_iteration]:
                     try:
                         results = self.search.search(query)
                         iter_record.sources_found += len(results)
 
-                        for result in results[:3]:
+                        for result in results[:self.max_pages_per_query]:
                             try:
                                 # Skip if we already have this source
                                 existing_sources = existing_content.get("sources", [])
