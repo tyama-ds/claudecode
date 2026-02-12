@@ -167,11 +167,15 @@ class OpenAIClient(BaseLLMClient):
         api_params = {
             "model": model,
             "messages": api_messages,
-            # Always use max_completion_tokens for all OpenAI models (2024+ API requirement)
-            "max_completion_tokens": token_limit,
         }
 
-        # Only add temperature if the model supports it (o1, o3 series don't)
+        # Use correct parameter name based on model
+        if self._requires_max_completion_tokens(model):
+            api_params["max_completion_tokens"] = token_limit
+        else:
+            api_params["max_tokens"] = token_limit
+
+        # Only add temperature if the model supports it (o1, o3, gpt-5 series don't)
         if self._supports_temperature(model):
             api_params["temperature"] = kwargs.get("temperature", self.temperature)
 

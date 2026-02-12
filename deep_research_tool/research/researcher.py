@@ -296,7 +296,7 @@ class Researcher:
         return self.session
 
     def _conduct_research_loop(self) -> None:
-        """Execute the main research loop with immediate content generation."""
+        """Execute the main research loop."""
         if not self.session or not self.session.research_plan:
             raise ValueError("Research session not properly initialized")
 
@@ -326,14 +326,16 @@ class Researcher:
             )
 
             section.status = "in_progress"
+            section_content_parts: List[ExtractedContent] = []
 
-            # Process section with immediate content generation
-            self._process_section_with_immediate_generation(
-                section=section,
-                available_queries=available_queries,
-                section_idx=section_idx,
-                total_sections=total_sections,
-            )
+            # Research iterations for this section
+            iteration = 0
+            while iteration < self.max_iterations:
+                iteration += 1
+                iter_record = ResearchIteration(
+                    iteration_number=iteration,
+                    section=section.section,
+                )
 
             # Remove used queries
             if available_queries:
