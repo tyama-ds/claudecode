@@ -16,6 +16,10 @@ from .quality_evaluator import (
     categorize_by_quality,
     get_quality_summary,
 )
+from .manual_loader import (
+    ManualEvidenceLoader,
+    load_evidence_file,
+)
 
 __all__ = [
     "EvidenceLocker",
@@ -28,4 +32,6 @@ __all__ = [
     "QualityEvaluation",
     "categorize_by_quality",
     "get_quality_summary",
+    "ManualEvidenceLoader",
+    "load_evidence_file",
 ]
