@@ -4,6 +4,7 @@ DuckDuckGo search client implementation.
 Supports both the new 'ddgs' package and legacy 'duckduckgo-search' package.
 """
 
+import csv
 import io
 import time
 import warnings
@@ -20,6 +21,27 @@ try:
     PDF_SUPPORT = True
 except ImportError:
     PDF_SUPPORT = False
+
+# DOCX extraction support (optional)
+try:
+    from docx import Document as DocxDocument
+    DOCX_SUPPORT = True
+except ImportError:
+    DOCX_SUPPORT = False
+
+# XLSX extraction support (optional)
+try:
+    import openpyxl
+    XLSX_SUPPORT = True
+except ImportError:
+    XLSX_SUPPORT = False
+
+# PPTX extraction support (optional)
+try:
+    from pptx import Presentation
+    PPTX_SUPPORT = True
+except ImportError:
+    PPTX_SUPPORT = False
 
 
 class DuckDuckGoSearch(BaseSearchClient):
@@ -326,14 +348,34 @@ class DuckDuckGoSearch(BaseSearchClient):
             )
             response.raise_for_status()
 
-            # Check if content is PDF (by Content-Type header or URL)
-            content_type = response.headers.get("Content-Type", "").lower()
-            is_pdf = "application/pdf" in content_type or self._is_pdf_url(url)
+            # Detect file type from Content-Type header and URL
+            content_type = response.headers.get("Content-Type", "")
+            file_type = self._get_file_type(url, content_type)
 
-            if is_pdf:
+            # Skip macro-enabled files for security
+            if file_type == 'macro_file':
+                return PageContent(
+                    url=url,
+                    title="Unsupported File",
+                    text_content="[Macro-enabled Office files (.docm, .xlsm, .pptm, .xlsb) are not supported for security reasons]",
+                    metadata={"error": "macro_file_skipped", "content_type": content_type},
+                )
+
+            # Dispatch to appropriate extraction method
+            if file_type == 'pdf':
                 return self._extract_pdf_content(response, url)
+            elif file_type == 'docx':
+                return self._extract_docx_content(response, url)
+            elif file_type == 'xlsx':
+                return self._extract_xlsx_content(response, url)
+            elif file_type == 'pptx':
+                return self._extract_pptx_content(response, url)
+            elif file_type == 'csv':
+                return self._extract_csv_content(response, url)
+            elif file_type in ('markdown', 'text'):
+                return self._extract_text_content(response, url, file_type)
 
-            # Continue with HTML processing
+            # Continue with HTML processing (default)
             response.encoding = response.apparent_encoding
 
             soup = BeautifulSoup(response.text, "lxml")
@@ -514,6 +556,390 @@ class DuckDuckGoSearch(BaseSearchClient):
                 title="PDF Document",
                 text_content=f"[Failed to extract PDF content: {str(e)}]",
                 metadata={"error": str(e), "content_type": "application/pdf"},
+            )
+
+    def _get_file_type(self, url: str, content_type: str = "") -> str:
+        """
+        Determine file type from URL extension or Content-Type header.
+
+        Args:
+            url: The URL to check
+            content_type: The Content-Type header value
+
+        Returns:
+            File type string: 'pdf', 'docx', 'xlsx', 'pptx', 'csv', 'markdown', or 'html'
+        """
+        url_lower = url.lower()
+        content_type_lower = content_type.lower()
+
+        # Check for macro-enabled files (exclude these)
+        macro_extensions = ['.docm', '.xlsm', '.pptm', '.xlsb']
+        for ext in macro_extensions:
+            if url_lower.endswith(ext):
+                return 'macro_file'  # Will be skipped
+
+        # PDF
+        if url_lower.endswith('.pdf') or 'application/pdf' in content_type_lower:
+            return 'pdf'
+
+        # DOCX
+        if url_lower.endswith('.docx') or 'application/vnd.openxmlformats-officedocument.wordprocessingml' in content_type_lower:
+            return 'docx'
+
+        # XLSX
+        if url_lower.endswith('.xlsx') or 'application/vnd.openxmlformats-officedocument.spreadsheetml' in content_type_lower:
+            return 'xlsx'
+
+        # PPTX
+        if url_lower.endswith('.pptx') or 'application/vnd.openxmlformats-officedocument.presentationml' in content_type_lower:
+            return 'pptx'
+
+        # CSV
+        if url_lower.endswith('.csv') or 'text/csv' in content_type_lower:
+            return 'csv'
+
+        # Markdown
+        if url_lower.endswith(('.md', '.rmd', '.markdown')):
+            return 'markdown'
+
+        # Plain text
+        if url_lower.endswith('.txt') or 'text/plain' in content_type_lower:
+            return 'text'
+
+        # Default to HTML
+        return 'html'
+
+    def _extract_docx_content(self, response: requests.Response, url: str) -> PageContent:
+        """
+        Extract text content from a DOCX file.
+
+        Args:
+            response: HTTP response containing DOCX binary data
+            url: The source URL
+
+        Returns:
+            PageContent with extracted text
+        """
+        if not DOCX_SUPPORT:
+            return PageContent(
+                url=url,
+                title="Word Document",
+                text_content="[DOCX content extraction requires python-docx. Install with: pip install python-docx]",
+                metadata={"error": "python-docx not installed", "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+            )
+
+        try:
+            docx_file = io.BytesIO(response.content)
+            doc = DocxDocument(docx_file)
+
+            # Extract title from core properties if available
+            title = "Word Document"
+            if doc.core_properties.title:
+                title = doc.core_properties.title
+
+            # Extract text from paragraphs
+            text_parts = []
+            for para in doc.paragraphs:
+                if para.text.strip():
+                    text_parts.append(para.text)
+
+            # Extract text from tables
+            for table in doc.tables:
+                for row in table.rows:
+                    row_text = []
+                    for cell in row.cells:
+                        if cell.text.strip():
+                            row_text.append(cell.text.strip())
+                    if row_text:
+                        text_parts.append(" | ".join(row_text))
+
+            text_content = "\n\n".join(text_parts)
+            text_content = self._clean_text(text_content)
+
+            # Extract metadata
+            metadata = {
+                "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            }
+            if doc.core_properties.author:
+                metadata["author"] = doc.core_properties.author
+            if doc.core_properties.created:
+                metadata["created"] = str(doc.core_properties.created)
+
+            return PageContent(
+                url=url,
+                title=title,
+                text_content=text_content,
+                metadata=metadata,
+            )
+
+        except Exception as e:
+            return PageContent(
+                url=url,
+                title="Word Document",
+                text_content=f"[Failed to extract DOCX content: {str(e)}]",
+                metadata={"error": str(e), "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+            )
+
+    def _extract_xlsx_content(self, response: requests.Response, url: str) -> PageContent:
+        """
+        Extract text content from an XLSX file.
+
+        Args:
+            response: HTTP response containing XLSX binary data
+            url: The source URL
+
+        Returns:
+            PageContent with extracted text
+        """
+        if not XLSX_SUPPORT:
+            return PageContent(
+                url=url,
+                title="Excel Spreadsheet",
+                text_content="[XLSX content extraction requires openpyxl. Install with: pip install openpyxl]",
+                metadata={"error": "openpyxl not installed", "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+            )
+
+        try:
+            xlsx_file = io.BytesIO(response.content)
+            wb = openpyxl.load_workbook(xlsx_file, read_only=True, data_only=True)
+
+            text_parts = []
+            sheet_count = 0
+
+            for sheet_name in wb.sheetnames:
+                sheet_count += 1
+                ws = wb[sheet_name]
+                text_parts.append(f"[Sheet: {sheet_name}]")
+
+                rows_data = []
+                for row in ws.iter_rows(values_only=True):
+                    # Skip completely empty rows
+                    if all(cell is None or str(cell).strip() == "" for cell in row):
+                        continue
+                    row_text = [str(cell) if cell is not None else "" for cell in row]
+                    rows_data.append(" | ".join(row_text))
+
+                if rows_data:
+                    text_parts.append("\n".join(rows_data[:100]))  # Limit to 100 rows per sheet
+
+            wb.close()
+
+            text_content = "\n\n".join(text_parts)
+            text_content = self._clean_text(text_content)
+
+            # Extract title from filename
+            title = url.split('/')[-1] if '/' in url else "Excel Spreadsheet"
+
+            metadata = {
+                "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "sheets": sheet_count,
+            }
+
+            return PageContent(
+                url=url,
+                title=title,
+                text_content=text_content,
+                metadata=metadata,
+            )
+
+        except Exception as e:
+            return PageContent(
+                url=url,
+                title="Excel Spreadsheet",
+                text_content=f"[Failed to extract XLSX content: {str(e)}]",
+                metadata={"error": str(e), "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+            )
+
+    def _extract_pptx_content(self, response: requests.Response, url: str) -> PageContent:
+        """
+        Extract text content from a PPTX file.
+
+        Args:
+            response: HTTP response containing PPTX binary data
+            url: The source URL
+
+        Returns:
+            PageContent with extracted text
+        """
+        if not PPTX_SUPPORT:
+            return PageContent(
+                url=url,
+                title="PowerPoint Presentation",
+                text_content="[PPTX content extraction requires python-pptx. Install with: pip install python-pptx]",
+                metadata={"error": "python-pptx not installed", "content_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+            )
+
+        try:
+            pptx_file = io.BytesIO(response.content)
+            prs = Presentation(pptx_file)
+
+            text_parts = []
+            slide_count = 0
+
+            for slide_num, slide in enumerate(prs.slides, 1):
+                slide_count += 1
+                slide_texts = [f"[Slide {slide_num}]"]
+
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text.strip():
+                        slide_texts.append(shape.text)
+
+                    # Handle tables in slides
+                    if shape.has_table:
+                        table = shape.table
+                        for row in table.rows:
+                            row_text = []
+                            for cell in row.cells:
+                                if cell.text.strip():
+                                    row_text.append(cell.text.strip())
+                            if row_text:
+                                slide_texts.append(" | ".join(row_text))
+
+                if len(slide_texts) > 1:  # More than just the slide number
+                    text_parts.append("\n".join(slide_texts))
+
+            text_content = "\n\n".join(text_parts)
+            text_content = self._clean_text(text_content)
+
+            # Extract title
+            title = "PowerPoint Presentation"
+            if prs.core_properties.title:
+                title = prs.core_properties.title
+
+            metadata = {
+                "content_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "slides": slide_count,
+            }
+            if prs.core_properties.author:
+                metadata["author"] = prs.core_properties.author
+
+            return PageContent(
+                url=url,
+                title=title,
+                text_content=text_content,
+                metadata=metadata,
+            )
+
+        except Exception as e:
+            return PageContent(
+                url=url,
+                title="PowerPoint Presentation",
+                text_content=f"[Failed to extract PPTX content: {str(e)}]",
+                metadata={"error": str(e), "content_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+            )
+
+    def _extract_csv_content(self, response: requests.Response, url: str) -> PageContent:
+        """
+        Extract text content from a CSV file.
+
+        Args:
+            response: HTTP response containing CSV data
+            url: The source URL
+
+        Returns:
+            PageContent with extracted text
+        """
+        try:
+            # Try different encodings
+            content_text = None
+            for encoding in ['utf-8', 'utf-8-sig', 'cp932', 'shift_jis', 'latin1']:
+                try:
+                    content_text = response.content.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+
+            if content_text is None:
+                raise ValueError("Could not decode CSV with any known encoding")
+
+            # Parse CSV
+            csv_file = io.StringIO(content_text)
+            reader = csv.reader(csv_file)
+
+            text_parts = []
+            row_count = 0
+            for row in reader:
+                row_count += 1
+                if row_count > 200:  # Limit to 200 rows
+                    text_parts.append(f"... ({row_count}+ rows total)")
+                    break
+                if any(cell.strip() for cell in row):
+                    text_parts.append(" | ".join(row))
+
+            text_content = "\n".join(text_parts)
+            text_content = self._clean_text(text_content)
+
+            # Extract title from filename
+            title = url.split('/')[-1] if '/' in url else "CSV File"
+
+            return PageContent(
+                url=url,
+                title=title,
+                text_content=text_content,
+                metadata={
+                    "content_type": "text/csv",
+                    "rows": row_count,
+                },
+            )
+
+        except Exception as e:
+            return PageContent(
+                url=url,
+                title="CSV File",
+                text_content=f"[Failed to extract CSV content: {str(e)}]",
+                metadata={"error": str(e), "content_type": "text/csv"},
+            )
+
+    def _extract_text_content(self, response: requests.Response, url: str, file_type: str = "text") -> PageContent:
+        """
+        Extract content from plain text files (txt, md, rmd, etc.).
+
+        Args:
+            response: HTTP response containing text data
+            url: The source URL
+            file_type: Type of file ('text', 'markdown')
+
+        Returns:
+            PageContent with extracted text
+        """
+        try:
+            # Try different encodings
+            content_text = None
+            for encoding in ['utf-8', 'utf-8-sig', 'cp932', 'shift_jis', 'latin1']:
+                try:
+                    content_text = response.content.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+
+            if content_text is None:
+                raise ValueError("Could not decode text with any known encoding")
+
+            text_content = self._clean_text(content_text)
+
+            # Extract title from filename
+            title = url.split('/')[-1] if '/' in url else "Text Document"
+
+            content_type_map = {
+                "text": "text/plain",
+                "markdown": "text/markdown",
+            }
+
+            return PageContent(
+                url=url,
+                title=title,
+                text_content=text_content,
+                metadata={
+                    "content_type": content_type_map.get(file_type, "text/plain"),
+                },
+            )
+
+        except Exception as e:
+            return PageContent(
+                url=url,
+                title="Text Document",
+                text_content=f"[Failed to extract text content: {str(e)}]",
+                metadata={"error": str(e), "content_type": "text/plain"},
             )
 
     def _extract_metadata(self, soup: BeautifulSoup) -> dict:
