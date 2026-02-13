@@ -453,6 +453,7 @@ class Researcher:
         crawl_result: FastCrawlResult = self.fast_crawler.crawl_and_evaluate(
             queries=queries,
             section_context=f"{section.section}. {section.title}: {section.description}",
+            research_topic=self.session.query,  # Pass original research topic for context-aware evaluation
             max_pages_per_query=self.max_pages_per_query,
             min_relevance_score=0.2,
             progress_callback=fast_progress,
