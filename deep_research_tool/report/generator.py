@@ -251,6 +251,9 @@ class ReportGenerator:
         # Use filtered evidence or all evidence
         evidence_list = filtered_evidence if filtered_evidence is not None else evidence_locker.get_all_evidence()
 
+        # Renumber citations to match final reference order
+        renumbered_contents = self._renumber_all_citations(session, evidence_list)
+
         # Title and metadata
         content_parts.append(f"# {plan.title if plan else session.query}\n")
         content_parts.append(f"**Research Date:** {session.started_at[:10]}\n")
@@ -258,7 +261,7 @@ class ReportGenerator:
         content_parts.append("\n---\n")
 
         # Executive Summary
-        exec_summary = session.section_contents.get("_executive_summary", {})
+        exec_summary = renumbered_contents.get("_executive_summary", {})
         if exec_summary:
             content_parts.append("## Executive Summary\n")
             content_parts.append(exec_summary.get("executive_summary", "") + "\n")
@@ -282,7 +285,7 @@ class ReportGenerator:
         # Main Content Sections
         if plan:
             for item in plan.table_of_contents.items:
-                section_content = session.section_contents.get(item.section, {})
+                section_content = renumbered_contents.get(item.section, {})
 
                 content_parts.append(f"\n## {item.section}. {item.title}\n")
 
@@ -301,7 +304,7 @@ class ReportGenerator:
 
                 # Subsections
                 for sub in item.subsections:
-                    sub_content = session.section_contents.get(sub.section, {})
+                    sub_content = renumbered_contents.get(sub.section, {})
                     content_parts.append(f"\n### {sub.section}. {sub.title}\n")
                     if sub_content:
                         content_parts.append(self._process_citations(
@@ -417,6 +420,9 @@ class ReportGenerator:
         # Use filtered evidence or all evidence
         evidence_list = filtered_evidence if filtered_evidence is not None else evidence_locker.get_all_evidence()
 
+        # Renumber citations to match final reference order
+        renumbered_contents = self._renumber_all_citations(session, evidence_list)
+
         # Title
         title = doc.add_heading(plan.title if plan else session.query, 0)
         title.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -429,7 +435,7 @@ class ReportGenerator:
         doc.add_paragraph()  # Spacing
 
         # Executive Summary
-        exec_summary = session.section_contents.get("_executive_summary", {})
+        exec_summary = renumbered_contents.get("_executive_summary", {})
         if exec_summary:
             doc.add_heading("Executive Summary", level=1)
             doc.add_paragraph(exec_summary.get("executive_summary", ""))
@@ -451,7 +457,7 @@ class ReportGenerator:
         # Main Content
         if plan:
             for item in plan.table_of_contents.items:
-                section_content = session.section_contents.get(item.section, {})
+                section_content = renumbered_contents.get(item.section, {})
 
                 doc.add_heading(f"{item.section}. {item.title}", level=1)
 
@@ -465,7 +471,7 @@ class ReportGenerator:
 
                 # Subsections
                 for sub in item.subsections:
-                    sub_content = session.section_contents.get(sub.section, {})
+                    sub_content = renumbered_contents.get(sub.section, {})
                     doc.add_heading(f"{sub.section}. {sub.title}", level=2)
                     if sub_content:
                         doc.add_paragraph(self._strip_citations(
@@ -614,6 +620,9 @@ class ReportGenerator:
         # Use filtered evidence or all evidence
         evidence_list = filtered_evidence if filtered_evidence is not None else evidence_locker.get_all_evidence()
 
+        # Renumber citations to match final reference order
+        renumbered_contents = self._renumber_all_citations(session, evidence_list)
+
         # Register Japanese fonts if language is Japanese
         japanese_font = None
         if self.language == "ja":
@@ -678,7 +687,7 @@ class ReportGenerator:
         story.append(Spacer(1, 30))
 
         # Executive Summary
-        exec_summary = session.section_contents.get("_executive_summary", {})
+        exec_summary = renumbered_contents.get("_executive_summary", {})
         if exec_summary:
             story.append(Paragraph("Executive Summary", heading1_style))
             story.append(Paragraph(
@@ -690,7 +699,7 @@ class ReportGenerator:
         # Main Content
         if plan:
             for item in plan.table_of_contents.items:
-                section_content = session.section_contents.get(item.section, {})
+                section_content = renumbered_contents.get(item.section, {})
 
                 story.append(Paragraph(
                     f"{item.section}. {item.title}",
@@ -713,7 +722,7 @@ class ReportGenerator:
 
                 # Subsections
                 for sub in item.subsections:
-                    sub_content = session.section_contents.get(sub.section, {})
+                    sub_content = renumbered_contents.get(sub.section, {})
                     story.append(Paragraph(
                         f"{sub.section}. {sub.title}",
                         heading2_style
@@ -791,11 +800,14 @@ class ReportGenerator:
         # Use filtered evidence or all evidence
         evidence_list = filtered_evidence if filtered_evidence is not None else evidence_locker.get_all_evidence()
 
+        # Renumber citations to match final reference order
+        renumbered_contents = self._renumber_all_citations(session, evidence_list)
+
         # Build content sections
         sections_html = []
         if plan:
             for item in plan.table_of_contents.items:
-                section_content = session.section_contents.get(item.section, {})
+                section_content = renumbered_contents.get(item.section, {})
 
                 section_html = f"""
                 <section id="{self._slugify(item.title)}">
@@ -819,7 +831,7 @@ class ReportGenerator:
 
                 # Subsections
                 for sub in item.subsections:
-                    sub_content = session.section_contents.get(sub.section, {})
+                    sub_content = renumbered_contents.get(sub.section, {})
                     section_html += f"""
                     <section id="{self._slugify(sub.title)}">
                         <h3>{sub.section}. {sub.title}</h3>
@@ -833,7 +845,7 @@ class ReportGenerator:
                 sections_html.append(section_html)
 
         # Executive summary
-        exec_summary = session.section_contents.get("_executive_summary", {})
+        exec_summary = renumbered_contents.get("_executive_summary", {})
         exec_html = ""
         if exec_summary:
             findings_html = "".join(
@@ -1052,9 +1064,107 @@ class ReportGenerator:
         text = re.sub(r'[\s_-]+', '-', text)
         return text.strip('-')
 
+    def _build_url_to_reference_map(
+        self,
+        evidence_list: List,
+    ) -> Dict[str, int]:
+        """
+        Build a mapping from source URL to final reference number.
+
+        Args:
+            evidence_list: List of evidence items in final order
+
+        Returns:
+            Dictionary mapping URL to reference number (1-indexed)
+        """
+        url_to_ref = {}
+        for i, evidence in enumerate(evidence_list, 1):
+            url_to_ref[evidence.url] = i
+        return url_to_ref
+
+    def _renumber_citations_in_section(
+        self,
+        content: str,
+        section_sources: List[str],
+        url_to_ref: Dict[str, int],
+    ) -> str:
+        """
+        Renumber citations in section content to match final reference numbers.
+
+        During synthesis, sources are numbered [SOURCE 1], [SOURCE 2], etc.
+        based on the order they were passed to the synthesizer.
+        This method converts those to match the final reference list order.
+
+        Args:
+            content: Section content with [SOURCE N] markers
+            section_sources: List of URLs used for this section (in synthesis order)
+            url_to_ref: Mapping from URL to final reference number
+
+        Returns:
+            Content with corrected reference numbers
+        """
+        if not content or not section_sources:
+            return content
+
+        # Find all [SOURCE N] patterns and replace with correct numbers
+        def replace_citation(match):
+            original_num = int(match.group(1))
+            # Source numbers are 1-indexed
+            source_index = original_num - 1
+
+            if 0 <= source_index < len(section_sources):
+                source_url = section_sources[source_index]
+                if source_url in url_to_ref:
+                    new_ref_num = url_to_ref[source_url]
+                    return f"[{new_ref_num}]"
+
+            # If we can't map, keep original but mark it
+            return f"[?{original_num}]"
+
+        # Replace [SOURCE N] and [SOURCE: N] patterns
+        result = re.sub(r'\[SOURCE:?\s*(\d+)\]', replace_citation, content)
+        return result
+
+    def _renumber_all_citations(
+        self,
+        session: 'ResearchSession',
+        evidence_list: List,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Renumber all citations in session contents to match final reference order.
+
+        Args:
+            session: Research session with section contents
+            evidence_list: Final ordered list of evidence
+
+        Returns:
+            Updated section_contents with correct citation numbers
+        """
+        from copy import deepcopy
+
+        url_to_ref = self._build_url_to_reference_map(evidence_list)
+        updated_contents = deepcopy(session.section_contents)
+
+        for section_id, section_data in updated_contents.items():
+            if section_id.startswith("_"):
+                continue
+
+            content = section_data.get("content", "")
+            section_sources = section_data.get("sources", [])
+
+            if content and section_sources:
+                updated_content = self._renumber_citations_in_section(
+                    content, section_sources, url_to_ref
+                )
+                updated_contents[section_id]["content"] = updated_content
+
+        return updated_contents
+
     def _process_citations(self, text: str) -> str:
         """Convert citation markers to markdown footnotes."""
-        # Convert [SOURCE: N] to [^N]
+        # Convert [N] to [^N] for markdown footnotes
+        text = re.sub(r'\[(\d+)\]', r'[^\1]', text)
+        # Handle legacy format [SOURCE: N]
         text = re.sub(r'\[SOURCE:\s*(\d+)\]', r'[^\1]', text)
         # Convert [ANALYSIS] to italic marker
         text = text.replace('[ANALYSIS]', '*[Analysis]*')
@@ -1062,7 +1172,9 @@ class ReportGenerator:
 
     def _strip_citations(self, text: str) -> str:
         """Remove citation markers from text."""
+        text = re.sub(r'\[\d+\]', '', text)
         text = re.sub(r'\[SOURCE:\s*\d+\]', '', text)
+        text = re.sub(r'\[\?\d+\]', '', text)  # Remove unmapped citations
         text = text.replace('[ANALYSIS]', '')
         return text.strip()
 

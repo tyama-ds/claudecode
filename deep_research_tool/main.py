@@ -125,14 +125,21 @@ class DeepResearchTool:
 
     def _create_llm_client(self):
         """Create LLM client based on configuration."""
-        return get_client(
-            provider=self.config.api.provider.value,
-            api_key=self.config.api.get_active_api_key(),
-            model=self.config.api.get_active_model(),
-            http_proxy=self.config.proxy.http_proxy,
-            https_proxy=self.config.proxy.https_proxy,
-            verify_ssl=self.config.proxy.verify_ssl,
-        )
+        kwargs = {
+            "provider": self.config.api.provider.value,
+            "api_key": self.config.api.get_active_api_key(),
+            "model": self.config.api.get_active_model(),
+            "http_proxy": self.config.proxy.http_proxy,
+            "https_proxy": self.config.proxy.https_proxy,
+            "verify_ssl": self.config.proxy.verify_ssl,
+        }
+
+        # Add local LLM specific settings
+        if self.config.api.provider == LLMProvider.LOCAL:
+            kwargs["base_url"] = self.config.api.local_base_url
+            kwargs["backend"] = self.config.api.local_backend.value
+
+        return get_client(**kwargs)
 
     def _create_search_client(self):
         """Create search client based on configuration."""
@@ -156,6 +163,38 @@ class DeepResearchTool:
             method=self.config.search.method.value,
             **kwargs
         )
+
+    def _create_content_filter(self):
+        """Create content filter based on configuration."""
+        from .evidence.content_filter import (
+            ContentFilter,
+            ContentFilterConfig,
+            create_strict_filter,
+            create_moderate_filter,
+            create_minimal_filter,
+        )
+        from .config import ContentFilterMode
+
+        filter_mode = self.config.research.content_filter_mode
+
+        if filter_mode == ContentFilterMode.NONE:
+            return None
+        elif filter_mode == ContentFilterMode.STRICT:
+            content_filter = create_strict_filter()
+        elif filter_mode == ContentFilterMode.MINIMAL:
+            content_filter = create_minimal_filter()
+        else:  # MODERATE (default)
+            content_filter = create_moderate_filter()
+
+        # Add custom blocked domains
+        for domain in self.config.research.custom_blocked_domains:
+            content_filter.add_blocked_domain(domain)
+
+        # Add custom whitelisted domains
+        for domain in self.config.research.custom_whitelisted_domains:
+            content_filter.add_whitelisted_domain(domain)
+
+        return content_filter
 
     def run(
         self,
@@ -199,7 +238,9 @@ class DeepResearchTool:
                         "content": doc.content,
                     })
 
-        # Initialize researcher
+        # Initialize researcher with content filter
+        content_filter = self._create_content_filter()
+
         self.researcher = Researcher(
             llm_client=self.llm_client,
             search_client=self.search_client,
@@ -216,6 +257,8 @@ class DeepResearchTool:
             crawl_max_sites=self.config.research.crawl_max_sites,
             crawl_relevance_threshold=self.config.research.crawl_relevance_threshold,
             use_enhanced_synthesis=self.config.research.use_enhanced_synthesis,
+            content_filter=content_filter,
+            filter_mode=self.config.research.content_filter_mode.value,
         )
 
         # Conduct research
@@ -584,6 +627,10 @@ def run_research(
     # Search depth parameters
     max_queries_per_iteration: int = 3,
     max_pages_per_query: int = 3,
+    # Content filtering parameters
+    content_filter_mode: str = "moderate",
+    custom_blocked_domains: List[str] = None,
+    custom_whitelisted_domains: List[str] = None,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -623,6 +670,9 @@ def run_research(
         use_enhanced_synthesis: Use multi-pass content generation for better quality
         max_queries_per_iteration: Max queries to execute per research iteration (default: 3)
         max_pages_per_query: Max pages to process per search query (default: 3)
+        content_filter_mode: Content filter strictness ('strict', 'moderate', 'minimal', 'none')
+        custom_blocked_domains: List of domains to block (ads, spam, etc.)
+        custom_whitelisted_domains: List of domains to always allow
         **kwargs: Additional configuration options
 
     Returns:
@@ -710,6 +760,9 @@ def run_research(
         use_enhanced_synthesis=use_enhanced_synthesis,
         max_queries_per_iteration=max_queries_per_iteration,
         max_pages_per_query=max_pages_per_query,
+        content_filter_mode=content_filter_mode,
+        custom_blocked_domains=custom_blocked_domains,
+        custom_whitelisted_domains=custom_whitelisted_domains,
         **api_key_param,
         **kwargs,
     )

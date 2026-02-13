@@ -157,6 +157,8 @@ class FigureTableGenerator:
         max_images_per_section: int = 2,
         image_max_width: int = 800,
         download_timeout: int = 10,
+        proxies: Dict[str, str] = None,
+        verify_ssl: bool = True,
     ):
         """
         Initialize FigureTableGenerator.
@@ -168,6 +170,8 @@ class FigureTableGenerator:
             max_images_per_section: Maximum images per section
             image_max_width: Maximum image width in pixels
             download_timeout: Timeout for downloading images
+            proxies: Proxy settings dict (e.g., {"http": "http://proxy:8080", "https": "http://proxy:8080"})
+            verify_ssl: Whether to verify SSL certificates
         """
         self.llm = llm_client
         self.output_dir = output_dir or Path("./output/figures")
@@ -176,6 +180,8 @@ class FigureTableGenerator:
         self.max_images_per_section = max_images_per_section
         self.image_max_width = image_max_width
         self.download_timeout = download_timeout
+        self.proxies = proxies
+        self.verify_ssl = verify_ssl
 
     def generate_figures_and_tables(
         self,
@@ -333,7 +339,9 @@ class FigureTableGenerator:
             response = requests.get(
                 url,
                 timeout=self.download_timeout,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; ResearchBot/1.0)"}
+                headers={"User-Agent": "Mozilla/5.0 (compatible; ResearchBot/1.0)"},
+                proxies=self.proxies,
+                verify=self.verify_ssl,
             )
             response.raise_for_status()
 
@@ -408,7 +416,9 @@ class FigureTableGenerator:
             response = requests.get(
                 url,
                 timeout=self.download_timeout,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; ResearchBot/1.0)"}
+                headers={"User-Agent": "Mozilla/5.0 (compatible; ResearchBot/1.0)"},
+                proxies=self.proxies,
+                verify=self.verify_ssl,
             )
             response.raise_for_status()
 
@@ -891,6 +901,8 @@ def add_figures_to_report(
     llm_client=None,
     output_dir: Path = None,
     language: str = "ja",
+    proxies: Dict[str, str] = None,
+    verify_ssl: bool = True,
 ) -> Path:
     """
     Add figures and tables to an existing report.
@@ -902,6 +914,8 @@ def add_figures_to_report(
         llm_client: Optional LLM client for analysis
         output_dir: Output directory for images
         language: Language for captions
+        proxies: Proxy settings dict (e.g., {"http": "http://proxy:8080", "https": "http://proxy:8080"})
+        verify_ssl: Whether to verify SSL certificates
 
     Returns:
         Path to the updated report
@@ -916,6 +930,8 @@ def add_figures_to_report(
         llm_client=llm_client,
         output_dir=output_dir,
         language=language,
+        proxies=proxies,
+        verify_ssl=verify_ssl,
     )
 
     # Generate figures and tables
