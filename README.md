@@ -1196,6 +1196,587 @@ page.evaluation_time      # float - 評価時間（秒）
 page.metadata             # Dict - メタデータ（検索クエリ等）
 ```
 
+### 検索エンジンの選択（DuckDuckGo / Selenium）
+
+```python
+from deep_research_tool.search import get_search_client
+
+# DuckDuckGo（高速、APIベース）
+search_duckduckgo = get_search_client(method="duckduckgo", max_results=10)
+
+# Selenium（動的サイト対応、ブラウザベース）
+search_selenium = get_search_client(
+    method="selenium",
+    headless=True,         # ヘッドレスモード
+    browser="chrome",      # chrome / firefox
+    max_results=10,
+)
+
+# FastCrawlerで使用
+crawler = FastCrawler(
+    search_client=search_selenium,  # Seleniumを使用
+    llm_client=llm_client,
+    evaluation_mode=EvaluationMode.BATCH,
+)
+```
+
+### 検索結果数の調整
+
+```python
+# 検索クエリあたりの取得ページ数を調整
+result = crawler.crawl_and_evaluate(
+    queries=["AI市場動向 2024"],
+    section_context="AI市場の概況",
+    max_pages_per_query=10,     # デフォルト3、最大10程度推奨
+    min_relevance_score=0.2,    # 関連度閾値（低いほど多く取得）
+)
+```
+
+### サイト内深層クローリング（SiteCrawler）
+
+SiteCrawlerを使うと、検索結果のページだけでなく、そのサイト内のリンクを辿って深層ページも収集できます。
+
+```python
+from deep_research_tool.research.site_crawler import SiteCrawler
+from deep_research_tool.search import get_search_client
+from deep_research_tool.api import get_client
+
+# クライアント作成
+search_client = get_search_client(method="selenium", headless=True)
+llm_client = get_client(provider="openai")
+
+# SiteCrawler作成
+site_crawler = SiteCrawler(
+    search_client=search_client,
+    llm_client=llm_client,       # LLM使用でより正確な関連度評価
+    max_pages=15,                # 1サイトあたり最大ページ数
+    max_depth=2,                 # シードURLからの最大深度
+    relevance_threshold=0.3,     # 関連度閾値
+    delay_between_requests=0.5,  # リクエスト間隔（秒）
+    language="ja",
+)
+
+# 単一サイトのクローリング
+result = site_crawler.crawl_site(
+    seed_url="https://example.com/ev-market",
+    research_topic="日本のEV市場",
+    keywords=["電気自動車", "EV", "市場規模", "普及率"],
+    section_context="市場概況",
+)
+
+print(f"クロール済み: {result.pages_crawled}ページ")
+print(f"関連ページ: {result.pages_relevant}ページ")
+print(f"発見トピック: {result.discovered_topics}")
+print(f"追加クエリ提案: {result.suggested_queries}")
+
+# 取得したページを処理
+for page in result.crawled_pages:
+    print(f"\n[{page.depth}] {page.title}")
+    print(f"  URL: {page.url}")
+    print(f"  関連度: {page.relevance_score:.2f}")
+    print(f"  リンク数: {len(page.links)}")
+```
+
+### FastCrawler + SiteCrawler の組み合わせ
+
+検索 → 検索結果ページ取得 → サイト内深層クロール のワークフロー:
+
+```python
+from deep_research_tool.research.fast_crawler import FastCrawler, EvaluationMode
+from deep_research_tool.research.site_crawler import SiteCrawler
+from deep_research_tool.search import get_search_client
+from deep_research_tool.api import get_client
+
+# クライアント
+search_client = get_search_client(method="selenium", headless=True)
+llm_client = get_client(provider="openai")
+
+# Step 1: FastCrawlerで検索結果を取得・評価
+fast_crawler = FastCrawler(
+    search_client=search_client,
+    llm_client=llm_client,
+    evaluation_mode=EvaluationMode.BATCH,
+)
+
+search_result = fast_crawler.crawl_and_evaluate(
+    queries=["量子コンピュータ 技術動向 2024"],
+    section_context="量子コンピュータの最新技術",
+    max_pages_per_query=5,
+)
+
+print(f"検索結果: {len(search_result.pages)}件の関連ページ")
+
+# Step 2: 高関連度のページについてサイト内深層クロール
+site_crawler = SiteCrawler(
+    search_client=search_client,
+    llm_client=llm_client,
+    max_pages=10,
+    max_depth=2,
+)
+
+all_deep_pages = []
+for page in search_result.pages:
+    if page.relevance_score >= 0.6:  # 高関連度のみ深層クロール
+        print(f"\n深層クロール開始: {page.url}")
+        deep_result = site_crawler.crawl_site(
+            seed_url=page.url,
+            research_topic="量子コンピュータ",
+            keywords=["量子", "qubit", "超電導", "誤り訂正"],
+        )
+        all_deep_pages.extend(deep_result.crawled_pages)
+        print(f"  → {deep_result.pages_relevant}ページ取得")
+
+print(f"\n合計: {len(all_deep_pages)}ページの深層情報を取得")
+```
+
+### 情報収集結果のエビデンスロッカーへの保存
+
+```python
+from deep_research_tool.evidence.locker import EvidenceLocker, EvidenceType
+
+# エビデンスロッカー作成
+locker = EvidenceLocker(output_dir="./output/evidence")
+
+# FastCrawlerの結果を保存
+for page in search_result.pages:
+    locker.add_evidence(
+        url=page.url,
+        title=page.title,
+        content_excerpt=page.processed_content or page.content[:500],
+        evidence_type=EvidenceType.WEB_PAGE,
+        search_query=page.metadata.get("query", ""),
+        relevance_score=page.relevance_score,
+    )
+
+# SiteCrawlerの結果を保存
+for page in all_deep_pages:
+    locker.add_evidence(
+        url=page.url,
+        title=page.title,
+        content_excerpt=page.content[:500],
+        evidence_type=EvidenceType.WEB_PAGE,
+        relevance_score=page.relevance_score,
+    )
+
+# エクスポート
+locker.export_to_json()   # JSON形式
+locker.export_to_csv()    # CSV形式（Excel対応）
+
+print(f"保存済み: {len(locker.get_all_evidence())}件のエビデンス")
+```
+
+### 完全なワークフロー例
+
+```python
+"""
+完全な情報収集ワークフロー:
+1. 複数クエリで検索
+2. 検索結果を並列フェッチ・評価
+3. 高関連度ページについてサイト内深層クロール
+4. 全結果をエビデンスロッカーに保存
+5. CSVエクスポート
+"""
+
+from deep_research_tool.research.fast_crawler import FastCrawler, EvaluationMode
+from deep_research_tool.research.site_crawler import SiteCrawler
+from deep_research_tool.search import get_search_client
+from deep_research_tool.api import get_client
+from deep_research_tool.evidence.locker import EvidenceLocker, EvidenceType
+
+def comprehensive_research(
+    topic: str,
+    queries: list,
+    provider: str = "openai",
+    search_method: str = "duckduckgo",
+    deep_crawl: bool = True,
+    output_dir: str = "./output",
+):
+    """包括的な情報収集を実行"""
+
+    # クライアント初期化
+    search = get_search_client(method=search_method, max_results=10)
+    llm = get_client(provider=provider)
+    locker = EvidenceLocker(output_dir=f"{output_dir}/evidence")
+
+    # FastCrawler
+    fast_crawler = FastCrawler(
+        search_client=search,
+        llm_client=llm,
+        evaluation_mode=EvaluationMode.BATCH,
+        max_workers=10,
+    )
+
+    print(f"=== 検索フェーズ: {len(queries)}クエリ ===")
+    search_result = fast_crawler.crawl_and_evaluate(
+        queries=queries,
+        section_context=topic,
+        max_pages_per_query=5,
+        min_relevance_score=0.2,
+    )
+
+    # 検索結果を保存
+    for page in search_result.pages:
+        locker.add_evidence(
+            url=page.url,
+            title=page.title,
+            content_excerpt=page.processed_content or page.content[:500],
+            evidence_type=EvidenceType.WEB_PAGE,
+            search_query=page.metadata.get("query", ""),
+            relevance_score=page.relevance_score,
+        )
+
+    print(f"検索結果: {len(search_result.pages)}件")
+
+    # 深層クロール
+    if deep_crawl:
+        site_crawler = SiteCrawler(
+            search_client=search,
+            llm_client=llm,
+            max_pages=10,
+            max_depth=2,
+        )
+
+        high_relevance = [p for p in search_result.pages if p.relevance_score >= 0.5]
+        print(f"\n=== 深層クロールフェーズ: {len(high_relevance)}サイト ===")
+
+        for page in high_relevance[:3]:  # 上位3サイトのみ
+            try:
+                deep_result = site_crawler.crawl_site(
+                    seed_url=page.url,
+                    research_topic=topic,
+                )
+                for dp in deep_result.crawled_pages:
+                    locker.add_evidence(
+                        url=dp.url,
+                        title=dp.title,
+                        content_excerpt=dp.content[:500],
+                        evidence_type=EvidenceType.WEB_PAGE,
+                        relevance_score=dp.relevance_score,
+                    )
+                print(f"  {page.url[:50]}... → {deep_result.pages_relevant}ページ")
+            except Exception as e:
+                print(f"  エラー: {e}")
+
+    # エクスポート
+    json_path = locker.export_to_json()
+    csv_path = locker.export_to_csv()
+
+    total = len(locker.get_all_evidence())
+    print(f"\n=== 完了: {total}件のエビデンス ===")
+    print(f"JSON: {json_path}")
+    print(f"CSV: {csv_path}")
+
+    return locker
+
+# 使用例
+locker = comprehensive_research(
+    topic="日本のEV市場の現状",
+    queries=[
+        "日本 EV市場 2024 市場規模",
+        "電気自動車 販売台数 推移",
+        "EV 充電インフラ 整備状況",
+    ],
+    provider="openai",
+    search_method="duckduckgo",  # または "selenium"
+    deep_crawl=True,
+)
+```
+
+### 全部盛り：最大限の情報収集（Maximum Coverage Mode）
+
+できるだけ多くの情報を収集したい場合の設定例です。検索エンジン併用、深層クロール、多言語検索などを組み合わせた「全部盛り」構成です。
+
+```python
+"""
+最大限の情報収集設定:
+- 複数検索エンジン（DuckDuckGo + Selenium/Google）
+- 多言語検索（日本語 + 英語）
+- 深層サイトクロール
+- 並列高速フェッチ
+- 広めの関連度閾値
+"""
+
+from deep_research_tool.research.fast_crawler import FastCrawler, EvaluationMode
+from deep_research_tool.research.site_crawler import SiteCrawler
+from deep_research_tool.search import DuckDuckGoSearch, SeleniumBrowser
+from deep_research_tool.api import get_client
+from deep_research_tool.evidence.locker import EvidenceLocker, EvidenceType
+
+
+def maximum_coverage_research(
+    topic: str,
+    queries_ja: list,
+    queries_en: list = None,
+    provider: str = "openai",
+    output_dir: str = "./output",
+    use_google: bool = True,        # Google検索も使う
+    deep_crawl: bool = True,        # サイト内深層クロール
+    max_pages_per_query: int = 10,  # クエリあたりの最大ページ数
+    deep_crawl_depth: int = 3,      # 深層クロールの最大深度
+    deep_crawl_pages: int = 20,     # 深層クロールの最大ページ数
+):
+    """
+    全部盛りの情報収集を実行
+
+    Args:
+        topic: 調査トピック
+        queries_ja: 日本語検索クエリのリスト
+        queries_en: 英語検索クエリのリスト（Noneの場合はスキップ）
+        provider: LLMプロバイダー
+        output_dir: 出力ディレクトリ
+        use_google: Seleniumを使ってGoogle検索も行う
+        deep_crawl: サイト内深層クロールを実行
+        max_pages_per_query: 検索クエリあたりの最大ページ数
+        deep_crawl_depth: 深層クロールの最大リンク深度
+        deep_crawl_pages: 深層クロールの最大ページ数
+    """
+
+    # === クライアント初期化 ===
+    llm = get_client(provider=provider)
+    locker = EvidenceLocker(output_dir=f"{output_dir}/evidence")
+
+    # 検索クライアント
+    duckduckgo = DuckDuckGoSearch(max_results=max_pages_per_query)
+    selenium = SeleniumBrowser(
+        max_results=max_pages_per_query,
+        headless=True,
+        browser="chrome",
+    ) if use_google else None
+
+    # === Phase 1: DuckDuckGo検索（日本語） ===
+    print("=" * 60)
+    print(f"Phase 1: DuckDuckGo検索（日本語）- {len(queries_ja)}クエリ")
+    print("=" * 60)
+
+    crawler_ddg = FastCrawler(
+        search_client=duckduckgo,
+        llm_client=llm,
+        evaluation_mode=EvaluationMode.BATCH,
+        max_workers=15,               # 並列ワーカー増量
+        batch_size=8,                 # バッチサイズ増量
+        language="ja",
+    )
+
+    result_ddg_ja = crawler_ddg.crawl_and_evaluate(
+        queries=queries_ja,
+        section_context=topic,
+        max_pages_per_query=max_pages_per_query,
+        min_relevance_score=0.15,     # 低めの閾値で多く取得
+    )
+    print(f"  → {len(result_ddg_ja.pages)}件取得")
+    _save_to_locker(locker, result_ddg_ja.pages, "DuckDuckGo-JA")
+
+    # === Phase 2: Google検索（日本語）- Selenium使用 ===
+    all_pages = list(result_ddg_ja.pages)
+
+    if selenium:
+        print("\n" + "=" * 60)
+        print(f"Phase 2: Google検索（日本語）- {len(queries_ja)}クエリ")
+        print("=" * 60)
+
+        crawler_google = FastCrawler(
+            search_client=selenium,
+            llm_client=llm,
+            evaluation_mode=EvaluationMode.BATCH,
+            max_workers=10,
+            language="ja",
+        )
+
+        # Selenium経由でGoogle検索
+        for query in queries_ja:
+            try:
+                # Google検索実行
+                search_results = selenium.search(
+                    query,
+                    search_engine="google",
+                    max_results=max_pages_per_query,
+                )
+                print(f"  '{query[:30]}...' → {len(search_results)}件")
+
+                # 各結果を取得・評価（既存URLはスキップ）
+                existing_urls = {p.url for p in all_pages}
+                new_results = [r for r in search_results if r.url not in existing_urls]
+
+                if new_results:
+                    # 簡易的にページ内容を取得して追加
+                    for r in new_results[:5]:  # 上位5件のみ
+                        try:
+                            page_content = selenium.get_page_content(r.url)
+                            locker.add_evidence(
+                                url=r.url,
+                                title=r.title,
+                                content_excerpt=page_content.text_content[:500],
+                                evidence_type=EvidenceType.WEB_PAGE,
+                                search_query=query,
+                                relevance_score=0.5,  # 仮スコア
+                            )
+                        except Exception as e:
+                            print(f"    ページ取得エラー: {e}")
+
+            except Exception as e:
+                print(f"  検索エラー: {e}")
+
+    # === Phase 3: 英語検索（オプション） ===
+    if queries_en:
+        print("\n" + "=" * 60)
+        print(f"Phase 3: 英語検索 - {len(queries_en)}クエリ")
+        print("=" * 60)
+
+        crawler_en = FastCrawler(
+            search_client=duckduckgo,
+            llm_client=llm,
+            evaluation_mode=EvaluationMode.BATCH,
+            max_workers=15,
+            language="en",
+        )
+
+        result_en = crawler_en.crawl_and_evaluate(
+            queries=queries_en,
+            section_context=topic,
+            max_pages_per_query=max_pages_per_query,
+            min_relevance_score=0.15,
+        )
+        print(f"  → {len(result_en.pages)}件取得")
+        _save_to_locker(locker, result_en.pages, "DuckDuckGo-EN")
+        all_pages.extend(result_en.pages)
+
+    # === Phase 4: 深層サイトクロール ===
+    if deep_crawl:
+        print("\n" + "=" * 60)
+        print("Phase 4: 深層サイトクロール")
+        print("=" * 60)
+
+        site_crawler = SiteCrawler(
+            search_client=duckduckgo,
+            llm_client=llm,
+            max_pages=deep_crawl_pages,
+            max_depth=deep_crawl_depth,
+            relevance_threshold=0.2,   # 広めの閾値
+            delay_between_requests=0.3,
+        )
+
+        # 高関連度ページのサイトを深層クロール
+        high_relevance = sorted(
+            all_pages,
+            key=lambda p: p.relevance_score,
+            reverse=True,
+        )[:5]  # 上位5サイト
+
+        crawled_domains = set()
+        for page in high_relevance:
+            domain = page.url.split('/')[2] if '/' in page.url else page.url
+            if domain in crawled_domains:
+                continue
+            crawled_domains.add(domain)
+
+            print(f"\n  深層クロール: {domain}")
+            try:
+                site_crawler.reset_page_counter()  # カウンターリセット
+                deep_result = site_crawler.crawl_site(
+                    seed_url=page.url,
+                    research_topic=topic,
+                    section_context=topic,
+                )
+                print(f"    → {deep_result.pages_relevant}ページ取得")
+                print(f"    発見トピック: {deep_result.discovered_topics[:3]}")
+
+                for dp in deep_result.crawled_pages:
+                    locker.add_evidence(
+                        url=dp.url,
+                        title=dp.title,
+                        content_excerpt=dp.content[:500],
+                        evidence_type=EvidenceType.WEB_PAGE,
+                        relevance_score=dp.relevance_score,
+                    )
+            except Exception as e:
+                print(f"    エラー: {e}")
+
+    # === Phase 5: 結果エクスポート ===
+    print("\n" + "=" * 60)
+    print("Phase 5: 結果エクスポート")
+    print("=" * 60)
+
+    json_path = locker.export_to_json()
+    csv_path = locker.export_to_csv()
+
+    total = len(locker.get_all_evidence())
+    print(f"\n収集完了: {total}件のエビデンス")
+    print(f"  JSON: {json_path}")
+    print(f"  CSV: {csv_path}")
+
+    # クリーンアップ
+    if selenium:
+        selenium.close()
+
+    return locker
+
+
+def _save_to_locker(locker, pages, source_tag):
+    """ページをエビデンスロッカーに保存"""
+    for page in pages:
+        locker.add_evidence(
+            url=page.url,
+            title=page.title,
+            content_excerpt=page.processed_content or page.content[:500],
+            evidence_type=EvidenceType.WEB_PAGE,
+            search_query=page.metadata.get("query", ""),
+            relevance_score=page.relevance_score,
+        )
+
+
+# === 使用例 ===
+if __name__ == "__main__":
+    locker = maximum_coverage_research(
+        topic="日本のEV市場の現状と将来展望",
+
+        # 日本語クエリ
+        queries_ja=[
+            "日本 EV市場 2024 市場規模",
+            "電気自動車 販売台数 推移 日本",
+            "EV 充電インフラ 整備 2024",
+            "トヨタ 日産 EV戦略",
+            "電気自動車 補助金 2024",
+        ],
+
+        # 英語クエリ（グローバル情報）
+        queries_en=[
+            "Japan EV market 2024 analysis",
+            "electric vehicle sales Japan trends",
+            "Toyota Nissan EV strategy global",
+        ],
+
+        # 全部盛り設定
+        provider="openai",
+        use_google=True,              # Google検索も使用
+        deep_crawl=True,              # 深層クロール有効
+        max_pages_per_query=10,       # クエリあたり最大10ページ
+        deep_crawl_depth=3,           # リンク3階層まで
+        deep_crawl_pages=20,          # サイトあたり最大20ページ
+    )
+
+    print(f"\n最終結果: {len(locker.get_all_evidence())}件のエビデンスを収集")
+```
+
+#### 設定の目安
+
+| 設定項目 | 通常 | 全部盛り | 備考 |
+|---------|------|---------|------|
+| `max_pages_per_query` | 3-5 | 10-15 | クエリあたりの検索結果数 |
+| `min_relevance_score` | 0.3 | 0.15-0.2 | 低いほど多く取得 |
+| `max_workers` | 10 | 15-20 | HTTPフェッチの並列数 |
+| `batch_size` | 5 | 8-10 | LLM評価のバッチサイズ |
+| `deep_crawl_depth` | 2 | 3-4 | サイト内リンク追跡深度 |
+| `deep_crawl_pages` | 10 | 20-30 | サイトあたりの最大ページ数 |
+| `use_google` | False | True | Google検索併用 |
+| `queries_en` | なし | あり | 英語検索追加 |
+
+#### 注意事項
+
+- **APIコスト**: 全部盛りではLLM APIの呼び出し回数が大幅に増加します
+- **レート制限**: 特にSelenium/Google検索はレート制限に注意（短時間に多数のリクエストでブロックされる可能性）
+- **実行時間**: 深層クロールを有効にすると数十分かかる場合があります
+- **ストレージ**: 大量のエビデンスを収集するため、十分なディスク容量を確保してください
+
 ---
 
 ## 詳細ワークフロー：クエリ入力からレポート出力まで

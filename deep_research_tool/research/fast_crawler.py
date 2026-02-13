@@ -115,6 +115,7 @@ class FastCrawler:
         self,
         queries: List[str],
         section_context: str,
+        research_topic: str = "",
         max_pages_per_query: int = 3,
         min_relevance_score: float = 0.3,
         progress_callback: Callable[[str, int, int], None] = None,
@@ -125,6 +126,7 @@ class FastCrawler:
         Args:
             queries: List of search queries
             section_context: Section context for relevance evaluation
+            research_topic: Original research topic/purpose for context-aware evaluation
             max_pages_per_query: Max pages to fetch per query
             min_relevance_score: Minimum relevance score to include
             progress_callback: Callback(message, current, total)
@@ -182,18 +184,21 @@ class FastCrawler:
             evaluated_pages = self._batch_evaluate(
                 pages=filtered_pages,
                 section_context=section_context,
+                research_topic=research_topic,
                 progress_callback=progress_callback,
             )
         elif self.evaluation_mode == EvaluationMode.PARALLEL:
             evaluated_pages = self._parallel_evaluate(
                 pages=filtered_pages,
                 section_context=section_context,
+                research_topic=research_topic,
                 progress_callback=progress_callback,
             )
         else:  # SEQUENTIAL
             evaluated_pages = self._sequential_evaluate(
                 pages=filtered_pages,
                 section_context=section_context,
+                research_topic=research_topic,
                 progress_callback=progress_callback,
             )
 
@@ -316,6 +321,7 @@ class FastCrawler:
         self,
         pages: List[CrawledPage],
         section_context: str,
+        research_topic: str = "",
         progress_callback: Callable = None,
     ) -> List[EvaluatedPage]:
         """
@@ -324,6 +330,7 @@ class FastCrawler:
         Args:
             pages: Crawled pages to evaluate
             section_context: Context for evaluation
+            research_topic: Original research topic/purpose
             progress_callback: Progress callback
 
         Returns:
@@ -344,7 +351,7 @@ class FastCrawler:
 
             start = time.time()
             try:
-                batch_results = self._evaluate_batch(batch, section_context)
+                batch_results = self._evaluate_batch(batch, section_context, research_topic)
                 eval_time = time.time() - start
 
                 for page, result in zip(batch, batch_results):
@@ -381,6 +388,7 @@ class FastCrawler:
         self,
         pages: List[CrawledPage],
         section_context: str,
+        research_topic: str = "",
     ) -> List[Dict[str, Any]]:
         """
         Evaluate a batch of pages with a single LLM call.
@@ -388,6 +396,7 @@ class FastCrawler:
         Args:
             pages: Pages to evaluate
             section_context: Context for evaluation
+            research_topic: Original research topic/purpose
 
         Returns:
             List of evaluation results
@@ -404,8 +413,17 @@ Content Preview:
 {content_preview}
 """)
 
+        # Build topic context string
+        topic_context_ja = f"調査目的: {research_topic}\n" if research_topic else ""
+        topic_context_en = f"Research Purpose: {research_topic}\n" if research_topic else ""
+
         if self.language == "ja":
-            prompt = f"""以下の{len(pages)}ページについて、セクション「{section_context}」との関連性を評価してください。
+            prompt = f"""以下の{len(pages)}ページについて、調査目的およびセクションとの関連性を評価してください。
+
+{topic_context_ja}現在のセクション: {section_context}
+
+【重要】評価の際は、当初の調査目的を念頭に置き、そのテーマに沿った情報かどうかを判断してください。
+セクションの内容だけでなく、調査全体の目的（技術動向、法規制、市場分析など）との整合性も考慮してください。
 
 各ページについて、以下の形式でJSON配列として回答してください:
 [
@@ -414,17 +432,22 @@ Content Preview:
 ]
 
 評価基準:
-- 1.0: 非常に関連性が高く、重要な情報を含む
-- 0.7-0.9: 関連性が高い
-- 0.4-0.6: 部分的に関連
+- 1.0: 調査目的に非常に関連性が高く、重要な情報を含む
+- 0.7-0.9: 調査目的に関連性が高い
+- 0.4-0.6: 部分的に関連（周辺情報）
 - 0.1-0.3: わずかに関連
-- 0.0: 無関係
+- 0.0: 調査目的と無関係
 
 {"".join(pages_text)}
 
 JSON配列のみを出力してください:"""
         else:
-            prompt = f"""Evaluate the relevance of the following {len(pages)} pages to the section "{section_context}".
+            prompt = f"""Evaluate the relevance of the following {len(pages)} pages to the research purpose and section.
+
+{topic_context_en}Current Section: {section_context}
+
+IMPORTANT: When evaluating, keep the original research purpose in mind and assess whether the information aligns with that theme.
+Consider not only the section content but also the overall research objective (technology trends, regulations, market analysis, etc.).
 
 For each page, respond with a JSON array in this format:
 [
@@ -433,11 +456,11 @@ For each page, respond with a JSON array in this format:
 ]
 
 Scoring criteria:
-- 1.0: Highly relevant with important information
-- 0.7-0.9: Highly relevant
-- 0.4-0.6: Partially relevant
+- 1.0: Highly relevant to research purpose with important information
+- 0.7-0.9: Highly relevant to research purpose
+- 0.4-0.6: Partially relevant (peripheral information)
 - 0.1-0.3: Slightly relevant
-- 0.0: Not relevant
+- 0.0: Not relevant to research purpose
 
 {"".join(pages_text)}
 
@@ -487,6 +510,7 @@ Output only the JSON array:"""
         self,
         pages: List[CrawledPage],
         section_context: str,
+        research_topic: str = "",
         progress_callback: Callable = None,
     ) -> List[EvaluatedPage]:
         """
@@ -495,6 +519,7 @@ Output only the JSON array:"""
         Args:
             pages: Crawled pages to evaluate
             section_context: Context for evaluation
+            research_topic: Original research topic/purpose
             progress_callback: Progress callback
 
         Returns:
@@ -507,7 +532,7 @@ Output only the JSON array:"""
             """Evaluate a single page."""
             start = time.time()
             try:
-                result = self._evaluate_single_page(page, section_context)
+                result = self._evaluate_single_page(page, section_context, research_topic)
                 return EvaluatedPage(
                     url=page.url,
                     title=page.title,
@@ -554,6 +579,7 @@ Output only the JSON array:"""
         self,
         page: CrawledPage,
         section_context: str,
+        research_topic: str = "",
     ) -> Dict[str, Any]:
         """
         Evaluate a single page's relevance.
@@ -561,14 +587,23 @@ Output only the JSON array:"""
         Args:
             page: Page to evaluate
             section_context: Context for evaluation
+            research_topic: Original research topic/purpose
 
         Returns:
             Evaluation result dict
         """
         content_preview = page.content[:2000] if page.content else page.snippet
 
+        # Build topic context string
+        topic_context_ja = f"調査目的: {research_topic}\n" if research_topic else ""
+        topic_context_en = f"Research Purpose: {research_topic}\n" if research_topic else ""
+
         if self.language == "ja":
-            prompt = f"""以下のページがセクション「{section_context}」にどの程度関連するか評価してください。
+            prompt = f"""以下のページが調査目的およびセクションにどの程度関連するか評価してください。
+
+{topic_context_ja}現在のセクション: {section_context}
+
+【重要】評価の際は、当初の調査目的を念頭に置き、そのテーマに沿った情報かどうかを判断してください。
 
 URL: {page.url}
 タイトル: {page.title}
@@ -580,7 +615,11 @@ URL: {page.url}
 
 JSONのみを出力:"""
         else:
-            prompt = f"""Evaluate how relevant this page is to the section "{section_context}".
+            prompt = f"""Evaluate how relevant this page is to the research purpose and section.
+
+{topic_context_en}Current Section: {section_context}
+
+IMPORTANT: Keep the original research purpose in mind when evaluating.
 
 URL: {page.url}
 Title: {page.title}
@@ -613,6 +652,7 @@ Output only JSON:"""
         self,
         pages: List[CrawledPage],
         section_context: str,
+        research_topic: str = "",
         progress_callback: Callable = None,
     ) -> List[EvaluatedPage]:
         """
@@ -621,6 +661,7 @@ Output only JSON:"""
         Args:
             pages: Crawled pages to evaluate
             section_context: Context for evaluation
+            research_topic: Original research topic/purpose
             progress_callback: Progress callback
 
         Returns:
@@ -638,7 +679,7 @@ Output only JSON:"""
 
             start = time.time()
             try:
-                result = self._evaluate_single_page(page, section_context)
+                result = self._evaluate_single_page(page, section_context, research_topic)
                 evaluated_pages.append(EvaluatedPage(
                     url=page.url,
                     title=page.title,
