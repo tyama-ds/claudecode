@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Prompt Optimization Agent</title>
+<style>
+/* ── Reset & Base ────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+    --bg: #0f1117; --bg-panel: #1a1d27; --bg-input: #252833;
+    --bg-hover: #2a2e3b; --border: #333848;
+    --text: #e4e6ed; --text-dim: #8b8fa3; --text-muted: #5c6073;
+    --accent: #6c5ce7; --accent-hover: #7d6ff0;
+    --accent-glow: rgba(108, 92, 231, 0.25);
+    --green: #00cec9; --green-dim: rgba(0, 206, 201, 0.15);
+    --red: #ff6b6b; --red-dim: rgba(255, 107, 107, 0.12);
+    --radius: 8px; --radius-lg: 12px;
+    --font: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Noto Sans JP', sans-serif;
+    --mono: 'Fira Code', 'Consolas', 'SF Mono', monospace;
+}
+
+html { font-size: 15px; }
+body { font-family: var(--font); background: var(--bg); color: var(--text); line-height: 1.6; min-height: 100vh; }
+
+/* ── Layout ──────────────────────────────────────────── */
+.app { display: flex; flex-direction: column; min-height: 100vh; }
+.header { background: var(--bg-panel); border-bottom: 1px solid var(--border); padding: 1.2rem 2rem; }
+.header-inner { max-width: 1600px; margin: 0 auto; }
+.logo { font-size: 1.5rem; font-weight: 700; background: linear-gradient(135deg, var(--accent), var(--green)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+.subtitle { font-size: 0.85rem; color: var(--text-dim); margin-top: 0.2rem; }
+.main { display: grid; grid-template-columns: 420px 1fr; gap: 0; flex: 1; max-width: 1600px; margin: 0 auto; width: 100%; }
+@media (max-width: 960px) { .main { grid-template-columns: 1fr; } }
+
+/* ── Panels ──────────────────────────────────────────── */
+.panel { padding: 1.5rem; overflow-y: auto; }
+.panel-config { background: var(--bg-panel); border-right: 1px solid var(--border); max-height: calc(100vh - 80px); }
+.panel-prompt { padding: 1.5rem 2rem; }
+.panel-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 1.2rem; color: var(--text); }
+
+/* ── Sections ────────────────────────────────────────── */
+.section { margin-bottom: 1.5rem; }
+.section-title { font-size: 0.9rem; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.8rem; display: flex; align-items: center; justify-content: space-between; }
+
+/* ── Form Fields ─────────────────────────────────────── */
+.field { margin-bottom: 0.8rem; }
+.field label { display: block; font-size: 0.82rem; color: var(--text-dim); margin-bottom: 0.3rem; font-weight: 500; }
+.field-row { display: flex; gap: 1rem; align-items: flex-start; }
+.field-row .field { flex: 1; }
+
+select, input[type="text"], input[type="password"] {
+    width: 100%; padding: 0.55rem 0.75rem; background: var(--bg-input);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    color: var(--text); font-size: 0.88rem; font-family: var(--font); transition: border-color 0.2s;
+}
+select:focus, input:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+select { cursor: pointer; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238b8fa3' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 0.75rem center; padding-right: 2rem; }
+textarea { width: 100%; padding: 0.75rem; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 0.92rem; font-family: var(--font); resize: vertical; line-height: 1.6; min-height: 120px; }
+
+.input-group { display: flex; gap: 0.4rem; }
+.input-group input { flex: 1; }
+.btn-icon { background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-dim); cursor: pointer; padding: 0.4rem 0.6rem; font-size: 0.9rem; transition: background 0.2s; }
+.btn-icon:hover { background: var(--bg-hover); }
+
+/* ── Range Slider ────────────────────────────────────── */
+.range-group { display: flex; align-items: center; gap: 0.6rem; }
+.range-group input[type="range"] { flex: 1; -webkit-appearance: none; appearance: none; height: 4px; background: var(--border); border-radius: 2px; outline: none; }
+.range-group input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: var(--accent); cursor: pointer; }
+.range-group span { font-size: 0.82rem; color: var(--text-dim); font-family: var(--mono); min-width: 2rem; text-align: right; }
+
+/* ── Technique List ──────────────────────────────────── */
+.technique-actions { display: flex; gap: 0.5rem; margin-bottom: 0.8rem; }
+.btn-sm { padding: 0.3rem 0.7rem; font-size: 0.75rem; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-dim); cursor: pointer; font-family: var(--font); transition: all 0.2s; }
+.btn-sm:hover { background: var(--bg-hover); color: var(--text); }
+.technique-count { font-size: 0.75rem; color: var(--accent); font-weight: 400; }
+.technique-list { display: flex; flex-direction: column; gap: 0.4rem; max-height: 50vh; overflow-y: auto; padding-right: 0.3rem; }
+.technique-list::-webkit-scrollbar { width: 4px; }
+.technique-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.technique-item { display: flex; align-items: flex-start; gap: 0.6rem; padding: 0.65rem 0.75rem; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; transition: all 0.2s; }
+.technique-item:hover { border-color: var(--accent); background: var(--bg-hover); }
+.technique-item.selected { border-color: var(--accent); background: rgba(108, 92, 231, 0.08); }
+.technique-item input[type="checkbox"] { margin-top: 0.15rem; accent-color: var(--accent); flex-shrink: 0; }
+.technique-info { flex: 1; min-width: 0; }
+.technique-name { font-size: 0.82rem; font-weight: 600; color: var(--text); line-height: 1.3; }
+.technique-desc { font-size: 0.72rem; color: var(--text-muted); margin-top: 0.15rem; line-height: 1.4; }
+.technique-category { font-size: 0.65rem; padding: 0.1rem 0.45rem; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; flex-shrink: 0; margin-top: 0.15rem; }
+
+.cat-reasoning { background: rgba(108, 92, 231, 0.15); color: #a29bfe; }
+.cat-examples { background: rgba(0, 206, 201, 0.15); color: #00cec9; }
+.cat-agent { background: rgba(253, 203, 110, 0.15); color: #fdcb6e; }
+.cat-framing { background: rgba(255, 118, 117, 0.15); color: #ff7675; }
+.cat-format { background: rgba(116, 185, 255, 0.15); color: #74b9ff; }
+.cat-refinement { background: rgba(85, 239, 196, 0.15); color: #55efc4; }
+.cat-meta { background: rgba(162, 155, 254, 0.15); color: #a29bfe; }
+.cat-framework { background: rgba(253, 121, 168, 0.15); color: #fd79a8; }
+
+/* ── Buttons ─────────────────────────────────────────── */
+.action-bar { margin-bottom: 1.2rem; }
+.btn-primary { width: 100%; padding: 0.8rem 1.5rem; background: linear-gradient(135deg, var(--accent), #8b7cf7); border: none; border-radius: var(--radius); color: white; font-size: 1rem; font-weight: 600; font-family: var(--font); cursor: pointer; transition: all 0.25s; position: relative; overflow: hidden; }
+.btn-primary:hover:not(:disabled) { background: linear-gradient(135deg, var(--accent-hover), #9d8ff8); box-shadow: 0 4px 20px var(--accent-glow); transform: translateY(-1px); }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-primary:active:not(:disabled) { transform: translateY(0); }
+.btn-copy { background: var(--green-dim); color: var(--green); border-color: transparent; font-weight: 600; }
+.btn-copy:hover { background: rgba(0, 206, 201, 0.25); }
+.btn-copy.copied { background: var(--green); color: var(--bg); }
+
+/* ── Output ──────────────────────────────────────────── */
+.output-box { background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.2rem; font-size: 0.9rem; line-height: 1.7; white-space: pre-wrap; word-wrap: break-word; max-height: 500px; overflow-y: auto; }
+.analysis-box { background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.2rem; font-size: 0.85rem; line-height: 1.7; color: var(--text-dim); }
+.analysis-box h1, .analysis-box h2, .analysis-box h3 { color: var(--text); margin-top: 0.8rem; margin-bottom: 0.4rem; }
+.analysis-box h1 { font-size: 1.1rem; } .analysis-box h2 { font-size: 1rem; } .analysis-box h3 { font-size: 0.9rem; }
+.analysis-box strong { color: var(--text); }
+.analysis-box ul, .analysis-box ol { margin-left: 1.5rem; margin-bottom: 0.5rem; }
+.analysis-box code { background: rgba(108, 92, 231, 0.1); padding: 0.1rem 0.4rem; border-radius: 3px; font-family: var(--mono); font-size: 0.82rem; }
+.meta-info { margin-top: 1rem; padding: 0.6rem 0.8rem; background: var(--bg-input); border-radius: var(--radius); font-size: 0.75rem; color: var(--text-muted); display: flex; gap: 1.5rem; flex-wrap: wrap; }
+.meta-info span { display: flex; align-items: center; gap: 0.3rem; }
+
+/* ── Error ───────────────────────────────────────────── */
+.error-box { background: var(--red-dim); border: 1px solid rgba(255, 107, 107, 0.3); border-radius: var(--radius); padding: 0.8rem 1rem; color: var(--red); font-size: 0.85rem; margin-top: 0.8rem; }
+
+/* ── Scrollbar ───────────────────────────────────────── */
+.panel-config::-webkit-scrollbar, .output-box::-webkit-scrollbar { width: 5px; }
+.panel-config::-webkit-scrollbar-thumb, .output-box::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+.btn-loading { animation: pulse 1.5s ease-in-out infinite; }
+</style>
+</head>
+<body>
+<div class="app">
+    <header class="header">
+        <div class="header-inner">
+            <h1 class="logo">Prompt Optimization Agent</h1>
+            <p class="subtitle">Select PE techniques and optimize your prompts with AI &mdash; No server required, runs entirely in your browser</p>
+        </div>
+    </header>
+
+    <main class="main">
+        <!-- Left Panel: Configuration -->
+        <section class="panel panel-config">
+            <h2 class="panel-title">Configuration</h2>
+
+            <div class="section">
+                <h3 class="section-title">API Settings</h3>
+                <div class="field">
+                    <label for="provider">Provider</label>
+                    <select id="provider">
+                        <option value="openai">OpenAI</option>
+                        <option value="anthropic">Anthropic</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="model">Model</label>
+                    <select id="model"></select>
+                </div>
+                <div class="field">
+                    <label for="api-key">API Key</label>
+                    <div class="input-group">
+                        <input type="password" id="api-key" placeholder="sk-... or sk-ant-...">
+                        <button type="button" class="btn-icon" id="toggle-key" title="Show/Hide">&#128065;</button>
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="language">Output Language</label>
+                    <select id="language">
+                        <option value="ja">Japanese</option>
+                        <option value="en">English</option>
+                    </select>
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="temperature">Temperature</label>
+                        <div class="range-group">
+                            <input type="range" id="temperature" min="0" max="1" step="0.1" value="0.7">
+                            <span id="temp-value">0.7</span>
+                        </div>
+                    </div>
+                    <div class="field">
+                        <label><input type="checkbox" id="include-analysis" checked> Include analysis</label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <h3 class="section-title">PE Techniques <span class="technique-count" id="technique-count">0 selected</span></h3>
+                <div class="technique-actions">
+                    <button type="button" class="btn-sm" id="select-all">Select All</button>
+                    <button type="button" class="btn-sm" id="select-none">Clear</button>
+                </div>
+                <div class="technique-list" id="technique-list"></div>
+            </div>
+        </section>
+
+        <!-- Right Panel: Prompt I/O -->
+        <section class="panel panel-prompt">
+            <h2 class="panel-title">Prompt Workspace</h2>
+
+            <div class="section">
+                <h3 class="section-title">Original Prompt</h3>
+                <textarea id="original-prompt" rows="8" placeholder="Enter the prompt you want to optimize..."></textarea>
+            </div>
+
+            <div class="action-bar">
+                <button type="button" class="btn-primary" id="optimize-btn">
+                    <span class="btn-text">Optimize Prompt</span>
+                    <span class="btn-loading" style="display:none;">Optimizing...</span>
+                </button>
+            </div>
+
+            <div class="section" id="output-section" style="display:none;">
+                <h3 class="section-title">Optimized Prompt <button type="button" class="btn-sm btn-copy" id="copy-btn">Copy</button></h3>
+                <div class="output-box" id="optimized-output"></div>
+                <div id="analysis-section" style="display:none;">
+                    <h3 class="section-title" style="margin-top:1.5rem;">Analysis</h3>
+                    <div class="analysis-box" id="analysis-output"></div>
+                </div>
+                <div class="meta-info" id="meta-info"></div>
+            </div>
+
+            <div class="error-box" id="error-box" style="display:none;"></div>
+        </section>
+    </main>
+</div>
+
+<script>
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  Prompt Optimization Agent — Standalone (No server required)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => document.querySelectorAll(s);
+
+// ── Technique Data ──────────────────────────────────────────────
+
+const TECHNIQUES = [
+    {
+        id: "cot", name: "Chain of Thought (CoT)",
+        name_ja: "Chain of Thought (CoT) - 思考の連鎖",
+        description: "Guides the model to reason step-by-step before arriving at an answer.",
+        description_ja: "回答に至る前にステップバイステップで推論するよう誘導します。",
+        category: "reasoning",
+        instruction: "Structure the prompt so the model is explicitly asked to think through the problem step by step. Insert a section like 'Let's think step by step:' before the final answer request. Break the task into sequential reasoning stages.",
+        example_pattern: "Let's think step by step:\nStep 1: ...\nStep 2: ...\nTherefore: ..."
+    },
+    {
+        id: "zero_shot_cot", name: "Zero-Shot CoT",
+        name_ja: "Zero-Shot CoT - ゼロショット思考連鎖",
+        description: "Adds 'Let's think step by step' without any examples, triggering reasoning.",
+        description_ja: "例を示さずに「ステップバイステップで考えよう」を追加し推論を引き出します。",
+        category: "reasoning",
+        instruction: "Append the phrase 'Let's think step by step.' at the end of the user's query or just before the answer request. This simple addition significantly improves reasoning quality without requiring examples.",
+        example_pattern: "[Original prompt]\n\nLet's think step by step."
+    },
+    {
+        id: "tot", name: "Tree of Thought (ToT)",
+        name_ja: "Tree of Thought (ToT) - 思考の木",
+        description: "Explores multiple reasoning paths in parallel, evaluating each branch.",
+        description_ja: "複数の推論パスを並行して探索し、各分岐を評価します。",
+        category: "reasoning",
+        instruction: "Restructure the prompt to ask the model to: (1) Generate 3 or more distinct approaches/hypotheses to the problem. (2) For each approach, reason through the implications and potential outcomes. (3) Evaluate which approach is strongest based on logical consistency. (4) Select the best path and provide the final answer with justification. Use clear headings like 'Approach A:', 'Approach B:', 'Evaluation:', 'Best Answer:'.",
+        example_pattern: "Consider multiple approaches:\nApproach A: ...\nApproach B: ...\nApproach C: ...\nEvaluation of each approach: ...\nBest answer based on evaluation: ..."
+    },
+    {
+        id: "got", name: "Graph of Thought (GoT)",
+        name_ja: "Graph of Thought (GoT) - 思考のグラフ",
+        description: "Builds a network of interconnected reasoning nodes, allowing merging and refining.",
+        description_ja: "相互接続された推論ノードのネットワークを構築し、統合・洗練します。",
+        category: "reasoning",
+        instruction: "Restructure the prompt to instruct the model to: (1) Decompose the problem into sub-problems (nodes). (2) Solve each sub-problem independently. (3) Identify connections and dependencies between sub-solutions. (4) Merge compatible partial solutions into a coherent whole. (5) Refine the merged solution by resolving any conflicts. Encourage the model to revisit and revise earlier conclusions as new insights emerge.",
+        example_pattern: "Sub-problem decomposition:\nNode 1: ... → Solution 1\nNode 2: ... → Solution 2\nConnections: Node 1 ↔ Node 2\nMerged solution: ...\nRefined final answer: ..."
+    },
+    {
+        id: "few_shot", name: "Few-Shot Prompting",
+        name_ja: "Few-Shot Prompting - 少数例プロンプティング",
+        description: "Provides concrete input-output examples before the actual task.",
+        description_ja: "実際のタスクの前に具体的な入出力例を提示します。",
+        category: "examples",
+        instruction: "Add 2-3 high-quality examples before the actual query. Each example should demonstrate the desired input format and output format/style. Use a clear delimiter between examples (e.g., '---'). Ensure the examples cover different aspects or edge cases of the task.",
+        example_pattern: "Example 1:\nInput: ...\nOutput: ...\n---\nExample 2:\nInput: ...\nOutput: ...\n---\nNow, your task:\nInput: [user's actual query]"
+    },
+    {
+        id: "self_consistency", name: "Self-Consistency",
+        name_ja: "Self-Consistency - 自己一貫性",
+        description: "Generates multiple independent reasoning paths, then selects the most consistent answer.",
+        description_ja: "複数の独立した推論パスを生成し、最も一貫性のある回答を選択します。",
+        category: "reasoning",
+        instruction: "Instruct the model to: (1) Solve the problem using 3 completely different reasoning approaches. (2) Compare the conclusions from each approach. (3) Identify the answer that appears most frequently or is most logically consistent. (4) Present the consensus answer with confidence level.",
+        example_pattern: "Solve this problem 3 different ways:\nMethod 1: ...\nConclusion 1: ...\nMethod 2: ...\nConclusion 2: ...\nMethod 3: ...\nConclusion 3: ...\nConsensus answer: ..."
+    },
+    {
+        id: "react", name: "ReAct (Reasoning + Acting)",
+        name_ja: "ReAct - 推論と行動の交互実行",
+        description: "Interleaves reasoning (Thought) with actions (Act) and observations (Obs).",
+        description_ja: "推論（Thought）と行動（Act）と観察（Obs）を交互に実行します。",
+        category: "agent",
+        instruction: "Structure the prompt using the Thought-Action-Observation loop: (1) Thought: The model reasons about what to do next. (2) Action: The model specifies a concrete action to take. (3) Observation: The result of the action is provided. Repeat until the task is solved. This is especially useful for tasks requiring external information or multi-step execution.",
+        example_pattern: "Thought 1: I need to ...\nAction 1: [action description]\nObservation 1: [result]\nThought 2: Based on the observation, ...\nAction 2: [action description]\nFinal Answer: ..."
+    },
+    {
+        id: "role_prompting", name: "Role Prompting / Expert Persona",
+        name_ja: "Role Prompting - 役割・専門家ペルソナ",
+        description: "Assigns a specific expert role to the model to leverage domain knowledge.",
+        description_ja: "モデルに特定の専門家の役割を割り当て、ドメイン知識を活用します。",
+        category: "framing",
+        instruction: "Prefix the prompt with a detailed role definition: 'You are a [domain] expert with [N] years of experience in [specific area]. You specialize in [specifics].' The role should be relevant to the task. Be specific about the expertise level and domain to activate the model's relevant knowledge patterns.",
+        example_pattern: "You are a senior [domain] expert with 20 years of experience. You specialize in [specific area] and are known for [specific trait].\n\n[Original prompt]"
+    },
+    {
+        id: "structured_output", name: "Structured Output / Format Control",
+        name_ja: "Structured Output - 構造化出力",
+        description: "Specifies an explicit output format (JSON, table, sections, etc.).",
+        description_ja: "明示的な出力形式（JSON、表、セクション等）を指定します。",
+        category: "format",
+        instruction: "Add explicit formatting instructions to the prompt. Specify: (1) The exact output structure (e.g., JSON schema, markdown sections, table format). (2) Required fields or sections. (3) Data types and constraints for each field. This reduces ambiguity and ensures the output is machine-parseable when needed.",
+        example_pattern: "Respond in the following format:\n## Summary\n[1-2 sentence summary]\n## Key Points\n- Point 1\n- Point 2\n## Detailed Analysis\n[detailed content]\n## Conclusion\n[conclusion]"
+    },
+    {
+        id: "self_refine", name: "Self-Refine / Iterative Improvement",
+        name_ja: "Self-Refine - 自己改善・反復改良",
+        description: "Generates a draft, critiques it, then produces an improved version.",
+        description_ja: "ドラフトを生成し、自己批評した上で改善版を出力します。",
+        category: "refinement",
+        instruction: "Instruct the model to follow a 3-phase process: (1) Draft: Generate an initial response. (2) Critique: Identify weaknesses, gaps, errors, or areas for improvement. (3) Refine: Produce an improved version addressing all identified issues. Optionally repeat the critique-refine cycle for higher quality.",
+        example_pattern: "Phase 1 - Draft:\n[initial response]\n\nPhase 2 - Self-Critique:\n- Weakness 1: ...\n- Gap: ...\n\nPhase 3 - Refined Response:\n[improved response]"
+    },
+    {
+        id: "meta_prompting", name: "Meta-Prompting",
+        name_ja: "Meta-Prompting - メタプロンプティング",
+        description: "Asks the model to first design the optimal prompt strategy, then execute it.",
+        description_ja: "まず最適なプロンプト戦略を設計させ、その後実行させます。",
+        category: "meta",
+        instruction: "Add a meta-reasoning step: (1) Ask the model to first analyze what kind of task this is. (2) Have it determine the best approach/strategy for this type of task. (3) Then have it execute that strategy. This leverages the model's ability to reason about its own reasoning process.",
+        example_pattern: "Before answering, analyze this task:\n1. What type of task is this?\n2. What's the best strategy for this task type?\n3. Now execute that strategy:\n[actual response]"
+    },
+    {
+        id: "constraint_based", name: "Constraint-Based Prompting",
+        name_ja: "Constraint-Based Prompting - 制約ベースプロンプティング",
+        description: "Defines explicit constraints, boundaries, and rules the response must follow.",
+        description_ja: "レスポンスが従うべき明示的な制約・境界・ルールを定義します。",
+        category: "framing",
+        instruction: "Add a 'Constraints' or 'Rules' section that explicitly lists: (1) What the response MUST include. (2) What the response MUST NOT include. (3) Quality criteria (accuracy, completeness, conciseness). (4) Scope boundaries. This reduces hallucination and keeps the response focused.",
+        example_pattern: "Constraints:\n- MUST: Be factually accurate and cite reasoning\n- MUST: Stay within the scope of [topic]\n- MUST NOT: Speculate beyond available information\n- MUST NOT: Exceed [N] words\n\n[Original prompt]"
+    },
+    {
+        id: "step_back", name: "Step-Back Prompting",
+        name_ja: "Step-Back Prompting - 一歩引いた抽象化",
+        description: "First asks a higher-level abstract question, then uses that to answer the specific question.",
+        description_ja: "まず高レベルの抽象的な質問をし、その回答を使って具体的な質問に答えます。",
+        category: "reasoning",
+        instruction: "Restructure the prompt in two phases: (1) Step-Back Question: Ask a broader, more abstract version of the original question to establish foundational principles or context. (2) Original Question: Use the foundational understanding to answer the specific question. This helps the model ground its reasoning in first principles.",
+        example_pattern: "Step-Back: What are the general principles of [broader topic]?\n[Answer to step-back question]\n\nNow, using these principles, answer the specific question:\n[Original specific question]"
+    },
+    {
+        id: "risen", name: "RISEN Framework",
+        name_ja: "RISEN フレームワーク",
+        description: "Role, Instructions, Steps, End goal, Narrowing - a comprehensive prompting framework.",
+        description_ja: "Role, Instructions, Steps, End goal, Narrowing - 包括的プロンプティングフレームワーク。",
+        category: "framework",
+        instruction: "Structure the prompt using the RISEN framework: (R) Role: Define who the model should be. (I) Instructions: State the core task clearly. (S) Steps: Break down the process into sequential steps. (E) End goal: Describe the desired outcome explicitly. (N) Narrowing: Add constraints to focus the response.",
+        example_pattern: "Role: You are a ...\nInstructions: Your task is to ...\nSteps:\n1. First, ...\n2. Then, ...\n3. Finally, ...\nEnd Goal: The output should ...\nNarrowing: Focus only on ... Do not include ..."
+    },
+    {
+        id: "emotional", name: "Emotional Prompting",
+        name_ja: "Emotional Prompting - 感情プロンプティング",
+        description: "Adds emotional context or urgency to improve response quality and engagement.",
+        description_ja: "感情的な文脈や緊急性を追加してレスポンス品質を向上させます。",
+        category: "framing",
+        instruction: "Add emotional context that communicates the importance and impact of the task: 'This is very important for [reason]. The quality of this response will directly impact [stakeholder/outcome].' Research shows this can improve model output quality by conveying the stakes involved.",
+        example_pattern: "This task is critically important because [reason]. A high-quality response will [positive impact], while errors could [negative impact].\n\n[Original prompt]\n\nPlease give this your best effort as the outcome matters significantly."
+    }
+];
+
+// ── Model Registry ──────────────────────────────────────────────
+
+const MODELS = {
+    openai: [
+        { id: "gpt-4o", name: "GPT-4o" },
+        { id: "gpt-4o-mini", name: "GPT-4o Mini" },
+        { id: "o1", name: "o1" },
+        { id: "o1-mini", name: "o1 Mini" },
+        { id: "o3-mini", name: "o3 Mini" },
+    ],
+    anthropic: [
+        { id: "claude-sonnet-4-20250514", name: "Claude Sonnet 4" },
+        { id: "claude-3-5-sonnet-20241022", name: "Claude 3.5 Sonnet" },
+        { id: "claude-3-5-haiku-20241022", name: "Claude 3.5 Haiku" },
+        { id: "claude-3-haiku-20240307", name: "Claude 3 Haiku" },
+    ]
+};
+
+// Models that don't support temperature
+const NO_TEMP_PREFIXES = ["o1", "o3", "o4"];
+
+// ── State ───────────────────────────────────────────────────────
+
+let selectedTechniques = new Set();
+
+// ── Init ────────────────────────────────────────────────────────
+
+document.addEventListener("DOMContentLoaded", () => {
+    renderTechniques();
+    updateModelSelect();
+    setupEventListeners();
+});
+
+// ── Rendering ───────────────────────────────────────────────────
+
+function renderTechniques() {
+    const list = $("#technique-list");
+    list.innerHTML = "";
+    TECHNIQUES.forEach((t) => {
+        const item = document.createElement("div");
+        item.className = "technique-item";
+        item.dataset.id = t.id;
+        item.innerHTML = `
+            <input type="checkbox" id="tech-${t.id}" value="${t.id}">
+            <div class="technique-info">
+                <div class="technique-name">${t.name_ja}</div>
+                <div class="technique-desc">${t.description_ja}</div>
+            </div>
+            <span class="technique-category cat-${t.category}">${t.category}</span>`;
+        item.addEventListener("click", (e) => {
+            if (e.target.tagName === "INPUT") return;
+            const cb = item.querySelector("input[type=checkbox]");
+            cb.checked = !cb.checked;
+            toggleTechnique(t.id, cb.checked);
+        });
+        item.querySelector("input[type=checkbox]").addEventListener("change", (e) => {
+            toggleTechnique(t.id, e.target.checked);
+        });
+        list.appendChild(item);
+    });
+    updateTechniqueCount();
+}
+
+function toggleTechnique(id, checked) {
+    checked ? selectedTechniques.add(id) : selectedTechniques.delete(id);
+    const item = $(`.technique-item[data-id="${id}"]`);
+    if (item) item.classList.toggle("selected", checked);
+    updateTechniqueCount();
+}
+
+function updateTechniqueCount() {
+    $("#technique-count").textContent = `${selectedTechniques.size} selected`;
+}
+
+function updateModelSelect() {
+    const provider = $("#provider").value;
+    const sel = $("#model");
+    sel.innerHTML = "";
+    (MODELS[provider] || []).forEach((m) => {
+        const opt = document.createElement("option");
+        opt.value = m.id;
+        opt.textContent = m.name;
+        sel.appendChild(opt);
+    });
+}
+
+// ── Event Listeners ─────────────────────────────────────────────
+
+function setupEventListeners() {
+    $("#provider").addEventListener("change", updateModelSelect);
+    $("#temperature").addEventListener("input", (e) => { $("#temp-value").textContent = e.target.value; });
+    $("#toggle-key").addEventListener("click", () => {
+        const inp = $("#api-key");
+        inp.type = inp.type === "password" ? "text" : "password";
+    });
+    $("#select-all").addEventListener("click", () => {
+        TECHNIQUES.forEach((t) => {
+            selectedTechniques.add(t.id);
+            const cb = $(`#tech-${t.id}`); if (cb) cb.checked = true;
+            const item = $(`.technique-item[data-id="${t.id}"]`); if (item) item.classList.add("selected");
+        });
+        updateTechniqueCount();
+    });
+    $("#select-none").addEventListener("click", () => {
+        selectedTechniques.clear();
+        $$(".technique-item input[type=checkbox]").forEach(cb => cb.checked = false);
+        $$(".technique-item").forEach(item => item.classList.remove("selected"));
+        updateTechniqueCount();
+    });
+    $("#optimize-btn").addEventListener("click", optimizePrompt);
+    $("#copy-btn").addEventListener("click", copyOptimized);
+}
+
+// ── Prompt Building (Engine) ────────────────────────────────────
+
+function getSelectedTechniqueObjects() {
+    const map = {};
+    TECHNIQUES.forEach(t => map[t.id] = t);
+    return Array.from(selectedTechniques).map(id => map[id]).filter(Boolean);
+}
+
+function buildSystemPrompt(techniques, language) {
+    const blocks = techniques.map((t, i) =>
+        `### Technique ${i+1}: ${t.name}\n**Description**: ${t.description}\n**How to apply**: ${t.instruction}\n**Pattern**: ${t.example_pattern}`
+    ).join("\n\n");
+
+    let langInst = "";
+    if (language === "ja") {
+        langInst = "\n\nIMPORTANT: The optimized prompt MUST be written in Japanese. The structural elements (section headings, instructions) should be in Japanese. Technical terms may remain in English where appropriate.";
+    } else {
+        langInst = "\n\nThe optimized prompt should be written in English.";
+    }
+
+    return `You are an expert Prompt Engineer specializing in optimizing prompts for Large Language Models.
+
+Your task is to take a user's original prompt and transform it into a highly optimized version
+that incorporates specific prompt engineering techniques selected by the user.
+
+## Your Optimization Process
+
+1. **Analyze** the original prompt to understand its intent, target audience, and desired outcome.
+2. **Apply** each selected technique thoughtfully — do not just mechanically append keywords.
+3. **Integrate** the techniques naturally so the final prompt reads as a cohesive whole.
+4. **Preserve** the original intent — the optimized prompt must accomplish the same goal.
+5. **Enhance** clarity, specificity, and effectiveness while keeping the prompt practical.
+
+## Selected Techniques to Apply
+
+${blocks}
+
+## Output Requirements
+
+- Return ONLY the optimized prompt text. Do not include explanations, metadata, or commentary.
+- The optimized prompt should be immediately usable — ready to paste into an LLM.
+- If multiple techniques overlap, merge them elegantly rather than creating redundant sections.
+- The optimized prompt should be significantly better than the original while remaining natural.
+${langInst}`;
+}
+
+function buildUserPrompt(original) {
+    return `## Original Prompt to Optimize\n\n${original}\n\n---\n\nPlease produce the optimized version of this prompt incorporating all the selected techniques. Return ONLY the optimized prompt text.`;
+}
+
+function buildAnalysisSystemPrompt() {
+    return `You are an expert Prompt Engineer. The user has just received an optimized prompt.
+Your job is to provide a brief analysis explaining:
+
+1. **Techniques Applied**: For each technique, explain specifically how it was integrated.
+2. **Key Improvements**: What are the main improvements over the original?
+3. **Usage Tips**: Any tips for using the optimized prompt effectively.
+
+Keep the analysis concise and actionable. Use markdown formatting.
+Respond in the same language as the optimized prompt.`;
+}
+
+// ── API Calls (Direct from Browser) ─────────────────────────────
+
+async function callOpenAI(apiKey, model, systemPrompt, userMessage, temperature, maxTokens) {
+    const messages = [];
+    if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
+    messages.push({ role: "user", content: userMessage });
+
+    const body = { model, messages, max_completion_tokens: maxTokens };
+
+    const supportsTemp = !NO_TEMP_PREFIXES.some(p => model.toLowerCase() === p || model.toLowerCase().startsWith(p + "-"));
+    if (supportsTemp) body.temperature = temperature;
+
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${apiKey}`
+        },
+        body: JSON.stringify(body)
+    });
+
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error?.message || `OpenAI API error: ${res.status}`);
+    }
+
+    const data = await res.json();
+    return {
+        content: data.choices[0].message.content,
+        model: data.model,
+        usage: {
+            prompt_tokens: data.usage?.prompt_tokens || 0,
+            completion_tokens: data.usage?.completion_tokens || 0,
+            total_tokens: data.usage?.total_tokens || 0
+        }
+    };
+}
+
+async function callAnthropic(apiKey, model, systemPrompt, userMessage, temperature, maxTokens) {
+    const body = {
+        model,
+        max_tokens: maxTokens,
+        messages: [{ role: "user", content: userMessage }]
+    };
+    if (systemPrompt) body.system = systemPrompt;
+    if (temperature !== 1.0) body.temperature = temperature;
+
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "x-api-key": apiKey,
+            "anthropic-version": "2023-06-01",
+            "anthropic-dangerous-direct-browser-access": "true"
+        },
+        body: JSON.stringify(body)
+    });
+
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error?.message || `Anthropic API error: ${res.status}`);
+    }
+
+    const data = await res.json();
+    const content = data.content.map(b => b.text || "").join("");
+    return {
+        content,
+        model: data.model,
+        usage: {
+            prompt_tokens: data.usage?.input_tokens || 0,
+            completion_tokens: data.usage?.output_tokens || 0,
+            total_tokens: (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0)
+        }
+    };
+}
+
+async function callLLM(provider, apiKey, model, systemPrompt, userMessage, temperature, maxTokens) {
+    if (provider === "openai") {
+        return callOpenAI(apiKey, model, systemPrompt, userMessage, temperature, maxTokens);
+    } else {
+        return callAnthropic(apiKey, model, systemPrompt, userMessage, temperature, maxTokens);
+    }
+}
+
+// ── Optimize ────────────────────────────────────────────────────
+
+async function optimizePrompt() {
+    const originalPrompt = $("#original-prompt").value.trim();
+    const apiKey = $("#api-key").value.trim();
+    const provider = $("#provider").value;
+    const model = $("#model").value;
+    const language = $("#language").value;
+    const temperature = parseFloat($("#temperature").value);
+    const includeAnalysis = $("#include-analysis").checked;
+
+    if (!originalPrompt) { showError("プロンプトを入力してください。"); return; }
+    if (!apiKey) { showError("APIキーを入力してください。"); return; }
+    if (selectedTechniques.size === 0) { showError("PE手法を1つ以上選択してください。"); return; }
+
+    const btn = $("#optimize-btn");
+    btn.disabled = true;
+    btn.querySelector(".btn-text").style.display = "none";
+    btn.querySelector(".btn-loading").style.display = "inline";
+    hideError();
+    $("#output-section").style.display = "none";
+
+    try {
+        const techniques = getSelectedTechniqueObjects();
+        const systemPrompt = buildSystemPrompt(techniques, language);
+        const userPrompt = buildUserPrompt(originalPrompt);
+
+        // Main optimization call
+        const response = await callLLM(provider, apiKey, model, systemPrompt, userPrompt, temperature, 4096);
+
+        const optimized = response.content;
+        const totalUsage = { ...response.usage };
+        let analysis = null;
+
+        // Optional analysis call
+        if (includeAnalysis) {
+            try {
+                const techNames = techniques.map(t => t.name).join(", ");
+                const analysisUser = `## Original Prompt\n${originalPrompt}\n\n## Optimized Prompt\n${optimized}\n\n## Applied Techniques\n${techNames}\n\nPlease provide a brief analysis of the optimization.`;
+                const analysisResp = await callLLM(provider, apiKey, model, buildAnalysisSystemPrompt(), analysisUser, 0.5, 2048);
+                analysis = analysisResp.content;
+                totalUsage.prompt_tokens += analysisResp.usage.prompt_tokens;
+                totalUsage.completion_tokens += analysisResp.usage.completion_tokens;
+                totalUsage.total_tokens += analysisResp.usage.total_tokens;
+            } catch (e) {
+                console.warn("Analysis failed:", e);
+            }
+        }
+
+        showResult({
+            optimized_prompt: optimized,
+            analysis,
+            model_used: response.model,
+            techniques_applied: techniques.map(t => t.name),
+            usage: totalUsage
+        });
+    } catch (err) {
+        showError(err.message);
+    } finally {
+        btn.disabled = false;
+        btn.querySelector(".btn-text").style.display = "inline";
+        btn.querySelector(".btn-loading").style.display = "none";
+    }
+}
+
+// ── Display Results ─────────────────────────────────────────────
+
+function showResult(data) {
+    $("#output-section").style.display = "block";
+    $("#optimized-output").textContent = data.optimized_prompt;
+
+    if (data.analysis) {
+        $("#analysis-section").style.display = "block";
+        $("#analysis-output").innerHTML = renderMarkdown(data.analysis);
+    } else {
+        $("#analysis-section").style.display = "none";
+    }
+
+    const u = data.usage || {};
+    $("#meta-info").innerHTML = `
+        <span>Model: <strong>${data.model_used}</strong></span>
+        <span>Techniques: <strong>${data.techniques_applied.length}</strong></span>
+        <span>Tokens: <strong>${(u.total_tokens || 0).toLocaleString()}</strong></span>
+        <span>Prompt tokens: ${(u.prompt_tokens || 0).toLocaleString()}</span>
+        <span>Completion tokens: ${(u.completion_tokens || 0).toLocaleString()}</span>`;
+}
+
+function renderMarkdown(text) {
+    return "<p>" + text
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/^### (.+)$/gm, "<h3>$1</h3>")
+        .replace(/^## (.+)$/gm, "<h2>$1</h2>")
+        .replace(/^# (.+)$/gm, "<h1>$1</h1>")
+        .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+        .replace(/`([^`]+)`/g, "<code>$1</code>")
+        .replace(/^- (.+)$/gm, "<li>$1</li>")
+        .replace(/^\d+\. (.+)$/gm, "<li>$1</li>")
+        .replace(/((?:<li>.*<\/li>\n?)+)/g, "<ul>$1</ul>")
+        .replace(/\n\n/g, "</p><p>")
+        .replace(/\n/g, "<br>") + "</p>";
+}
+
+// ── Copy ────────────────────────────────────────────────────────
+
+async function copyOptimized() {
+    const text = $("#optimized-output").textContent;
+    try {
+        await navigator.clipboard.writeText(text);
+        const btn = $("#copy-btn");
+        btn.textContent = "Copied!";
+        btn.classList.add("copied");
+        setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("copied"); }, 2000);
+    } catch {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+    }
+}
+
+// ── Error ───────────────────────────────────────────────────────
+
+function showError(msg) { const b = $("#error-box"); b.textContent = msg; b.style.display = "block"; }
+function hideError() { $("#error-box").style.display = "none"; }
+</script>
+</body>
+</html>
