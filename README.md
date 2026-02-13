@@ -1016,6 +1016,186 @@ result = tool.run(
 - ネットワークが不安定な環境では`standard`モードが安定します
 - Extended Modeとの併用も可能です
 
+### FastCrawlerの独立使用（情報収集のみ）
+
+FastCrawlerはリサーチ全体のワークフローから独立して使用できます。Web検索と情報収集だけを行い、結果を自分で処理したい場合に便利です。
+
+#### 基本的な使い方
+
+```python
+from deep_research_tool.research.fast_crawler import FastCrawler, EvaluationMode
+from deep_research_tool.search import get_search_client
+from deep_research_tool.api import get_client
+
+# クライアントを作成
+search_client = get_search_client(method="duckduckgo")
+llm_client = get_client(provider="openai")
+
+# FastCrawlerを作成
+crawler = FastCrawler(
+    search_client=search_client,
+    llm_client=llm_client,
+    evaluation_mode=EvaluationMode.BATCH,  # BATCH / PARALLEL / SEQUENTIAL
+    max_workers=10,        # 並列フェッチのワーカー数
+    batch_size=5,          # バッチ評価時のページ数
+    language="ja",
+)
+
+# クロール実行
+result = crawler.crawl_and_evaluate(
+    queries=["日本のEV市場 2024", "電気自動車 販売台数"],
+    section_context="日本のEV市場の現状",
+    max_pages_per_query=5,
+    min_relevance_score=0.3,
+)
+
+# 結果を処理
+print(f"取得ページ数: {result.pages_fetched}")
+print(f"フィルタ済み: {result.pages_filtered}")
+print(f"関連ページ数: {len(result.pages)}")
+print(f"フェッチ時間: {result.total_fetch_time:.1f}秒")
+print(f"評価時間: {result.total_eval_time:.1f}秒")
+
+# 各ページの情報を取得
+for page in result.pages:
+    print(f"\n--- {page.title} ---")
+    print(f"URL: {page.url}")
+    print(f"関連度: {page.relevance_score:.2f}")
+    print(f"要点: {page.key_points}")
+    print(f"要約: {page.processed_content[:200]}...")
+```
+
+#### ファクトリー関数を使った簡易作成
+
+```python
+from deep_research_tool.research.fast_crawler import create_fast_crawler
+from deep_research_tool.search import get_search_client
+from deep_research_tool.api import get_client
+
+search_client = get_search_client(method="duckduckgo")
+llm_client = get_client(provider="openai")
+
+# ファクトリー関数で作成
+crawler = create_fast_crawler(
+    search_client=search_client,
+    llm_client=llm_client,
+    mode="batch",      # "batch" / "parallel" / "sequential"
+    language="ja",
+    max_workers=15,
+    batch_size=8,
+)
+
+result = crawler.crawl_and_evaluate(
+    queries=["量子コンピュータ 最新動向"],
+    section_context="量子コンピュータの技術動向",
+)
+```
+
+#### コンテンツフィルターのカスタマイズ
+
+```python
+from deep_research_tool.research.fast_crawler import FastCrawler, EvaluationMode
+from deep_research_tool.evidence.content_filter import (
+    ContentFilter,
+    ContentFilterConfig,
+    create_strict_filter,
+)
+
+# 厳格なフィルター（広告サイトを強力に排除）
+strict_filter = create_strict_filter()
+
+# カスタムフィルター
+custom_filter = ContentFilter(ContentFilterConfig(
+    min_content_length=500,
+    max_ad_ratio=0.1,
+    blocked_domains=["spam-site.com", "ad-network.net"],
+    whitelisted_domains=["trusted-source.org"],
+))
+
+crawler = FastCrawler(
+    search_client=search_client,
+    llm_client=llm_client,
+    evaluation_mode=EvaluationMode.BATCH,
+    content_filter=custom_filter,  # カスタムフィルターを使用
+)
+```
+
+#### プログレスコールバック
+
+```python
+def progress_callback(message: str, current: int, total: int):
+    """進捗を表示するコールバック"""
+    percentage = (current / total) * 100 if total > 0 else 0
+    print(f"[{percentage:5.1f}%] {message}")
+
+result = crawler.crawl_and_evaluate(
+    queries=["検索クエリ1", "検索クエリ2"],
+    section_context="調査テーマ",
+    progress_callback=progress_callback,
+)
+```
+
+#### 大量クエリの一括処理
+
+```python
+# 複数のテーマについて一括でクロール
+themes = [
+    ("EV市場", ["日本 EV市場 2024", "電気自動車 普及率"]),
+    ("自動運転", ["自動運転技術 最新", "レベル4 自動運転 日本"]),
+    ("水素自動車", ["FCV 燃料電池車 トヨタ", "水素ステーション 整備"]),
+]
+
+all_results = {}
+for theme_name, queries in themes:
+    result = crawler.crawl_and_evaluate(
+        queries=queries,
+        section_context=theme_name,
+        max_pages_per_query=3,
+    )
+    all_results[theme_name] = result
+    print(f"{theme_name}: {len(result.pages)}ページ取得")
+
+# 結果をCSVで保存
+import csv
+with open("crawl_results.csv", "w", encoding="utf-8-sig", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["テーマ", "URL", "タイトル", "関連度", "要約"])
+    for theme, result in all_results.items():
+        for page in result.pages:
+            writer.writerow([
+                theme,
+                page.url,
+                page.title,
+                f"{page.relevance_score:.2f}",
+                page.processed_content[:500],
+            ])
+```
+
+#### CrawlResult / EvaluatedPage の構造
+
+```python
+# CrawlResult の属性
+result.pages              # List[EvaluatedPage] - 関連性のあるページ一覧
+result.total_fetch_time   # float - フェッチ総時間（秒）
+result.total_eval_time    # float - 評価総時間（秒）
+result.pages_fetched      # int - フェッチしたページ数
+result.pages_filtered     # int - フィルタで除外されたページ数
+result.pages_evaluated    # int - 評価したページ数
+result.errors             # List[str] - エラーメッセージ一覧
+
+# EvaluatedPage の属性
+page.url                  # str - ページURL
+page.title                # str - ページタイトル
+page.snippet              # str - 検索結果のスニペット
+page.content              # str - ページの全文コンテンツ
+page.relevance_score      # float - 関連度スコア (0.0-1.0)
+page.processed_content    # str - LLMが生成した要約
+page.key_points           # List[str] - 抽出された要点
+page.fetch_time           # float - フェッチ時間（秒）
+page.evaluation_time      # float - 評価時間（秒）
+page.metadata             # Dict - メタデータ（検索クエリ等）
+```
+
 ---
 
 ## 詳細ワークフロー：クエリ入力からレポート出力まで
