@@ -36,6 +36,14 @@ class LLMProvider(str, Enum):
     """Supported LLM providers."""
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
+    LOCAL = "local"
+
+
+class LocalLLMBackend(str, Enum):
+    """Supported local LLM backends."""
+    OLLAMA = "ollama"
+    VLLM = "vllm"
+    OPENAI_COMPATIBLE = "openai_compatible"
 
 
 class SearchMethod(str, Enum):
@@ -121,6 +129,12 @@ class APIConfig:
     openai_model: str = "gpt-5-mini"
     anthropic_model: str = "claude-3-5-sonnet-20241022"
 
+    # Local LLM settings
+    local_model: str = "llama3.1:8b"
+    local_backend: LocalLLMBackend = LocalLLMBackend.OLLAMA
+    local_base_url: Optional[str] = None  # e.g., "http://localhost:11434"
+    local_api_key: Optional[str] = None  # Optional auth for local servers
+
     # API parameters
     temperature: float = 0.7
     max_tokens: int = 4096
@@ -144,6 +158,23 @@ class APIConfig:
         "claude-3-sonnet-20240229",
         "claude-3-haiku-20240307",
     )
+    LOCAL_MODELS: tuple = (
+        # Llama models (Ollama)
+        "llama3.1:8b",
+        "llama3.1:70b",
+        "llama3.2:3b",
+        "llama2:7b",
+        "codellama:7b",
+        # GPT-OSS models (vLLM)
+        "gpt-oss-20b",
+        "gpt-oss-120b",
+        # Other local models
+        "mistral:7b",
+        "mixtral:8x7b",
+        "phi3:mini",
+        "qwen2:7b",
+        "gemma2:9b",
+    )
 
     def __post_init__(self):
         """Load API keys from environment if not provided."""
@@ -151,17 +182,25 @@ class APIConfig:
             self.openai_api_key = os.getenv("OPENAI_API_KEY")
         if self.anthropic_api_key is None:
             self.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+        if self.local_base_url is None:
+            self.local_base_url = os.getenv("LOCAL_LLM_BASE_URL")
+        if self.local_api_key is None:
+            self.local_api_key = os.getenv("LOCAL_LLM_API_KEY")
 
     def get_active_api_key(self) -> Optional[str]:
         """Get the API key for the active provider."""
         if self.provider == LLMProvider.OPENAI:
             return self.openai_api_key
+        elif self.provider == LLMProvider.LOCAL:
+            return self.local_api_key
         return self.anthropic_api_key
 
     def get_active_model(self) -> str:
         """Get the model name for the active provider."""
         if self.provider == LLMProvider.OPENAI:
             return self.openai_model
+        elif self.provider == LLMProvider.LOCAL:
+            return self.local_model
         return self.anthropic_model
 
 

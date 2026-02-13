@@ -125,14 +125,21 @@ class DeepResearchTool:
 
     def _create_llm_client(self):
         """Create LLM client based on configuration."""
-        return get_client(
-            provider=self.config.api.provider.value,
-            api_key=self.config.api.get_active_api_key(),
-            model=self.config.api.get_active_model(),
-            http_proxy=self.config.proxy.http_proxy,
-            https_proxy=self.config.proxy.https_proxy,
-            verify_ssl=self.config.proxy.verify_ssl,
-        )
+        kwargs = {
+            "provider": self.config.api.provider.value,
+            "api_key": self.config.api.get_active_api_key(),
+            "model": self.config.api.get_active_model(),
+            "http_proxy": self.config.proxy.http_proxy,
+            "https_proxy": self.config.proxy.https_proxy,
+            "verify_ssl": self.config.proxy.verify_ssl,
+        }
+
+        # Add local LLM specific settings
+        if self.config.api.provider == LLMProvider.LOCAL:
+            kwargs["base_url"] = self.config.api.local_base_url
+            kwargs["backend"] = self.config.api.local_backend.value
+
+        return get_client(**kwargs)
 
     def _create_search_client(self):
         """Create search client based on configuration."""
