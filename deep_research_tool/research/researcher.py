@@ -18,9 +18,11 @@ from ..evidence.content_filter import (
     create_moderate_filter,
 )
 from ..search.base import SearchResult
+from ..config import CrawlMode
 from .query_generator import QueryGenerator, ResearchPlan, TableOfContents, TableOfContentsItem
 from .content_extractor import ContentExtractor, ExtractedContent
 from .site_crawler import SiteCrawler, CrawlResult, extract_keywords_from_topic
+from .fast_crawler import FastCrawler, EvaluationMode, CrawlResult as FastCrawlResult
 
 
 class ResearchState(str, Enum):
@@ -151,6 +153,9 @@ class Researcher:
         use_enhanced_synthesis: bool = True,
         content_filter: ContentFilter = None,
         filter_mode: str = "moderate",
+        crawl_mode: CrawlMode = CrawlMode.STANDARD,
+        fast_crawl_workers: int = 10,
+        fast_crawl_batch_size: int = 5,
     ):
         """
         Initialize Researcher.
@@ -173,6 +178,9 @@ class Researcher:
             use_enhanced_synthesis: Use multi-pass content generation for better quality
             content_filter: Content filter instance (None to use default based on filter_mode)
             filter_mode: Filter strictness: "strict", "moderate", "minimal", or "none"
+            crawl_mode: Crawl mode (standard, fast_batch, fast_parallel)
+            fast_crawl_workers: Max parallel workers for fast crawl mode
+            fast_crawl_batch_size: Pages per batch in batch evaluation mode
         """
         self.llm = llm_client
         self.search = search_client
@@ -222,6 +230,24 @@ class Researcher:
             self.content_filter = create_minimal_filter()
         else:  # "none"
             self.content_filter = None
+
+        # Fast crawl mode settings
+        self.crawl_mode = crawl_mode
+        self.fast_crawler: Optional[FastCrawler] = None
+        if crawl_mode in (CrawlMode.FAST_BATCH, CrawlMode.FAST_PARALLEL):
+            eval_mode = (
+                EvaluationMode.BATCH if crawl_mode == CrawlMode.FAST_BATCH
+                else EvaluationMode.PARALLEL
+            )
+            self.fast_crawler = FastCrawler(
+                search_client=search_client,
+                llm_client=llm_client,
+                evaluation_mode=eval_mode,
+                content_filter=self.content_filter,
+                max_workers=fast_crawl_workers,
+                batch_size=fast_crawl_batch_size,
+                language=language,
+            )
 
     def _report_progress(self, message: str, percentage: float) -> None:
         """Report progress to callback if available."""
@@ -341,6 +367,9 @@ class Researcher:
         available_queries = list(self.session.research_plan.search_queries)
         print(f"[DEBUG] Initial search queries: {len(available_queries)}")
 
+        # Log crawl mode
+        print(f"[DEBUG] Using crawl mode: {self.crawl_mode.value}")
+
         for section_idx, section in enumerate(sections):
             section_progress_base = 10 + (section_idx / total_sections) * 70
 
@@ -350,15 +379,23 @@ class Researcher:
             )
 
             section.status = "in_progress"
-            section_content_parts: List[ExtractedContent] = []
 
-            # Research iterations for this section
-            iteration = 0
-            while iteration < self.max_iterations:
-                iteration += 1
-                iter_record = ResearchIteration(
-                    iteration_number=iteration,
-                    section=section.section,
+            # Choose processing method based on crawl mode
+            if self.fast_crawler and self.crawl_mode in (CrawlMode.FAST_BATCH, CrawlMode.FAST_PARALLEL):
+                # Fast crawl mode: parallel fetch + batch/parallel evaluation
+                self._process_section_with_fast_crawler(
+                    section=section,
+                    available_queries=available_queries,
+                    section_idx=section_idx,
+                    total_sections=total_sections,
+                )
+            else:
+                # Standard mode: sequential processing
+                self._process_section_with_immediate_generation(
+                    section=section,
+                    available_queries=available_queries,
+                    section_idx=section_idx,
+                    total_sections=total_sections,
                 )
 
             # Remove used queries
@@ -372,6 +409,97 @@ class Researcher:
 
         # Final coherence check
         self._check_report_coherence()
+
+    def _process_section_with_fast_crawler(
+        self,
+        section: TableOfContentsItem,
+        available_queries: List[str],
+        section_idx: int,
+        total_sections: int,
+    ) -> None:
+        """
+        Process a section using fast crawler mode.
+
+        This method:
+        1. Uses FastCrawler for parallel fetching and evaluation
+        2. Generates section content from evaluated pages
+        """
+        if not self.fast_crawler:
+            # Fallback to standard processing
+            return self._process_section_with_immediate_generation(
+                section, available_queries, section_idx, total_sections
+            )
+
+        section_content_parts: List[ExtractedContent] = []
+
+        # Progress callback for fast crawler
+        def fast_progress(msg: str, current: int, total: int):
+            self._report_progress(
+                f"{section.section}: {msg}",
+                10 + (section_idx / total_sections) * 70 + (current / total) * 10
+            )
+
+        # Get queries for this section
+        queries = available_queries[:self.max_queries_per_iteration]
+        if not queries:
+            # Generate queries if none available
+            queries = self.query_generator.generate_follow_up_queries(
+                section, "", []
+            )
+
+        print(f"[FastCrawler] Processing section {section.section} with {len(queries)} queries")
+
+        # Use FastCrawler for parallel fetch and batch/parallel evaluation
+        crawl_result: FastCrawlResult = self.fast_crawler.crawl_and_evaluate(
+            queries=queries,
+            section_context=f"{section.section}. {section.title}: {section.description}",
+            max_pages_per_query=self.max_pages_per_query,
+            min_relevance_score=0.2,
+            progress_callback=fast_progress,
+        )
+
+        print(f"[FastCrawler] Found {len(crawl_result.pages)} relevant pages "
+              f"(fetch: {crawl_result.total_fetch_time:.1f}s, eval: {crawl_result.total_eval_time:.1f}s)")
+
+        # Convert evaluated pages to ExtractedContent
+        for page in crawl_result.pages:
+            # Create ExtractedContent from evaluated page
+            extracted = ExtractedContent(
+                source_url=page.url,
+                source_title=page.title,
+                raw_content=page.content,
+                processed_content=page.processed_content or page.content[:2000],
+                key_points=page.key_points,
+                relevance_score=page.relevance_score,
+                extraction_notes=f"fast_crawler ({self.crawl_mode.value})",
+            )
+            section_content_parts.append(extracted)
+
+            # Add to evidence locker
+            self.evidence_locker.add_evidence(
+                url=page.url,
+                title=page.title,
+                content_excerpt=page.processed_content[:500] if page.processed_content else page.snippet,
+                evidence_type=EvidenceType.WEB_PAGE,
+                search_query=page.metadata.get("query", ""),
+                section_reference=section.section,
+                relevance_score=page.relevance_score,
+            )
+
+        # Create research iteration record
+        iter_record = ResearchIteration(
+            iteration_number=1,
+            section=section.section,
+            queries_executed=queries,
+            sources_found=crawl_result.pages_fetched,
+            content_extracted=len(crawl_result.pages),
+        )
+        iter_record.completed_at = datetime.now().isoformat()
+        self.session.iterations.append(iter_record)
+
+        # Generate and save section content
+        print(f"[FastCrawler] Section {section.section} complete. Parts: {len(section_content_parts)}")
+        self._generate_and_save_section_content(section, section_content_parts)
 
     def _process_section_with_immediate_generation(
         self,

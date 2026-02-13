@@ -259,6 +259,9 @@ class DeepResearchTool:
             use_enhanced_synthesis=self.config.research.use_enhanced_synthesis,
             content_filter=content_filter,
             filter_mode=self.config.research.content_filter_mode.value,
+            crawl_mode=self.config.research.crawl_mode,
+            fast_crawl_workers=self.config.research.fast_crawl_workers,
+            fast_crawl_batch_size=self.config.research.fast_crawl_batch_size,
         )
 
         # Conduct research
@@ -631,6 +634,10 @@ def run_research(
     content_filter_mode: str = "moderate",
     custom_blocked_domains: List[str] = None,
     custom_whitelisted_domains: List[str] = None,
+    # Fast crawl mode parameters
+    crawl_mode: str = "standard",
+    fast_crawl_workers: int = 10,
+    fast_crawl_batch_size: int = 5,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -673,6 +680,9 @@ def run_research(
         content_filter_mode: Content filter strictness ('strict', 'moderate', 'minimal', 'none')
         custom_blocked_domains: List of domains to block (ads, spam, etc.)
         custom_whitelisted_domains: List of domains to always allow
+        crawl_mode: Crawl mode for performance ('standard', 'fast_batch', 'fast_parallel')
+        fast_crawl_workers: Max parallel workers for fast crawl mode
+        fast_crawl_batch_size: Pages per batch in batch evaluation mode
         **kwargs: Additional configuration options
 
     Returns:
@@ -688,19 +698,18 @@ def run_research(
         )
         print(f"Report: {result['report_path']}")
 
-        # With extended mode for deeper research
+        # With fast crawl mode (batch evaluation)
         result = run_research(
             "AI trends 2024",
-            extended_mode=True,
-            crawl_max_pages=15,
-            crawl_max_sites=5,
+            crawl_mode="fast_batch",  # Parallel crawl + batch LLM
+            fast_crawl_workers=15,
+            fast_crawl_batch_size=5,
         )
 
-        # With proxy settings
+        # With fast crawl mode (parallel evaluation)
         result = run_research(
             "Market analysis",
-            http_proxy="http://proxy.company.com:8080",
-            https_proxy="http://proxy.company.com:8080",
+            crawl_mode="fast_parallel",  # Parallel crawl + parallel LLM
         )
 
         # With DeepThink for enhanced reasoning
@@ -763,6 +772,9 @@ def run_research(
         content_filter_mode=content_filter_mode,
         custom_blocked_domains=custom_blocked_domains,
         custom_whitelisted_domains=custom_whitelisted_domains,
+        crawl_mode=crawl_mode,
+        fast_crawl_workers=fast_crawl_workers,
+        fast_crawl_batch_size=fast_crawl_batch_size,
         **api_key_param,
         **kwargs,
     )

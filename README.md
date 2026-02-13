@@ -21,6 +21,7 @@ AIを活用した自動リサーチツール。OpenAI/Anthropic APIとWeb検索�
 - **多言語検索**: 複数言語での同時検索と結果統合
 - **ローカルデータ分析**: PDFやExcelなどのローカルファイルを直接分析
 - **データサルベージ**: エラー時のデータ復旧とCSVエクスポート（日本語エンコーディング対応）
+- **高速クロールモード**: 並列フェッチとバッチ/並列LLM評価で情報収集を高速化
 
 ## インストール
 
@@ -900,6 +901,303 @@ extract_report_text(session, 'report.docx', format='docx')
 
 ---
 
+## 追加機能8：高速クロールモード（Fast Crawl Mode）
+
+### 概要
+
+情報収集プロセスを高速化するための最適化モードです。従来の順次処理に対して、並列フェッチと効率的なLLM評価を組み合わせることで、リサーチ時間を大幅に短縮できます。
+
+### 処理フロー比較
+
+```
+【標準モード（standard）】
+検索 → ページ1取得 → LLM評価 → ページ2取得 → LLM評価 → ...（順次処理）
+
+【高速バッチモード（fast_batch）】
+検索 → [ページ1,2,3,4,5を並列取得] → [5ページをまとめてLLM評価] → ...
+        ↑ 並列HTTP fetch            ↑ 1回のLLMコールで複数評価
+
+【高速並列モード（fast_parallel）】
+検索 → [ページ1,2,3,4,5を並列取得] → [LLM評価を並列実行] → ...
+        ↑ 並列HTTP fetch            ↑ 複数のLLMコールを同時実行
+```
+
+### モードの選択指針
+
+| モード | 特徴 | 推奨ケース |
+|-------|------|-----------|
+| `standard` | 順次処理、最も安定 | デフォルト、確実性重視 |
+| `fast_batch` | 並列fetch + バッチLLM評価 | トークンコスト削減、中程度の高速化 |
+| `fast_parallel` | 並列fetch + 並列LLM評価 | 最速、レート制限に余裕がある場合 |
+
+### CLIでの使用
+
+```bash
+# 高速バッチモード（推奨）
+deep-research research "市場分析" --crawl-mode fast_batch
+
+# 高速並列モード（最速）
+deep-research research "技術調査" --crawl-mode fast_parallel
+
+# ワーカー数とバッチサイズをカスタマイズ
+deep-research research "競合分析" \
+    --crawl-mode fast_batch \
+    --fast-crawl-workers 15 \
+    --fast-crawl-batch-size 8
+```
+
+### Pythonでの使用
+
+```python
+from deep_research_tool import run_research
+
+# 高速バッチモード
+result = run_research(
+    query="AIトレンド分析 2024",
+    provider="anthropic",
+    crawl_mode="fast_batch",      # fast_batch または fast_parallel
+    fast_crawl_workers=10,        # 並列HTTPワーカー数
+    fast_crawl_batch_size=5,      # バッチあたりのページ数
+)
+
+# 高速並列モード（最速）
+result = run_research(
+    query="市場動向調査",
+    crawl_mode="fast_parallel",
+    fast_crawl_workers=15,
+)
+
+print(f"レポート: {result['report_path']}")
+```
+
+### 詳細な設定（Config使用）
+
+```python
+from deep_research_tool import DeepResearchTool, create_config
+
+config = create_config(
+    provider="anthropic",
+    research_iterations=5,
+    output_format="pdf",
+
+    # 高速クロールモード設定
+    crawl_mode="fast_batch",     # standard / fast_batch / fast_parallel
+    fast_crawl_workers=10,       # 並列フェッチのワーカー数
+    fast_crawl_batch_size=5,     # バッチ評価時のページ数
+)
+
+tool = DeepResearchTool(config)
+result = tool.run(
+    query="再生可能エネルギー市場",
+    requirements="最新データと予測を含める",
+)
+```
+
+### 設定パラメータ
+
+| パラメータ | 説明 | デフォルト |
+|-----------|------|----------|
+| `crawl_mode` | クロールモード（standard/fast_batch/fast_parallel） | `standard` |
+| `fast_crawl_workers` | 並列HTTPフェッチのワーカー数 | `10` |
+| `fast_crawl_batch_size` | バッチ評価時の1バッチあたりページ数 | `5` |
+
+### パフォーマンス特性
+
+| モード | 速度 | トークン効率 | 安定性 |
+|-------|------|------------|--------|
+| standard | ★★☆ | ★★★ | ★★★ |
+| fast_batch | ★★★ | ★★★ | ★★★ |
+| fast_parallel | ★★★★ | ★★☆ | ★★☆ |
+
+### 注意事項
+
+- `fast_parallel`モードはAPIのレート制限に注意が必要です
+- `fast_batch`モードはトークン効率が良く、多くのケースで推奨されます
+- ネットワークが不安定な環境では`standard`モードが安定します
+- Extended Modeとの併用も可能です
+
+### FastCrawlerの独立使用（情報収集のみ）
+
+FastCrawlerはリサーチ全体のワークフローから独立して使用できます。Web検索と情報収集だけを行い、結果を自分で処理したい場合に便利です。
+
+#### 基本的な使い方
+
+```python
+from deep_research_tool.research.fast_crawler import FastCrawler, EvaluationMode
+from deep_research_tool.search import get_search_client
+from deep_research_tool.api import get_client
+
+# クライアントを作成
+search_client = get_search_client(method="duckduckgo")
+llm_client = get_client(provider="openai")
+
+# FastCrawlerを作成
+crawler = FastCrawler(
+    search_client=search_client,
+    llm_client=llm_client,
+    evaluation_mode=EvaluationMode.BATCH,  # BATCH / PARALLEL / SEQUENTIAL
+    max_workers=10,        # 並列フェッチのワーカー数
+    batch_size=5,          # バッチ評価時のページ数
+    language="ja",
+)
+
+# クロール実行
+result = crawler.crawl_and_evaluate(
+    queries=["日本のEV市場 2024", "電気自動車 販売台数"],
+    section_context="日本のEV市場の現状",
+    max_pages_per_query=5,
+    min_relevance_score=0.3,
+)
+
+# 結果を処理
+print(f"取得ページ数: {result.pages_fetched}")
+print(f"フィルタ済み: {result.pages_filtered}")
+print(f"関連ページ数: {len(result.pages)}")
+print(f"フェッチ時間: {result.total_fetch_time:.1f}秒")
+print(f"評価時間: {result.total_eval_time:.1f}秒")
+
+# 各ページの情報を取得
+for page in result.pages:
+    print(f"\n--- {page.title} ---")
+    print(f"URL: {page.url}")
+    print(f"関連度: {page.relevance_score:.2f}")
+    print(f"要点: {page.key_points}")
+    print(f"要約: {page.processed_content[:200]}...")
+```
+
+#### ファクトリー関数を使った簡易作成
+
+```python
+from deep_research_tool.research.fast_crawler import create_fast_crawler
+from deep_research_tool.search import get_search_client
+from deep_research_tool.api import get_client
+
+search_client = get_search_client(method="duckduckgo")
+llm_client = get_client(provider="openai")
+
+# ファクトリー関数で作成
+crawler = create_fast_crawler(
+    search_client=search_client,
+    llm_client=llm_client,
+    mode="batch",      # "batch" / "parallel" / "sequential"
+    language="ja",
+    max_workers=15,
+    batch_size=8,
+)
+
+result = crawler.crawl_and_evaluate(
+    queries=["量子コンピュータ 最新動向"],
+    section_context="量子コンピュータの技術動向",
+)
+```
+
+#### コンテンツフィルターのカスタマイズ
+
+```python
+from deep_research_tool.research.fast_crawler import FastCrawler, EvaluationMode
+from deep_research_tool.evidence.content_filter import (
+    ContentFilter,
+    ContentFilterConfig,
+    create_strict_filter,
+)
+
+# 厳格なフィルター（広告サイトを強力に排除）
+strict_filter = create_strict_filter()
+
+# カスタムフィルター
+custom_filter = ContentFilter(ContentFilterConfig(
+    min_content_length=500,
+    max_ad_ratio=0.1,
+    blocked_domains=["spam-site.com", "ad-network.net"],
+    whitelisted_domains=["trusted-source.org"],
+))
+
+crawler = FastCrawler(
+    search_client=search_client,
+    llm_client=llm_client,
+    evaluation_mode=EvaluationMode.BATCH,
+    content_filter=custom_filter,  # カスタムフィルターを使用
+)
+```
+
+#### プログレスコールバック
+
+```python
+def progress_callback(message: str, current: int, total: int):
+    """進捗を表示するコールバック"""
+    percentage = (current / total) * 100 if total > 0 else 0
+    print(f"[{percentage:5.1f}%] {message}")
+
+result = crawler.crawl_and_evaluate(
+    queries=["検索クエリ1", "検索クエリ2"],
+    section_context="調査テーマ",
+    progress_callback=progress_callback,
+)
+```
+
+#### 大量クエリの一括処理
+
+```python
+# 複数のテーマについて一括でクロール
+themes = [
+    ("EV市場", ["日本 EV市場 2024", "電気自動車 普及率"]),
+    ("自動運転", ["自動運転技術 最新", "レベル4 自動運転 日本"]),
+    ("水素自動車", ["FCV 燃料電池車 トヨタ", "水素ステーション 整備"]),
+]
+
+all_results = {}
+for theme_name, queries in themes:
+    result = crawler.crawl_and_evaluate(
+        queries=queries,
+        section_context=theme_name,
+        max_pages_per_query=3,
+    )
+    all_results[theme_name] = result
+    print(f"{theme_name}: {len(result.pages)}ページ取得")
+
+# 結果をCSVで保存
+import csv
+with open("crawl_results.csv", "w", encoding="utf-8-sig", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["テーマ", "URL", "タイトル", "関連度", "要約"])
+    for theme, result in all_results.items():
+        for page in result.pages:
+            writer.writerow([
+                theme,
+                page.url,
+                page.title,
+                f"{page.relevance_score:.2f}",
+                page.processed_content[:500],
+            ])
+```
+
+#### CrawlResult / EvaluatedPage の構造
+
+```python
+# CrawlResult の属性
+result.pages              # List[EvaluatedPage] - 関連性のあるページ一覧
+result.total_fetch_time   # float - フェッチ総時間（秒）
+result.total_eval_time    # float - 評価総時間（秒）
+result.pages_fetched      # int - フェッチしたページ数
+result.pages_filtered     # int - フィルタで除外されたページ数
+result.pages_evaluated    # int - 評価したページ数
+result.errors             # List[str] - エラーメッセージ一覧
+
+# EvaluatedPage の属性
+page.url                  # str - ページURL
+page.title                # str - ページタイトル
+page.snippet              # str - 検索結果のスニペット
+page.content              # str - ページの全文コンテンツ
+page.relevance_score      # float - 関連度スコア (0.0-1.0)
+page.processed_content    # str - LLMが生成した要約
+page.key_points           # List[str] - 抽出された要点
+page.fetch_time           # float - フェッチ時間（秒）
+page.evaluation_time      # float - 評価時間（秒）
+page.metadata             # Dict - メタデータ（検索クエリ等）
+```
+
+---
+
 ## 詳細ワークフロー：クエリ入力からレポート出力まで
 
 以下は、ユーザーがリサーチクエリを入力してからレポートが出力されるまでの詳細なワークフローです。
@@ -1192,6 +1490,9 @@ extract_report_text(session, 'report.docx', format='docx')
 | `local_model` | ローカルLLMモデル名 | llama3.1:8b |
 | `local_backend` | ローカルLLMバックエンド (ollama/vllm/openai_compatible) | ollama |
 | `local_base_url` | ローカルLLMサーバーURL | http://localhost:11434 |
+| `crawl_mode` | 高速クロールモード (standard/fast_batch/fast_parallel) | standard |
+| `fast_crawl_workers` | 並列HTTPフェッチのワーカー数 | 10 |
+| `fast_crawl_batch_size` | バッチ評価時の1バッチあたりページ数 | 5 |
 
 ---
 
@@ -1292,7 +1593,8 @@ deep_research_tool/
 │   ├── query_generator.py
 │   ├── content_extractor.py
 │   ├── researcher.py
-│   └── site_crawler.py  # Extended Mode用サイトクローラー
+│   ├── site_crawler.py  # Extended Mode用サイトクローラー
+│   └── fast_crawler.py  # 高速クロールモード用並列クローラー
 ├── verification/        # ハルシネーション検証
 │   └── verifier.py
 ├── evidence/            # Evidence Locker
