@@ -4,7 +4,7 @@ AIを活用した自動リサーチツール。OpenAI/Anthropic APIとWeb検索�
 
 ## 特徴
 
-- **マルチLLMサポート**: OpenAI (GPT-4o-mini, GPT-5等) および Anthropic (Claude Opus, Sonnet, Haiku) に対応
+- **マルチLLMサポート**: OpenAI (GPT-4o-mini, GPT-5等)、Anthropic (Claude Opus, Sonnet, Haiku)、**ローカルLLM (Ollama, vLLM)** に対応
 - **柔軟なWeb検索**: DuckDuckGo API または Selenium（動的サイト対応）による情報収集
 - **自動リサーチループ**: クエリ連想→検索→情報抽出を設定回数繰り返し
 - **Evidence Locker**: 全ての参照元を追跡し、引用として管理
@@ -19,6 +19,8 @@ AIを活用した自動リサーチツール。OpenAI/Anthropic APIとWeb検索�
 - **トークン使用量追跡**: API呼び出しのトークン消費を詳細に追跡
 - **DeepThink推論強化**: 複雑なトピックに対する深い推論機能
 - **多言語検索**: 複数言語での同時検索と結果統合
+- **ローカルデータ分析**: PDFやExcelなどのローカルファイルを直接分析
+- **データサルベージ**: エラー時のデータ復旧とCSVエクスポート（日本語エンコーディング対応）
 
 ## インストール
 
@@ -45,6 +47,11 @@ export OPENAI_API_KEY="your-openai-api-key"
 
 # Anthropic APIを使用する場合
 export ANTHROPIC_API_KEY="your-anthropic-api-key"
+
+# ローカルLLMを使用する場合
+export LOCAL_LLM_BASE_URL="http://localhost:11434"  # Ollama
+# export LOCAL_LLM_BASE_URL="http://localhost:8000"  # vLLM
+export LOCAL_LLM_API_KEY=""  # 認証が必要な場合のみ
 ```
 
 ---
@@ -716,6 +723,183 @@ result = tool.run(
 
 ---
 
+## 追加機能6：ローカルLLMサポート
+
+### 概要
+
+ローカルで動作するLLMサーバー（Ollama、vLLM等）を使用してリサーチを実行できます。API料金を気にせず、機密データを外部に送信せずに処理が可能です。
+
+### 対応バックエンド・モデル
+
+| バックエンド | 対応モデル | デフォルトポート |
+|-------------|-----------|-----------------|
+| **Ollama** | Llama 3.1/3.2/2, CodeLlama, Mistral, Mixtral, Phi, Qwen, Gemma | 11434 |
+| **vLLM** | gpt-oss-20b, gpt-oss-120b, その他OpenAI互換モデル | 8000 |
+| **OpenAI互換** | 任意のOpenAI API互換サーバー | 8000 |
+
+### 使用方法
+
+#### Ollama + Llama3.1
+
+```python
+from deep_research_tool import run_research
+
+result = run_research(
+    query="調査テーマ",
+    provider="local",
+    local_model="llama3.1:8b",
+    local_backend="ollama",
+    local_base_url="http://localhost:11434",
+)
+```
+
+#### vLLM + gpt-oss-20b
+
+```python
+from deep_research_tool import run_research
+
+result = run_research(
+    query="調査テーマ",
+    provider="local",
+    local_model="gpt-oss-20b",
+    local_backend="vllm",
+    local_base_url="http://localhost:8000",
+)
+```
+
+### ローカルデータのみで分析（Web検索なし）
+
+```python
+from pathlib import Path
+from deep_research_tool.api import LocalLLMClient
+from deep_research_tool.research.researcher import Researcher
+from deep_research_tool.evidence.locker import EvidenceLocker, Evidence
+from deep_research_tool.utils.document_reader import read_document
+
+# LLMクライアント作成
+llm = LocalLLMClient(
+    model="llama3.1:8b",
+    backend="ollama",
+    base_url="http://localhost:11434",
+)
+
+# ローカルファイルをエビデンスとして読み込み
+locker = EvidenceLocker()
+for file_path in Path("./data").rglob("*.*"):
+    try:
+        content = read_document(str(file_path))
+        locker.add_evidence(Evidence(
+            url=f"file://{file_path.absolute()}",
+            title=file_path.name,
+            content_excerpt=content[:2000],
+            full_content=content,
+            source_type="local_file",
+            relevance_score=1.0,
+        ))
+    except Exception:
+        pass
+
+# Web検索をスキップしてローカルデータのみで分析
+researcher = Researcher(llm_client=llm, language="ja")
+session = researcher.run_research(
+    query="ローカルデータの分析",
+    evidence_locker=locker,
+    skip_search=True,
+)
+```
+
+### LocalLLMClientの直接使用
+
+```python
+from deep_research_tool.api import LocalLLMClient
+
+client = LocalLLMClient(
+    model="llama3.1:8b",
+    backend="ollama",
+    base_url="http://localhost:11434",
+)
+
+# サーバー接続確認
+if client.is_available():
+    print("✓ 接続OK")
+
+    # 利用可能なモデル一覧
+    models = client.list_models()
+    print(f"利用可能モデル: {models}")
+
+    # テキスト生成
+    response = client.generate("日本の経済状況を要約してください")
+    print(response.content)
+```
+
+### 対応モデル一覧
+
+```python
+# Llama系（Ollama）
+"llama3.1:8b", "llama3.1:70b", "llama3.2:3b", "llama2:7b", "codellama:7b"
+
+# GPT-OSS系（vLLM）
+"gpt-oss-20b", "gpt-oss-120b"
+
+# その他
+"mistral:7b", "mixtral:8x7b", "phi3:mini", "qwen2:7b", "gemma2:9b"
+```
+
+---
+
+## 追加機能7：データサルベージと復旧
+
+### 概要
+
+接続切れやエラーで中断したリサーチセッションのデータを復旧するための機能です。`salvage.ipynb` ノートブックを使用して、メモリ上のデータやファイルからサルベージできます。
+
+### 使用方法
+
+```python
+# salvage.ipynbを開いてセルを実行
+
+# === 1. メモリ上のオブジェクト検索 ===
+# カーネルが再起動されていなければ、セッションやエビデンスを復旧可能
+
+# === 2. トークン使用量の確認 ===
+from deep_research_tool.api.base import get_token_stats
+stats = get_token_stats()
+print(stats.get_summary("ja"))
+
+# === 3. 報告書本文の抽出 ===
+# サルベージしたセッションから報告書を抽出
+extract_report_text(salvaged['sessions'][0], 'report.md')
+
+# === 4. CSVエクスポート（日本語エンコーディング対応）===
+# Excelで開く場合: utf-8-sig
+# 古いWindowsアプリ: cp932
+convert_json_to_csv("salvage_xxx/evidences.json", encoding="cp932")
+```
+
+### CSVエンコーディングオプション
+
+| エンコーディング | 説明 | 用途 |
+|----------------|------|------|
+| `utf-8-sig` | BOM付きUTF-8 | Excel（推奨） |
+| `utf-8` | UTF-8 | 汎用 |
+| `cp932` | Windows日本語 | 古いWindowsアプリ |
+| `shift_jis` | Shift_JIS | レガシーシステム |
+
+### 報告書抽出機能
+
+```python
+# Markdown形式で保存
+extract_report_text(session, 'report.md', format='markdown')
+
+# テキスト形式（cp932エンコーディング）
+extract_report_text(session, 'report.txt', encoding='cp932', format='txt')
+
+# Word文書（python-docx必要）
+extract_report_text(session, 'report.docx', format='docx')
+```
+
+---
+
 ## 詳細ワークフロー：クエリ入力からレポート出力まで
 
 以下は、ユーザーがリサーチクエリを入力してからレポートが出力されるまでの詳細なワークフローです。
@@ -983,7 +1167,7 @@ result = tool.run(
 
 | オプション | 説明 | デフォルト |
 |-----------|------|----------|
-| `provider` | LLMプロバイダー (openai/anthropic) | openai |
+| `provider` | LLMプロバイダー (openai/anthropic/local) | openai |
 | `model` | 使用するモデル名 | gpt-4o-mini |
 | `search_method` | 検索方法 (duckduckgo/selenium) | duckduckgo |
 | `research_iterations` | リサーチループ回数 | 3 |
@@ -1005,6 +1189,9 @@ result = tool.run(
 | `query_translation` | クエリ翻訳方法 (llm/none) | llm |
 | `translate_results` | 結果を出力言語に翻訳 | True |
 | `use_enhanced_synthesis` | Multi-Pass Synthesis有効化 | True |
+| `local_model` | ローカルLLMモデル名 | llama3.1:8b |
+| `local_backend` | ローカルLLMバックエンド (ollama/vllm/openai_compatible) | ollama |
+| `local_base_url` | ローカルLLMサーバーURL | http://localhost:11434 |
 
 ---
 
@@ -1095,7 +1282,8 @@ deep_research_tool/
 ├── api/                 # LLM APIクライアント
 │   ├── base.py
 │   ├── openai_client.py
-│   └── anthropic_client.py
+│   ├── anthropic_client.py
+│   └── local_client.py  # ローカルLLM (Ollama/vLLM)
 ├── search/              # Web検索モジュール
 │   ├── base.py
 │   ├── duckduckgo.py
@@ -1114,9 +1302,10 @@ deep_research_tool/
 │   ├── generator.py
 │   ├── length_controller.py
 │   └── figure_table_generator.py
-└── utils/               # ユーティリティ
-    ├── document_reader.py
-    └── helpers.py
+├── utils/               # ユーティリティ
+│   ├── document_reader.py
+│   └── helpers.py
+└── salvage.ipynb        # データサルベージ用ノートブック
 ```
 
 ---
