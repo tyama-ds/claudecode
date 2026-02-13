@@ -304,6 +304,13 @@ class ContentFilterMode(str, Enum):
     NONE = "none"          # No filtering
 
 
+class CrawlMode(str, Enum):
+    """Crawl and evaluation mode for performance optimization."""
+    STANDARD = "standard"          # Original sequential mode
+    FAST_BATCH = "fast_batch"      # Fast parallel crawl + batch LLM evaluation
+    FAST_PARALLEL = "fast_parallel"  # Fast parallel crawl + parallel LLM evaluation
+
+
 @dataclass
 class ResearchConfig:
     """Configuration for research process."""
@@ -338,6 +345,11 @@ class ResearchConfig:
     content_filter_mode: ContentFilterMode = ContentFilterMode.MODERATE
     custom_blocked_domains: List[str] = field(default_factory=list)
     custom_whitelisted_domains: List[str] = field(default_factory=list)
+
+    # Fast crawl mode settings
+    crawl_mode: CrawlMode = CrawlMode.STANDARD  # standard, fast_batch, fast_parallel
+    fast_crawl_workers: int = 10   # Max parallel workers for fetching
+    fast_crawl_batch_size: int = 5  # Pages per batch in batch evaluation mode
 
 
 @dataclass
@@ -483,6 +495,10 @@ def create_config(
     content_filter_mode: str = "moderate",
     custom_blocked_domains: Optional[List[str]] = None,
     custom_whitelisted_domains: Optional[List[str]] = None,
+    # Fast crawl mode parameters
+    crawl_mode: str = "standard",
+    fast_crawl_workers: int = 10,
+    fast_crawl_batch_size: int = 5,
     **kwargs
 ) -> Config:
     """
@@ -528,6 +544,9 @@ def create_config(
         content_filter_mode: Content filter strictness ('strict', 'moderate', 'minimal', 'none')
         custom_blocked_domains: List of domains to block in addition to defaults
         custom_whitelisted_domains: List of domains to always allow
+        crawl_mode: Crawl mode ('standard', 'fast_batch', 'fast_parallel')
+        fast_crawl_workers: Max parallel workers for fast crawl mode
+        fast_crawl_batch_size: Pages per batch in batch evaluation mode
         **kwargs: Additional keyword arguments
 
     Returns:
@@ -565,6 +584,9 @@ def create_config(
         content_filter_mode=ContentFilterMode(content_filter_mode),
         custom_blocked_domains=custom_blocked_domains if custom_blocked_domains else [],
         custom_whitelisted_domains=custom_whitelisted_domains if custom_whitelisted_domains else [],
+        crawl_mode=CrawlMode(crawl_mode),
+        fast_crawl_workers=fast_crawl_workers,
+        fast_crawl_batch_size=fast_crawl_batch_size,
     )
 
     report_config = ReportConfig(
