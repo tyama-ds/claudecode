@@ -7,7 +7,6 @@
 <style>
 /* ── Reset & Base ────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
 :root {
     --bg: #0f1117; --bg-panel: #1a1d27; --bg-input: #252833;
     --bg-hover: #2a2e3b; --border: #333848;
@@ -16,51 +15,51 @@
     --accent-glow: rgba(108, 92, 231, 0.25);
     --green: #00cec9; --green-dim: rgba(0, 206, 201, 0.15);
     --red: #ff6b6b; --red-dim: rgba(255, 107, 107, 0.12);
+    --orange: #fdcb6e;
     --radius: 8px; --radius-lg: 12px;
     --font: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Noto Sans JP', sans-serif;
     --mono: 'Fira Code', 'Consolas', 'SF Mono', monospace;
 }
-
 html { font-size: 15px; }
 body { font-family: var(--font); background: var(--bg); color: var(--text); line-height: 1.6; min-height: 100vh; }
 
 /* ── Layout ──────────────────────────────────────────── */
 .app { display: flex; flex-direction: column; min-height: 100vh; }
-.header { background: var(--bg-panel); border-bottom: 1px solid var(--border); padding: 1.2rem 2rem; }
-.header-inner { max-width: 1600px; margin: 0 auto; }
-.logo { font-size: 1.5rem; font-weight: 700; background: linear-gradient(135deg, var(--accent), var(--green)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
-.subtitle { font-size: 0.85rem; color: var(--text-dim); margin-top: 0.2rem; }
+.header { background: var(--bg-panel); border-bottom: 1px solid var(--border); padding: 1rem 2rem; }
+.header-inner { max-width: 1600px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; }
+.header-left { display: flex; flex-direction: column; }
+.logo { font-size: 1.4rem; font-weight: 700; background: linear-gradient(135deg, var(--accent), var(--green)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+.subtitle { font-size: 0.8rem; color: var(--text-dim); margin-top: 0.1rem; }
+.header-actions { display: flex; gap: 0.5rem; }
+.btn-header { background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-dim); cursor: pointer; padding: 0.5rem 0.8rem; font-size: 0.85rem; font-family: var(--font); transition: all 0.2s; }
+.btn-header:hover { background: var(--bg-hover); color: var(--text); }
 .main { display: grid; grid-template-columns: 420px 1fr; gap: 0; flex: 1; max-width: 1600px; margin: 0 auto; width: 100%; }
 @media (max-width: 960px) { .main { grid-template-columns: 1fr; } }
 
 /* ── Panels ──────────────────────────────────────────── */
 .panel { padding: 1.5rem; overflow-y: auto; }
-.panel-config { background: var(--bg-panel); border-right: 1px solid var(--border); max-height: calc(100vh - 80px); }
-.panel-prompt { padding: 1.5rem 2rem; }
-.panel-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 1.2rem; color: var(--text); }
-
-/* ── Sections ────────────────────────────────────────── */
-.section { margin-bottom: 1.5rem; }
-.section-title { font-size: 0.9rem; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.8rem; display: flex; align-items: center; justify-content: space-between; }
+.panel-config { background: var(--bg-panel); border-right: 1px solid var(--border); max-height: calc(100vh - 70px); }
+.panel-prompt { padding: 1.5rem 2rem; max-height: calc(100vh - 70px); overflow-y: auto; }
+.panel-title { font-size: 1.05rem; font-weight: 600; margin-bottom: 1rem; color: var(--text); }
+.section { margin-bottom: 1.3rem; }
+.section-title { font-size: 0.85rem; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.7rem; display: flex; align-items: center; justify-content: space-between; }
 
 /* ── Form Fields ─────────────────────────────────────── */
-.field { margin-bottom: 0.8rem; }
-.field label { display: block; font-size: 0.82rem; color: var(--text-dim); margin-bottom: 0.3rem; font-weight: 500; }
-.field-row { display: flex; gap: 1rem; align-items: flex-start; }
+.field { margin-bottom: 0.7rem; }
+.field label { display: block; font-size: 0.82rem; color: var(--text-dim); margin-bottom: 0.25rem; font-weight: 500; }
+.field-row { display: flex; gap: 0.8rem; align-items: flex-start; }
 .field-row .field { flex: 1; }
-
 select, input[type="text"], input[type="password"] {
-    width: 100%; padding: 0.55rem 0.75rem; background: var(--bg-input);
+    width: 100%; padding: 0.5rem 0.7rem; background: var(--bg-input);
     border: 1px solid var(--border); border-radius: var(--radius);
-    color: var(--text); font-size: 0.88rem; font-family: var(--font); transition: border-color 0.2s;
+    color: var(--text); font-size: 0.85rem; font-family: var(--font); transition: border-color 0.2s;
 }
 select:focus, input:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
-select { cursor: pointer; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238b8fa3' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 0.75rem center; padding-right: 2rem; }
-textarea { width: 100%; padding: 0.75rem; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 0.92rem; font-family: var(--font); resize: vertical; line-height: 1.6; min-height: 120px; }
-
+select { cursor: pointer; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238b8fa3' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 0.7rem center; padding-right: 2rem; }
+textarea { width: 100%; padding: 0.7rem; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 0.88rem; font-family: var(--font); resize: vertical; line-height: 1.6; min-height: 100px; }
 .input-group { display: flex; gap: 0.4rem; }
 .input-group input { flex: 1; }
-.btn-icon { background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-dim); cursor: pointer; padding: 0.4rem 0.6rem; font-size: 0.9rem; transition: background 0.2s; }
+.btn-icon { background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-dim); cursor: pointer; padding: 0.35rem 0.55rem; font-size: 0.85rem; transition: background 0.2s; }
 .btn-icon:hover { background: var(--bg-hover); }
 
 /* ── Range Slider ────────────────────────────────────── */
@@ -70,21 +69,21 @@ textarea { width: 100%; padding: 0.75rem; background: var(--bg-input); border: 1
 .range-group span { font-size: 0.82rem; color: var(--text-dim); font-family: var(--mono); min-width: 2rem; text-align: right; }
 
 /* ── Technique List ──────────────────────────────────── */
-.technique-actions { display: flex; gap: 0.5rem; margin-bottom: 0.8rem; }
-.btn-sm { padding: 0.3rem 0.7rem; font-size: 0.75rem; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-dim); cursor: pointer; font-family: var(--font); transition: all 0.2s; }
+.technique-actions { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; }
+.btn-sm { padding: 0.25rem 0.6rem; font-size: 0.72rem; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-dim); cursor: pointer; font-family: var(--font); transition: all 0.2s; }
 .btn-sm:hover { background: var(--bg-hover); color: var(--text); }
-.technique-count { font-size: 0.75rem; color: var(--accent); font-weight: 400; }
-.technique-list { display: flex; flex-direction: column; gap: 0.4rem; max-height: 50vh; overflow-y: auto; padding-right: 0.3rem; }
+.technique-count { font-size: 0.72rem; color: var(--accent); font-weight: 400; }
+.technique-list { display: flex; flex-direction: column; gap: 0.35rem; max-height: 42vh; overflow-y: auto; padding-right: 0.3rem; }
 .technique-list::-webkit-scrollbar { width: 4px; }
 .technique-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-.technique-item { display: flex; align-items: flex-start; gap: 0.6rem; padding: 0.65rem 0.75rem; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; transition: all 0.2s; }
+.technique-item { display: flex; align-items: flex-start; gap: 0.5rem; padding: 0.55rem 0.65rem; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; transition: all 0.2s; }
 .technique-item:hover { border-color: var(--accent); background: var(--bg-hover); }
 .technique-item.selected { border-color: var(--accent); background: rgba(108, 92, 231, 0.08); }
 .technique-item input[type="checkbox"] { margin-top: 0.15rem; accent-color: var(--accent); flex-shrink: 0; }
 .technique-info { flex: 1; min-width: 0; }
-.technique-name { font-size: 0.82rem; font-weight: 600; color: var(--text); line-height: 1.3; }
-.technique-desc { font-size: 0.72rem; color: var(--text-muted); margin-top: 0.15rem; line-height: 1.4; }
-.technique-category { font-size: 0.65rem; padding: 0.1rem 0.45rem; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; flex-shrink: 0; margin-top: 0.15rem; }
+.technique-name { font-size: 0.78rem; font-weight: 600; color: var(--text); line-height: 1.3; }
+.technique-desc { font-size: 0.68rem; color: var(--text-muted); margin-top: 0.1rem; line-height: 1.4; }
+.technique-category { font-size: 0.62rem; padding: 0.08rem 0.4rem; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; flex-shrink: 0; margin-top: 0.15rem; }
 
 .cat-reasoning { background: rgba(108, 92, 231, 0.15); color: #a29bfe; }
 .cat-examples { background: rgba(0, 206, 201, 0.15); color: #00cec9; }
@@ -94,111 +93,254 @@ textarea { width: 100%; padding: 0.75rem; background: var(--bg-input); border: 1
 .cat-refinement { background: rgba(85, 239, 196, 0.15); color: #55efc4; }
 .cat-meta { background: rgba(162, 155, 254, 0.15); color: #a29bfe; }
 .cat-framework { background: rgba(253, 121, 168, 0.15); color: #fd79a8; }
+.cat-custom { background: rgba(255, 234, 167, 0.15); color: #ffeaa7; }
+
+/* ── Manual Technique ────────────────────────────────── */
+.manual-input { margin-top: 0.5rem; display: none; }
+.manual-input.visible { display: block; }
+.manual-input textarea { min-height: 70px; font-size: 0.8rem; }
 
 /* ── Buttons ─────────────────────────────────────────── */
-.action-bar { margin-bottom: 1.2rem; }
-.btn-primary { width: 100%; padding: 0.8rem 1.5rem; background: linear-gradient(135deg, var(--accent), #8b7cf7); border: none; border-radius: var(--radius); color: white; font-size: 1rem; font-weight: 600; font-family: var(--font); cursor: pointer; transition: all 0.25s; position: relative; overflow: hidden; }
+.action-bar { margin-bottom: 1rem; }
+.btn-primary { width: 100%; padding: 0.7rem 1.2rem; background: linear-gradient(135deg, var(--accent), #8b7cf7); border: none; border-radius: var(--radius); color: white; font-size: 0.95rem; font-weight: 600; font-family: var(--font); cursor: pointer; transition: all 0.25s; }
 .btn-primary:hover:not(:disabled) { background: linear-gradient(135deg, var(--accent-hover), #9d8ff8); box-shadow: 0 4px 20px var(--accent-glow); transform: translateY(-1px); }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-primary:active:not(:disabled) { transform: translateY(0); }
 .btn-copy { background: var(--green-dim); color: var(--green); border-color: transparent; font-weight: 600; }
 .btn-copy:hover { background: rgba(0, 206, 201, 0.25); }
 .btn-copy.copied { background: var(--green); color: var(--bg); }
 
 /* ── Output ──────────────────────────────────────────── */
-.output-box { background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.2rem; font-size: 0.9rem; line-height: 1.7; white-space: pre-wrap; word-wrap: break-word; max-height: 500px; overflow-y: auto; }
-.analysis-box { background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.2rem; font-size: 0.85rem; line-height: 1.7; color: var(--text-dim); }
-.analysis-box h1, .analysis-box h2, .analysis-box h3 { color: var(--text); margin-top: 0.8rem; margin-bottom: 0.4rem; }
-.analysis-box h1 { font-size: 1.1rem; } .analysis-box h2 { font-size: 1rem; } .analysis-box h3 { font-size: 0.9rem; }
+.output-box { background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1rem; font-size: 0.88rem; line-height: 1.7; white-space: pre-wrap; word-wrap: break-word; max-height: 400px; overflow-y: auto; }
+.analysis-box { background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1rem; font-size: 0.82rem; line-height: 1.7; color: var(--text-dim); }
+.analysis-box h1,.analysis-box h2,.analysis-box h3 { color: var(--text); margin-top: 0.6rem; margin-bottom: 0.3rem; }
+.analysis-box h1 { font-size: 1.05rem; } .analysis-box h2 { font-size: 0.95rem; } .analysis-box h3 { font-size: 0.88rem; }
 .analysis-box strong { color: var(--text); }
-.analysis-box ul, .analysis-box ol { margin-left: 1.5rem; margin-bottom: 0.5rem; }
-.analysis-box code { background: rgba(108, 92, 231, 0.1); padding: 0.1rem 0.4rem; border-radius: 3px; font-family: var(--mono); font-size: 0.82rem; }
-.meta-info { margin-top: 1rem; padding: 0.6rem 0.8rem; background: var(--bg-input); border-radius: var(--radius); font-size: 0.75rem; color: var(--text-muted); display: flex; gap: 1.5rem; flex-wrap: wrap; }
-.meta-info span { display: flex; align-items: center; gap: 0.3rem; }
+.analysis-box ul,.analysis-box ol { margin-left: 1.3rem; margin-bottom: 0.4rem; }
+.analysis-box code { background: rgba(108,92,231,0.1); padding: 0.1rem 0.35rem; border-radius: 3px; font-family: var(--mono); font-size: 0.78rem; }
+.meta-info { margin-top: 0.8rem; padding: 0.5rem 0.7rem; background: var(--bg-input); border-radius: var(--radius); font-size: 0.72rem; color: var(--text-muted); display: flex; gap: 1.2rem; flex-wrap: wrap; }
+.meta-info span { display: flex; align-items: center; gap: 0.25rem; }
+
+/* ── Recent & Preferred ──────────────────────────────── */
+.prompt-links { margin-bottom: 1rem; }
+.prompt-links-title { font-size: 0.78rem; font-weight: 600; color: var(--text-dim); margin-bottom: 0.4rem; display: flex; align-items: center; gap: 0.4rem; }
+.prompt-link-list { display: flex; flex-direction: column; gap: 0.3rem; }
+.prompt-link { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.6rem; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; transition: all 0.2s; font-size: 0.75rem; color: var(--text-dim); }
+.prompt-link:hover { border-color: var(--accent); background: var(--bg-hover); color: var(--text); }
+.prompt-link-excerpt { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prompt-link-meta { font-size: 0.65rem; color: var(--text-muted); flex-shrink: 0; }
+.prompt-link-star { cursor: pointer; font-size: 0.85rem; flex-shrink: 0; transition: transform 0.2s; }
+.prompt-link-star:hover { transform: scale(1.2); }
+.prompt-link-star.active { color: var(--orange); }
 
 /* ── Error ───────────────────────────────────────────── */
-.error-box { background: var(--red-dim); border: 1px solid rgba(255, 107, 107, 0.3); border-radius: var(--radius); padding: 0.8rem 1rem; color: var(--red); font-size: 0.85rem; margin-top: 0.8rem; }
+.error-box { background: var(--red-dim); border: 1px solid rgba(255,107,107,0.3); border-radius: var(--radius); padding: 0.7rem 0.9rem; color: var(--red); font-size: 0.82rem; margin-top: 0.7rem; }
 
 /* ── Scrollbar ───────────────────────────────────────── */
-.panel-config::-webkit-scrollbar, .output-box::-webkit-scrollbar { width: 5px; }
-.panel-config::-webkit-scrollbar-thumb, .output-box::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.panel-config::-webkit-scrollbar,.output-box::-webkit-scrollbar,.panel-prompt::-webkit-scrollbar { width: 5px; }
+.panel-config::-webkit-scrollbar-thumb,.output-box::-webkit-scrollbar-thumb,.panel-prompt::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+.btn-loading-anim { animation: pulse 1.5s ease-in-out infinite; }
 
-@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-.btn-loading { animation: pulse 1.5s ease-in-out infinite; }
+/* ── Modal Overlay ───────────────────────────────────── */
+.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; align-items: center; justify-content: center; backdrop-filter: blur(4px); }
+.modal-overlay.active { display: flex; }
+.modal { background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.5rem; max-width: 600px; width: 90%; max-height: 85vh; overflow-y: auto; }
+.modal-title { font-size: 1.1rem; font-weight: 700; margin-bottom: 1rem; color: var(--text); display: flex; align-items: center; justify-content: space-between; }
+.modal-close { background: none; border: none; color: var(--text-muted); font-size: 1.3rem; cursor: pointer; padding: 0.2rem; }
+.modal-close:hover { color: var(--text); }
+.modal-body { margin-bottom: 1rem; }
+.modal-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }
+.modal-btn { padding: 0.5rem 1.2rem; border-radius: var(--radius); font-family: var(--font); font-size: 0.85rem; cursor: pointer; transition: all 0.2s; }
+.modal-btn-primary { background: var(--accent); border: none; color: white; font-weight: 600; }
+.modal-btn-primary:hover { background: var(--accent-hover); }
+.modal-btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.modal-btn-secondary { background: var(--bg-input); border: 1px solid var(--border); color: var(--text-dim); }
+.modal-btn-secondary:hover { background: var(--bg-hover); color: var(--text); }
+.modal-btn-danger { background: var(--red-dim); border: 1px solid rgba(255,107,107,0.3); color: var(--red); }
+.modal-btn-danger:hover { background: rgba(255,107,107,0.25); }
+
+/* ── Setup / Unlock Views ────────────────────────────── */
+.view-screen { display: none; min-height: 100vh; align-items: center; justify-content: center; flex-direction: column; padding: 2rem; }
+.view-screen.active { display: flex; }
+.setup-card { background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 2rem; max-width: 500px; width: 100%; }
+.setup-card h2 { font-size: 1.2rem; font-weight: 700; margin-bottom: 0.3rem; }
+.setup-card p { font-size: 0.85rem; color: var(--text-dim); margin-bottom: 1.2rem; }
+.setup-step { margin-bottom: 1rem; }
+.setup-step-label { font-size: 0.78rem; color: var(--accent); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
+.setup-note { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.2rem; }
+.fs-unavailable { background: rgba(253,203,110,0.1); border: 1px solid rgba(253,203,110,0.3); border-radius: var(--radius); padding: 0.7rem; font-size: 0.78rem; color: var(--orange); margin-bottom: 1rem; }
+
+/* ── Back Number List ────────────────────────────────── */
+.bn-list { display: flex; flex-direction: column; gap: 0.4rem; max-height: 50vh; overflow-y: auto; }
+.bn-item { display: flex; align-items: center; gap: 0.6rem; padding: 0.6rem 0.8rem; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; transition: all 0.2s; }
+.bn-item:hover { border-color: var(--accent); background: var(--bg-hover); }
+.bn-excerpt { flex: 1; font-size: 0.78rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bn-meta { font-size: 0.65rem; color: var(--text-muted); text-align: right; flex-shrink: 0; }
+.bn-techniques { display: flex; gap: 0.2rem; flex-wrap: wrap; }
+.bn-tag { font-size: 0.55rem; padding: 0.05rem 0.3rem; background: rgba(108,92,231,0.12); color: var(--accent); border-radius: 2px; }
+.bn-empty { text-align: center; padding: 2rem; color: var(--text-muted); font-size: 0.85rem; }
+
+/* ── Detail View in Modal ────────────────────────────── */
+.detail-section { margin-bottom: 1rem; }
+.detail-label { font-size: 0.75rem; font-weight: 600; color: var(--text-dim); text-transform: uppercase; margin-bottom: 0.3rem; }
+.detail-content { background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.7rem; font-size: 0.82rem; white-space: pre-wrap; word-wrap: break-word; max-height: 200px; overflow-y: auto; }
+
+/* ── Hidden ──────────────────────────────────────────── */
+.hidden { display: none !important; }
 </style>
 </head>
 <body>
-<div class="app">
+
+<!-- ═══ Setup View ═══ -->
+<div class="view-screen active" id="view-setup">
+    <div class="setup-card">
+        <h2>Prompt Optimization Agent</h2>
+        <p>初回セットアップ：作業ディレクトリとAPIキーを設定します。</p>
+
+        <div id="fs-warning" class="fs-unavailable hidden">
+            File System Access API が利用できません。データはブラウザ内(IndexedDB)に保存されます。Chrome/Edge の使用を推奨します。
+        </div>
+
+        <div class="setup-step">
+            <div class="setup-step-label">Step 1 - 作業ディレクトリ</div>
+            <button type="button" class="modal-btn modal-btn-primary" id="setup-select-dir" style="width:100%;margin-bottom:0.4rem;">フォルダを選択</button>
+            <div id="setup-dir-path" class="setup-note">未選択</div>
+        </div>
+
+        <div class="setup-step">
+            <div class="setup-step-label">Step 2 - 暗号化パスフレーズ</div>
+            <input type="password" id="setup-passphrase" placeholder="APIキーを暗号化するパスフレーズ">
+            <div class="setup-note">毎回起動時に入力が必要です</div>
+        </div>
+
+        <div class="setup-step">
+            <div class="setup-step-label">Step 3 - APIキー</div>
+            <div class="field">
+                <label>OpenAI API Key (任意)</label>
+                <input type="password" id="setup-openai-key" placeholder="sk-...">
+            </div>
+            <div class="field">
+                <label>Anthropic API Key (任意)</label>
+                <input type="password" id="setup-anthropic-key" placeholder="sk-ant-...">
+            </div>
+            <div class="setup-note">少なくとも1つのAPIキーが必要です</div>
+        </div>
+
+        <button type="button" class="modal-btn modal-btn-primary" id="setup-save" style="width:100%;" disabled>セットアップ完了</button>
+        <div class="error-box hidden" id="setup-error"></div>
+    </div>
+</div>
+
+<!-- ═══ Unlock View ═══ -->
+<div class="view-screen" id="view-unlock">
+    <div class="setup-card">
+        <h2>Prompt Optimization Agent</h2>
+        <p>ワークスペースのロックを解除します。</p>
+
+        <div class="setup-step">
+            <button type="button" class="modal-btn modal-btn-primary" id="unlock-open-dir" style="width:100%;margin-bottom:0.5rem;">ワークスペースを開く</button>
+            <div id="unlock-dir-status" class="setup-note"></div>
+        </div>
+
+        <div class="setup-step">
+            <div class="setup-step-label">パスフレーズ</div>
+            <input type="password" id="unlock-passphrase" placeholder="パスフレーズを入力">
+        </div>
+
+        <div style="display:flex;gap:0.5rem;">
+            <button type="button" class="modal-btn modal-btn-primary" id="unlock-btn" style="flex:1;" disabled>ロック解除</button>
+            <button type="button" class="modal-btn modal-btn-secondary" id="unlock-reset-btn">リセット</button>
+        </div>
+        <div class="error-box hidden" id="unlock-error"></div>
+    </div>
+</div>
+
+<!-- ═══ Main App ═══ -->
+<div class="app hidden" id="view-main">
     <header class="header">
         <div class="header-inner">
-            <h1 class="logo">Prompt Optimization Agent</h1>
-            <p class="subtitle">Select PE techniques and optimize your prompts with AI &mdash; No server required, runs entirely in your browser</p>
+            <div class="header-left">
+                <h1 class="logo">Prompt Optimization Agent</h1>
+                <p class="subtitle">PE techniques + AI optimization &mdash; Browser standalone</p>
+            </div>
+            <div class="header-actions">
+                <button type="button" class="btn-header" id="btn-backnumbers">Back Numbers</button>
+                <button type="button" class="btn-header" id="btn-settings">Settings</button>
+            </div>
         </div>
     </header>
 
     <main class="main">
-        <!-- Left Panel: Configuration -->
+        <!-- Left Panel -->
         <section class="panel panel-config">
             <h2 class="panel-title">Configuration</h2>
 
             <div class="section">
-                <h3 class="section-title">API Settings</h3>
-                <div class="field">
-                    <label for="provider">Provider</label>
-                    <select id="provider">
-                        <option value="openai">OpenAI</option>
-                        <option value="anthropic">Anthropic</option>
-                    </select>
-                </div>
-                <div class="field">
-                    <label for="model">Model</label>
-                    <select id="model"></select>
-                </div>
-                <div class="field">
-                    <label for="api-key">API Key</label>
-                    <div class="input-group">
-                        <input type="password" id="api-key" placeholder="sk-... or sk-ant-...">
-                        <button type="button" class="btn-icon" id="toggle-key" title="Show/Hide">&#128065;</button>
+                <h3 class="section-title">Model</h3>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="provider">Provider</label>
+                        <select id="provider"></select>
                     </div>
-                </div>
-                <div class="field">
-                    <label for="language">Output Language</label>
-                    <select id="language">
-                        <option value="ja">Japanese</option>
-                        <option value="en">English</option>
-                    </select>
+                    <div class="field">
+                        <label for="model">Model</label>
+                        <select id="model"></select>
+                    </div>
                 </div>
                 <div class="field-row">
                     <div class="field">
-                        <label for="temperature">Temperature</label>
+                        <label for="language">Language</label>
+                        <select id="language">
+                            <option value="ja">Japanese</option>
+                            <option value="en">English</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="temperature">Temp</label>
                         <div class="range-group">
                             <input type="range" id="temperature" min="0" max="1" step="0.1" value="0.7">
                             <span id="temp-value">0.7</span>
                         </div>
                     </div>
-                    <div class="field">
-                        <label><input type="checkbox" id="include-analysis" checked> Include analysis</label>
-                    </div>
+                </div>
+                <div class="field">
+                    <label><input type="checkbox" id="include-analysis" checked> 分析を含める</label>
                 </div>
             </div>
 
             <div class="section">
                 <h3 class="section-title">PE Techniques <span class="technique-count" id="technique-count">0 selected</span></h3>
                 <div class="technique-actions">
-                    <button type="button" class="btn-sm" id="select-all">Select All</button>
+                    <button type="button" class="btn-sm" id="select-all">All</button>
                     <button type="button" class="btn-sm" id="select-none">Clear</button>
                 </div>
                 <div class="technique-list" id="technique-list"></div>
+                <div class="manual-input" id="manual-input">
+                    <label style="font-size:0.75rem;color:var(--text-dim);margin-bottom:0.3rem;display:block;">Manual手法の定義</label>
+                    <textarea id="manual-text" placeholder="カスタム手法の説明・指示を入力...&#10;例: 回答の冒頭に必ず結論を述べ、その後に根拠を3つ列挙させる形式にしてください。"></textarea>
+                </div>
             </div>
         </section>
 
-        <!-- Right Panel: Prompt I/O -->
+        <!-- Right Panel -->
         <section class="panel panel-prompt">
             <h2 class="panel-title">Prompt Workspace</h2>
 
             <div class="section">
                 <h3 class="section-title">Original Prompt</h3>
-                <textarea id="original-prompt" rows="8" placeholder="Enter the prompt you want to optimize..."></textarea>
+                <textarea id="original-prompt" rows="6" placeholder="最適化したいプロンプトを入力..."></textarea>
+            </div>
+
+            <!-- Recent Prompts -->
+            <div class="prompt-links" id="recent-section" style="display:none;">
+                <div class="prompt-links-title">Recent</div>
+                <div class="prompt-link-list" id="recent-list"></div>
+            </div>
+
+            <!-- Preferred Prompts -->
+            <div class="prompt-links" id="preferred-section" style="display:none;">
+                <div class="prompt-links-title">Preferred</div>
+                <div class="prompt-link-list" id="preferred-list"></div>
             </div>
 
             <div class="action-bar">
@@ -208,24 +350,105 @@ textarea { width: 100%; padding: 0.75rem; background: var(--bg-input); border: 1
                 </button>
             </div>
 
-            <div class="section" id="output-section" style="display:none;">
+            <div class="section hidden" id="output-section">
                 <h3 class="section-title">Optimized Prompt <button type="button" class="btn-sm btn-copy" id="copy-btn">Copy</button></h3>
                 <div class="output-box" id="optimized-output"></div>
                 <div id="analysis-section" style="display:none;">
-                    <h3 class="section-title" style="margin-top:1.5rem;">Analysis</h3>
+                    <h3 class="section-title" style="margin-top:1rem;">Analysis</h3>
                     <div class="analysis-box" id="analysis-output"></div>
                 </div>
                 <div class="meta-info" id="meta-info"></div>
             </div>
 
-            <div class="error-box" id="error-box" style="display:none;"></div>
+            <div class="error-box hidden" id="error-box"></div>
         </section>
     </main>
 </div>
 
+<!-- ═══ Settings Modal ═══ -->
+<div class="modal-overlay" id="modal-settings">
+    <div class="modal">
+        <div class="modal-title">Settings <button class="modal-close" data-close="modal-settings">&times;</button></div>
+        <div class="modal-body">
+            <div class="field">
+                <label>OpenAI API Key</label>
+                <div class="input-group">
+                    <input type="password" id="settings-openai-key" placeholder="sk-...">
+                    <button type="button" class="btn-icon settings-toggle-key" data-target="settings-openai-key">&#128065;</button>
+                </div>
+            </div>
+            <div class="field">
+                <label>Anthropic API Key</label>
+                <div class="input-group">
+                    <input type="password" id="settings-anthropic-key" placeholder="sk-ant-...">
+                    <button type="button" class="btn-icon settings-toggle-key" data-target="settings-anthropic-key">&#128065;</button>
+                </div>
+            </div>
+            <hr style="border-color:var(--border);margin:1rem 0;">
+            <div class="field">
+                <label>パスフレーズ変更 (空欄で変更なし)</label>
+                <input type="password" id="settings-new-passphrase" placeholder="新しいパスフレーズ">
+            </div>
+            <hr style="border-color:var(--border);margin:1rem 0;">
+            <div style="margin-bottom:0.8rem;">
+                <div style="font-size:0.82rem;font-weight:600;color:var(--text-dim);margin-bottom:0.6rem;">Token Usage</div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;">
+                    <div style="background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius);padding:0.6rem;">
+                        <div style="font-size:0.65rem;color:var(--text-muted);text-transform:uppercase;">今回のセッション</div>
+                        <div style="font-size:1.1rem;font-weight:700;color:var(--green);margin-top:0.2rem;" id="settings-session-tokens">0</div>
+                        <div style="font-size:0.65rem;color:var(--text-muted);margin-top:0.1rem;">
+                            Prompt: <span id="settings-session-prompt">0</span> / Completion: <span id="settings-session-completion">0</span>
+                        </div>
+                    </div>
+                    <div style="background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius);padding:0.6rem;">
+                        <div style="font-size:0.65rem;color:var(--text-muted);text-transform:uppercase;">累積トータル</div>
+                        <div style="font-size:1.1rem;font-weight:700;color:var(--accent);margin-top:0.2rem;" id="settings-total-tokens">0</div>
+                        <div style="font-size:0.65rem;color:var(--text-muted);margin-top:0.1rem;">
+                            Prompt: <span id="settings-total-prompt">0</span> / Completion: <span id="settings-total-completion">0</span>
+                        </div>
+                    </div>
+                </div>
+                <button type="button" class="modal-btn modal-btn-danger" id="settings-reset-tokens" style="margin-top:0.5rem;font-size:0.75rem;padding:0.3rem 0.8rem;">累積トークンをリセット</button>
+            </div>
+        </div>
+        <div class="modal-actions">
+            <button class="modal-btn modal-btn-secondary" data-close="modal-settings">キャンセル</button>
+            <button class="modal-btn modal-btn-primary" id="settings-save">保存</button>
+        </div>
+        <div class="error-box hidden" id="settings-error"></div>
+    </div>
+</div>
+
+<!-- ═══ Back Numbers Modal ═══ -->
+<div class="modal-overlay" id="modal-backnumbers">
+    <div class="modal" style="max-width:700px;">
+        <div class="modal-title">Back Numbers <button class="modal-close" data-close="modal-backnumbers">&times;</button></div>
+        <div class="modal-body">
+            <div class="field" style="margin-bottom:0.8rem;">
+                <input type="text" id="bn-search" placeholder="検索...">
+            </div>
+            <div class="bn-list" id="bn-list">
+                <div class="bn-empty">保存されたプロンプトはありません</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══ Prompt Detail Modal ═══ -->
+<div class="modal-overlay" id="modal-detail">
+    <div class="modal" style="max-width:700px;">
+        <div class="modal-title">Prompt Detail <button class="modal-close" data-close="modal-detail">&times;</button></div>
+        <div class="modal-body" id="detail-body"></div>
+        <div class="modal-actions">
+            <button class="modal-btn modal-btn-secondary" data-close="modal-detail">閉じる</button>
+            <button class="modal-btn modal-btn-primary" id="detail-load">プロンプト欄に読み込む</button>
+        </div>
+    </div>
+</div>
+
 <script>
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//  Prompt Optimization Agent — Standalone (No server required)
+//  Prompt Optimization Agent v2 — Standalone with WD + Encryption
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 const $ = (s) => document.querySelector(s);
@@ -234,182 +457,496 @@ const $$ = (s) => document.querySelectorAll(s);
 // ── Technique Data ──────────────────────────────────────────────
 
 const TECHNIQUES = [
-    {
-        id: "cot", name: "Chain of Thought (CoT)",
-        name_ja: "Chain of Thought (CoT) - 思考の連鎖",
-        description: "Guides the model to reason step-by-step before arriving at an answer.",
-        description_ja: "回答に至る前にステップバイステップで推論するよう誘導します。",
-        category: "reasoning",
-        instruction: "Structure the prompt so the model is explicitly asked to think through the problem step by step. Insert a section like 'Let's think step by step:' before the final answer request. Break the task into sequential reasoning stages.",
-        example_pattern: "Let's think step by step:\nStep 1: ...\nStep 2: ...\nTherefore: ..."
-    },
-    {
-        id: "zero_shot_cot", name: "Zero-Shot CoT",
-        name_ja: "Zero-Shot CoT - ゼロショット思考連鎖",
-        description: "Adds 'Let's think step by step' without any examples, triggering reasoning.",
-        description_ja: "例を示さずに「ステップバイステップで考えよう」を追加し推論を引き出します。",
-        category: "reasoning",
-        instruction: "Append the phrase 'Let's think step by step.' at the end of the user's query or just before the answer request. This simple addition significantly improves reasoning quality without requiring examples.",
-        example_pattern: "[Original prompt]\n\nLet's think step by step."
-    },
-    {
-        id: "tot", name: "Tree of Thought (ToT)",
-        name_ja: "Tree of Thought (ToT) - 思考の木",
-        description: "Explores multiple reasoning paths in parallel, evaluating each branch.",
-        description_ja: "複数の推論パスを並行して探索し、各分岐を評価します。",
-        category: "reasoning",
-        instruction: "Restructure the prompt to ask the model to: (1) Generate 3 or more distinct approaches/hypotheses to the problem. (2) For each approach, reason through the implications and potential outcomes. (3) Evaluate which approach is strongest based on logical consistency. (4) Select the best path and provide the final answer with justification. Use clear headings like 'Approach A:', 'Approach B:', 'Evaluation:', 'Best Answer:'.",
-        example_pattern: "Consider multiple approaches:\nApproach A: ...\nApproach B: ...\nApproach C: ...\nEvaluation of each approach: ...\nBest answer based on evaluation: ..."
-    },
-    {
-        id: "got", name: "Graph of Thought (GoT)",
-        name_ja: "Graph of Thought (GoT) - 思考のグラフ",
-        description: "Builds a network of interconnected reasoning nodes, allowing merging and refining.",
-        description_ja: "相互接続された推論ノードのネットワークを構築し、統合・洗練します。",
-        category: "reasoning",
-        instruction: "Restructure the prompt to instruct the model to: (1) Decompose the problem into sub-problems (nodes). (2) Solve each sub-problem independently. (3) Identify connections and dependencies between sub-solutions. (4) Merge compatible partial solutions into a coherent whole. (5) Refine the merged solution by resolving any conflicts. Encourage the model to revisit and revise earlier conclusions as new insights emerge.",
-        example_pattern: "Sub-problem decomposition:\nNode 1: ... → Solution 1\nNode 2: ... → Solution 2\nConnections: Node 1 ↔ Node 2\nMerged solution: ...\nRefined final answer: ..."
-    },
-    {
-        id: "few_shot", name: "Few-Shot Prompting",
-        name_ja: "Few-Shot Prompting - 少数例プロンプティング",
-        description: "Provides concrete input-output examples before the actual task.",
-        description_ja: "実際のタスクの前に具体的な入出力例を提示します。",
-        category: "examples",
-        instruction: "Add 2-3 high-quality examples before the actual query. Each example should demonstrate the desired input format and output format/style. Use a clear delimiter between examples (e.g., '---'). Ensure the examples cover different aspects or edge cases of the task.",
-        example_pattern: "Example 1:\nInput: ...\nOutput: ...\n---\nExample 2:\nInput: ...\nOutput: ...\n---\nNow, your task:\nInput: [user's actual query]"
-    },
-    {
-        id: "self_consistency", name: "Self-Consistency",
-        name_ja: "Self-Consistency - 自己一貫性",
-        description: "Generates multiple independent reasoning paths, then selects the most consistent answer.",
-        description_ja: "複数の独立した推論パスを生成し、最も一貫性のある回答を選択します。",
-        category: "reasoning",
-        instruction: "Instruct the model to: (1) Solve the problem using 3 completely different reasoning approaches. (2) Compare the conclusions from each approach. (3) Identify the answer that appears most frequently or is most logically consistent. (4) Present the consensus answer with confidence level.",
-        example_pattern: "Solve this problem 3 different ways:\nMethod 1: ...\nConclusion 1: ...\nMethod 2: ...\nConclusion 2: ...\nMethod 3: ...\nConclusion 3: ...\nConsensus answer: ..."
-    },
-    {
-        id: "react", name: "ReAct (Reasoning + Acting)",
-        name_ja: "ReAct - 推論と行動の交互実行",
-        description: "Interleaves reasoning (Thought) with actions (Act) and observations (Obs).",
-        description_ja: "推論（Thought）と行動（Act）と観察（Obs）を交互に実行します。",
-        category: "agent",
-        instruction: "Structure the prompt using the Thought-Action-Observation loop: (1) Thought: The model reasons about what to do next. (2) Action: The model specifies a concrete action to take. (3) Observation: The result of the action is provided. Repeat until the task is solved. This is especially useful for tasks requiring external information or multi-step execution.",
-        example_pattern: "Thought 1: I need to ...\nAction 1: [action description]\nObservation 1: [result]\nThought 2: Based on the observation, ...\nAction 2: [action description]\nFinal Answer: ..."
-    },
-    {
-        id: "role_prompting", name: "Role Prompting / Expert Persona",
-        name_ja: "Role Prompting - 役割・専門家ペルソナ",
-        description: "Assigns a specific expert role to the model to leverage domain knowledge.",
-        description_ja: "モデルに特定の専門家の役割を割り当て、ドメイン知識を活用します。",
-        category: "framing",
-        instruction: "Prefix the prompt with a detailed role definition: 'You are a [domain] expert with [N] years of experience in [specific area]. You specialize in [specifics].' The role should be relevant to the task. Be specific about the expertise level and domain to activate the model's relevant knowledge patterns.",
-        example_pattern: "You are a senior [domain] expert with 20 years of experience. You specialize in [specific area] and are known for [specific trait].\n\n[Original prompt]"
-    },
-    {
-        id: "structured_output", name: "Structured Output / Format Control",
-        name_ja: "Structured Output - 構造化出力",
-        description: "Specifies an explicit output format (JSON, table, sections, etc.).",
-        description_ja: "明示的な出力形式（JSON、表、セクション等）を指定します。",
-        category: "format",
-        instruction: "Add explicit formatting instructions to the prompt. Specify: (1) The exact output structure (e.g., JSON schema, markdown sections, table format). (2) Required fields or sections. (3) Data types and constraints for each field. This reduces ambiguity and ensures the output is machine-parseable when needed.",
-        example_pattern: "Respond in the following format:\n## Summary\n[1-2 sentence summary]\n## Key Points\n- Point 1\n- Point 2\n## Detailed Analysis\n[detailed content]\n## Conclusion\n[conclusion]"
-    },
-    {
-        id: "self_refine", name: "Self-Refine / Iterative Improvement",
-        name_ja: "Self-Refine - 自己改善・反復改良",
-        description: "Generates a draft, critiques it, then produces an improved version.",
-        description_ja: "ドラフトを生成し、自己批評した上で改善版を出力します。",
-        category: "refinement",
-        instruction: "Instruct the model to follow a 3-phase process: (1) Draft: Generate an initial response. (2) Critique: Identify weaknesses, gaps, errors, or areas for improvement. (3) Refine: Produce an improved version addressing all identified issues. Optionally repeat the critique-refine cycle for higher quality.",
-        example_pattern: "Phase 1 - Draft:\n[initial response]\n\nPhase 2 - Self-Critique:\n- Weakness 1: ...\n- Gap: ...\n\nPhase 3 - Refined Response:\n[improved response]"
-    },
-    {
-        id: "meta_prompting", name: "Meta-Prompting",
-        name_ja: "Meta-Prompting - メタプロンプティング",
-        description: "Asks the model to first design the optimal prompt strategy, then execute it.",
-        description_ja: "まず最適なプロンプト戦略を設計させ、その後実行させます。",
-        category: "meta",
-        instruction: "Add a meta-reasoning step: (1) Ask the model to first analyze what kind of task this is. (2) Have it determine the best approach/strategy for this type of task. (3) Then have it execute that strategy. This leverages the model's ability to reason about its own reasoning process.",
-        example_pattern: "Before answering, analyze this task:\n1. What type of task is this?\n2. What's the best strategy for this task type?\n3. Now execute that strategy:\n[actual response]"
-    },
-    {
-        id: "constraint_based", name: "Constraint-Based Prompting",
-        name_ja: "Constraint-Based Prompting - 制約ベースプロンプティング",
-        description: "Defines explicit constraints, boundaries, and rules the response must follow.",
-        description_ja: "レスポンスが従うべき明示的な制約・境界・ルールを定義します。",
-        category: "framing",
-        instruction: "Add a 'Constraints' or 'Rules' section that explicitly lists: (1) What the response MUST include. (2) What the response MUST NOT include. (3) Quality criteria (accuracy, completeness, conciseness). (4) Scope boundaries. This reduces hallucination and keeps the response focused.",
-        example_pattern: "Constraints:\n- MUST: Be factually accurate and cite reasoning\n- MUST: Stay within the scope of [topic]\n- MUST NOT: Speculate beyond available information\n- MUST NOT: Exceed [N] words\n\n[Original prompt]"
-    },
-    {
-        id: "step_back", name: "Step-Back Prompting",
-        name_ja: "Step-Back Prompting - 一歩引いた抽象化",
-        description: "First asks a higher-level abstract question, then uses that to answer the specific question.",
-        description_ja: "まず高レベルの抽象的な質問をし、その回答を使って具体的な質問に答えます。",
-        category: "reasoning",
-        instruction: "Restructure the prompt in two phases: (1) Step-Back Question: Ask a broader, more abstract version of the original question to establish foundational principles or context. (2) Original Question: Use the foundational understanding to answer the specific question. This helps the model ground its reasoning in first principles.",
-        example_pattern: "Step-Back: What are the general principles of [broader topic]?\n[Answer to step-back question]\n\nNow, using these principles, answer the specific question:\n[Original specific question]"
-    },
-    {
-        id: "risen", name: "RISEN Framework",
-        name_ja: "RISEN フレームワーク",
-        description: "Role, Instructions, Steps, End goal, Narrowing - a comprehensive prompting framework.",
-        description_ja: "Role, Instructions, Steps, End goal, Narrowing - 包括的プロンプティングフレームワーク。",
-        category: "framework",
-        instruction: "Structure the prompt using the RISEN framework: (R) Role: Define who the model should be. (I) Instructions: State the core task clearly. (S) Steps: Break down the process into sequential steps. (E) End goal: Describe the desired outcome explicitly. (N) Narrowing: Add constraints to focus the response.",
-        example_pattern: "Role: You are a ...\nInstructions: Your task is to ...\nSteps:\n1. First, ...\n2. Then, ...\n3. Finally, ...\nEnd Goal: The output should ...\nNarrowing: Focus only on ... Do not include ..."
-    },
-    {
-        id: "emotional", name: "Emotional Prompting",
-        name_ja: "Emotional Prompting - 感情プロンプティング",
-        description: "Adds emotional context or urgency to improve response quality and engagement.",
-        description_ja: "感情的な文脈や緊急性を追加してレスポンス品質を向上させます。",
-        category: "framing",
-        instruction: "Add emotional context that communicates the importance and impact of the task: 'This is very important for [reason]. The quality of this response will directly impact [stakeholder/outcome].' Research shows this can improve model output quality by conveying the stakes involved.",
-        example_pattern: "This task is critically important because [reason]. A high-quality response will [positive impact], while errors could [negative impact].\n\n[Original prompt]\n\nPlease give this your best effort as the outcome matters significantly."
-    }
+{id:"cot",name:"Chain of Thought (CoT)",name_ja:"Chain of Thought (CoT) - 思考の連鎖",description:"Guides the model to reason step-by-step before arriving at an answer.",description_ja:"回答に至る前にステップバイステップで推論するよう誘導します。",category:"reasoning",instruction:"Structure the prompt so the model is explicitly asked to think through the problem step by step. Insert a section like 'Let's think step by step:' before the final answer request. Break the task into sequential reasoning stages.",example_pattern:"Let's think step by step:\nStep 1: ...\nStep 2: ...\nTherefore: ..."},
+{id:"zero_shot_cot",name:"Zero-Shot CoT",name_ja:"Zero-Shot CoT - ゼロショット思考連鎖",description:"Adds 'Let's think step by step' without any examples, triggering reasoning.",description_ja:"例を示さずに「ステップバイステップで考えよう」を追加し推論を引き出します。",category:"reasoning",instruction:"Append the phrase 'Let's think step by step.' at the end of the user's query or just before the answer request.",example_pattern:"[Original prompt]\n\nLet's think step by step."},
+{id:"tot",name:"Tree of Thought (ToT)",name_ja:"Tree of Thought (ToT) - 思考の木",description:"Explores multiple reasoning paths in parallel, evaluating each branch.",description_ja:"複数の推論パスを並行して探索し、各分岐を評価します。",category:"reasoning",instruction:"Restructure the prompt to ask the model to: (1) Generate 3+ distinct approaches. (2) Reason through each. (3) Evaluate which is strongest. (4) Select the best path with justification.",example_pattern:"Approach A: ...\nApproach B: ...\nEvaluation: ...\nBest answer: ..."},
+{id:"got",name:"Graph of Thought (GoT)",name_ja:"Graph of Thought (GoT) - 思考のグラフ",description:"Builds a network of interconnected reasoning nodes, allowing merging and refining.",description_ja:"相互接続された推論ノードのネットワークを構築し、統合・洗練します。",category:"reasoning",instruction:"Instruct the model to: (1) Decompose into sub-problems. (2) Solve each independently. (3) Identify connections. (4) Merge partial solutions. (5) Refine the merged solution.",example_pattern:"Node 1: ... → Solution 1\nNode 2: ... → Solution 2\nMerged: ...\nRefined: ..."},
+{id:"few_shot",name:"Few-Shot Prompting",name_ja:"Few-Shot Prompting - 少数例プロンプティング",description:"Provides concrete input-output examples before the actual task.",description_ja:"実際のタスクの前に具体的な入出力例を提示します。",category:"examples",instruction:"Add 2-3 high-quality examples before the actual query. Each example should demonstrate the desired format. Use clear delimiters between examples.",example_pattern:"Example 1:\nInput: ...\nOutput: ...\n---\nNow, your task:\nInput: [query]"},
+{id:"self_consistency",name:"Self-Consistency",name_ja:"Self-Consistency - 自己一貫性",description:"Generates multiple independent reasoning paths, then selects the most consistent answer.",description_ja:"複数の独立した推論パスを生成し、最も一貫性のある回答を選択します。",category:"reasoning",instruction:"Instruct the model to: (1) Solve using 3 different approaches. (2) Compare conclusions. (3) Select the most consistent answer. (4) Present with confidence level.",example_pattern:"Method 1: ...\nMethod 2: ...\nMethod 3: ...\nConsensus: ..."},
+{id:"react",name:"ReAct (Reasoning + Acting)",name_ja:"ReAct - 推論と行動の交互実行",description:"Interleaves reasoning (Thought) with actions (Act) and observations (Obs).",description_ja:"推論（Thought）と行動（Act）と観察（Obs）を交互に実行します。",category:"agent",instruction:"Structure using Thought-Action-Observation loop. Repeat until the task is solved.",example_pattern:"Thought 1: ...\nAction 1: ...\nObservation 1: ...\nFinal Answer: ..."},
+{id:"role_prompting",name:"Role Prompting / Expert Persona",name_ja:"Role Prompting - 役割・専門家ペルソナ",description:"Assigns a specific expert role to the model.",description_ja:"モデルに特定の専門家の役割を割り当てます。",category:"framing",instruction:"Prefix with a detailed role definition: 'You are a [domain] expert with [N] years of experience in [area].'",example_pattern:"You are a senior [domain] expert...\n\n[Original prompt]"},
+{id:"structured_output",name:"Structured Output",name_ja:"Structured Output - 構造化出力",description:"Specifies an explicit output format.",description_ja:"明示的な出力形式を指定します。",category:"format",instruction:"Add explicit formatting instructions: output structure, required fields, data types.",example_pattern:"Respond in format:\n## Summary\n## Key Points\n## Conclusion"},
+{id:"self_refine",name:"Self-Refine",name_ja:"Self-Refine - 自己改善・反復改良",description:"Generates a draft, critiques it, then produces an improved version.",description_ja:"ドラフトを生成し、自己批評した上で改善版を出力します。",category:"refinement",instruction:"Follow 3-phase process: (1) Draft. (2) Critique: identify weaknesses. (3) Refine: improved version.",example_pattern:"Draft: ...\nCritique: ...\nRefined: ..."},
+{id:"meta_prompting",name:"Meta-Prompting",name_ja:"Meta-Prompting - メタプロンプティング",description:"Asks the model to first design the optimal strategy, then execute it.",description_ja:"まず最適な戦略を設計させ、その後実行させます。",category:"meta",instruction:"Add meta-reasoning: (1) Analyze task type. (2) Determine best strategy. (3) Execute that strategy.",example_pattern:"1. Task type: ...\n2. Best strategy: ...\n3. Execution: ..."},
+{id:"constraint_based",name:"Constraint-Based Prompting",name_ja:"Constraint-Based - 制約ベース",description:"Defines explicit constraints and rules.",description_ja:"レスポンスが従うべき制約・ルールを定義します。",category:"framing",instruction:"Add Constraints section: MUST include, MUST NOT include, quality criteria, scope boundaries.",example_pattern:"Constraints:\n- MUST: ...\n- MUST NOT: ...\n\n[prompt]"},
+{id:"step_back",name:"Step-Back Prompting",name_ja:"Step-Back - 一歩引いた抽象化",description:"First asks a higher-level question, then uses that to answer the specific question.",description_ja:"まず抽象的な質問をし、その回答で具体的な質問に答えます。",category:"reasoning",instruction:"Two phases: (1) Step-Back: broader abstract question for foundational principles. (2) Use that to answer the specific question.",example_pattern:"Step-Back: General principles of [topic]?\n...\nNow answer: [specific question]"},
+{id:"risen",name:"RISEN Framework",name_ja:"RISEN フレームワーク",description:"Role, Instructions, Steps, End goal, Narrowing.",description_ja:"Role, Instructions, Steps, End goal, Narrowing の包括的フレームワーク。",category:"framework",instruction:"Structure: (R) Role (I) Instructions (S) Steps (E) End goal (N) Narrowing constraints.",example_pattern:"Role: ...\nInstructions: ...\nSteps: 1. 2. 3.\nEnd Goal: ...\nNarrowing: ..."},
+{id:"emotional",name:"Emotional Prompting",name_ja:"Emotional Prompting - 感情プロンプティング",description:"Adds emotional context or urgency.",description_ja:"感情的な文脈や緊急性を追加します。",category:"framing",instruction:"Add emotional context: 'This is very important for [reason]. Quality directly impacts [outcome].'",example_pattern:"This is critically important because [reason].\n\n[prompt]\n\nPlease give your best effort."},
+{id:"manual",name:"Manual / Custom Technique",name_ja:"Manual - カスタム手法",description:"User-defined custom technique with free-form instructions.",description_ja:"ユーザー定義のカスタム手法。自由記述で指示を定義できます。",category:"custom",instruction:"",example_pattern:""}
 ];
-
-// ── Model Registry ──────────────────────────────────────────────
 
 const MODELS = {
     openai: [
-        { id: "gpt-4o", name: "GPT-4o" },
-        { id: "gpt-4o-mini", name: "GPT-4o Mini" },
-        { id: "o1", name: "o1" },
-        { id: "o1-mini", name: "o1 Mini" },
-        { id: "o3-mini", name: "o3 Mini" },
+        {id:"gpt-4o",name:"GPT-4o"},{id:"gpt-4o-mini",name:"GPT-4o Mini"},
+        {id:"o1",name:"o1"},{id:"o1-mini",name:"o1 Mini"},{id:"o3-mini",name:"o3 Mini"}
     ],
     anthropic: [
-        { id: "claude-sonnet-4-20250514", name: "Claude Sonnet 4" },
-        { id: "claude-3-5-sonnet-20241022", name: "Claude 3.5 Sonnet" },
-        { id: "claude-3-5-haiku-20241022", name: "Claude 3.5 Haiku" },
-        { id: "claude-3-haiku-20240307", name: "Claude 3 Haiku" },
+        {id:"claude-sonnet-4-20250514",name:"Claude Sonnet 4"},
+        {id:"claude-3-5-sonnet-20241022",name:"Claude 3.5 Sonnet"},
+        {id:"claude-3-5-haiku-20241022",name:"Claude 3.5 Haiku"},
+        {id:"claude-3-haiku-20240307",name:"Claude 3 Haiku"}
     ]
 };
+const NO_TEMP_PREFIXES = ["o1","o3","o4"];
 
-// Models that don't support temperature
-const NO_TEMP_PREFIXES = ["o1", "o3", "o4"];
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  Crypto Utilities (AES-GCM + PBKDF2)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-// ── State ───────────────────────────────────────────────────────
+const Crypto = {
+    async deriveKey(passphrase, salt) {
+        const enc = new TextEncoder();
+        const keyMaterial = await crypto.subtle.importKey("raw", enc.encode(passphrase), "PBKDF2", false, ["deriveKey"]);
+        return crypto.subtle.deriveKey(
+            { name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" },
+            keyMaterial,
+            { name: "AES-GCM", length: 256 },
+            false,
+            ["encrypt", "decrypt"]
+        );
+    },
+    async encrypt(text, key) {
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const enc = new TextEncoder();
+        const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(text));
+        return { ciphertext: this._toBase64(new Uint8Array(ct)), iv: this._toBase64(iv) };
+    },
+    async decrypt(ciphertext, iv, key) {
+        try {
+            const ct = this._fromBase64(ciphertext);
+            const ivArr = this._fromBase64(iv);
+            const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: ivArr }, key, ct);
+            return new TextDecoder().decode(pt);
+        } catch { return null; }
+    },
+    generateSalt() { return crypto.getRandomValues(new Uint8Array(16)); },
+    _toBase64(arr) { return btoa(String.fromCharCode(...arr)); },
+    _fromBase64(str) { return Uint8Array.from(atob(str), c => c.charCodeAt(0)); }
+};
 
-let selectedTechniques = new Set();
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  Storage Layer (File System Access API + IndexedDB fallback)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-// ── Init ────────────────────────────────────────────────────────
+const HAS_FS = typeof window.showDirectoryPicker === "function";
+const IDB_NAME = "PromptOptimizerDB";
+const IDB_VERSION = 1;
+const CONFIG_DIR = ".prompt_optimizer";
+const PAST_DIR = "past_prompt";
 
-document.addEventListener("DOMContentLoaded", () => {
-    renderTechniques();
-    updateModelSelect();
-    setupEventListeners();
+function openIDB() {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+        req.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains("handles")) db.createObjectStore("handles");
+            if (!db.objectStoreNames.contains("config")) db.createObjectStore("config");
+            if (!db.objectStoreNames.contains("past_prompts")) db.createObjectStore("past_prompts", { keyPath: "id" });
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+    });
+}
+
+function idbGet(storeName, key) {
+    return openIDB().then(db => new Promise((res, rej) => {
+        const tx = db.transaction(storeName, "readonly");
+        const req = tx.objectStore(storeName).get(key);
+        req.onsuccess = () => res(req.result);
+        req.onerror = () => rej(req.error);
+    }));
+}
+
+function idbPut(storeName, key, value) {
+    return openIDB().then(db => new Promise((res, rej) => {
+        const tx = db.transaction(storeName, "readwrite");
+        const req = tx.objectStore(storeName).put(value, key);
+        req.onsuccess = () => res();
+        req.onerror = () => rej(req.error);
+    }));
+}
+
+function idbGetAll(storeName) {
+    return openIDB().then(db => new Promise((res, rej) => {
+        const tx = db.transaction(storeName, "readonly");
+        const req = tx.objectStore(storeName).getAll();
+        req.onsuccess = () => res(req.result);
+        req.onerror = () => rej(req.error);
+    }));
+}
+
+function idbDelete(storeName, key) {
+    return openIDB().then(db => new Promise((res, rej) => {
+        const tx = db.transaction(storeName, "readwrite");
+        const req = tx.objectStore(storeName).delete(key);
+        req.onsuccess = () => res();
+        req.onerror = () => rej(req.error);
+    }));
+}
+
+const Storage = {
+    dirHandle: null,
+    configDirHandle: null,
+    pastDirHandle: null,
+
+    async selectDirectory() {
+        if (!HAS_FS) return false;
+        try {
+            this.dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+            await this._ensureDirs();
+            const db = await openIDB();
+            const tx = db.transaction("handles", "readwrite");
+            tx.objectStore("handles").put(this.dirHandle, "workspace");
+            await new Promise(r => { tx.oncomplete = r; });
+            return true;
+        } catch { return false; }
+    },
+
+    async tryRestoreHandle() {
+        if (!HAS_FS) return false;
+        try {
+            const handle = await idbGet("handles", "workspace");
+            if (!handle) return false;
+            const perm = await handle.requestPermission({ mode: "readwrite" });
+            if (perm !== "granted") return false;
+            this.dirHandle = handle;
+            await this._ensureDirs();
+            return true;
+        } catch { return false; }
+    },
+
+    async _ensureDirs() {
+        this.configDirHandle = await this.dirHandle.getDirectoryHandle(CONFIG_DIR, { create: true });
+        this.pastDirHandle = await this.configDirHandle.getDirectoryHandle(PAST_DIR, { create: true });
+    },
+
+    // ── Config ──
+
+    async readConfig() {
+        if (HAS_FS && this.configDirHandle) {
+            try {
+                const fh = await this.configDirHandle.getFileHandle("config.json");
+                const file = await fh.getFile();
+                return JSON.parse(await file.text());
+            } catch { return null; }
+        }
+        return idbGet("config", "main");
+    },
+
+    async writeConfig(config) {
+        if (HAS_FS && this.configDirHandle) {
+            const fh = await this.configDirHandle.getFileHandle("config.json", { create: true });
+            const w = await fh.createWritable();
+            await w.write(JSON.stringify(config, null, 2));
+            await w.close();
+        }
+        await idbPut("config", "main", config);
+    },
+
+    // ── Past Prompts ──
+
+    async savePastPrompt(record) {
+        if (HAS_FS && this.pastDirHandle) {
+            const ts = record.created_at.replace(/[:.]/g, "").replace("T", "_").slice(0, 15);
+            const fname = `${ts}_${record.id.slice(0, 8)}.json`;
+            const fh = await this.pastDirHandle.getFileHandle(fname, { create: true });
+            const w = await fh.createWritable();
+            await w.write(JSON.stringify(record, null, 2));
+            await w.close();
+        }
+        const db = await openIDB();
+        const tx = db.transaction("past_prompts", "readwrite");
+        tx.objectStore("past_prompts").put(record);
+        await new Promise(r => { tx.oncomplete = r; });
+    },
+
+    async updatePastPrompt(record) {
+        await this.savePastPrompt(record);
+    },
+
+    async listPastPrompts() {
+        return idbGetAll("past_prompts");
+    },
+
+    async getPastPrompt(id) {
+        return idbGet("past_prompts", id) || null;
+    },
+
+    async clearAll() {
+        const db = await openIDB();
+        const tx = db.transaction(["handles", "config", "past_prompts"], "readwrite");
+        tx.objectStore("handles").clear();
+        tx.objectStore("config").clear();
+        tx.objectStore("past_prompts").clear();
+        await new Promise(r => { tx.oncomplete = r; });
+    }
+};
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  App State
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+let state = {
+    config: null,
+    cryptoKey: null,
+    selectedTechniques: new Set(),
+    decryptedKeys: { openai: "", anthropic: "" },
+    currentDetailRecord: null,
+    sessionTokens: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+};
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  Initialization
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+document.addEventListener("DOMContentLoaded", async () => {
+    if (!HAS_FS) $("#fs-warning").classList.remove("hidden");
+
+    const config = await Storage.readConfig();
+    if (config && config.version) {
+        showView("unlock");
+    } else {
+        showView("setup");
+    }
+    setupGlobalListeners();
 });
 
-// ── Rendering ───────────────────────────────────────────────────
+function showView(name) {
+    ["view-setup", "view-unlock", "view-main"].forEach(id => {
+        const el = $(`#${id}`);
+        if (id === `view-${name}`) { el.classList.remove("hidden"); el.classList.add("active"); }
+        else { el.classList.add("hidden"); el.classList.remove("active"); }
+    });
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  Setup Flow
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function setupGlobalListeners() {
+    // ── Setup view ──
+    let setupDirReady = !HAS_FS; // If no FS API, skip dir selection
+    if (!HAS_FS) $("#setup-dir-path").textContent = "ブラウザ内ストレージを使用";
+
+    function checkSetupReady() {
+        const pp = $("#setup-passphrase").value.trim();
+        const ok = $("#setup-openai-key").value.trim();
+        const ak = $("#setup-anthropic-key").value.trim();
+        const ready = setupDirReady && pp.length >= 1 && (ok || ak);
+        $("#setup-save").disabled = !ready;
+    }
+
+    $("#setup-select-dir").addEventListener("click", async () => {
+        const ok = await Storage.selectDirectory();
+        if (ok) {
+            setupDirReady = true;
+            $("#setup-dir-path").textContent = Storage.dirHandle.name + "/" + CONFIG_DIR;
+            checkSetupReady();
+        }
+    });
+
+    $("#setup-passphrase").addEventListener("input", checkSetupReady);
+    $("#setup-openai-key").addEventListener("input", checkSetupReady);
+    $("#setup-anthropic-key").addEventListener("input", checkSetupReady);
+
+    $("#setup-save").addEventListener("click", async () => {
+        try {
+            const passphrase = $("#setup-passphrase").value.trim();
+            const openaiKey = $("#setup-openai-key").value.trim();
+            const anthropicKey = $("#setup-anthropic-key").value.trim();
+            const salt = Crypto.generateSalt();
+            const key = await Crypto.deriveKey(passphrase, salt);
+
+            const apiKeys = {};
+            if (openaiKey) apiKeys.openai = await Crypto.encrypt(openaiKey, key);
+            if (anthropicKey) apiKeys.anthropic = await Crypto.encrypt(anthropicKey, key);
+
+            // Encrypt a known token to verify passphrase later
+            const verifier = await Crypto.encrypt("__PROMPT_OPT_OK__", key);
+
+            const config = {
+                version: 1,
+                salt: Crypto._toBase64(salt),
+                verifier,
+                api_keys: apiKeys,
+                settings: { provider: openaiKey ? "openai" : "anthropic", model: "", language: "ja", temperature: 0.7, include_analysis: true },
+                recent: [],
+                preferred_ids: [],
+                manual_technique_text: "",
+                cumulative_tokens: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+            };
+
+            await Storage.writeConfig(config);
+            state.config = config;
+            state.cryptoKey = key;
+            state.decryptedKeys = { openai: openaiKey, anthropic: anthropicKey };
+
+            initMainApp();
+            showView("main");
+        } catch (e) {
+            showSetupError(e.message);
+        }
+    });
+
+    // ── Unlock view ──
+    let unlockDirReady = !HAS_FS;
+    if (!HAS_FS) { $("#unlock-open-dir").textContent = "ブラウザ内ストレージ"; $("#unlock-open-dir").disabled = true; unlockDirReady = true; }
+
+    function checkUnlockReady() {
+        $("#unlock-btn").disabled = !(unlockDirReady && $("#unlock-passphrase").value.trim());
+    }
+
+    $("#unlock-open-dir").addEventListener("click", async () => {
+        const restored = await Storage.tryRestoreHandle();
+        if (restored) {
+            unlockDirReady = true;
+            $("#unlock-dir-status").textContent = Storage.dirHandle.name + " を開きました";
+            checkUnlockReady();
+        } else {
+            const ok = await Storage.selectDirectory();
+            if (ok) {
+                unlockDirReady = true;
+                $("#unlock-dir-status").textContent = Storage.dirHandle.name + " を開きました";
+                checkUnlockReady();
+            }
+        }
+    });
+
+    $("#unlock-passphrase").addEventListener("input", checkUnlockReady);
+    $("#unlock-passphrase").addEventListener("keydown", (e) => { if (e.key === "Enter" && !$("#unlock-btn").disabled) $("#unlock-btn").click(); });
+
+    $("#unlock-btn").addEventListener("click", async () => {
+        try {
+            const passphrase = $("#unlock-passphrase").value.trim();
+            const config = await Storage.readConfig();
+            if (!config) throw new Error("設定ファイルが見つかりません");
+
+            const salt = Crypto._fromBase64(config.salt);
+            const key = await Crypto.deriveKey(passphrase, salt);
+
+            // Verify passphrase
+            const check = await Crypto.decrypt(config.verifier.ciphertext, config.verifier.iv, key);
+            if (check !== "__PROMPT_OPT_OK__") throw new Error("パスフレーズが正しくありません");
+
+            // Decrypt API keys
+            const dk = { openai: "", anthropic: "" };
+            if (config.api_keys.openai) dk.openai = await Crypto.decrypt(config.api_keys.openai.ciphertext, config.api_keys.openai.iv, key) || "";
+            if (config.api_keys.anthropic) dk.anthropic = await Crypto.decrypt(config.api_keys.anthropic.ciphertext, config.api_keys.anthropic.iv, key) || "";
+
+            state.config = config;
+            state.cryptoKey = key;
+            state.decryptedKeys = dk;
+
+            initMainApp();
+            showView("main");
+        } catch (e) {
+            const box = $("#unlock-error");
+            box.textContent = e.message;
+            box.classList.remove("hidden");
+        }
+    });
+
+    $("#unlock-reset-btn").addEventListener("click", async () => {
+        if (confirm("全データを削除してリセットしますか？")) {
+            await Storage.clearAll();
+            location.reload();
+        }
+    });
+
+    // ── Modal close handlers ──
+    $$("[data-close]").forEach(btn => {
+        btn.addEventListener("click", () => {
+            $(`#${btn.dataset.close}`).classList.remove("active");
+        });
+    });
+
+    // Close modals on overlay click
+    $$(".modal-overlay").forEach(ov => {
+        ov.addEventListener("click", (e) => {
+            if (e.target === ov) ov.classList.remove("active");
+        });
+    });
+}
+
+function showSetupError(msg) {
+    const box = $("#setup-error");
+    box.textContent = msg;
+    box.classList.remove("hidden");
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  Main App Initialization
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function initMainApp() {
+    populateProviderSelect();
+    updateModelSelect();
+    applySettings();
+    renderTechniques();
+    renderRecentAndPreferred();
+    setupMainListeners();
+}
+
+function populateProviderSelect() {
+    const sel = $("#provider");
+    sel.innerHTML = "";
+    if (state.decryptedKeys.openai) {
+        const opt = document.createElement("option");
+        opt.value = "openai"; opt.textContent = "OpenAI";
+        sel.appendChild(opt);
+    }
+    if (state.decryptedKeys.anthropic) {
+        const opt = document.createElement("option");
+        opt.value = "anthropic"; opt.textContent = "Anthropic";
+        sel.appendChild(opt);
+    }
+    if (state.config.settings.provider && state.decryptedKeys[state.config.settings.provider]) {
+        sel.value = state.config.settings.provider;
+    }
+}
+
+function updateModelSelect() {
+    const provider = $("#provider").value;
+    const sel = $("#model");
+    sel.innerHTML = "";
+    (MODELS[provider] || []).forEach(m => {
+        const opt = document.createElement("option");
+        opt.value = m.id; opt.textContent = m.name;
+        sel.appendChild(opt);
+    });
+    if (state.config.settings.model) {
+        const exists = Array.from(sel.options).some(o => o.value === state.config.settings.model);
+        if (exists) sel.value = state.config.settings.model;
+    }
+}
+
+function applySettings() {
+    const s = state.config.settings;
+    $("#language").value = s.language || "ja";
+    $("#temperature").value = s.temperature || 0.7;
+    $("#temp-value").textContent = s.temperature || 0.7;
+    $("#include-analysis").checked = s.include_analysis !== false;
+    if (state.config.manual_technique_text) {
+        $("#manual-text").value = state.config.manual_technique_text;
+    }
+}
+
+async function saveSettings() {
+    state.config.settings.provider = $("#provider").value;
+    state.config.settings.model = $("#model").value;
+    state.config.settings.language = $("#language").value;
+    state.config.settings.temperature = parseFloat($("#temperature").value);
+    state.config.settings.include_analysis = $("#include-analysis").checked;
+    state.config.manual_technique_text = $("#manual-text").value;
+    await Storage.writeConfig(state.config);
+}
+
+// ── Techniques Rendering ────────────────────────────────────────
 
 function renderTechniques() {
     const list = $("#technique-list");
     list.innerHTML = "";
-    TECHNIQUES.forEach((t) => {
+    TECHNIQUES.forEach(t => {
         const item = document.createElement("div");
         item.className = "technique-item";
         item.dataset.id = t.id;
@@ -420,13 +957,13 @@ function renderTechniques() {
                 <div class="technique-desc">${t.description_ja}</div>
             </div>
             <span class="technique-category cat-${t.category}">${t.category}</span>`;
-        item.addEventListener("click", (e) => {
+        item.addEventListener("click", e => {
             if (e.target.tagName === "INPUT") return;
             const cb = item.querySelector("input[type=checkbox]");
             cb.checked = !cb.checked;
             toggleTechnique(t.id, cb.checked);
         });
-        item.querySelector("input[type=checkbox]").addEventListener("change", (e) => {
+        item.querySelector("input[type=checkbox]").addEventListener("change", e => {
             toggleTechnique(t.id, e.target.checked);
         });
         list.appendChild(item);
@@ -435,71 +972,348 @@ function renderTechniques() {
 }
 
 function toggleTechnique(id, checked) {
-    checked ? selectedTechniques.add(id) : selectedTechniques.delete(id);
+    checked ? state.selectedTechniques.add(id) : state.selectedTechniques.delete(id);
     const item = $(`.technique-item[data-id="${id}"]`);
     if (item) item.classList.toggle("selected", checked);
     updateTechniqueCount();
+    // Show/hide manual input
+    const mi = $("#manual-input");
+    if (id === "manual") {
+        mi.classList.toggle("visible", checked);
+    }
 }
 
 function updateTechniqueCount() {
-    $("#technique-count").textContent = `${selectedTechniques.size} selected`;
+    $("#technique-count").textContent = `${state.selectedTechniques.size} selected`;
 }
 
-function updateModelSelect() {
-    const provider = $("#provider").value;
-    const sel = $("#model");
-    sel.innerHTML = "";
-    (MODELS[provider] || []).forEach((m) => {
-        const opt = document.createElement("option");
-        opt.value = m.id;
-        opt.textContent = m.name;
-        sel.appendChild(opt);
+// ── Recent & Preferred ──────────────────────────────────────────
+
+async function renderRecentAndPreferred() {
+    const all = await Storage.listPastPrompts();
+    if (!all || all.length === 0) {
+        $("#recent-section").style.display = "none";
+        $("#preferred-section").style.display = "none";
+        return;
+    }
+
+    // Recent: last 3 by timestamp
+    const sorted = [...all].sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+    const recent = sorted.slice(0, 3);
+    renderPromptLinks("recent", recent);
+
+    // Preferred: from config preferred_ids + auto-detect high access_count
+    const preferredIds = new Set(state.config.preferred_ids || []);
+    const preferred = all
+        .filter(r => preferredIds.has(r.id) || (r.metadata && r.metadata.access_count >= 2))
+        .sort((a, b) => ((b.metadata?.access_count || 0) - (a.metadata?.access_count || 0)))
+        .slice(0, 5);
+
+    if (preferred.length > 0) {
+        renderPromptLinks("preferred", preferred);
+    } else {
+        $("#preferred-section").style.display = "none";
+    }
+}
+
+function renderPromptLinks(sectionId, records) {
+    const section = $(`#${sectionId}-section`);
+    const list = $(`#${sectionId}-list`);
+    if (!records.length) { section.style.display = "none"; return; }
+    section.style.display = "block";
+    list.innerHTML = "";
+
+    const preferredIds = new Set(state.config.preferred_ids || []);
+
+    records.forEach(r => {
+        const div = document.createElement("div");
+        div.className = "prompt-link";
+        const excerpt = (r.input?.original_prompt || "").slice(0, 60) || "(empty)";
+        const date = r.created_at ? new Date(r.created_at).toLocaleDateString("ja-JP", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+        const isPreferred = preferredIds.has(r.id);
+
+        div.innerHTML = `
+            <span class="prompt-link-star ${isPreferred ? "active" : ""}" data-id="${r.id}" title="Preferred切替">&#9733;</span>
+            <span class="prompt-link-excerpt">${escapeHtml(excerpt)}</span>
+            <span class="prompt-link-meta">${date}</span>`;
+
+        div.querySelector(".prompt-link-excerpt").addEventListener("click", () => loadPastPrompt(r.id));
+        div.querySelector(".prompt-link-star").addEventListener("click", (e) => {
+            e.stopPropagation();
+            togglePreferred(r.id);
+        });
+        list.appendChild(div);
     });
 }
 
-// ── Event Listeners ─────────────────────────────────────────────
+async function togglePreferred(id) {
+    const pids = state.config.preferred_ids || [];
+    const idx = pids.indexOf(id);
+    if (idx >= 0) pids.splice(idx, 1);
+    else pids.push(id);
+    state.config.preferred_ids = pids;
+    await Storage.writeConfig(state.config);
+    renderRecentAndPreferred();
+}
 
-function setupEventListeners() {
-    $("#provider").addEventListener("change", updateModelSelect);
-    $("#temperature").addEventListener("input", (e) => { $("#temp-value").textContent = e.target.value; });
-    $("#toggle-key").addEventListener("click", () => {
-        const inp = $("#api-key");
-        inp.type = inp.type === "password" ? "text" : "password";
-    });
+async function loadPastPrompt(id) {
+    const record = await idbGet("past_prompts", id);
+    if (!record) return;
+
+    // Increment access count
+    if (!record.metadata) record.metadata = {};
+    record.metadata.access_count = (record.metadata.access_count || 0) + 1;
+    await Storage.updatePastPrompt(record);
+
+    // Load into UI
+    $("#original-prompt").value = record.input?.original_prompt || "";
+
+    // Show result
+    if (record.output?.optimized_prompt) {
+        showResult({
+            optimized_prompt: record.output.optimized_prompt,
+            analysis: record.output.analysis,
+            model_used: record.input?.model || "unknown",
+            techniques_applied: record.input?.techniques || [],
+            usage: record.output.usage || {}
+        });
+    }
+
+    renderRecentAndPreferred();
+}
+
+// ── Main Event Listeners ────────────────────────────────────────
+
+function setupMainListeners() {
+    $("#provider").addEventListener("change", () => { updateModelSelect(); saveSettings(); });
+    $("#language").addEventListener("change", saveSettings);
+    $("#temperature").addEventListener("input", e => { $("#temp-value").textContent = e.target.value; saveSettings(); });
+    $("#include-analysis").addEventListener("change", saveSettings);
+    $("#manual-text").addEventListener("change", saveSettings);
+
     $("#select-all").addEventListener("click", () => {
-        TECHNIQUES.forEach((t) => {
-            selectedTechniques.add(t.id);
+        TECHNIQUES.forEach(t => {
+            state.selectedTechniques.add(t.id);
             const cb = $(`#tech-${t.id}`); if (cb) cb.checked = true;
             const item = $(`.technique-item[data-id="${t.id}"]`); if (item) item.classList.add("selected");
         });
+        $("#manual-input").classList.add("visible");
         updateTechniqueCount();
     });
+
     $("#select-none").addEventListener("click", () => {
-        selectedTechniques.clear();
+        state.selectedTechniques.clear();
         $$(".technique-item input[type=checkbox]").forEach(cb => cb.checked = false);
         $$(".technique-item").forEach(item => item.classList.remove("selected"));
+        $("#manual-input").classList.remove("visible");
         updateTechniqueCount();
     });
+
     $("#optimize-btn").addEventListener("click", optimizePrompt);
     $("#copy-btn").addEventListener("click", copyOptimized);
+
+    // Settings
+    $("#btn-settings").addEventListener("click", openSettings);
+    $("#settings-save").addEventListener("click", saveSettingsModal);
+    $$(".settings-toggle-key").forEach(btn => {
+        btn.addEventListener("click", () => {
+            const inp = $(`#${btn.dataset.target}`);
+            inp.type = inp.type === "password" ? "text" : "password";
+        });
+    });
+
+    // Reset tokens
+    $("#settings-reset-tokens").addEventListener("click", async () => {
+        if (confirm("累積トークン数をリセットしますか？")) {
+            state.config.cumulative_tokens = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+            await Storage.writeConfig(state.config);
+            openSettings(); // Refresh display
+        }
+    });
+
+    // Back Numbers
+    $("#btn-backnumbers").addEventListener("click", openBackNumbers);
+    $("#bn-search").addEventListener("input", filterBackNumbers);
+
+    // Detail
+    $("#detail-load").addEventListener("click", () => {
+        if (state.currentDetailRecord) {
+            loadPastPrompt(state.currentDetailRecord.id);
+            $("#modal-detail").classList.remove("active");
+            $("#modal-backnumbers").classList.remove("active");
+        }
+    });
 }
 
-// ── Prompt Building (Engine) ────────────────────────────────────
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  Settings Modal
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function openSettings() {
+    $("#settings-openai-key").value = state.decryptedKeys.openai || "";
+    $("#settings-anthropic-key").value = state.decryptedKeys.anthropic || "";
+    $("#settings-new-passphrase").value = "";
+    $("#settings-error").classList.add("hidden");
+
+    // Populate token usage
+    const s = state.sessionTokens;
+    const fmt = n => (n || 0).toLocaleString();
+    $("#settings-session-tokens").textContent = fmt(s.total_tokens);
+    $("#settings-session-prompt").textContent = fmt(s.prompt_tokens);
+    $("#settings-session-completion").textContent = fmt(s.completion_tokens);
+
+    const c = state.config.cumulative_tokens || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+    $("#settings-total-tokens").textContent = fmt(c.total_tokens);
+    $("#settings-total-prompt").textContent = fmt(c.prompt_tokens);
+    $("#settings-total-completion").textContent = fmt(c.completion_tokens);
+
+    $("#modal-settings").classList.add("active");
+}
+
+async function saveSettingsModal() {
+    try {
+        const newOk = $("#settings-openai-key").value.trim();
+        const newAk = $("#settings-anthropic-key").value.trim();
+        const newPass = $("#settings-new-passphrase").value.trim();
+
+        if (!newOk && !newAk) throw new Error("少なくとも1つのAPIキーが必要です");
+
+        let key = state.cryptoKey;
+        let salt = Crypto._fromBase64(state.config.salt);
+
+        if (newPass) {
+            salt = Crypto.generateSalt();
+            key = await Crypto.deriveKey(newPass, salt);
+            state.config.salt = Crypto._toBase64(salt);
+            state.config.verifier = await Crypto.encrypt("__PROMPT_OPT_OK__", key);
+            state.cryptoKey = key;
+        }
+
+        const apiKeys = {};
+        if (newOk) apiKeys.openai = await Crypto.encrypt(newOk, key);
+        if (newAk) apiKeys.anthropic = await Crypto.encrypt(newAk, key);
+        state.config.api_keys = apiKeys;
+        state.decryptedKeys = { openai: newOk, anthropic: newAk };
+
+        await Storage.writeConfig(state.config);
+        populateProviderSelect();
+        updateModelSelect();
+
+        $("#modal-settings").classList.remove("active");
+    } catch (e) {
+        const box = $("#settings-error");
+        box.textContent = e.message;
+        box.classList.remove("hidden");
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  Back Numbers Modal
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+let allPastPrompts = [];
+
+async function openBackNumbers() {
+    allPastPrompts = await Storage.listPastPrompts();
+    allPastPrompts.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+    $("#bn-search").value = "";
+    renderBackNumbers(allPastPrompts);
+    $("#modal-backnumbers").classList.add("active");
+}
+
+function filterBackNumbers() {
+    const q = $("#bn-search").value.toLowerCase();
+    const filtered = allPastPrompts.filter(r =>
+        (r.input?.original_prompt || "").toLowerCase().includes(q) ||
+        (r.output?.optimized_prompt || "").toLowerCase().includes(q) ||
+        (r.input?.techniques || []).some(t => t.toLowerCase().includes(q))
+    );
+    renderBackNumbers(filtered);
+}
+
+function renderBackNumbers(records) {
+    const list = $("#bn-list");
+    if (!records.length) {
+        list.innerHTML = '<div class="bn-empty">該当するプロンプトはありません</div>';
+        return;
+    }
+    list.innerHTML = "";
+    records.forEach(r => {
+        const div = document.createElement("div");
+        div.className = "bn-item";
+        const excerpt = (r.input?.original_prompt || "").slice(0, 80) || "(empty)";
+        const date = r.created_at ? new Date(r.created_at).toLocaleDateString("ja-JP", { year: "numeric", month: "short", day: "numeric" }) : "";
+        const techs = (r.input?.techniques || []).slice(0, 3).map(t => `<span class="bn-tag">${escapeHtml(t)}</span>`).join("");
+
+        div.innerHTML = `
+            <div style="flex:1;min-width:0;">
+                <div class="bn-excerpt">${escapeHtml(excerpt)}</div>
+                <div class="bn-techniques">${techs}</div>
+            </div>
+            <div class="bn-meta">${date}<br>&#128065; ${r.metadata?.access_count || 0}</div>`;
+        div.addEventListener("click", () => openDetail(r));
+        list.appendChild(div);
+    });
+}
+
+function openDetail(record) {
+    state.currentDetailRecord = record;
+    const body = $("#detail-body");
+    const inp = record.input || {};
+    const out = record.output || {};
+
+    body.innerHTML = `
+        <div class="detail-section">
+            <div class="detail-label">Original Prompt</div>
+            <div class="detail-content">${escapeHtml(inp.original_prompt || "")}</div>
+        </div>
+        <div class="detail-section">
+            <div class="detail-label">Optimized Prompt</div>
+            <div class="detail-content">${escapeHtml(out.optimized_prompt || "")}</div>
+        </div>
+        ${out.analysis ? `<div class="detail-section"><div class="detail-label">Analysis</div><div class="detail-content">${escapeHtml(out.analysis)}</div></div>` : ""}
+        <div class="detail-section">
+            <div class="detail-label">Metadata</div>
+            <div style="font-size:0.75rem;color:var(--text-dim);">
+                Model: ${escapeHtml(inp.model || "")}<br>
+                Techniques: ${(inp.techniques || []).map(t => escapeHtml(t)).join(", ")}<br>
+                Date: ${record.created_at ? new Date(record.created_at).toLocaleString("ja-JP") : ""}<br>
+                Access count: ${record.metadata?.access_count || 0}
+            </div>
+        </div>`;
+    $("#modal-detail").classList.add("active");
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  Prompt Building Engine
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 function getSelectedTechniqueObjects() {
     const map = {};
     TECHNIQUES.forEach(t => map[t.id] = t);
-    return Array.from(selectedTechniques).map(id => map[id]).filter(Boolean);
+    return Array.from(state.selectedTechniques).map(id => map[id]).filter(Boolean);
 }
 
-function buildSystemPrompt(techniques, language) {
-    const blocks = techniques.map((t, i) =>
+function buildSystemPrompt(techniques, manualText, language) {
+    const nonManual = techniques.filter(t => t.id !== "manual");
+    const blocks = nonManual.map((t, i) =>
         `### Technique ${i+1}: ${t.name}\n**Description**: ${t.description}\n**How to apply**: ${t.instruction}\n**Pattern**: ${t.example_pattern}`
-    ).join("\n\n");
+    );
+
+    if (manualText && manualText.trim()) {
+        blocks.push(
+            `### Technique ${blocks.length+1}: Custom User-Defined Technique\n` +
+            `**Description**: User-defined custom optimization approach\n` +
+            `**How to apply**: ${manualText.trim()}\n` +
+            `**Pattern**: Follow the user's custom instructions above while integrating naturally with the other selected techniques.`
+        );
+    }
+
+    const blocksStr = blocks.join("\n\n");
 
     let langInst = "";
     if (language === "ja") {
-        langInst = "\n\nIMPORTANT: The optimized prompt MUST be written in Japanese. The structural elements (section headings, instructions) should be in Japanese. Technical terms may remain in English where appropriate.";
+        langInst = "\n\nIMPORTANT: The optimized prompt MUST be written in Japanese. Technical terms may remain in English.";
     } else {
         langInst = "\n\nThe optimized prompt should be written in English.";
     }
@@ -511,7 +1325,7 @@ that incorporates specific prompt engineering techniques selected by the user.
 
 ## Your Optimization Process
 
-1. **Analyze** the original prompt to understand its intent, target audience, and desired outcome.
+1. **Analyze** the original prompt to understand its intent and desired outcome.
 2. **Apply** each selected technique thoughtfully — do not just mechanically append keywords.
 3. **Integrate** the techniques naturally so the final prompt reads as a cohesive whole.
 4. **Preserve** the original intent — the optimized prompt must accomplish the same goal.
@@ -519,13 +1333,13 @@ that incorporates specific prompt engineering techniques selected by the user.
 
 ## Selected Techniques to Apply
 
-${blocks}
+${blocksStr}
 
 ## Output Requirements
 
-- Return ONLY the optimized prompt text. Do not include explanations, metadata, or commentary.
+- Return ONLY the optimized prompt text. No explanations, metadata, or commentary.
 - The optimized prompt should be immediately usable — ready to paste into an LLM.
-- If multiple techniques overlap, merge them elegantly rather than creating redundant sections.
+- If multiple techniques overlap, merge them elegantly.
 - The optimized prompt should be significantly better than the original while remaining natural.
 ${langInst}`;
 }
@@ -535,204 +1349,202 @@ function buildUserPrompt(original) {
 }
 
 function buildAnalysisSystemPrompt() {
-    return `You are an expert Prompt Engineer. The user has just received an optimized prompt.
-Your job is to provide a brief analysis explaining:
-
-1. **Techniques Applied**: For each technique, explain specifically how it was integrated.
-2. **Key Improvements**: What are the main improvements over the original?
-3. **Usage Tips**: Any tips for using the optimized prompt effectively.
-
-Keep the analysis concise and actionable. Use markdown formatting.
-Respond in the same language as the optimized prompt.`;
+    return `You are an expert Prompt Engineer. Provide a brief analysis of the optimization:
+1. **Techniques Applied**: How each technique was integrated.
+2. **Key Improvements**: Main improvements over the original.
+3. **Usage Tips**: Tips for using the optimized prompt.
+Keep it concise. Use markdown. Respond in the same language as the optimized prompt.`;
 }
 
-// ── API Calls (Direct from Browser) ─────────────────────────────
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  API Calls
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async function callOpenAI(apiKey, model, systemPrompt, userMessage, temperature, maxTokens) {
     const messages = [];
     if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
     messages.push({ role: "user", content: userMessage });
-
     const body = { model, messages, max_completion_tokens: maxTokens };
-
     const supportsTemp = !NO_TEMP_PREFIXES.some(p => model.toLowerCase() === p || model.toLowerCase().startsWith(p + "-"));
     if (supportsTemp) body.temperature = temperature;
-
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${apiKey}`
-        },
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
         body: JSON.stringify(body)
     });
-
-    if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error?.message || `OpenAI API error: ${res.status}`);
-    }
-
+    if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error?.message || `OpenAI API error: ${res.status}`); }
     const data = await res.json();
-    return {
-        content: data.choices[0].message.content,
-        model: data.model,
-        usage: {
-            prompt_tokens: data.usage?.prompt_tokens || 0,
-            completion_tokens: data.usage?.completion_tokens || 0,
-            total_tokens: data.usage?.total_tokens || 0
-        }
-    };
+    return { content: data.choices[0].message.content, model: data.model, usage: { prompt_tokens: data.usage?.prompt_tokens||0, completion_tokens: data.usage?.completion_tokens||0, total_tokens: data.usage?.total_tokens||0 } };
 }
 
 async function callAnthropic(apiKey, model, systemPrompt, userMessage, temperature, maxTokens) {
-    const body = {
-        model,
-        max_tokens: maxTokens,
-        messages: [{ role: "user", content: userMessage }]
-    };
+    const body = { model, max_tokens: maxTokens, messages: [{ role: "user", content: userMessage }] };
     if (systemPrompt) body.system = systemPrompt;
     if (temperature !== 1.0) body.temperature = temperature;
-
     const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01",
-            "anthropic-dangerous-direct-browser-access": "true"
-        },
+        headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
         body: JSON.stringify(body)
     });
-
-    if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error?.message || `Anthropic API error: ${res.status}`);
-    }
-
+    if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error?.message || `Anthropic API error: ${res.status}`); }
     const data = await res.json();
-    const content = data.content.map(b => b.text || "").join("");
-    return {
-        content,
-        model: data.model,
-        usage: {
-            prompt_tokens: data.usage?.input_tokens || 0,
-            completion_tokens: data.usage?.output_tokens || 0,
-            total_tokens: (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0)
-        }
-    };
+    return { content: data.content.map(b=>b.text||"").join(""), model: data.model, usage: { prompt_tokens: data.usage?.input_tokens||0, completion_tokens: data.usage?.output_tokens||0, total_tokens: (data.usage?.input_tokens||0)+(data.usage?.output_tokens||0) } };
 }
 
 async function callLLM(provider, apiKey, model, systemPrompt, userMessage, temperature, maxTokens) {
-    if (provider === "openai") {
-        return callOpenAI(apiKey, model, systemPrompt, userMessage, temperature, maxTokens);
-    } else {
-        return callAnthropic(apiKey, model, systemPrompt, userMessage, temperature, maxTokens);
-    }
+    return provider === "openai"
+        ? callOpenAI(apiKey, model, systemPrompt, userMessage, temperature, maxTokens)
+        : callAnthropic(apiKey, model, systemPrompt, userMessage, temperature, maxTokens);
 }
 
-// ── Optimize ────────────────────────────────────────────────────
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  Optimize
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async function optimizePrompt() {
     const originalPrompt = $("#original-prompt").value.trim();
-    const apiKey = $("#api-key").value.trim();
     const provider = $("#provider").value;
     const model = $("#model").value;
     const language = $("#language").value;
     const temperature = parseFloat($("#temperature").value);
     const includeAnalysis = $("#include-analysis").checked;
+    const manualText = state.selectedTechniques.has("manual") ? $("#manual-text").value : "";
+    const apiKey = state.decryptedKeys[provider];
 
     if (!originalPrompt) { showError("プロンプトを入力してください。"); return; }
-    if (!apiKey) { showError("APIキーを入力してください。"); return; }
-    if (selectedTechniques.size === 0) { showError("PE手法を1つ以上選択してください。"); return; }
+    if (!apiKey) { showError(`${provider} のAPIキーが設定されていません。Settingsで設定してください。`); return; }
+    if (state.selectedTechniques.size === 0) { showError("PE手法を1つ以上選択してください。"); return; }
 
     const btn = $("#optimize-btn");
     btn.disabled = true;
     btn.querySelector(".btn-text").style.display = "none";
     btn.querySelector(".btn-loading").style.display = "inline";
+    btn.classList.add("btn-loading-anim");
     hideError();
-    $("#output-section").style.display = "none";
+    $("#output-section").classList.add("hidden");
 
     try {
         const techniques = getSelectedTechniqueObjects();
-        const systemPrompt = buildSystemPrompt(techniques, language);
+        const sysPrompt = buildSystemPrompt(techniques, manualText, language);
         const userPrompt = buildUserPrompt(originalPrompt);
 
-        // Main optimization call
-        const response = await callLLM(provider, apiKey, model, systemPrompt, userPrompt, temperature, 4096);
-
+        const response = await callLLM(provider, apiKey, model, sysPrompt, userPrompt, temperature, 4096);
         const optimized = response.content;
         const totalUsage = { ...response.usage };
         let analysis = null;
 
-        // Optional analysis call
         if (includeAnalysis) {
             try {
-                const techNames = techniques.map(t => t.name).join(", ");
-                const analysisUser = `## Original Prompt\n${originalPrompt}\n\n## Optimized Prompt\n${optimized}\n\n## Applied Techniques\n${techNames}\n\nPlease provide a brief analysis of the optimization.`;
-                const analysisResp = await callLLM(provider, apiKey, model, buildAnalysisSystemPrompt(), analysisUser, 0.5, 2048);
-                analysis = analysisResp.content;
-                totalUsage.prompt_tokens += analysisResp.usage.prompt_tokens;
-                totalUsage.completion_tokens += analysisResp.usage.completion_tokens;
-                totalUsage.total_tokens += analysisResp.usage.total_tokens;
-            } catch (e) {
-                console.warn("Analysis failed:", e);
-            }
+                const techNames = techniques.filter(t=>t.id!=="manual").map(t=>t.name).join(", ") + (manualText ? ", Custom" : "");
+                const aUser = `## Original Prompt\n${originalPrompt}\n\n## Optimized Prompt\n${optimized}\n\n## Applied Techniques\n${techNames}\n\nPlease provide a brief analysis.`;
+                const aResp = await callLLM(provider, apiKey, model, buildAnalysisSystemPrompt(), aUser, 0.5, 2048);
+                analysis = aResp.content;
+                totalUsage.prompt_tokens += aResp.usage.prompt_tokens;
+                totalUsage.completion_tokens += aResp.usage.completion_tokens;
+                totalUsage.total_tokens += aResp.usage.total_tokens;
+            } catch (e) { console.warn("Analysis failed:", e); }
         }
 
+        const techIds = Array.from(state.selectedTechniques);
+        const techNames = techniques.filter(t=>t.id!=="manual").map(t=>t.name);
+        if (manualText) techNames.push("Custom");
+
         showResult({
-            optimized_prompt: optimized,
-            analysis,
+            optimized_prompt: optimized, analysis,
             model_used: response.model,
-            techniques_applied: techniques.map(t => t.name),
+            techniques_applied: techNames,
             usage: totalUsage
         });
+
+        // Save to past prompts
+        const record = {
+            $schema: "prompt_optimizer_record_v1",
+            version: 1,
+            id: generateId(),
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            input: {
+                original_prompt: originalPrompt,
+                techniques: techIds,
+                manual_technique_text: manualText,
+                provider, model, language, temperature
+            },
+            output: {
+                optimized_prompt: optimized,
+                analysis,
+                usage: totalUsage
+            },
+            metadata: {
+                access_count: 0,
+                tags: [],
+                notes: ""
+            }
+        };
+        await Storage.savePastPrompt(record);
+
+        // Update token counters
+        state.sessionTokens.prompt_tokens += totalUsage.prompt_tokens;
+        state.sessionTokens.completion_tokens += totalUsage.completion_tokens;
+        state.sessionTokens.total_tokens += totalUsage.total_tokens;
+
+        if (!state.config.cumulative_tokens) state.config.cumulative_tokens = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+        state.config.cumulative_tokens.prompt_tokens += totalUsage.prompt_tokens;
+        state.config.cumulative_tokens.completion_tokens += totalUsage.completion_tokens;
+        state.config.cumulative_tokens.total_tokens += totalUsage.total_tokens;
+
+        // Update recent in config
+        state.config.recent = state.config.recent || [];
+        state.config.recent.unshift({ id: record.id, timestamp: record.created_at, excerpt: originalPrompt.slice(0, 60) });
+        if (state.config.recent.length > 10) state.config.recent = state.config.recent.slice(0, 10);
+        await saveSettings();
+
+        renderRecentAndPreferred();
     } catch (err) {
         showError(err.message);
     } finally {
         btn.disabled = false;
         btn.querySelector(".btn-text").style.display = "inline";
         btn.querySelector(".btn-loading").style.display = "none";
+        btn.classList.remove("btn-loading-anim");
     }
 }
 
-// ── Display Results ─────────────────────────────────────────────
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  Display
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 function showResult(data) {
-    $("#output-section").style.display = "block";
+    $("#output-section").classList.remove("hidden");
     $("#optimized-output").textContent = data.optimized_prompt;
-
     if (data.analysis) {
         $("#analysis-section").style.display = "block";
         $("#analysis-output").innerHTML = renderMarkdown(data.analysis);
     } else {
         $("#analysis-section").style.display = "none";
     }
-
     const u = data.usage || {};
     $("#meta-info").innerHTML = `
-        <span>Model: <strong>${data.model_used}</strong></span>
+        <span>Model: <strong>${escapeHtml(data.model_used)}</strong></span>
         <span>Techniques: <strong>${data.techniques_applied.length}</strong></span>
-        <span>Tokens: <strong>${(u.total_tokens || 0).toLocaleString()}</strong></span>
-        <span>Prompt tokens: ${(u.prompt_tokens || 0).toLocaleString()}</span>
-        <span>Completion tokens: ${(u.completion_tokens || 0).toLocaleString()}</span>`;
+        <span>Tokens: <strong>${(u.total_tokens||0).toLocaleString()}</strong></span>
+        <span>Prompt: ${(u.prompt_tokens||0).toLocaleString()}</span>
+        <span>Completion: ${(u.completion_tokens||0).toLocaleString()}</span>`;
 }
 
 function renderMarkdown(text) {
     return "<p>" + text
-        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-        .replace(/^### (.+)$/gm, "<h3>$1</h3>")
-        .replace(/^## (.+)$/gm, "<h2>$1</h2>")
-        .replace(/^# (.+)$/gm, "<h1>$1</h1>")
-        .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-        .replace(/`([^`]+)`/g, "<code>$1</code>")
-        .replace(/^- (.+)$/gm, "<li>$1</li>")
-        .replace(/^\d+\. (.+)$/gm, "<li>$1</li>")
-        .replace(/((?:<li>.*<\/li>\n?)+)/g, "<ul>$1</ul>")
-        .replace(/\n\n/g, "</p><p>")
-        .replace(/\n/g, "<br>") + "</p>";
+        .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+        .replace(/^### (.+)$/gm,"<h3>$1</h3>")
+        .replace(/^## (.+)$/gm,"<h2>$1</h2>")
+        .replace(/^# (.+)$/gm,"<h1>$1</h1>")
+        .replace(/\*\*(.+?)\*\*/g,"<strong>$1</strong>")
+        .replace(/`([^`]+)`/g,"<code>$1</code>")
+        .replace(/^- (.+)$/gm,"<li>$1</li>")
+        .replace(/^\d+\. (.+)$/gm,"<li>$1</li>")
+        .replace(/((?:<li>.*<\/li>\n?)+)/g,"<ul>$1</ul>")
+        .replace(/\n\n/g,"</p><p>")
+        .replace(/\n/g,"<br>") + "</p>";
 }
-
-// ── Copy ────────────────────────────────────────────────────────
 
 async function copyOptimized() {
     const text = $("#optimized-output").textContent;
@@ -752,10 +1564,22 @@ async function copyOptimized() {
     }
 }
 
-// ── Error ───────────────────────────────────────────────────────
+function showError(msg) { const b = $("#error-box"); b.textContent = msg; b.classList.remove("hidden"); }
+function hideError() { $("#error-box").classList.add("hidden"); }
 
-function showError(msg) { const b = $("#error-box"); b.textContent = msg; b.style.display = "block"; }
-function hideError() { $("#error-box").style.display = "none"; }
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  Utilities
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function generateId() {
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
+
+function escapeHtml(str) {
+    const d = document.createElement("div");
+    d.textContent = str;
+    return d.innerHTML;
+}
 </script>
 </body>
 </html>
