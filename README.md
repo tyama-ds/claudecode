@@ -21,6 +21,7 @@ AIを活用した自動リサーチツール。OpenAI/Anthropic APIとWeb検索�
 - **多言語検索**: 複数言語での同時検索と結果統合
 - **ローカルデータ分析**: PDFやExcelなどのローカルファイルを直接分析
 - **データサルベージ**: エラー時のデータ復旧とCSVエクスポート（日本語エンコーディング対応）
+- **高速クロールモード**: 並列フェッチとバッチ/並列LLM評価で情報収集を高速化
 
 ## インストール
 
@@ -900,6 +901,123 @@ extract_report_text(session, 'report.docx', format='docx')
 
 ---
 
+## 追加機能8：高速クロールモード（Fast Crawl Mode）
+
+### 概要
+
+情報収集プロセスを高速化するための最適化モードです。従来の順次処理に対して、並列フェッチと効率的なLLM評価を組み合わせることで、リサーチ時間を大幅に短縮できます。
+
+### 処理フロー比較
+
+```
+【標準モード（standard）】
+検索 → ページ1取得 → LLM評価 → ページ2取得 → LLM評価 → ...（順次処理）
+
+【高速バッチモード（fast_batch）】
+検索 → [ページ1,2,3,4,5を並列取得] → [5ページをまとめてLLM評価] → ...
+        ↑ 並列HTTP fetch            ↑ 1回のLLMコールで複数評価
+
+【高速並列モード（fast_parallel）】
+検索 → [ページ1,2,3,4,5を並列取得] → [LLM評価を並列実行] → ...
+        ↑ 並列HTTP fetch            ↑ 複数のLLMコールを同時実行
+```
+
+### モードの選択指針
+
+| モード | 特徴 | 推奨ケース |
+|-------|------|-----------|
+| `standard` | 順次処理、最も安定 | デフォルト、確実性重視 |
+| `fast_batch` | 並列fetch + バッチLLM評価 | トークンコスト削減、中程度の高速化 |
+| `fast_parallel` | 並列fetch + 並列LLM評価 | 最速、レート制限に余裕がある場合 |
+
+### CLIでの使用
+
+```bash
+# 高速バッチモード（推奨）
+deep-research research "市場分析" --crawl-mode fast_batch
+
+# 高速並列モード（最速）
+deep-research research "技術調査" --crawl-mode fast_parallel
+
+# ワーカー数とバッチサイズをカスタマイズ
+deep-research research "競合分析" \
+    --crawl-mode fast_batch \
+    --fast-crawl-workers 15 \
+    --fast-crawl-batch-size 8
+```
+
+### Pythonでの使用
+
+```python
+from deep_research_tool import run_research
+
+# 高速バッチモード
+result = run_research(
+    query="AIトレンド分析 2024",
+    provider="anthropic",
+    crawl_mode="fast_batch",      # fast_batch または fast_parallel
+    fast_crawl_workers=10,        # 並列HTTPワーカー数
+    fast_crawl_batch_size=5,      # バッチあたりのページ数
+)
+
+# 高速並列モード（最速）
+result = run_research(
+    query="市場動向調査",
+    crawl_mode="fast_parallel",
+    fast_crawl_workers=15,
+)
+
+print(f"レポート: {result['report_path']}")
+```
+
+### 詳細な設定（Config使用）
+
+```python
+from deep_research_tool import DeepResearchTool, create_config
+
+config = create_config(
+    provider="anthropic",
+    research_iterations=5,
+    output_format="pdf",
+
+    # 高速クロールモード設定
+    crawl_mode="fast_batch",     # standard / fast_batch / fast_parallel
+    fast_crawl_workers=10,       # 並列フェッチのワーカー数
+    fast_crawl_batch_size=5,     # バッチ評価時のページ数
+)
+
+tool = DeepResearchTool(config)
+result = tool.run(
+    query="再生可能エネルギー市場",
+    requirements="最新データと予測を含める",
+)
+```
+
+### 設定パラメータ
+
+| パラメータ | 説明 | デフォルト |
+|-----------|------|----------|
+| `crawl_mode` | クロールモード（standard/fast_batch/fast_parallel） | `standard` |
+| `fast_crawl_workers` | 並列HTTPフェッチのワーカー数 | `10` |
+| `fast_crawl_batch_size` | バッチ評価時の1バッチあたりページ数 | `5` |
+
+### パフォーマンス特性
+
+| モード | 速度 | トークン効率 | 安定性 |
+|-------|------|------------|--------|
+| standard | ★★☆ | ★★★ | ★★★ |
+| fast_batch | ★★★ | ★★★ | ★★★ |
+| fast_parallel | ★★★★ | ★★☆ | ★★☆ |
+
+### 注意事項
+
+- `fast_parallel`モードはAPIのレート制限に注意が必要です
+- `fast_batch`モードはトークン効率が良く、多くのケースで推奨されます
+- ネットワークが不安定な環境では`standard`モードが安定します
+- Extended Modeとの併用も可能です
+
+---
+
 ## 詳細ワークフロー：クエリ入力からレポート出力まで
 
 以下は、ユーザーがリサーチクエリを入力してからレポートが出力されるまでの詳細なワークフローです。
@@ -1192,6 +1310,9 @@ extract_report_text(session, 'report.docx', format='docx')
 | `local_model` | ローカルLLMモデル名 | llama3.1:8b |
 | `local_backend` | ローカルLLMバックエンド (ollama/vllm/openai_compatible) | ollama |
 | `local_base_url` | ローカルLLMサーバーURL | http://localhost:11434 |
+| `crawl_mode` | 高速クロールモード (standard/fast_batch/fast_parallel) | standard |
+| `fast_crawl_workers` | 並列HTTPフェッチのワーカー数 | 10 |
+| `fast_crawl_batch_size` | バッチ評価時の1バッチあたりページ数 | 5 |
 
 ---
 
@@ -1292,7 +1413,8 @@ deep_research_tool/
 │   ├── query_generator.py
 │   ├── content_extractor.py
 │   ├── researcher.py
-│   └── site_crawler.py  # Extended Mode用サイトクローラー
+│   ├── site_crawler.py  # Extended Mode用サイトクローラー
+│   └── fast_crawler.py  # 高速クロールモード用並列クローラー
 ├── verification/        # ハルシネーション検証
 │   └── verifier.py
 ├── evidence/            # Evidence Locker
