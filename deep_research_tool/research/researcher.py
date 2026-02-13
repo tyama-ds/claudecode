@@ -12,6 +12,11 @@ from typing import List, Optional, Dict, Any, Callable
 from uuid import uuid4
 
 from ..evidence.locker import EvidenceLocker, Evidence, EvidenceType
+from ..evidence.content_filter import (
+    ContentFilter,
+    ContentFilterConfig,
+    create_moderate_filter,
+)
 from ..search.base import SearchResult
 from .query_generator import QueryGenerator, ResearchPlan, TableOfContents, TableOfContentsItem
 from .content_extractor import ContentExtractor, ExtractedContent
@@ -144,6 +149,8 @@ class Researcher:
         crawl_max_sites: int = 3,
         crawl_relevance_threshold: float = 0.3,
         use_enhanced_synthesis: bool = True,
+        content_filter: ContentFilter = None,
+        filter_mode: str = "moderate",
     ):
         """
         Initialize Researcher.
@@ -164,6 +171,8 @@ class Researcher:
             crawl_max_sites: Max sites to crawl per search
             crawl_relevance_threshold: Min relevance score to include page
             use_enhanced_synthesis: Use multi-pass content generation for better quality
+            content_filter: Content filter instance (None to use default based on filter_mode)
+            filter_mode: Filter strictness: "strict", "moderate", "minimal", or "none"
         """
         self.llm = llm_client
         self.search = search_client
@@ -198,6 +207,21 @@ class Researcher:
                 language=language,
             )
             self.crawl_max_sites = crawl_max_sites
+
+        # Content filter for ad/spam removal
+        self.filter_mode = filter_mode
+        if content_filter:
+            self.content_filter = content_filter
+        elif filter_mode == "strict":
+            from ..evidence.content_filter import create_strict_filter
+            self.content_filter = create_strict_filter()
+        elif filter_mode == "moderate":
+            self.content_filter = create_moderate_filter()
+        elif filter_mode == "minimal":
+            from ..evidence.content_filter import create_minimal_filter
+            self.content_filter = create_minimal_filter()
+        else:  # "none"
+            self.content_filter = None
 
     def _report_progress(self, message: str, percentage: float) -> None:
         """Report progress to callback if available."""
@@ -407,8 +431,28 @@ class Researcher:
 
                     for result in results[:self.max_pages_per_query]:
                         print(f"[DEBUG] Processing: {result.url[:60]}...")
+
+                        # Apply content filter to URL first
+                        if self.content_filter:
+                            url_filter_result = self.content_filter.filter_url(result.url)
+                            if not url_filter_result.should_include:
+                                print(f"[FILTER] Skipped (URL): {url_filter_result.reason}")
+                                continue
+
                         try:
                             page = self.search.get_page_content(result.url)
+
+                            # Apply content filter to page content
+                            if self.content_filter:
+                                content_filter_result = self.content_filter.filter_content(
+                                    url=result.url,
+                                    title=result.title,
+                                    content=page.text_content,
+                                )
+                                if not content_filter_result.should_include:
+                                    print(f"[FILTER] Skipped (content): {content_filter_result.reason}")
+                                    continue
+                                print(f"[FILTER] Quality score: {content_filter_result.quality_score:.2f}")
 
                             extracted = self.content_extractor.extract_relevant_content(
                                 raw_content=page.text_content,
@@ -881,7 +925,23 @@ Return as JSON:
                                 if result.url in existing_sources:
                                     continue
 
+                                # Apply content filter
+                                if self.content_filter:
+                                    url_filter_result = self.content_filter.filter_url(result.url)
+                                    if not url_filter_result.should_include:
+                                        continue
+
                                 page = self.search.get_page_content(result.url)
+
+                                # Apply content filter to page content
+                                if self.content_filter:
+                                    content_filter_result = self.content_filter.filter_content(
+                                        url=result.url,
+                                        title=result.title,
+                                        content=page.text_content,
+                                    )
+                                    if not content_filter_result.should_include:
+                                        continue
 
                                 extracted = self.content_extractor.extract_relevant_content(
                                     raw_content=page.text_content,

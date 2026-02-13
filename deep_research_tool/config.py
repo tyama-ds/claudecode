@@ -296,6 +296,14 @@ class DeepThinkConfig:
     _deviation_weights: tuple = (0.4, 0.4, 0.2)  # semantic, logical, contradiction
 
 
+class ContentFilterMode(str, Enum):
+    """Content filter strictness modes."""
+    STRICT = "strict"      # Aggressive filtering (removes most ads/spam)
+    MODERATE = "moderate"  # Balanced filtering (default)
+    MINIMAL = "minimal"    # Light filtering (only obvious ads)
+    NONE = "none"          # No filtering
+
+
 @dataclass
 class ResearchConfig:
     """Configuration for research process."""
@@ -325,6 +333,11 @@ class ResearchConfig:
 
     # Enhanced synthesis settings
     use_enhanced_synthesis: bool = True  # Use multi-pass content generation
+
+    # Content filtering settings (ads, spam, low-quality content)
+    content_filter_mode: ContentFilterMode = ContentFilterMode.MODERATE
+    custom_blocked_domains: List[str] = field(default_factory=list)
+    custom_whitelisted_domains: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -466,6 +479,10 @@ def create_config(
     # Search depth parameters
     max_queries_per_iteration: int = 3,
     max_pages_per_query: int = 3,
+    # Content filtering parameters
+    content_filter_mode: str = "moderate",
+    custom_blocked_domains: Optional[List[str]] = None,
+    custom_whitelisted_domains: Optional[List[str]] = None,
     **kwargs
 ) -> Config:
     """
@@ -508,6 +525,9 @@ def create_config(
         use_enhanced_synthesis: Use multi-pass content generation for better quality
         max_queries_per_iteration: Max queries to execute per research iteration (default: 3)
         max_pages_per_query: Max pages to process per search query (default: 3)
+        content_filter_mode: Content filter strictness ('strict', 'moderate', 'minimal', 'none')
+        custom_blocked_domains: List of domains to block in addition to defaults
+        custom_whitelisted_domains: List of domains to always allow
         **kwargs: Additional keyword arguments
 
     Returns:
@@ -542,6 +562,9 @@ def create_config(
         crawl_max_depth=crawl_max_depth,
         crawl_max_sites=crawl_max_sites,
         use_enhanced_synthesis=use_enhanced_synthesis,
+        content_filter_mode=ContentFilterMode(content_filter_mode),
+        custom_blocked_domains=custom_blocked_domains if custom_blocked_domains else [],
+        custom_whitelisted_domains=custom_whitelisted_domains if custom_whitelisted_domains else [],
     )
 
     report_config = ReportConfig(

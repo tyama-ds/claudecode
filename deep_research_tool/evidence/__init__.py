@@ -20,6 +20,14 @@ from .manual_loader import (
     ManualEvidenceLoader,
     load_evidence_file,
 )
+from .content_filter import (
+    ContentFilter,
+    ContentFilterConfig,
+    FilterResult,
+    create_strict_filter,
+    create_moderate_filter,
+    create_minimal_filter,
+)
 
 __all__ = [
     "EvidenceLocker",
@@ -34,4 +42,10 @@ __all__ = [
     "get_quality_summary",
     "ManualEvidenceLoader",
     "load_evidence_file",
+    "ContentFilter",
+    "ContentFilterConfig",
+    "FilterResult",
+    "create_strict_filter",
+    "create_moderate_filter",
+    "create_minimal_filter",
 ]
