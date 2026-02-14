@@ -60,4 +60,6 @@ __all__ = [
     "Turn",
     "Round",
     "DiscussionSession",
+    # Orchestrator (available via multi_agent_discussion.orchestrator)
+    "orchestrator",
 ]

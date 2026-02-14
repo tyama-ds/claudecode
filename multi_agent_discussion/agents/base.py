@@ -62,30 +62,50 @@ class BaseAgent(ABC):
             self._client = self._create_client()
         return self._client
 
+    def _get_http_client(self):
+        """Create an HTTP client with proxy support if configured."""
+        proxy_url = self.llm_config.proxy_url
+        if proxy_url:
+            try:
+                import httpx
+                return httpx.Client(proxy=proxy_url)
+            except ImportError:
+                raise ImportError("httpx package is required for proxy support")
+        return None
+
     def _create_client(self):
         """Create LLM client based on configuration."""
         from ..config import LLMProvider
 
         provider = self.llm_config.provider
         api_key = self.llm_config.get_api_key()
+        http_client = self._get_http_client()
 
         if provider == LLMProvider.OPENAI:
             try:
                 from openai import OpenAI
-                return OpenAI(api_key=api_key)
+                kwargs = {"api_key": api_key}
+                if http_client:
+                    kwargs["http_client"] = http_client
+                return OpenAI(**kwargs)
             except ImportError:
                 raise ImportError("openai package is required for OpenAI provider")
 
         elif provider == LLMProvider.ANTHROPIC:
             try:
                 from anthropic import Anthropic
-                return Anthropic(api_key=api_key)
+                kwargs = {"api_key": api_key}
+                if http_client:
+                    kwargs["http_client"] = http_client
+                return Anthropic(**kwargs)
             except ImportError:
                 raise ImportError("anthropic package is required for Anthropic provider")
 
         elif provider == LLMProvider.GOOGLE:
             try:
                 import google.generativeai as genai
+                # Google uses environment variables for proxy (HTTP_PROXY/HTTPS_PROXY)
+                # or request_options for per-request proxy
                 genai.configure(api_key=api_key)
                 return genai
             except ImportError:
@@ -95,10 +115,13 @@ class BaseAgent(ABC):
             try:
                 from openai import OpenAI
                 # Ollama provides OpenAI-compatible API
-                return OpenAI(
-                    base_url=f"{self.llm_config.ollama_base_url}/v1",
-                    api_key="ollama",  # Ollama doesn't require API key
-                )
+                kwargs = {
+                    "base_url": f"{self.llm_config.ollama_base_url}/v1",
+                    "api_key": "ollama",  # Ollama doesn't require API key
+                }
+                if http_client:
+                    kwargs["http_client"] = http_client
+                return OpenAI(**kwargs)
             except ImportError:
                 raise ImportError("openai package is required for Ollama provider")
 
@@ -106,10 +129,13 @@ class BaseAgent(ABC):
             try:
                 from openai import OpenAI
                 # xAI provides OpenAI-compatible API
-                return OpenAI(
-                    base_url="https://api.x.ai/v1",
-                    api_key=api_key,
-                )
+                kwargs = {
+                    "base_url": "https://api.x.ai/v1",
+                    "api_key": api_key,
+                }
+                if http_client:
+                    kwargs["http_client"] = http_client
+                return OpenAI(**kwargs)
             except ImportError:
                 raise ImportError("openai package is required for xAI provider")
 
