@@ -275,6 +275,61 @@ class QueryGenerator:
         is_valid = len(issues) == 0
         return is_valid, issues
 
+    def _detect_user_toc_preference(self, query: str, requirements: str) -> tuple[bool, str]:
+        """
+        Detect if the user has specified ToC preferences or structure hints.
+
+        Args:
+            query: The research query
+            requirements: The requirements string
+
+        Returns:
+            Tuple of (has_preference, preference_text)
+        """
+        combined_text = f"{query} {requirements}".lower()
+
+        # Japanese indicators of ToC preference
+        toc_indicators_ja = [
+            "目次", "構成", "章立て", "セクション", "項目",
+            "以下の構成", "以下の目次", "以下の章",
+            "1.", "2.", "3.",  # Numbered items
+            "第1章", "第2章", "第一章", "第二章",
+            "・", "－",  # Bullet points
+        ]
+
+        # English indicators of ToC preference
+        toc_indicators_en = [
+            "table of contents", "toc", "structure", "outline",
+            "sections", "chapters", "following structure",
+            "include sections", "cover the following",
+            "i.", "ii.", "iii.",  # Roman numerals
+        ]
+
+        # Check for indicators
+        has_preference = False
+        for indicator in toc_indicators_ja + toc_indicators_en:
+            if indicator in combined_text:
+                has_preference = True
+                break
+
+        # Also check if the text contains multiple numbered items (likely a user-defined structure)
+        import re
+        numbered_pattern = r'[1-9]\.\s*\S+'
+        numbered_matches = re.findall(numbered_pattern, combined_text)
+        if len(numbered_matches) >= 3:
+            has_preference = True
+
+        # Extract the preference text for passing to the prompt
+        preference_text = ""
+        if has_preference:
+            # If requirements contains the preference, use it
+            if any(ind in requirements.lower() for ind in toc_indicators_ja + toc_indicators_en):
+                preference_text = requirements
+            elif any(ind in query.lower() for ind in toc_indicators_ja + toc_indicators_en):
+                preference_text = query
+
+        return has_preference, preference_text
+
     def create_research_plan(
         self,
         query: str,
@@ -294,6 +349,12 @@ class QueryGenerator:
         Returns:
             Complete ResearchPlan object
         """
+        # Check if user has specified ToC preferences
+        has_user_toc_preference, user_toc_text = self._detect_user_toc_preference(query, requirements)
+
+        if has_user_toc_preference:
+            print(f"[QueryGenerator] User ToC preference detected, skipping validation")
+
         for attempt in range(max_retries + 1):
             plan = self._generate_research_plan_attempt(
                 query=query,
@@ -301,10 +362,16 @@ class QueryGenerator:
                 additional_context=additional_context,
                 is_retry=attempt > 0,
                 previous_issues=[] if attempt == 0 else issues,
+                user_toc_preference=user_toc_text if has_user_toc_preference else "",
             )
 
             if plan is None:
                 continue
+
+            # Skip validation if user specified their own ToC preference
+            if has_user_toc_preference:
+                print(f"[QueryGenerator] Respecting user ToC preference, returning plan without strict validation")
+                return plan
 
             # Validate ToC quality
             is_valid, issues = self._validate_toc_quality(plan.table_of_contents, query)
@@ -325,6 +392,7 @@ class QueryGenerator:
         additional_context: str,
         is_retry: bool = False,
         previous_issues: List[str] = None,
+        user_toc_preference: str = "",
     ) -> Optional[ResearchPlan]:
         """
         Single attempt at generating a research plan.
@@ -335,6 +403,7 @@ class QueryGenerator:
             additional_context: Additional context or information
             is_retry: Whether this is a retry attempt
             previous_issues: Issues from previous attempt (for retry)
+            user_toc_preference: User-specified ToC preference text
 
         Returns:
             ResearchPlan object or None if parsing failed
@@ -343,6 +412,26 @@ class QueryGenerator:
             "Respond entirely in Japanese." if self.language == "ja"
             else f"Respond in {self.language}."
         )
+
+        # Build user ToC preference instruction
+        user_toc_instruction = ""
+        if user_toc_preference:
+            if self.language == "ja":
+                user_toc_instruction = f"""
+【ユーザー指定の目次構成】
+ユーザーが以下の目次構成または希望を指定しています。この構成を最優先で尊重してください：
+{user_toc_preference}
+
+上記のユーザー指定に従い、目次を作成してください。ユーザーの指定がある場合は、一般的なセクション名の制約よりもユーザーの希望を優先します。
+"""
+            else:
+                user_toc_instruction = f"""
+[USER-SPECIFIED TABLE OF CONTENTS]
+The user has specified the following ToC structure or preferences. Respect this structure as the top priority:
+{user_toc_preference}
+
+Follow the user's specification above. When user preferences are specified, prioritize them over the generic section name constraints.
+"""
 
         # Build retry-specific instructions
         retry_instruction = ""
@@ -410,7 +499,7 @@ When creating a research plan:
 要件: {requirements if requirements else "包括的な調査"}
 
 追加コンテキスト: {additional_context if additional_context else "なし"}
-{retry_instruction}
+{user_toc_instruction}{retry_instruction}
 詳細な調査計画を作成してください。以下のJSON形式で回答してください：
 {{
     "title": "レポートタイトル（調査テーマを反映）",
@@ -444,7 +533,7 @@ When creating a research plan:
 Requirements: {requirements if requirements else "General comprehensive research"}
 
 Additional Context: {additional_context if additional_context else "None"}
-{retry_instruction}
+{user_toc_instruction}{retry_instruction}
 Create a detailed research plan. Return your response as a JSON object with this exact structure:
 {{
     "title": "Report title (reflecting the research topic)",

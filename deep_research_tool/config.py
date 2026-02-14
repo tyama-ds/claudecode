@@ -60,6 +60,12 @@ class ReportFormat(str, Enum):
     HTML = "html"
 
 
+class ReportGeneratorVersion(str, Enum):
+    """Report generator version selection."""
+    V1 = "v1"  # Original report generator
+    V2 = "v2"  # Enhanced with consistency features
+
+
 @dataclass
 class ProxyConfig:
     """Configuration for HTTP proxy settings."""
@@ -372,6 +378,17 @@ class ReportConfig:
     export_evidence_csv: bool = True
     export_evidence_json: bool = True
 
+    # Report generator version
+    generator_version: ReportGeneratorVersion = ReportGeneratorVersion.V1
+
+    # V2-specific settings (consistency features)
+    v2_writing_style: str = "business"  # formal, business, technical, executive, casual
+    v2_target_audience: str = "business"  # expert, business, engineer, general, student
+    v2_technical_level: int = 3  # 1-5 (1=basic, 5=advanced)
+    v2_enable_consistency_check: bool = True
+    v2_enable_two_phase: bool = True
+    v2_include_glossary: bool = True
+
 
 @dataclass
 class Config:
@@ -499,6 +516,14 @@ def create_config(
     crawl_mode: str = "standard",
     fast_crawl_workers: int = 10,
     fast_crawl_batch_size: int = 5,
+    # Report generator version parameters
+    report_generator_version: str = "v1",
+    v2_writing_style: str = "business",
+    v2_target_audience: str = "business",
+    v2_technical_level: int = 3,
+    v2_enable_consistency_check: bool = True,
+    v2_enable_two_phase: bool = True,
+    v2_include_glossary: bool = True,
     **kwargs
 ) -> Config:
     """
@@ -547,6 +572,13 @@ def create_config(
         crawl_mode: Crawl mode ('standard', 'fast_batch', 'fast_parallel')
         fast_crawl_workers: Max parallel workers for fast crawl mode
         fast_crawl_batch_size: Pages per batch in batch evaluation mode
+        report_generator_version: Report generator version ('v1' or 'v2')
+        v2_writing_style: V2 writing style ('formal', 'business', 'technical', 'executive', 'casual')
+        v2_target_audience: V2 target audience ('expert', 'business', 'engineer', 'general', 'student')
+        v2_technical_level: V2 technical level (1-5, 1=basic, 5=advanced)
+        v2_enable_consistency_check: Enable V2 consistency checking
+        v2_enable_two_phase: Enable V2 two-phase generation (draft + refinement)
+        v2_include_glossary: Include glossary section in V2 reports
         **kwargs: Additional keyword arguments
 
     Returns:
@@ -594,6 +626,13 @@ def create_config(
         output_dir=Path(output_dir),
         target_pages=target_pages,
         target_characters=target_characters,
+        generator_version=ReportGeneratorVersion(report_generator_version),
+        v2_writing_style=v2_writing_style,
+        v2_target_audience=v2_target_audience,
+        v2_technical_level=v2_technical_level,
+        v2_enable_consistency_check=v2_enable_consistency_check,
+        v2_enable_two_phase=v2_enable_two_phase,
+        v2_include_glossary=v2_include_glossary,
     )
 
     proxy_config = ProxyConfig(

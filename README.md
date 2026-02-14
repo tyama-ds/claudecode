@@ -22,6 +22,7 @@ AIを活用した自動リサーチツール。OpenAI/Anthropic APIとWeb検索�
 - **ローカルデータ分析**: PDFやExcelなどのローカルファイルを直接分析
 - **データサルベージ**: エラー時のデータ復旧とCSVエクスポート（日本語エンコーディング対応）
 - **高速クロールモード**: 並列フェッチとバッチ/並列LLM評価で情報収集を高速化
+- **レポート生成V2**: 章間の一貫性を保証する用語統一・コンテキスト引き継ぎ・自動修正機能
 
 ## インストール
 
@@ -1776,6 +1777,274 @@ if __name__ == "__main__":
 - **レート制限**: 特にSelenium/Google検索はレート制限に注意（短時間に多数のリクエストでブロックされる可能性）
 - **実行時間**: 深層クロールを有効にすると数十分かかる場合があります
 - **ストレージ**: 大量のエビデンスを収集するため、十分なディスク容量を確保してください
+
+---
+
+## 追加機能9：レポート生成 V2（Report Generator V2）
+
+### 概要
+
+Report Generator V2は、長文レポートにおける章間の一貫性を保証するための拡張機能です。従来のV1では各章を独立して生成していたため、以下のような問題が発生することがありました：
+
+- **用語の不統一**: 同じ概念に異なる表現を使用（例：「EV」「電気自動車」「BEV」が混在）
+- **説明の重複**: 複数の章で同じ内容を繰り返し説明
+- **文脈の断絶**: 前章の内容を踏まえない説明
+- **事実の矛盾**: 章によって異なる数値や事実を記載
+
+V2はこれらの問題を解決するため、以下の機能を提供します：
+
+| 機能 | 説明 |
+|------|------|
+| **用語集管理（Glossary）** | 専門用語・略語を一元管理し、レポート全体で統一 |
+| **コンテキスト引き継ぎ** | 前章の要約を次章生成時に参照し、文脈を維持 |
+| **事実トラッキング** | 確立された事実を記録し、矛盾を防止 |
+| **一貫性チェック** | 生成後に用語・スタイル・重複・矛盾を自動検出 |
+| **2フェーズ生成** | ドラフト生成 → 一貫性チェック → 自動修正 |
+
+### 処理フロー
+
+```
+【V1（従来）】
+章1生成 → 章2生成 → 章3生成 → 完了
+（各章が独立、コンテキスト共有なし）
+
+【V2（新機能）】
+┌─────────────────────────────────────────────────────────┐
+│ フェーズ1: コンテキスト付き生成                          │
+│                                                         │
+│  調査計画から用語集を初期化                              │
+│       ↓                                                 │
+│  章1生成 → 要約・用語・事実を記録 → コンテキスト更新    │
+│       ↓                                                 │
+│  章2生成（章1のコンテキスト参照）→ コンテキスト更新     │
+│       ↓                                                 │
+│  章3生成（章1,2のコンテキスト参照）→ コンテキスト更新   │
+│       ↓                                                 │
+└─────────────────────────────────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────────┐
+│ フェーズ2: 一貫性チェック & 修正                         │
+│                                                         │
+│  全章を対象に以下をチェック:                             │
+│  - 用語の不統一（同義語、表記ゆれ）                      │
+│  - スタイルの不整合（敬体/常体、技術レベル）             │
+│  - 内容の重複（類似度50%以上の段落）                     │
+│  - 事実の矛盾（数値、日付、主張の相違）                  │
+│       ↓                                                 │
+│  問題箇所を自動修正                                      │
+└─────────────────────────────────────────────────────────┘
+                         ↓
+                    最終レポート出力
+```
+
+### CLIでの使用
+
+```bash
+# V2でリサーチ実行
+deep-research research "日本のEV市場の現状と将来展望" \
+    --report-generator-version v2
+
+# スタイルと対象読者を指定
+deep-research research "量子コンピュータの技術動向" \
+    --report-generator-version v2 \
+    --v2-writing-style technical \
+    --v2-target-audience engineer \
+    --v2-technical-level 4
+```
+
+### Pythonでの使用
+
+```python
+from deep_research_tool import run_research
+
+# V2でリサーチ実行
+result = run_research(
+    query="日本のEV市場の現状と将来展望",
+    provider="openai",
+    report_generator_version="v2",
+)
+
+print(f"レポート: {result['report_path']}")
+```
+
+### 詳細な設定（Config使用）
+
+```python
+from deep_research_tool import DeepResearchTool, create_config
+
+config = create_config(
+    provider="anthropic",
+    research_iterations=5,
+
+    # V2レポート生成の設定
+    report_generator_version="v2",      # v1 または v2
+    v2_writing_style="business",        # 文体スタイル
+    v2_target_audience="business",      # 想定読者
+    v2_technical_level=3,               # 技術レベル (1-5)
+    v2_enable_consistency_check=True,   # 一貫性チェック
+    v2_enable_two_phase=True,           # 2フェーズ生成
+    v2_include_glossary=True,           # 用語集セクション追加
+)
+
+tool = DeepResearchTool(config)
+result = tool.run(
+    query="再生可能エネルギー市場分析",
+    requirements="投資家向けレポート形式で",
+)
+```
+
+### 設定パラメータ詳細
+
+#### `v2_writing_style` - 文体スタイル
+
+レポート全体の文体を統一します。
+
+| 値 | 説明 | 使用例 |
+|----|------|--------|
+| `formal` | 硬い文体、学術的 | 学術論文、公式報告書 |
+| `business` | ビジネス文書向け（デフォルト） | 経営会議資料、提案書 |
+| `technical` | 技術文書向け | 技術仕様書、開発ドキュメント |
+| `executive` | 経営層向け、簡潔 | エグゼクティブサマリー、役員報告 |
+| `casual` | 親しみやすい文体 | ブログ、社内ニュースレター |
+
+#### `v2_target_audience` - 想定読者
+
+読者に合わせて説明の深さや専門用語の使い方を調整します。
+
+| 値 | 説明 | 特徴 |
+|----|------|------|
+| `expert` | 専門家 | 専門用語をそのまま使用、詳細な技術説明 |
+| `business` | ビジネスパーソン（デフォルト） | 適度な専門用語、ビジネス観点を強調 |
+| `engineer` | 技術者 | 実装詳細、技術的正確性を重視 |
+| `general` | 一般読者 | 専門用語は必ず解説、平易な表現 |
+| `student` | 学生・初学者 | 基礎から丁寧に説明、例を多用 |
+
+#### `v2_technical_level` - 技術レベル
+
+説明の専門性レベルを1〜5で指定します。
+
+| 値 | 説明 | 例 |
+|----|------|-----|
+| `1` | 入門レベル | 「AIとは人工知能のことで、コンピュータに人間のような判断をさせる技術です」 |
+| `2` | 基礎レベル | 「機械学習はデータからパターンを学習するAI技術の一種です」 |
+| `3` | 中級レベル（デフォルト） | 「深層学習は多層ニューラルネットワークを用いた機械学習手法です」 |
+| `4` | 上級レベル | 「Transformerアーキテクチャのself-attentionメカニズムにより...」 |
+| `5` | 専門家レベル | 「Multi-Head Attentionにおけるscaled dot-product attentionの計算量はO(n²d)...」 |
+
+#### その他のパラメータ
+
+| パラメータ | 説明 | デフォルト |
+|-----------|------|----------|
+| `v2_enable_consistency_check` | 一貫性チェックを実行するか | `True` |
+| `v2_enable_two_phase` | 2フェーズ生成（ドラフト→修正）を有効にするか | `True` |
+| `v2_include_glossary` | レポート末尾に用語集セクションを追加するか | `True` |
+
+### V2モジュールの直接使用
+
+高度なカスタマイズが必要な場合、V2のコンポーネントを直接使用できます。
+
+```python
+from deep_research_tool.report.v2 import (
+    ReportGeneratorV2,
+    ReportContext,
+    ConsistencyChecker,
+    GlossaryManager,
+    WritingStyle,
+    TargetAudience,
+)
+from deep_research_tool.api import get_client
+
+# LLMクライアント作成
+llm_client = get_client(provider="openai")
+
+# V2ジェネレーター作成
+generator = ReportGeneratorV2(
+    llm_client=llm_client,
+    writing_style=WritingStyle.TECHNICAL,
+    target_audience=TargetAudience.ENGINEER,
+    technical_level=4,
+    enable_consistency_check=True,
+    enable_two_phase=True,
+    language="ja",
+)
+
+# レポート生成（research_plan, section_contentsはrun_researchの結果から取得）
+result = generator.generate_report(
+    research_topic="量子コンピュータの技術動向",
+    research_plan=research_plan,
+    section_contents=section_contents,
+)
+
+# 最終ドキュメント生成
+final_document = generator.generate_final_document(
+    result,
+    include_glossary=True,
+)
+
+# 保存
+with open("report.md", "w", encoding="utf-8") as f:
+    f.write(final_document)
+
+# コンテキストを確認
+context = result.context
+print(f"登録された用語数: {len(context.glossary)}")
+print(f"確立された事実数: {len(context.established_facts)}")
+print(f"章要約数: {len(context.chapter_summaries)}")
+```
+
+### 一貫性チェッカーの単独使用
+
+既存のレポートに対して一貫性チェックだけを実行することもできます。
+
+```python
+from deep_research_tool.report.v2 import ConsistencyChecker, ReportContext
+from deep_research_tool.api import get_client
+
+llm_client = get_client(provider="openai")
+context = ReportContext(research_topic="EV市場分析")
+
+checker = ConsistencyChecker(
+    llm_client=llm_client,
+    context=context,
+)
+
+# 章のテキストを用意
+chapters = {
+    "1": "第1章の内容...",
+    "2": "第2章の内容...",
+    "3": "第3章の内容...",
+}
+
+# 一貫性チェック実行
+report = checker.check_all(chapters)
+
+# 結果を表示
+print(f"検出された問題: {len(report.issues)}")
+for issue in report.issues:
+    print(f"  [{issue.issue_type.value}] {issue.description}")
+    print(f"    位置: 章{issue.location}")
+    if issue.suggestion:
+        print(f"    提案: {issue.suggestion}")
+```
+
+### V1とV2の比較
+
+| 項目 | V1 | V2 |
+|------|-----|-----|
+| 章間のコンテキスト共有 | なし | あり |
+| 用語の統一 | 手動で調整が必要 | 自動で統一 |
+| 一貫性チェック | なし | 自動実行 |
+| 処理時間 | 短い | 長い（チェック・修正のため） |
+| トークン使用量 | 少ない | 多い（コンテキスト付与のため） |
+| 出力品質 | 基本的な品質 | 高い一貫性 |
+| 推奨用途 | 短いレポート、コスト重視 | 長いレポート、品質重視 |
+
+### 注意事項
+
+- **処理時間**: V2は2フェーズ生成と一貫性チェックを行うため、V1より処理時間が長くなります
+- **トークン使用量**: コンテキストを各章に付与するため、V1より多くのトークンを消費します
+- **メモリ使用量**: 全章の情報を保持するため、長いレポートではメモリ使用量が増加します
+- **v2_enable_two_phase=False**: 処理時間を短縮したい場合は2フェーズ生成を無効化できます
 
 ---
 
