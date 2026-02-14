@@ -157,6 +157,28 @@ class ResearchPlan:
 class QueryGenerator:
     """Generate research queries and plans using LLM."""
 
+    # Generic section titles that indicate a too-plain ToC
+    GENERIC_SECTION_TITLES_JA = [
+        "はじめに", "緒言", "序論", "導入", "イントロダクション",
+        "背景", "概要", "概説",
+        "歴史", "経緯", "沿革",
+        "考察", "ディスカッション", "議論",
+        "結論", "まとめ", "おわりに", "結び", "総括",
+        "今後の展望", "将来展望", "展望",
+        "参考文献", "引用文献", "文献",
+        "付録", "補遺", "appendix",
+    ]
+
+    GENERIC_SECTION_TITLES_EN = [
+        "introduction", "background", "overview", "preface",
+        "history", "historical background",
+        "discussion", "analysis",
+        "conclusion", "summary", "closing remarks",
+        "future work", "future directions", "outlook",
+        "references", "bibliography",
+        "appendix", "appendices",
+    ]
+
     def __init__(self, llm_client, language: str = "ja"):
         """
         Initialize QueryGenerator.
@@ -168,11 +190,97 @@ class QueryGenerator:
         self.llm = llm_client
         self.language = language
 
+    def _is_generic_title(self, title: str) -> bool:
+        """Check if a section title is too generic."""
+        title_lower = title.lower().strip()
+
+        # Check Japanese generic titles
+        for generic in self.GENERIC_SECTION_TITLES_JA:
+            if generic in title_lower or title_lower == generic:
+                return True
+
+        # Check English generic titles
+        for generic in self.GENERIC_SECTION_TITLES_EN:
+            if generic in title_lower or title_lower == generic:
+                return True
+
+        return False
+
+    def _validate_toc_quality(self, toc: TableOfContents, query: str) -> tuple[bool, list[str]]:
+        """
+        Validate that the ToC is specific enough and not too generic.
+
+        Args:
+            toc: The table of contents to validate
+            query: Original research query for context
+
+        Returns:
+            Tuple of (is_valid, list_of_issues)
+        """
+        issues = []
+
+        if not toc.items:
+            issues.append("No sections generated")
+            return False, issues
+
+        # Check minimum number of sections
+        if len(toc.items) < 3:
+            issues.append(f"Too few main sections: {len(toc.items)} (minimum 3)")
+
+        # Count generic titles
+        generic_count = 0
+        total_sections = 0
+        sections_with_subsections = 0
+
+        for item in toc.items:
+            total_sections += 1
+
+            if self._is_generic_title(item.title):
+                generic_count += 1
+
+            # Check for subsections
+            if item.subsections and len(item.subsections) > 0:
+                sections_with_subsections += 1
+                for sub in item.subsections:
+                    total_sections += 1
+                    if self._is_generic_title(sub.title):
+                        generic_count += 1
+
+        # Calculate generic ratio
+        generic_ratio = generic_count / total_sections if total_sections > 0 else 1.0
+
+        # Too many generic titles (more than 50% is too generic)
+        if generic_ratio > 0.5:
+            issues.append(f"Too many generic section titles: {generic_count}/{total_sections} ({generic_ratio:.0%})")
+
+        # Check that at least some sections have subsections
+        if len(toc.items) >= 3 and sections_with_subsections < 2:
+            issues.append(f"Not enough sections with subsections: {sections_with_subsections} (minimum 2)")
+
+        # Check if titles are topic-specific (contain keywords from query)
+        query_words = set(query.lower().split())
+        # Remove common stop words
+        stop_words = {"の", "を", "に", "は", "が", "と", "で", "a", "the", "of", "in", "to", "and", "for"}
+        query_words = query_words - stop_words
+
+        topic_relevant_sections = 0
+        for item in toc.items:
+            item_words = set(item.title.lower().split())
+            if query_words & item_words:  # intersection
+                topic_relevant_sections += 1
+
+        if len(toc.items) >= 3 and topic_relevant_sections < 1:
+            issues.append("Section titles don't reflect the research topic")
+
+        is_valid = len(issues) == 0
+        return is_valid, issues
+
     def create_research_plan(
         self,
         query: str,
         requirements: str = "",
         additional_context: str = "",
+        max_retries: int = 2,
     ) -> ResearchPlan:
         """
         Create a complete research plan from query.
@@ -181,42 +289,174 @@ class QueryGenerator:
             query: The main research query/topic
             requirements: Specific requirements for the research
             additional_context: Additional context or information
+            max_retries: Maximum number of retries for ToC regeneration
 
         Returns:
             Complete ResearchPlan object
+        """
+        for attempt in range(max_retries + 1):
+            plan = self._generate_research_plan_attempt(
+                query=query,
+                requirements=requirements,
+                additional_context=additional_context,
+                is_retry=attempt > 0,
+                previous_issues=[] if attempt == 0 else issues,
+            )
+
+            if plan is None:
+                continue
+
+            # Validate ToC quality
+            is_valid, issues = self._validate_toc_quality(plan.table_of_contents, query)
+
+            if is_valid:
+                return plan
+
+            print(f"[QueryGenerator] ToC validation failed (attempt {attempt + 1}/{max_retries + 1}): {issues}")
+
+        # If all retries failed, return the last generated plan with a warning
+        print(f"[QueryGenerator] Warning: Could not generate ideal ToC after {max_retries + 1} attempts. Using best effort.")
+        return plan if plan else self._create_fallback_plan(query, "All generation attempts failed")
+
+    def _generate_research_plan_attempt(
+        self,
+        query: str,
+        requirements: str,
+        additional_context: str,
+        is_retry: bool = False,
+        previous_issues: List[str] = None,
+    ) -> Optional[ResearchPlan]:
+        """
+        Single attempt at generating a research plan.
+
+        Args:
+            query: The main research query/topic
+            requirements: Specific requirements for the research
+            additional_context: Additional context or information
+            is_retry: Whether this is a retry attempt
+            previous_issues: Issues from previous attempt (for retry)
+
+        Returns:
+            ResearchPlan object or None if parsing failed
         """
         lang_instruction = (
             "Respond entirely in Japanese." if self.language == "ja"
             else f"Respond in {self.language}."
         )
 
-        system_prompt = f"""You are an expert research analyst. Your task is to create comprehensive research plans.
+        # Build retry-specific instructions
+        retry_instruction = ""
+        if is_retry and previous_issues:
+            if self.language == "ja":
+                issues_text = "\n".join(f"- {issue}" for issue in previous_issues)
+                retry_instruction = f"""
+【重要：前回の目次は以下の理由でリジェクトされました。これらの問題を解決してください】
+{issues_text}
+
+特に以下に注意してください：
+- 「はじめに」「背景」「考察」「結論」などの一般的なセクション名は避け、調査テーマに具体的なセクション名にする
+- 各主要セクションには必ず2-3個のサブセクションを含める
+- セクション名には調査テーマのキーワードを含める
+"""
+            else:
+                issues_text = "\n".join(f"- {issue}" for issue in previous_issues)
+                retry_instruction = f"""
+IMPORTANT: The previous table of contents was rejected for these reasons. Please fix:
+{issues_text}
+
+Pay special attention to:
+- Avoid generic section names like "Introduction", "Background", "Discussion", "Conclusion"
+- Use topic-specific section titles that reflect the research subject
+- Include 2-3 subsections for each main section
+- Section titles should contain keywords from the research topic
+"""
+
+        if self.language == "ja":
+            system_prompt = f"""あなたは専門的なリサーチアナリストです。詳細で実践的な調査計画を作成してください。
 {lang_instruction}
 
-When creating a research plan:
-1. Break down the topic into logical sections and subsections
-2. Create a detailed table of contents
-3. Generate specific, targeted search queries
-4. Identify key terms and concepts
-5. Suggest types of sources to explore"""
+【重要な注意事項】
+- 「はじめに」「緒言」「背景」「考察」「結論」「まとめ」などの一般的・学術論文的なセクション名は避けてください
+- 代わりに、調査テーマに直接関連する具体的なセクション名を使用してください
+- 例：「炭素繊維市場調査」の場合
+  ✗ 悪い例：1.はじめに、2.炭素繊維の歴史、3.考察、4.結論
+  ○ 良い例：1.炭素繊維の種類と製造プロセス、2.主要メーカーと市場シェア、3.用途別市場規模、4.価格動向と原材料、5.需要予測と成長ドライバー
 
-        prompt = f"""Research Topic: {query}
+調査計画作成のポイント：
+1. テーマを論理的なセクションとサブセクションに分解する
+2. 各メインセクションには必ず2-3個のサブセクションを含める
+3. 具体的で実行可能な検索クエリを生成する
+4. 重要な用語と概念を特定する"""
+        else:
+            system_prompt = f"""You are an expert research analyst. Create detailed and practical research plans.
+{lang_instruction}
+
+IMPORTANT GUIDELINES:
+- AVOID generic/academic section names like "Introduction", "Background", "Discussion", "Conclusion", "Summary"
+- Instead, use specific section names directly related to the research topic
+- Example for "Carbon Fiber Market Research":
+  ✗ Bad: 1. Introduction, 2. History of Carbon Fiber, 3. Discussion, 4. Conclusion
+  ○ Good: 1. Types and Manufacturing Processes, 2. Key Manufacturers and Market Share, 3. Market Size by Application, 4. Pricing Trends and Raw Materials, 5. Demand Forecast and Growth Drivers
+
+When creating a research plan:
+1. Break down the topic into logical, topic-specific sections and subsections
+2. Each main section MUST have 2-3 subsections
+3. Generate specific, targeted search queries
+4. Identify key terms and concepts"""
+
+        if self.language == "ja":
+            prompt = f"""調査テーマ: {query}
+
+要件: {requirements if requirements else "包括的な調査"}
+
+追加コンテキスト: {additional_context if additional_context else "なし"}
+{retry_instruction}
+詳細な調査計画を作成してください。以下のJSON形式で回答してください：
+{{
+    "title": "レポートタイトル（調査テーマを反映）",
+    "summary": "調査の範囲と目的の概要",
+    "table_of_contents": [
+        {{
+            "section": "1",
+            "title": "具体的なセクションタイトル（「はじめに」等の一般名は不可）",
+            "description": "このセクションでカバーする内容",
+            "subsections": [
+                {{"section": "1.1", "title": "サブセクションタイトル", "description": "..."}},
+                {{"section": "1.2", "title": "サブセクションタイトル", "description": "..."}}
+            ]
+        }}
+    ],
+    "search_queries": ["クエリ1", "クエリ2", ...],
+    "key_terms": ["用語1", "用語2", ...],
+    "suggested_sources": ["情報源タイプ1", "情報源タイプ2", ...],
+    "methodology_notes": "方法論に関する注意点",
+    "estimated_complexity": "low/medium/high"
+}}
+
+必須条件：
+- 最低5つのメインセクション
+- 各メインセクションに2-3個のサブセクション
+- 15個以上の検索クエリ
+- 一般的なセクション名（はじめに、背景、考察、結論等）は使用しない"""
+        else:
+            prompt = f"""Research Topic: {query}
 
 Requirements: {requirements if requirements else "General comprehensive research"}
 
 Additional Context: {additional_context if additional_context else "None"}
-
+{retry_instruction}
 Create a detailed research plan. Return your response as a JSON object with this exact structure:
 {{
-    "title": "Report title",
+    "title": "Report title (reflecting the research topic)",
     "summary": "Brief summary of research scope and objectives",
     "table_of_contents": [
         {{
             "section": "1",
-            "title": "Section title",
+            "title": "Specific section title (NO generic names like Introduction)",
             "description": "What this section covers",
             "subsections": [
-                {{"section": "1.1", "title": "Subsection title", "description": "..."}}
+                {{"section": "1.1", "title": "Subsection title", "description": "..."}},
+                {{"section": "1.2", "title": "Subsection title", "description": "..."}}
             ]
         }}
     ],
@@ -227,14 +467,16 @@ Create a detailed research plan. Return your response as a JSON object with this
     "estimated_complexity": "low/medium/high"
 }}
 
-Generate at least 5 main sections and 15 search queries.
-Make search queries specific and actionable."""
+Requirements:
+- Generate at least 5 main sections
+- Each main section MUST have 2-3 subsections
+- Generate at least 15 search queries
+- DO NOT use generic section names (Introduction, Background, Discussion, Conclusion)"""
 
         response = self.llm.generate(prompt, system_prompt=system_prompt)
 
         # Parse response
         try:
-            # Try to extract JSON from response
             content = response.content
             start = content.find("{")
             end = content.rfind("}") + 1
@@ -278,8 +520,8 @@ Make search queries specific and actionable."""
             )
 
         except (json.JSONDecodeError, ValueError) as e:
-            # Fallback: create basic plan from query
-            return self._create_fallback_plan(query, str(e))
+            print(f"[QueryGenerator] JSON parsing failed: {e}")
+            return None
 
     def generate_follow_up_queries(
         self,

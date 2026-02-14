@@ -111,6 +111,79 @@ class FastCrawler:
         self.batch_size = batch_size
         self.language = language
 
+    def _extract_research_context(self, research_topic: str) -> dict:
+        """
+        Extract key aspects from the research topic for evaluation context.
+
+        Args:
+            research_topic: Original research query/topic
+
+        Returns:
+            Dict with extracted context elements
+        """
+        if not research_topic:
+            return {"topic": "", "keywords": [], "focus_areas": ""}
+
+        # For short queries, use as-is
+        if len(research_topic) < 100:
+            # Extract potential keywords (simple approach)
+            import re
+            # Remove common particles and split
+            topic_clean = re.sub(r'[、。・「」『』（）\[\]【】]', ' ', research_topic)
+            words = [w.strip() for w in topic_clean.split() if len(w.strip()) > 1]
+            # Filter out very common words
+            stop_words = {'の', 'を', 'に', 'は', 'が', 'と', 'で', 'する', 'ある', 'について', 'に関する',
+                         'the', 'a', 'an', 'of', 'in', 'to', 'and', 'for', 'on', 'about', 'with'}
+            keywords = [w for w in words if w.lower() not in stop_words][:10]
+
+            return {
+                "topic": research_topic,
+                "keywords": keywords,
+                "focus_areas": research_topic,
+            }
+
+        # For longer queries, use LLM to extract key aspects
+        if self.language == "ja":
+            extract_prompt = f"""以下の調査テーマから、キーワードと調査の焦点を抽出してください。
+
+調査テーマ: {research_topic}
+
+以下のJSON形式で回答:
+{{"keywords": ["キーワード1", "キーワード2", ...], "focus_areas": "調査の主な焦点を1-2文で"}}
+
+JSONのみ出力:"""
+        else:
+            extract_prompt = f"""Extract keywords and focus areas from this research topic.
+
+Research Topic: {research_topic}
+
+Respond in JSON format:
+{{"keywords": ["keyword1", "keyword2", ...], "focus_areas": "Main focus in 1-2 sentences"}}
+
+Output only JSON:"""
+
+        try:
+            response = self.llm.generate(extract_prompt)
+            import json
+            content = response.content.strip()
+            if "```" in content:
+                content = content.split("```")[1].split("```")[0]
+                if content.startswith("json"):
+                    content = content[4:]
+            data = json.loads(content)
+            return {
+                "topic": research_topic,
+                "keywords": data.get("keywords", [])[:10],
+                "focus_areas": data.get("focus_areas", research_topic[:200]),
+            }
+        except Exception:
+            # Fallback to simple extraction
+            return {
+                "topic": research_topic,
+                "keywords": [],
+                "focus_areas": research_topic[:200],
+            }
+
     def crawl_and_evaluate(
         self,
         queries: List[str],
@@ -180,25 +253,28 @@ class FastCrawler:
 
         eval_start = time.time()
 
+        # Extract research context for better evaluation
+        research_context = self._extract_research_context(research_topic)
+
         if self.evaluation_mode == EvaluationMode.BATCH:
             evaluated_pages = self._batch_evaluate(
                 pages=filtered_pages,
                 section_context=section_context,
-                research_topic=research_topic,
+                research_context=research_context,
                 progress_callback=progress_callback,
             )
         elif self.evaluation_mode == EvaluationMode.PARALLEL:
             evaluated_pages = self._parallel_evaluate(
                 pages=filtered_pages,
                 section_context=section_context,
-                research_topic=research_topic,
+                research_context=research_context,
                 progress_callback=progress_callback,
             )
         else:  # SEQUENTIAL
             evaluated_pages = self._sequential_evaluate(
                 pages=filtered_pages,
                 section_context=section_context,
-                research_topic=research_topic,
+                research_context=research_context,
                 progress_callback=progress_callback,
             )
 
@@ -321,7 +397,7 @@ class FastCrawler:
         self,
         pages: List[CrawledPage],
         section_context: str,
-        research_topic: str = "",
+        research_context: dict = None,
         progress_callback: Callable = None,
     ) -> List[EvaluatedPage]:
         """
@@ -330,12 +406,13 @@ class FastCrawler:
         Args:
             pages: Crawled pages to evaluate
             section_context: Context for evaluation
-            research_topic: Original research topic/purpose
+            research_context: Extracted research context dict with topic, keywords, focus_areas
             progress_callback: Progress callback
 
         Returns:
             List of evaluated pages
         """
+        research_context = research_context or {"topic": "", "keywords": [], "focus_areas": ""}
         evaluated_pages = []
         total_batches = (len(pages) + self.batch_size - 1) // self.batch_size
 
@@ -351,7 +428,7 @@ class FastCrawler:
 
             start = time.time()
             try:
-                batch_results = self._evaluate_batch(batch, section_context, research_topic)
+                batch_results = self._evaluate_batch(batch, section_context, research_context)
                 eval_time = time.time() - start
 
                 for page, result in zip(batch, batch_results):
@@ -388,7 +465,7 @@ class FastCrawler:
         self,
         pages: List[CrawledPage],
         section_context: str,
-        research_topic: str = "",
+        research_context: dict = None,
     ) -> List[Dict[str, Any]]:
         """
         Evaluate a batch of pages with a single LLM call.
@@ -396,11 +473,13 @@ class FastCrawler:
         Args:
             pages: Pages to evaluate
             section_context: Context for evaluation
-            research_topic: Original research topic/purpose
+            research_context: Extracted research context dict
 
         Returns:
             List of evaluation results
         """
+        research_context = research_context or {"topic": "", "keywords": [], "focus_areas": ""}
+
         # Build batch prompt
         pages_text = []
         for i, page in enumerate(pages, 1):
@@ -413,17 +492,30 @@ Content Preview:
 {content_preview}
 """)
 
-        # Build topic context string
-        topic_context_ja = f"調査目的: {research_topic}\n" if research_topic else ""
-        topic_context_en = f"Research Purpose: {research_topic}\n" if research_topic else ""
+        # Build enhanced context strings with keywords
+        research_topic = research_context.get("topic", "")
+        keywords = research_context.get("keywords", [])
+        focus_areas = research_context.get("focus_areas", "")
+
+        keywords_str = ", ".join(keywords) if keywords else ""
 
         if self.language == "ja":
-            prompt = f"""以下の{len(pages)}ページについて、調査目的およびセクションとの関連性を評価してください。
+            context_block = f"""【調査コンテキスト】
+調査テーマ: {research_topic}
+{f'重要キーワード: {keywords_str}' if keywords_str else ''}
+{f'調査の焦点: {focus_areas}' if focus_areas and focus_areas != research_topic else ''}
+現在のセクション: {section_context}
+""" if research_topic else f"現在のセクション: {section_context}"
 
-{topic_context_ja}現在のセクション: {section_context}
+            prompt = f"""以下の{len(pages)}ページについて、調査テーマとの関連性を評価してください。
 
-【重要】評価の際は、当初の調査目的を念頭に置き、そのテーマに沿った情報かどうかを判断してください。
-セクションの内容だけでなく、調査全体の目的（技術動向、法規制、市場分析など）との整合性も考慮してください。
+{context_block}
+
+【重要な評価指針】
+1. 調査テーマ「{research_topic}」に直接関連する情報かどうかを最優先で判断
+2. 重要キーワード（{keywords_str}）を含むページを高く評価
+3. セクション「{section_context}」の内容に貢献する情報かを確認
+4. 一般的・無関係な情報（広告、他トピック、ニュース一般等）は低スコア
 
 各ページについて、以下の形式でJSON配列として回答してください:
 [
@@ -432,22 +524,32 @@ Content Preview:
 ]
 
 評価基準:
-- 1.0: 調査目的に非常に関連性が高く、重要な情報を含む
-- 0.7-0.9: 調査目的に関連性が高い
-- 0.4-0.6: 部分的に関連（周辺情報）
-- 0.1-0.3: わずかに関連
-- 0.0: 調査目的と無関係
+- 0.8-1.0: 調査テーマに直接関連し、重要キーワードを含む具体的情報
+- 0.6-0.7: 調査テーマに関連するが、やや周辺的な情報
+- 0.3-0.5: 部分的に関連、または間接的に有用
+- 0.1-0.2: わずかに関連、情報価値が低い
+- 0.0: 調査テーマと無関係
 
 {"".join(pages_text)}
 
 JSON配列のみを出力してください:"""
         else:
-            prompt = f"""Evaluate the relevance of the following {len(pages)} pages to the research purpose and section.
+            context_block = f"""[Research Context]
+Research Topic: {research_topic}
+{f'Key Keywords: {keywords_str}' if keywords_str else ''}
+{f'Research Focus: {focus_areas}' if focus_areas and focus_areas != research_topic else ''}
+Current Section: {section_context}
+""" if research_topic else f"Current Section: {section_context}"
 
-{topic_context_en}Current Section: {section_context}
+            prompt = f"""Evaluate the relevance of the following {len(pages)} pages to the research topic.
 
-IMPORTANT: When evaluating, keep the original research purpose in mind and assess whether the information aligns with that theme.
-Consider not only the section content but also the overall research objective (technology trends, regulations, market analysis, etc.).
+{context_block}
+
+IMPORTANT EVALUATION GUIDELINES:
+1. Prioritize whether the information directly relates to the research topic "{research_topic}"
+2. Rate pages containing key keywords ({keywords_str}) higher
+3. Check if the information contributes to the section "{section_context}"
+4. Give low scores to generic/unrelated content (ads, off-topic, general news)
 
 For each page, respond with a JSON array in this format:
 [
@@ -456,11 +558,11 @@ For each page, respond with a JSON array in this format:
 ]
 
 Scoring criteria:
-- 1.0: Highly relevant to research purpose with important information
-- 0.7-0.9: Highly relevant to research purpose
-- 0.4-0.6: Partially relevant (peripheral information)
-- 0.1-0.3: Slightly relevant
-- 0.0: Not relevant to research purpose
+- 0.8-1.0: Directly related to research topic with key keywords and specific information
+- 0.6-0.7: Related to research topic but somewhat peripheral
+- 0.3-0.5: Partially related or indirectly useful
+- 0.1-0.2: Slightly related, low information value
+- 0.0: Not related to research topic
 
 {"".join(pages_text)}
 
@@ -510,7 +612,7 @@ Output only the JSON array:"""
         self,
         pages: List[CrawledPage],
         section_context: str,
-        research_topic: str = "",
+        research_context: dict = None,
         progress_callback: Callable = None,
     ) -> List[EvaluatedPage]:
         """
@@ -519,12 +621,13 @@ Output only the JSON array:"""
         Args:
             pages: Crawled pages to evaluate
             section_context: Context for evaluation
-            research_topic: Original research topic/purpose
+            research_context: Extracted research context dict
             progress_callback: Progress callback
 
         Returns:
             List of evaluated pages
         """
+        research_context = research_context or {"topic": "", "keywords": [], "focus_areas": ""}
         evaluated_pages = []
         total = len(pages)
 
@@ -532,7 +635,7 @@ Output only the JSON array:"""
             """Evaluate a single page."""
             start = time.time()
             try:
-                result = self._evaluate_single_page(page, section_context, research_topic)
+                result = self._evaluate_single_page(page, section_context, research_context)
                 return EvaluatedPage(
                     url=page.url,
                     title=page.title,
@@ -579,7 +682,7 @@ Output only the JSON array:"""
         self,
         page: CrawledPage,
         section_context: str,
-        research_topic: str = "",
+        research_context: dict = None,
     ) -> Dict[str, Any]:
         """
         Evaluate a single page's relevance.
@@ -587,23 +690,32 @@ Output only the JSON array:"""
         Args:
             page: Page to evaluate
             section_context: Context for evaluation
-            research_topic: Original research topic/purpose
+            research_context: Extracted research context dict
 
         Returns:
             Evaluation result dict
         """
+        research_context = research_context or {"topic": "", "keywords": [], "focus_areas": ""}
         content_preview = page.content[:2000] if page.content else page.snippet
 
-        # Build topic context string
-        topic_context_ja = f"調査目的: {research_topic}\n" if research_topic else ""
-        topic_context_en = f"Research Purpose: {research_topic}\n" if research_topic else ""
+        # Build enhanced context
+        research_topic = research_context.get("topic", "")
+        keywords = research_context.get("keywords", [])
+        keywords_str = ", ".join(keywords) if keywords else ""
 
         if self.language == "ja":
-            prompt = f"""以下のページが調査目的およびセクションにどの程度関連するか評価してください。
+            context_block = f"""調査テーマ: {research_topic}
+{f'重要キーワード: {keywords_str}' if keywords_str else ''}
+現在のセクション: {section_context}""" if research_topic else f"現在のセクション: {section_context}"
 
-{topic_context_ja}現在のセクション: {section_context}
+            prompt = f"""以下のページが調査テーマにどの程度関連するか評価してください。
 
-【重要】評価の際は、当初の調査目的を念頭に置き、そのテーマに沿った情報かどうかを判断してください。
+{context_block}
+
+【評価指針】
+- 調査テーマ「{research_topic}」に直接関連するか
+- 重要キーワード（{keywords_str}）を含むか
+- セクションの内容に貢献するか
 
 URL: {page.url}
 タイトル: {page.title}
@@ -615,11 +727,18 @@ URL: {page.url}
 
 JSONのみを出力:"""
         else:
-            prompt = f"""Evaluate how relevant this page is to the research purpose and section.
+            context_block = f"""Research Topic: {research_topic}
+{f'Key Keywords: {keywords_str}' if keywords_str else ''}
+Current Section: {section_context}""" if research_topic else f"Current Section: {section_context}"
 
-{topic_context_en}Current Section: {section_context}
+            prompt = f"""Evaluate how relevant this page is to the research topic.
 
-IMPORTANT: Keep the original research purpose in mind when evaluating.
+{context_block}
+
+EVALUATION GUIDELINES:
+- Does it directly relate to "{research_topic}"?
+- Does it contain key keywords ({keywords_str})?
+- Does it contribute to the section content?
 
 URL: {page.url}
 Title: {page.title}
@@ -652,7 +771,7 @@ Output only JSON:"""
         self,
         pages: List[CrawledPage],
         section_context: str,
-        research_topic: str = "",
+        research_context: dict = None,
         progress_callback: Callable = None,
     ) -> List[EvaluatedPage]:
         """
@@ -661,12 +780,13 @@ Output only JSON:"""
         Args:
             pages: Crawled pages to evaluate
             section_context: Context for evaluation
-            research_topic: Original research topic/purpose
+            research_context: Extracted research context dict
             progress_callback: Progress callback
 
         Returns:
             List of evaluated pages
         """
+        research_context = research_context or {"topic": "", "keywords": [], "focus_areas": ""}
         evaluated_pages = []
         total = len(pages)
 
@@ -679,7 +799,7 @@ Output only JSON:"""
 
             start = time.time()
             try:
-                result = self._evaluate_single_page(page, section_context, research_topic)
+                result = self._evaluate_single_page(page, section_context, research_context)
                 evaluated_pages.append(EvaluatedPage(
                     url=page.url,
                     title=page.title,
