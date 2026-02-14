@@ -40,6 +40,62 @@ Ollama はローカルで動作するため、APIキー不要:
 ollama serve  # デフォルト: http://localhost:11434
 ```
 
+### スクリプト/Jupyter上でAPIキーを指定
+
+環境変数を使わず、コード内で直接APIキーを指定することも可能です:
+
+```python
+from multi_agent_discussion import LLMConfig, LLMProvider, run_discussion
+
+# OpenAI
+llm = LLMConfig(
+    provider=LLMProvider.OPENAI,
+    openai_api_key="sk-...",
+)
+
+# Anthropic
+llm = LLMConfig(
+    provider=LLMProvider.ANTHROPIC,
+    anthropic_api_key="sk-ant-...",
+)
+
+# Google
+llm = LLMConfig(
+    provider=LLMProvider.GOOGLE,
+    google_api_key="AI...",
+)
+
+# xAI
+llm = LLMConfig(
+    provider=LLMProvider.XAI,
+    xai_api_key="xai-...",
+)
+
+# Ollama（APIキー不要、エンドポイントのみ）
+llm = LLMConfig(
+    provider=LLMProvider.OLLAMA,
+    ollama_base_url="http://localhost:11434",
+)
+
+# 議論実行
+result = run_discussion(
+    topic="リモートワークの是非",
+    llm_config=llm,
+)
+```
+
+**APIキーパラメータ一覧:**
+
+| プロバイダー | パラメータ |
+|---|---|
+| OpenAI | `openai_api_key` |
+| Anthropic | `anthropic_api_key` |
+| Google | `google_api_key` |
+| xAI | `xai_api_key` |
+| Ollama | 不要（`ollama_base_url` でエンドポイント指定） |
+
+環境変数が設定されている場合は環境変数が優先されます。
+
 ---
 
 ## 基本的な使い方
