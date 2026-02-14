@@ -7,7 +7,7 @@ This module provides the main interface for conducting automated research.
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable
 
-from .config import Config, LLMProvider, SearchMethod, ReportFormat
+from .config import Config, LLMProvider, SearchMethod, ReportFormat, ReportGeneratorVersion
 from .api import get_client
 from .api.base import get_token_stats, reset_token_stats
 from .search import get_search_client
@@ -17,9 +17,74 @@ from .evidence.locker import EvidenceLocker
 from .verification.verifier import Verifier
 from .report.generator import ReportGenerator
 from .report.length_controller import ContentLengthController, LengthTarget
+from .report.v2 import ReportGeneratorV2, ReportContext, WritingStyle, TargetAudience
 from .utils.document_reader import DocumentReader, auto_detect_additional_documents
 from .thinking import DeepThinkProcessor, DeepThinkConfig as ThinkingConfig
 from .thinking.reasoning_chain import ConsistencyMode
+
+
+# Style/Audience mapping for V2
+_STYLE_MAP = {
+    "formal": WritingStyle.FORMAL,
+    "business": WritingStyle.BUSINESS,
+    "technical": WritingStyle.TECHNICAL,
+    "executive": WritingStyle.EXECUTIVE,
+    "casual": WritingStyle.CASUAL,
+}
+
+_AUDIENCE_MAP = {
+    "expert": TargetAudience.EXPERT,
+    "business": TargetAudience.BUSINESS,
+    "engineer": TargetAudience.ENGINEER,
+    "general": TargetAudience.GENERAL,
+    "student": TargetAudience.STUDENT,
+}
+
+
+def _create_report_generator(
+    config: Config,
+    llm_client,
+    output_dir: Path = None,
+) -> tuple:
+    """
+    Create appropriate report generator based on config.
+
+    Returns:
+        Tuple of (generator, is_v2)
+    """
+    output_dir = output_dir or config.report.output_dir / "reports"
+
+    if config.report.generator_version == ReportGeneratorVersion.V2:
+        # Create V2 generator
+        writing_style = _STYLE_MAP.get(
+            config.report.v2_writing_style,
+            WritingStyle.BUSINESS
+        )
+        target_audience = _AUDIENCE_MAP.get(
+            config.report.v2_target_audience,
+            TargetAudience.BUSINESS
+        )
+
+        generator = ReportGeneratorV2(
+            llm_client=llm_client,
+            writing_style=writing_style,
+            target_audience=target_audience,
+            technical_level=config.report.v2_technical_level,
+            enable_consistency_check=config.report.v2_enable_consistency_check,
+            enable_two_phase=config.report.v2_enable_two_phase,
+            language=config.research.language,
+        )
+        return generator, True
+    else:
+        # Create V1 generator
+        generator = ReportGenerator(
+            output_dir=output_dir,
+            include_toc=config.report.include_toc,
+            include_citations=config.report.include_citations,
+            include_images=config.report.include_images,
+            language=config.research.language,
+        )
+        return generator, False
 
 
 class DeepResearchTool:
@@ -325,22 +390,40 @@ class DeepResearchTool:
         if progress_callback:
             progress_callback("Generating report...", 95)
 
-        self.report_generator = ReportGenerator(
+        generator, is_v2 = _create_report_generator(
+            config=self.config,
+            llm_client=self.llm_client,
             output_dir=self.config.report.output_dir / "reports",
-            include_toc=self.config.report.include_toc,
-            include_citations=self.config.report.include_citations,
-            include_images=self.config.report.include_images,
-            language=self.config.research.language,
         )
+        self.report_generator = generator
 
-        report_path = self.report_generator.generate_report(
-            session=session,
-            evidence_locker=evidence_locker,
-            format=self.config.report.format,
-            verification_result=verification_result,
-            target_pages=self.config.report.target_pages,
-            target_characters=self.config.report.target_characters,
-        )
+        if is_v2:
+            # V2: Use new generation flow
+            result = generator.generate_report(
+                research_topic=query,
+                research_plan=session.research_plan,
+                section_contents=session.section_contents,
+            )
+            # Generate final document
+            final_doc = generator.generate_final_document(
+                result,
+                include_glossary=self.config.report.v2_include_glossary,
+            )
+            # Save to file
+            output_dir = self.config.report.output_dir / "reports"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            report_path = output_dir / f"report_{session.session_id}.md"
+            report_path.write_text(final_doc, encoding="utf-8")
+        else:
+            # V1: Original generation flow
+            report_path = generator.generate_report(
+                session=session,
+                evidence_locker=evidence_locker,
+                format=self.config.report.format,
+                verification_result=verification_result,
+                target_pages=self.config.report.target_pages,
+                target_characters=self.config.report.target_characters,
+            )
 
         # Clean up search client if selenium
         if hasattr(self.search_client, 'close'):
@@ -1173,22 +1256,39 @@ def run_manual_research(
         verifier.generate_verification_report_html(verification_result, verification_html)
 
     # Generate report
-    report_generator = ReportGenerator(
+    generator, is_v2 = _create_report_generator(
+        config=config,
+        llm_client=llm_client,
         output_dir=config.report.output_dir / "reports",
-        include_toc=config.report.include_toc,
-        include_citations=config.report.include_citations,
-        include_images=config.report.include_images,
-        language=config.research.language,
     )
 
-    report_path = report_generator.generate_report(
-        session=session,
-        evidence_locker=evidence_locker,
-        format=config.report.format,
-        verification_result=verification_result,
-        target_pages=target_pages,
-        target_characters=target_characters,
-    )
+    if is_v2:
+        # V2: Use new generation flow with consistency features
+        result = generator.generate_report(
+            research_topic=topic,
+            research_plan=session.research_plan,
+            section_contents=session.section_contents,
+        )
+        # Generate final document
+        final_doc = generator.generate_final_document(
+            result,
+            include_glossary=config.report.v2_include_glossary,
+        )
+        # Save to file
+        output_dir = config.report.output_dir / "reports"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        report_path = output_dir / f"report_{session.session_id}.md"
+        report_path.write_text(final_doc, encoding="utf-8")
+    else:
+        # V1: Original generation flow
+        report_path = generator.generate_report(
+            session=session,
+            evidence_locker=evidence_locker,
+            format=config.report.format,
+            verification_result=verification_result,
+            target_pages=target_pages,
+            target_characters=target_characters,
+        )
 
     # Get token stats
     token_stats = get_token_stats()
