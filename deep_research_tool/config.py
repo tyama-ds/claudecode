@@ -401,6 +401,10 @@ class ReportConfig:
     numerical_llm_extraction: bool = True  # Use LLM for extraction (vs pattern-only)
     numerical_min_confidence: float = 0.5  # Minimum confidence for data points
 
+    # Unit conversion settings
+    enable_unit_conversion: bool = True  # Enable SI prefix normalization and unit conversion
+    enable_pint: bool = True  # Enable pint for dimensional analysis (requires: pip install pint)
+
     # Derived metrics settings
     derived_metrics: bool = True  # Calculate derived metrics (CAGR, growth rates)
     derived_fill_missing: bool = True  # Fill missing data points (interpolation)
@@ -555,6 +559,9 @@ def create_config(
     numerical_extraction: bool = True,
     numerical_llm_extraction: bool = True,
     numerical_min_confidence: float = 0.5,
+    # Unit conversion parameters
+    enable_unit_conversion: bool = True,
+    enable_pint: bool = True,
     # Derived metrics parameters
     derived_metrics: bool = True,
     derived_fill_missing: bool = True,
@@ -625,6 +632,8 @@ def create_config(
         numerical_extraction: Extract numerical data during research for intelligent charts
         numerical_llm_extraction: Use LLM for numerical extraction (vs pattern-only)
         numerical_min_confidence: Minimum confidence threshold for numerical data points
+        enable_unit_conversion: Enable SI prefix normalization and unit conversion tables
+        enable_pint: Enable pint library for dimensional analysis (requires: pip install pint)
         derived_metrics: Calculate derived metrics (CAGR, growth rates, etc.)
         derived_fill_missing: Fill missing data points via interpolation
         intelligent_charts: Use ChartAnalyzer for smart chart recommendations
@@ -692,6 +701,8 @@ def create_config(
         numerical_extraction=numerical_extraction,
         numerical_llm_extraction=numerical_llm_extraction,
         numerical_min_confidence=numerical_min_confidence,
+        enable_unit_conversion=enable_unit_conversion,
+        enable_pint=enable_pint,
         derived_metrics=derived_metrics,
         derived_fill_missing=derived_fill_missing,
         intelligent_charts=intelligent_charts,

@@ -55,6 +55,9 @@ setup(
             "selenium>=4.20.0",
             "webdriver-manager>=4.0.0",
         ],
+        "units": [
+            "pint>=0.24.0",  # Optional: dimensional analysis (Level 3 unit conversion)
+        ],
     },
     entry_points={
         "console_scripts": [

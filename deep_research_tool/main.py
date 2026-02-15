@@ -667,6 +667,8 @@ class DeepResearchTool:
             language=self.config.research.language,
             min_confidence=self.config.report.numerical_min_confidence,
             use_llm=self.config.report.numerical_llm_extraction,
+            enable_unit_conversion=self.config.report.enable_unit_conversion,
+            enable_pint=self.config.report.enable_pint,
         )
 
         # Extract from each evidence item

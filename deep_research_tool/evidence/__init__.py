@@ -35,6 +35,7 @@ from .numerical_extractor import (
     DataType,
     MetricCategory,
     DerivedMetricsCalculator,
+    UnitConverter,
 )
 
 __all__ = [
@@ -62,4 +63,5 @@ __all__ = [
     "DataType",
     "MetricCategory",
     "DerivedMetricsCalculator",
+    "UnitConverter",
 ]
