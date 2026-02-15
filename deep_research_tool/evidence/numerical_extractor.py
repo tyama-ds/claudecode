@@ -370,6 +370,243 @@ class NumericalDataStore:
         return cls.from_dict(data)
 
 
+class CurrencyNormalizer:
+    """
+    Normalizes currency symbols, names, and codes to ISO 4217 codes.
+
+    Handles:
+    - Symbols: $, €, ¥, £, etc.
+    - Names: dollar, ドル, euro, ユーロ, etc.
+    - Codes: USD, EUR, JPY, GBP, etc.
+    - Full-width numbers: １２３４５ → 12345
+    - Thousand separators: 1,000 → 1000
+    """
+
+    # Currency normalization mappings → ISO 4217 code
+    CURRENCY_MAPPINGS: Dict[str, str] = {
+        # US Dollar
+        '$': 'USD',
+        'US$': 'USD',
+        'USD': 'USD',
+        'dollar': 'USD',
+        'dollars': 'USD',
+        'ドル': 'USD',
+        '米ドル': 'USD',
+        'アメリカドル': 'USD',
+        # Euro
+        '€': 'EUR',
+        'EUR': 'EUR',
+        'euro': 'EUR',
+        'euros': 'EUR',
+        'ユーロ': 'EUR',
+        # Japanese Yen
+        '¥': 'JPY',
+        '￥': 'JPY',
+        'JPY': 'JPY',
+        'yen': 'JPY',
+        '円': 'JPY',
+        '日本円': 'JPY',
+        # British Pound
+        '£': 'GBP',
+        'GBP': 'GBP',
+        'pound': 'GBP',
+        'pounds': 'GBP',
+        'ポンド': 'GBP',
+        '英ポンド': 'GBP',
+        # Chinese Yuan
+        '元': 'CNY',
+        '人民元': 'CNY',
+        'CNY': 'CNY',
+        'RMB': 'CNY',
+        'yuan': 'CNY',
+        # Korean Won
+        '₩': 'KRW',
+        'KRW': 'KRW',
+        'won': 'KRW',
+        'ウォン': 'KRW',
+        '韓国ウォン': 'KRW',
+        # Swiss Franc
+        'CHF': 'CHF',
+        'franc': 'CHF',
+        'francs': 'CHF',
+        'フラン': 'CHF',
+        # Australian Dollar
+        'A$': 'AUD',
+        'AU$': 'AUD',
+        'AUD': 'AUD',
+        '豪ドル': 'AUD',
+        # Canadian Dollar
+        'C$': 'CAD',
+        'CA$': 'CAD',
+        'CAD': 'CAD',
+        'カナダドル': 'CAD',
+        # Indian Rupee
+        '₹': 'INR',
+        'INR': 'INR',
+        'rupee': 'INR',
+        'rupees': 'INR',
+        'ルピー': 'INR',
+        # Brazilian Real
+        'R$': 'BRL',
+        'BRL': 'BRL',
+        'real': 'BRL',
+        'レアル': 'BRL',
+        # Russian Ruble
+        '₽': 'RUB',
+        'RUB': 'RUB',
+        'ruble': 'RUB',
+        'rubles': 'RUB',
+        'ルーブル': 'RUB',
+        # Singapore Dollar
+        'S$': 'SGD',
+        'SG$': 'SGD',
+        'SGD': 'SGD',
+        'シンガポールドル': 'SGD',
+        # Hong Kong Dollar
+        'HK$': 'HKD',
+        'HKD': 'HKD',
+        '香港ドル': 'HKD',
+        # Taiwan Dollar
+        'NT$': 'TWD',
+        'TWD': 'TWD',
+        '台湾ドル': 'TWD',
+        # Thai Baht
+        '฿': 'THB',
+        'THB': 'THB',
+        'baht': 'THB',
+        'バーツ': 'THB',
+    }
+
+    # Full-width to half-width number mapping
+    FULLWIDTH_NUMBERS: Dict[str, str] = {
+        '０': '0', '１': '1', '２': '2', '３': '3', '４': '4',
+        '５': '5', '６': '6', '７': '7', '８': '8', '９': '9',
+        '．': '.', '，': ',',
+    }
+
+    @classmethod
+    def normalize_currency(cls, text: str) -> Optional[str]:
+        """
+        Normalize currency text to ISO 4217 code.
+
+        Args:
+            text: Currency symbol, name, or code (e.g., "€", "ユーロ", "EUR")
+
+        Returns:
+            ISO 4217 code (e.g., "EUR") or None if not recognized
+        """
+        if not text:
+            return None
+
+        # Clean the text
+        cleaned = text.strip().lower()
+
+        # Direct lookup (case-insensitive for names)
+        for key, iso_code in cls.CURRENCY_MAPPINGS.items():
+            if cleaned == key.lower():
+                return iso_code
+
+        # Try original case for symbols
+        original = text.strip()
+        if original in cls.CURRENCY_MAPPINGS:
+            return cls.CURRENCY_MAPPINGS[original]
+
+        return None
+
+    @classmethod
+    def normalize_number(cls, text: str) -> str:
+        """
+        Normalize number format.
+
+        Handles:
+        - Full-width numbers: １２３４５ → 12345
+        - Thousand separators: 1,000 → 1000
+        - Spaces in numbers: 1 000 → 1000
+
+        Args:
+            text: Number string (e.g., "１，０００", "1,000", "1 000")
+
+        Returns:
+            Normalized number string (e.g., "1000")
+        """
+        result = text
+
+        # Convert full-width to half-width
+        for fw, hw in cls.FULLWIDTH_NUMBERS.items():
+            result = result.replace(fw, hw)
+
+        # Remove thousand separators (comma)
+        result = result.replace(',', '')
+
+        # Remove space separators (European style)
+        result = re.sub(r'(\d)\s+(\d)', r'\1\2', result)
+
+        return result
+
+    @classmethod
+    def parse_number(cls, text: str) -> Optional[float]:
+        """
+        Parse a number string with normalization.
+
+        Args:
+            text: Number string (e.g., "１，０００.５", "1,000.5")
+
+        Returns:
+            Float value or None if parsing failed
+        """
+        try:
+            normalized = cls.normalize_number(text)
+            return float(normalized)
+        except ValueError:
+            return None
+
+    @classmethod
+    def get_currency_from_text(cls, text: str) -> Tuple[Optional[str], Optional[float]]:
+        """
+        Extract currency code and value from text.
+
+        Args:
+            text: Text containing currency (e.g., "10€", "100ユーロ", "€50")
+
+        Returns:
+            (ISO code, value) tuple, e.g., ("EUR", 10.0)
+        """
+        # Try symbol at start: $100, €50, ¥1000
+        for symbol in ['$', 'US$', 'A$', 'C$', 'S$', 'HK$', 'NT$', 'R$',
+                       '€', '£', '¥', '￥', '₩', '₹', '₽', '฿']:
+            if text.startswith(symbol):
+                iso_code = cls.CURRENCY_MAPPINGS.get(symbol)
+                if iso_code:
+                    num_text = text[len(symbol):].strip()
+                    value = cls.parse_number(num_text)
+                    if value is not None:
+                        return iso_code, value
+
+        # Try symbol at end: 100€, 50£
+        for symbol in ['€', '£', '¥', '￥', '₩', '₹', '₽', '฿']:
+            if text.endswith(symbol):
+                iso_code = cls.CURRENCY_MAPPINGS.get(symbol)
+                if iso_code:
+                    num_text = text[:-len(symbol)].strip()
+                    value = cls.parse_number(num_text)
+                    if value is not None:
+                        return iso_code, value
+
+        # Try Japanese/Korean names at end: 100円, 100ドル, 100ユーロ
+        for name in ['円', 'ドル', '米ドル', 'ユーロ', 'ポンド', '元', '人民元',
+                     'ウォン', 'フラン', '豪ドル', 'カナダドル', 'ルピー',
+                     'レアル', 'ルーブル', 'バーツ']:
+            if text.endswith(name):
+                iso_code = cls.CURRENCY_MAPPINGS.get(name)
+                if iso_code:
+                    num_text = text[:-len(name)].strip()
+                    value = cls.parse_number(num_text)
+                    if value is not None:
+                        return iso_code, value
+
+        return None, None
+
+
 class UnitConverter:
     """
     Comprehensive unit conversion system with three levels:
@@ -1398,18 +1635,22 @@ Output format:
         """Extract using regex patterns as fallback."""
         data_points = []
 
+        # Normalize full-width numbers to half-width for pattern matching
+        # Keep original content for raw_text extraction
+        normalized_content = CurrencyNormalizer.normalize_number(content)
+
         # Extract years for context
-        years = set(re.findall(r'\b(20\d{2})\b', content))
+        years = set(re.findall(r'\b(20\d{2})\b', normalized_content))
         default_year = max(int(y) for y in years) if years else None
 
-        # Currency extraction
+        # Currency extraction (use normalized_content for matching)
         for pattern in self.CURRENCY_PATTERNS:
-            for match in re.finditer(pattern, content, re.IGNORECASE):
+            for match in re.finditer(pattern, normalized_content, re.IGNORECASE):
                 try:
                     # Get surrounding context (50 chars each side)
                     start = max(0, match.start() - 50)
-                    end = min(len(content), match.end() + 50)
-                    context = content[start:end]
+                    end = min(len(normalized_content), match.end() + 50)
+                    context = normalized_content[start:end]
 
                     # Find year in context
                     year_match = re.search(r'\b(20\d{2})\b', context)
@@ -1440,17 +1681,18 @@ Output format:
                 except Exception:
                     continue
 
-        # Percentage extraction
+        # Percentage extraction (use normalized_content for matching)
         for pattern in self.PERCENTAGE_PATTERNS:
-            for match in re.finditer(pattern, content, re.IGNORECASE):
+            for match in re.finditer(pattern, normalized_content, re.IGNORECASE):
                 try:
                     raw_text = match.group(0)
-                    value = float(match.group(1).replace(',', ''))
+                    # Number already normalized, no need for replace(',', '')
+                    value = float(match.group(1))
 
                     # Get context for year
                     start = max(0, match.start() - 50)
-                    end = min(len(content), match.end() + 50)
-                    context = content[start:end]
+                    end = min(len(normalized_content), match.end() + 50)
+                    context = normalized_content[start:end]
                     year_match = re.search(r'\b(20\d{2})\b', context)
                     year = int(year_match.group(1)) if year_match else default_year
 
@@ -1479,9 +1721,9 @@ Output format:
                 except Exception:
                     continue
 
-        # Scientific/engineering measurement extraction
+        # Scientific/engineering measurement extraction (use normalized_content)
         data_points.extend(self._extract_measurements(
-            content=content,
+            content=normalized_content,
             source_url=source_url,
             source_title=source_title,
             evidence_id=evidence_id,
@@ -1506,6 +1748,7 @@ Output format:
         Extract scientific/engineering measurements using patterns.
 
         Handles SI prefixed units, non-SI units, and compound units.
+        Expects content to be pre-normalized (commas removed, full-width converted).
         """
         data_points = []
 
@@ -1515,7 +1758,8 @@ Output format:
             for match in re.finditer(pattern, content):
                 try:
                     raw_text = match.group(0)
-                    value_str = match.group(val_group).replace(',', '')
+                    # Content is already normalized, no need for replace(',', '')
+                    value_str = match.group(val_group)
                     value = float(value_str)
 
                     # Determine the full unit string
@@ -1525,8 +1769,8 @@ Output format:
                         unit = prefix + base_unit
                     else:
                         # Unit is captured directly in the match
-                        # Find the unit part after the number
-                        unit_match = re.search(r'[\d,]+\.?\d*\s*(.*)', raw_text)
+                        # Find the unit part after the number (content is normalized, no commas)
+                        unit_match = re.search(r'[\d]+\.?\d*\s*(.*)', raw_text)
                         unit = unit_match.group(1).strip() if unit_match else ""
 
                     if not unit:
@@ -1631,16 +1875,19 @@ Output format:
         return value
 
     def _parse_currency_value(self, text: str) -> float:
-        """Parse currency value from text."""
-        # Remove currency symbols
-        text = re.sub(r'[\$€¥£]', '', text)
+        """Parse currency value from text with full normalization."""
+        # Normalize full-width numbers first
+        normalized_text = CurrencyNormalizer.normalize_number(text)
 
-        # Find number
-        num_match = re.search(r'([\d,]+\.?\d*)', text)
+        # Remove currency symbols
+        normalized_text = re.sub(r'[\$€¥£￥₩₹₽฿]', '', normalized_text)
+
+        # Find number (now without commas after normalization)
+        num_match = re.search(r'([\d]+\.?\d*)', normalized_text)
         if not num_match:
             return 0.0
 
-        value = float(num_match.group(1).replace(',', ''))
+        value = float(num_match.group(1))
 
         # Apply multiplier
         text_lower = text.lower()
@@ -1655,25 +1902,78 @@ Output format:
 
         return value
 
-    def _detect_currency_unit(self, text: str) -> str:
-        """Detect currency unit from text."""
-        if '$' in text or 'dollar' in text.lower():
-            if 'billion' in text.lower():
-                return 'billion USD'
-            elif 'million' in text.lower():
-                return 'million USD'
-            return 'USD'
-        elif '¥' in text or '円' in text:
-            if '兆' in text:
-                return '兆円'
-            elif '億' in text:
-                return '億円'
+    def _detect_currency_unit(self, text: str, normalize: bool = True) -> str:
+        """
+        Detect currency unit from text.
+
+        Args:
+            text: Text containing currency (e.g., "10€", "100ユーロ", "$50 billion")
+            normalize: If True, return ISO 4217 code (EUR). If False, return with scale (billion USD).
+
+        Returns:
+            Currency unit string, normalized to ISO code if normalize=True
+        """
+        text_lower = text.lower()
+
+        # Determine scale multiplier suffix
+        scale_suffix = ""
+        if not normalize:
+            if 'trillion' in text_lower or '兆' in text:
+                scale_suffix = " trillion"
+            elif 'billion' in text_lower or '億' in text:
+                scale_suffix = " billion" if 'billion' in text_lower else "億"
+            elif 'million' in text_lower or '百万' in text:
+                scale_suffix = " million"
             elif '万' in text:
-                return '万円'
-            return '円'
-        elif '€' in text or 'euro' in text.lower():
-            return 'EUR'
-        return 'USD'  # Default
+                scale_suffix = "万"
+
+        # Try to detect currency using CurrencyNormalizer
+        for symbol in ['$', 'US$', 'A$', 'C$', 'S$', 'HK$', 'NT$', 'R$',
+                       '€', '£', '¥', '￥', '₩', '₹', '₽', '฿']:
+            if symbol in text:
+                iso_code = CurrencyNormalizer.normalize_currency(symbol)
+                if iso_code:
+                    if normalize:
+                        return iso_code
+                    else:
+                        # For JPY, use Japanese format
+                        if iso_code == 'JPY' and scale_suffix:
+                            return scale_suffix + '円'
+                        return scale_suffix.strip() + ' ' + iso_code if scale_suffix else iso_code
+
+        # Try currency names (Japanese/English)
+        for name in ['ドル', '米ドル', 'dollar', 'dollars']:
+            if name in text or name in text_lower:
+                if normalize:
+                    return 'USD'
+                return (scale_suffix.strip() + ' USD').strip() if scale_suffix else 'USD'
+
+        for name in ['ユーロ', 'euro', 'euros']:
+            if name in text or name in text_lower:
+                if normalize:
+                    return 'EUR'
+                return (scale_suffix.strip() + ' EUR').strip() if scale_suffix else 'EUR'
+
+        for name in ['円', 'yen']:
+            if name in text or name in text_lower:
+                if normalize:
+                    return 'JPY'
+                return scale_suffix + '円' if scale_suffix else '円'
+
+        for name in ['ポンド', 'pound', 'pounds']:
+            if name in text or name in text_lower:
+                if normalize:
+                    return 'GBP'
+                return (scale_suffix.strip() + ' GBP').strip() if scale_suffix else 'GBP'
+
+        for name in ['元', '人民元', 'yuan']:
+            if name in text or name in text_lower:
+                if normalize:
+                    return 'CNY'
+                return (scale_suffix.strip() + ' CNY').strip() if scale_suffix else 'CNY'
+
+        # Default to USD
+        return 'USD'
 
 
 class DerivedMetricsCalculator:

@@ -36,6 +36,7 @@ from .numerical_extractor import (
     MetricCategory,
     DerivedMetricsCalculator,
     UnitConverter,
+    CurrencyNormalizer,
 )
 
 __all__ = [
@@ -64,4 +65,5 @@ __all__ = [
     "MetricCategory",
     "DerivedMetricsCalculator",
     "UnitConverter",
+    "CurrencyNormalizer",
 ]
