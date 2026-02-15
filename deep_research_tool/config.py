@@ -389,6 +389,13 @@ class ReportConfig:
     v2_enable_two_phase: bool = True
     v2_include_glossary: bool = True
 
+    # Auto figure/table generation settings
+    auto_figures: bool = False  # Auto-generate figures/tables during run_research
+    auto_figures_include_images: bool = True  # Include images from web sources
+    auto_figures_include_tables: bool = True  # Include extracted tables
+    auto_figures_include_charts: bool = True  # Include generated charts
+    auto_figures_max_images: int = 2  # Max images per section
+
 
 @dataclass
 class Config:
@@ -524,6 +531,12 @@ def create_config(
     v2_enable_consistency_check: bool = True,
     v2_enable_two_phase: bool = True,
     v2_include_glossary: bool = True,
+    # Auto figure/table generation parameters
+    auto_figures: bool = False,
+    auto_figures_include_images: bool = True,
+    auto_figures_include_tables: bool = True,
+    auto_figures_include_charts: bool = True,
+    auto_figures_max_images: int = 2,
     **kwargs
 ) -> Config:
     """
@@ -579,6 +592,11 @@ def create_config(
         v2_enable_consistency_check: Enable V2 consistency checking
         v2_enable_two_phase: Enable V2 two-phase generation (draft + refinement)
         v2_include_glossary: Include glossary section in V2 reports
+        auto_figures: Auto-generate figures/tables during run_research
+        auto_figures_include_images: Include images from web sources in auto figures
+        auto_figures_include_tables: Include extracted tables in auto figures
+        auto_figures_include_charts: Include generated charts in auto figures
+        auto_figures_max_images: Maximum images per section in auto figures
         **kwargs: Additional keyword arguments
 
     Returns:
@@ -633,6 +651,11 @@ def create_config(
         v2_enable_consistency_check=v2_enable_consistency_check,
         v2_enable_two_phase=v2_enable_two_phase,
         v2_include_glossary=v2_include_glossary,
+        auto_figures=auto_figures,
+        auto_figures_include_images=auto_figures_include_images,
+        auto_figures_include_tables=auto_figures_include_tables,
+        auto_figures_include_charts=auto_figures_include_charts,
+        auto_figures_max_images=auto_figures_max_images,
     )
 
     proxy_config = ProxyConfig(
