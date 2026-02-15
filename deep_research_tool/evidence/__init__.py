@@ -28,6 +28,14 @@ from .content_filter import (
     create_moderate_filter,
     create_minimal_filter,
 )
+from .numerical_extractor import (
+    NumericalDataExtractor,
+    NumericalDataStore,
+    NumericalDataPoint,
+    DataType,
+    MetricCategory,
+    DerivedMetricsCalculator,
+)
 
 __all__ = [
     "EvidenceLocker",
@@ -48,4 +56,10 @@ __all__ = [
     "create_strict_filter",
     "create_moderate_filter",
     "create_minimal_filter",
+    "NumericalDataExtractor",
+    "NumericalDataStore",
+    "NumericalDataPoint",
+    "DataType",
+    "MetricCategory",
+    "DerivedMetricsCalculator",
 ]

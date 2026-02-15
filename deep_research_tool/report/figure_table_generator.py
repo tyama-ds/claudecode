@@ -285,6 +285,263 @@ class FigureTableGenerator:
 
         return collection
 
+    def generate_from_recommendations(
+        self,
+        session,
+        evidence_locker,
+        recommendations: List,
+        include_images: bool = True,
+        include_tables: bool = True,
+    ) -> FigureTableCollection:
+        """
+        Generate figures and tables from ChartAnalyzer recommendations.
+
+        This method uses intelligent chart recommendations that include
+        insights and meaningful messages rather than mechanical table extraction.
+
+        Args:
+            session: Research session with content
+            evidence_locker: Evidence locker with sources
+            recommendations: List of ChartRecommendation from ChartAnalyzer
+            include_images: Include images from sources
+            include_tables: Include extracted tables (in addition to recommended charts)
+
+        Returns:
+            FigureTableCollection with figures, tables, and recommended charts
+        """
+        collection = FigureTableCollection()
+
+        # Get section information
+        sections = self._get_sections(session)
+
+        # Process each section for images and tables
+        for section_id, section_data in sections.items():
+            if section_id.startswith("_"):
+                continue
+
+            section_evidence = evidence_locker.get_section_evidence(section_id)
+            content = section_data.get("content", "")
+
+            # Extract images if enabled
+            if include_images:
+                images = self._extract_images_for_section(
+                    section_id=section_id,
+                    section_data=section_data,
+                    evidence_list=section_evidence,
+                )
+                collection.figures.extend(images)
+
+            # Extract tables if enabled (but don't generate charts from them)
+            if include_tables:
+                tables = self._extract_tables_for_section(
+                    section_id=section_id,
+                    section_data=section_data,
+                    content=content,
+                    evidence_list=section_evidence,
+                )
+                collection.tables.extend(tables)
+
+        # Generate charts from recommendations
+        for rec in recommendations:
+            chart = self._generate_chart_from_recommendation(rec)
+            if chart:
+                collection.charts.append(chart)
+
+        return collection
+
+    def _generate_chart_from_recommendation(self, recommendation) -> Optional[Figure]:
+        """
+        Generate a chart from a ChartRecommendation.
+
+        Args:
+            recommendation: ChartRecommendation from ChartAnalyzer
+
+        Returns:
+            Figure object with chart image, or None if failed
+        """
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            import matplotlib.font_manager as fm
+
+            # Setup fonts and style
+            self._setup_matplotlib_fonts(plt, fm)
+            self._setup_chart_style(plt)
+
+            # Map recommendation chart type to our ChartType
+            type_map = {
+                "line": ChartType.LINE,
+                "bar": ChartType.BAR,
+                "horizontal_bar": ChartType.HORIZONTAL_BAR,
+                "stacked_bar": ChartType.STACKED_BAR,
+                "pie": ChartType.PIE,
+                "area": ChartType.AREA,
+                "scatter": ChartType.SCATTER,
+                "combo": ChartType.LINE,  # Fallback to line for combo
+            }
+
+            rec_type = recommendation.chart_type.value if hasattr(recommendation.chart_type, 'value') else str(recommendation.chart_type)
+            chart_type = type_map.get(rec_type, ChartType.BAR)
+
+            # Create figure
+            fig, ax = plt.subplots(figsize=(10, 6))
+
+            # Prepare data from recommendation
+            data_points = recommendation.data_points
+            if not data_points:
+                plt.close(fig)
+                return None
+
+            # Sort by year for time series, or by value for comparisons
+            if recommendation.purpose.value in ("show_trend", "show_growth"):
+                data_points = sorted(data_points, key=lambda x: x.year or 0)
+                x_labels = [str(dp.year) for dp in data_points]
+            else:
+                data_points = sorted(data_points, key=lambda x: x.normalized_value, reverse=True)
+                x_labels = [dp.subject for dp in data_points]
+
+            values = [dp.normalized_value for dp in data_points]
+
+            # Render based on chart type
+            if chart_type == ChartType.PIE:
+                self._render_pie_from_recommendation(ax, data_points)
+            elif chart_type == ChartType.HORIZONTAL_BAR:
+                self._render_horizontal_bar_from_recommendation(ax, data_points)
+            elif chart_type == ChartType.LINE:
+                ax.plot(range(len(values)), values, marker='o', linewidth=2, color=CHART_COLORS[0])
+                ax.set_xticks(range(len(x_labels)))
+                ax.set_xticklabels(x_labels, rotation=45, ha='right')
+            elif chart_type == ChartType.AREA:
+                ax.fill_between(range(len(values)), values, alpha=0.7, color=CHART_COLORS[0])
+                ax.plot(range(len(values)), values, linewidth=1, color=CHART_COLORS[0])
+                ax.set_xticks(range(len(x_labels)))
+                ax.set_xticklabels(x_labels, rotation=45, ha='right')
+            else:  # BAR
+                bars = ax.bar(range(len(values)), values, color=CHART_COLORS[0])
+                ax.set_xticks(range(len(x_labels)))
+                ax.set_xticklabels(x_labels, rotation=45, ha='right')
+                # Add value labels for small datasets
+                if len(values) <= 8:
+                    for bar, val in zip(bars, values):
+                        ax.text(
+                            bar.get_x() + bar.get_width() / 2,
+                            bar.get_height(),
+                            f'{val:,.1f}',
+                            ha='center', va='bottom', fontsize=9
+                        )
+
+            # Set title and labels
+            ax.set_title(recommendation.title, fontsize=14, fontweight='bold', pad=15)
+            if recommendation.y_axis_label:
+                ax.set_ylabel(recommendation.y_axis_label, fontsize=11)
+            if recommendation.x_axis_label:
+                ax.set_xlabel(recommendation.x_axis_label, fontsize=11)
+
+            # Add insight as subtitle if available
+            if recommendation.main_message:
+                ax.text(
+                    0.5, -0.15,
+                    recommendation.main_message[:100] + "..." if len(recommendation.main_message) > 100 else recommendation.main_message,
+                    transform=ax.transAxes,
+                    fontsize=9,
+                    ha='center',
+                    style='italic',
+                    wrap=True,
+                )
+
+            plt.tight_layout()
+
+            # Save chart
+            chart_filename = f"chart_{recommendation.chart_id}.png"
+            chart_path = self.output_dir / chart_filename
+
+            plt.savefig(
+                chart_path,
+                dpi=150,
+                bbox_inches='tight',
+                facecolor='white',
+                edgecolor='none',
+            )
+
+            # Read image data
+            with open(chart_path, 'rb') as f:
+                image_data = f.read()
+
+            plt.close(fig)
+
+            # Create Figure object
+            caption = recommendation.main_message or f"Chart: {recommendation.title}"
+
+            return Figure(
+                figure_id=f"chart_{recommendation.chart_id}",
+                figure_type=FigureType.CHART,
+                title=recommendation.title,
+                caption=caption,
+                source_url=recommendation.source_urls[0] if recommendation.source_urls else "",
+                section_id=recommendation.section_id,
+                image_path=chart_path,
+                image_data=image_data,
+                alt_text=f"Chart showing {recommendation.title}",
+            )
+
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"Failed to generate chart from recommendation: {e}"
+            )
+            return None
+
+    def _render_pie_from_recommendation(self, ax, data_points) -> None:
+        """Render pie chart from recommendation data points."""
+        labels = [dp.subject for dp in data_points]
+        values = [dp.value for dp in data_points]
+
+        # Filter out zero/negative values
+        filtered = [(l, v) for l, v in zip(labels, values) if v > 0]
+        if not filtered:
+            return
+
+        labels, values = zip(*filtered)
+
+        colors = PIE_COLORS[:len(values)]
+        wedges, texts, autotexts = ax.pie(
+            values,
+            labels=labels,
+            colors=colors,
+            autopct='%1.1f%%',
+            startangle=90,
+        )
+
+        for w in wedges:
+            w.set_edgecolor('white')
+            w.set_linewidth(1.5)
+
+        ax.axis('equal')
+
+    def _render_horizontal_bar_from_recommendation(self, ax, data_points) -> None:
+        """Render horizontal bar chart from recommendation data points."""
+        import numpy as np
+
+        labels = [dp.subject for dp in data_points]
+        values = [dp.normalized_value for dp in data_points]
+
+        y = np.arange(len(labels))
+        bars = ax.barh(y, values, color=CHART_COLORS[0])
+
+        ax.set_yticks(y)
+        ax.set_yticklabels(labels)
+        ax.invert_yaxis()
+
+        # Add value labels
+        for bar, val in zip(bars, values):
+            ax.text(
+                bar.get_width() + max(values) * 0.01,
+                bar.get_y() + bar.get_height() / 2,
+                f'{val:,.1f}',
+                va='center', fontsize=9
+            )
+
     def _get_sections(self, session) -> Dict[str, Dict[str, Any]]:
         """Get section information from session."""
         return session.section_contents
