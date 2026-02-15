@@ -48,6 +48,8 @@ class DataType(str, Enum):
     CAPACITANCE = "capacitance"     # F, μF, nF, pF
     VISCOSITY = "viscosity"         # Pa·s, mPa·s, cP
     THERMAL_CONDUCTIVITY = "thermal_conductivity"  # W/(m·K)
+    ARBITRARY = "arbitrary"         # a.u., arb., dimensionless relative values
+    DIMENSIONLESS = "dimensionless" # Pure numbers, ratios without units
     OTHER = "other"
 
 
@@ -73,6 +75,7 @@ class MetricCategory(str, Enum):
     CHEMICAL_PROPERTY = "chemical_property"           # pH, concentration, etc.
     DIMENSIONAL = "dimensional"                       # Sizes, lengths, areas, volumes
     ENERGY_PROPERTY = "energy_property"               # Energy, power, efficiency
+    RELATIVE_VALUE = "relative_value"                 # Arbitrary units, normalized values
     OTHER = "other"
 
 
@@ -1030,8 +1033,8 @@ class NumericalDataExtractor:
         (r'([\d,]+\.?\d*)\s*rpm\b', 1, 'rpm', DataType.FREQUENCY),
         # Voltage: 3.3 V, 220 V, 12 kV
         (r'([\d,]+\.?\d*)\s*(Y|Z|E|P|T|G|M|k|h|da|d|c|m|μ|u|n|p|f|a)?V\b', 1, 'V', DataType.VOLTAGE),
-        # Current: 10 mA, 2 A, 100 μA
-        (r'([\d,]+\.?\d*)\s*(Y|Z|E|P|T|G|M|k|h|da|d|c|m|μ|u|n|p|f|a)?A\b', 1, 'A', DataType.CURRENT),
+        # Current: 10 mA, 2 A, 100 μA (negative lookahead to avoid A.U./a.u.)
+        (r'([\d,]+\.?\d*)\s*(Y|Z|E|P|T|G|M|k|h|da|d|c|m|μ|u|n|p|f|a)?A\b(?!\.?[Uu]\.?)', 1, 'A', DataType.CURRENT),
         # Resistance: 100 Ω, 4.7 kΩ, 1 MΩ
         (r'([\d,]+\.?\d*)\s*(Y|Z|E|P|T|G|M|k|h|da|d|c|m|μ|u|n|p|f|a)?(?:Ω|ohm)\b', 1, 'Ω', DataType.RESISTANCE),
         # Capacitance: 100 μF, 10 nF, 22 pF
@@ -1056,6 +1059,20 @@ class NumericalDataExtractor:
         (r'([\d,]+\.?\d*)\s*(cP|P|cSt)\b', 1, None, DataType.VISCOSITY),
         # Thermal conductivity: 400 W/(m·K)
         (r'([\d,]+\.?\d*)\s*W/\(?m[·*]?K\)?\b', 1, 'W/(m·K)', DataType.THERMAL_CONDUCTIVITY),
+        # Arbitrary/relative units: 100 a.u., 0.5 arb., 1.2 rel.
+        (r'([\d,]+\.?\d*)\s*a\.?u\.?\b', 1, 'a.u.', DataType.ARBITRARY),
+        (r'([\d,]+\.?\d*)\s*A\.?U\.?\b', 1, 'a.u.', DataType.ARBITRARY),
+        (r'([\d,]+\.?\d*)\s*arb\.?\s*(?:units?)?', 1, 'arb.', DataType.ARBITRARY),
+        (r'([\d,]+\.?\d*)\s*(?:arbitrary\s*units?)', 1, 'a.u.', DataType.ARBITRARY),
+        (r'([\d,]+\.?\d*)\s*rel\.?\b', 1, 'rel.', DataType.ARBITRARY),
+        (r'([\d,]+\.?\d*)\s*norm\.?\b', 1, 'norm.', DataType.ARBITRARY),
+        # Japanese: 100単位, 100ユニット (no \b for Japanese)
+        (r'([\d,]+\.?\d*)\s*単位', 1, '単位', DataType.ARBITRARY),
+        (r'([\d,]+\.?\d*)\s*ユニット', 1, 'unit', DataType.ARBITRARY),
+        # Generic units: 100 units, 50 U (common in biology/chemistry)
+        (r'([\d,]+\.?\d*)\s*units?\b', 1, 'unit', DataType.ARBITRARY),
+        (r'([\d,]+\.?\d*)\s*U\b(?!/)', 1, 'U', DataType.ARBITRARY),  # (?!/) to avoid m/s etc
+        (r'([\d,]+\.?\d*)\s*IU\b', 1, 'IU', DataType.ARBITRARY),  # International Units
     ]
 
     def __init__(
@@ -1188,6 +1205,7 @@ class NumericalDataExtractor:
 - 寸法・サイズ（長さ nm/μm/mm/m、面積、体積）
 - 温度（K、°C、°F）
 - 周波数（Hz、kHz、GHz）
+- 任意単位（a.u., arb., rel., norm.）- スペクトル強度等の相対値
 - 単位付きの全ての定量データ
 
 【重要】SI接頭辞付き単位（GPa、kN、MHz等）もそのまま抽出してください。
@@ -1200,8 +1218,8 @@ class NumericalDataExtractor:
 5. subject: 何についてか（例: "アルミニウム合金", "AI市場", "SUS304"）
 6. year: 年（あれば、例: 2024）
 7. is_forecast: 予測値かどうか（true/false）
-8. data_type: currency/percentage/count/ratio/rate/time_series/measurement/stress/strain/force/energy/power/temperature/pressure/length/mass/velocity/density/frequency/voltage/current/resistance/capacitance/viscosity/thermal_conductivity/other
-9. category: market_size/growth_rate/market_share/revenue/profit/user_count/price/performance/forecast/comparison/mechanical_property/thermal_property/electrical_property/material_property/physical_constant/environmental/chemical_property/dimensional/energy_property/other
+8. data_type: currency/percentage/count/ratio/rate/time_series/measurement/stress/strain/force/energy/power/temperature/pressure/length/mass/velocity/density/frequency/voltage/current/resistance/capacitance/viscosity/thermal_conductivity/arbitrary/dimensionless/other
+9. category: market_size/growth_rate/market_share/revenue/profit/user_count/price/performance/forecast/comparison/mechanical_property/thermal_property/electrical_property/material_property/physical_constant/environmental/chemical_property/dimensional/energy_property/relative_value/other
 10. confidence: 抽出の確信度（0.0-1.0）
 
 JSON配列形式で出力してください。数値データがない場合は空配列[]を返してください。
@@ -1257,6 +1275,7 @@ Research Topic: {research_topic}
 - Dimensions/sizes (length nm/μm/mm/m, area, volume)
 - Temperature (K, °C, °F)
 - Frequency (Hz, kHz, GHz)
+- Arbitrary units (a.u., arb., rel., norm.) - relative values like spectral intensity
 - All quantitative data with units
 
 【Important】Extract values with SI prefixed units (GPa, kN, MHz, etc.) as-is.
@@ -1269,8 +1288,8 @@ Research Topic: {research_topic}
 5. subject: What entity (e.g., "aluminum alloy", "AI market", "SUS304")
 6. year: Year (if available)
 7. is_forecast: Whether this is a forecast (true/false)
-8. data_type: currency/percentage/count/ratio/rate/time_series/measurement/stress/strain/force/energy/power/temperature/pressure/length/mass/velocity/density/frequency/voltage/current/resistance/capacitance/viscosity/thermal_conductivity/other
-9. category: market_size/growth_rate/market_share/revenue/profit/user_count/price/performance/forecast/comparison/mechanical_property/thermal_property/electrical_property/material_property/physical_constant/environmental/chemical_property/dimensional/energy_property/other
+8. data_type: currency/percentage/count/ratio/rate/time_series/measurement/stress/strain/force/energy/power/temperature/pressure/length/mass/velocity/density/frequency/voltage/current/resistance/capacitance/viscosity/thermal_conductivity/arbitrary/dimensionless/other
+9. category: market_size/growth_rate/market_share/revenue/profit/user_count/price/performance/forecast/comparison/mechanical_property/thermal_property/electrical_property/material_property/physical_constant/environmental/chemical_property/dimensional/energy_property/relative_value/other
 10. confidence: Extraction confidence (0.0-1.0)
 
 Output as JSON array. Return empty array [] if no numerical data found.
@@ -1525,8 +1544,10 @@ Output format:
                     year_match = re.search(r'\b(20\d{2})\b', context)
                     year = int(year_match.group(1)) if year_match else default_year
 
-                    # Determine category from unit converter or data type
-                    if self.unit_converter:
+                    # Determine category from data type or unit converter
+                    if data_type == DataType.ARBITRARY:
+                        category = MetricCategory.RELATIVE_VALUE
+                    elif self.unit_converter:
                         category = self.unit_converter.get_metric_category(unit)
                     else:
                         category = MetricCategory.OTHER
