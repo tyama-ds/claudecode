@@ -2048,6 +2048,125 @@ for issue in report.issues:
 
 ---
 
+## 全機能フルカスタマイズ例（Maximum Customized run_research）
+
+`run_research()` の全パラメータを使いこなした最大構成の例です。V2レポート生成、DeepThink推論、多言語検索、高速クロール、自動図表生成、数値データ抽出、単位変換など、全機能を有効にしています。
+
+```python
+from deep_research_tool import run_research
+
+result = run_research(
+    # === 基本設定 ===
+    query="次世代半導体材料の技術動向と市場展望",
+    provider="anthropic",                    # "openai" or "anthropic"
+    api_key="sk-ant-xxx",                    # 環境変数 ANTHROPIC_API_KEY でもOK
+    model="claude-sonnet-4-20250514",
+    search_method="duckduckgo",              # "duckduckgo" or "selenium"
+    iterations=5,                            # 各セクションの調査反復回数
+    output_format="docx",                    # markdown / docx / pdf / html
+    output_dir="./output",
+    requirements="SiC、GaN、Ga2O3の3材料を中心に比較分析。日本企業の動向を重視",
+    verbose=True,
+
+    # === レポート長 ===
+    target_pages=30,                         # 目標ページ数（概算）
+    # target_characters=50000,               # 文字数指定も可能（target_pagesと排他）
+
+    # === V2 レポート生成 ===
+    report_generator_version="v2",           # ★ V2有効化（必須）
+    v2_writing_style="technical",            # formal / business / technical / executive / casual
+    v2_target_audience="engineer",           # expert / business / engineer / general / student
+    v2_technical_level=4,                    # 1-5（5が最も専門的）
+    v2_enable_consistency_check=True,        # 用語・事実の一貫性チェック
+    v2_enable_two_phase=True,               # ドラフト → 推敲の2段階生成
+    v2_include_glossary=True,               # 巻末に用語集を付与
+
+    # === DeepThink（推論強化） ===
+    deep_think=True,                         # 推論強化モード有効化
+    deep_think_level=0.7,                    # 0.0-1.0（高いほど深い推論）
+    reasoning_iterations=3,                  # 推論の反復回数
+    consistency_threshold=0.3,               # 整合性チェック閾値
+    consistency_mode="revise",               # warn / revise / strict
+
+    # === 多言語検索 ===
+    multilingual=True,                       # 多言語検索有効化
+    search_languages=["ja", "en", "zh"],     # 検索対象言語
+    results_per_language=10,                 # 言語あたりの検索結果数
+    translate_results=True,                  # 結果を出力言語に翻訳
+
+    # === 検索深度 ===
+    max_queries_per_iteration=5,             # イテレーションあたりの最大クエリ数
+    max_pages_per_query=5,                   # クエリあたりの最大ページ数
+
+    # === クロール設定 ===
+    extended_mode=True,                      # 深層サイトクローリング有効化
+    crawl_mode="fast_parallel",              # standard / fast_batch / fast_parallel
+    crawl_max_pages=15,                      # サイトあたりの最大クロールページ数
+    crawl_max_depth=3,                       # リンク追跡の最大深度
+    crawl_max_sites=5,                       # クロール対象の最大サイト数
+    fast_crawl_workers=10,                   # 並列HTTPフェッチワーカー数
+    fast_crawl_batch_size=5,                 # バッチ評価の1バッチあたりページ数
+
+    # === コンテンツフィルタ ===
+    content_filter_mode="moderate",          # strict / moderate / minimal / none
+
+    # === 自動図表生成 ===
+    auto_figures=True,                       # 図表の自動生成有効化
+    auto_figures_include_images=True,        # Webソースからの画像を含める
+    auto_figures_include_tables=True,        # 抽出した表を含める
+    auto_figures_include_charts=True,        # 生成チャートを含める
+    auto_figures_max_images=3,               # セクションあたりの最大画像数
+
+    # === 数値データ抽出・チャート ===
+    numerical_extraction=True,               # 数値データ自動抽出
+    numerical_llm_extraction=True,           # LLMによるインテリジェント抽出
+    numerical_min_confidence=0.5,            # 最小信頼度スコア
+    enable_unit_conversion=True,             # SI単位変換（GPa→Pa等）
+    enable_pint=True,                        # pint次元解析（Level 3）
+    derived_metrics=True,                    # CAGR・YoY等の派生指標を自動計算
+    derived_fill_missing=True,               # 欠損年度の線形補間
+    intelligent_charts=True,                 # インテリジェントチャート生成
+    chart_insights=True,                     # チャートへの洞察コメント付与
+    chart_max_per_section=3,                 # セクションあたりの最大チャート数
+
+    # === ファクト検証 ===
+    enable_verification=True,                # ハルシネーション検証
+    use_enhanced_synthesis=True,             # Multi-Pass Synthesis
+)
+
+# === 結果の取得 ===
+print(f"レポート: {result['report_path']}")
+print(f"図表入りレポート: {result.get('figures_report_path')}")
+print(f"エビデンスJSON: {result['evidence_json']}")
+print(f"エビデンスCSV: {result['evidence_csv']}")
+print(f"検証レポート: {result.get('verification_html')}")
+print(f"トークン使用量: {result['token_usage']}")
+```
+
+### パラメータ早見表
+
+| カテゴリ | 主要パラメータ | 用途 |
+|---------|-------------|------|
+| **基本** | `provider`, `model`, `iterations` | LLM選択、調査深度 |
+| **出力** | `output_format`, `target_pages` | レポート形式・長さ |
+| **V2レポート** | `report_generator_version="v2"`, `v2_*` | 一貫性保証、用語統一 |
+| **DeepThink** | `deep_think=True`, `deep_think_level` | 推論品質の強化 |
+| **多言語** | `multilingual=True`, `search_languages` | 複数言語で情報収集 |
+| **クロール** | `crawl_mode`, `extended_mode` | 深層・高速情報収集 |
+| **図表** | `auto_figures=True` | 自動図表挿入 |
+| **数値抽出** | `numerical_extraction=True`, `intelligent_charts` | データ抽出・可視化 |
+| **単位変換** | `enable_unit_conversion=True` | SI単位正規化・変換 |
+| **検証** | `enable_verification=True` | ファクトチェック |
+
+### 注意事項
+
+- **APIコスト**: 全機能有効時はトークン消費量が大幅に増加します（V1の3-5倍程度）
+- **実行時間**: DeepThink + V2 + 多言語 + 深層クロールの組み合わせでは数十分〜1時間以上かかる場合があります
+- **段階的な有効化**: まず基本設定で動作確認し、必要に応じて機能を追加していくことを推奨します
+- **最小V2設定**: V2だけ試す場合は `report_generator_version="v2"` を追加するだけでOKです（他のv2_*パラメータはデフォルトで適切な値）
+
+---
+
 ## 詳細ワークフロー：クエリ入力からレポート出力まで
 
 以下は、ユーザーがリサーチクエリを入力してからレポートが出力されるまでの詳細なワークフローです。
