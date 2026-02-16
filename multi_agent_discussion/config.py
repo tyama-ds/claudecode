@@ -41,7 +41,7 @@ class LLMConfig:
     google_api_key: Optional[str] = None
     xai_api_key: Optional[str] = None
     # Model names
-    openai_model: str = "gpt-4o-mini"
+    openai_model: str = "gpt-5-mini"
     anthropic_model: str = "claude-3-5-sonnet-20241022"
     google_model: str = "gemini-1.5-flash"
     ollama_model: str = "llama3.2"

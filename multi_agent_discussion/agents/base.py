@@ -142,6 +142,19 @@ class BaseAgent(ABC):
         else:
             raise ValueError(f"Unsupported provider: {provider}")
 
+    # Model prefixes that do not support custom temperature
+    _NO_TEMPERATURE_PREFIXES = ("o1", "o3", "o4", "gpt-5", "gpt-6")
+
+    def _supports_temperature(self, model: str) -> bool:
+        """Check if a model supports custom temperature parameter."""
+        model_lower = model.lower()
+        for prefix in self._NO_TEMPERATURE_PREFIXES:
+            if (model_lower == prefix or
+                model_lower.startswith(prefix + "-") or
+                model_lower.startswith(prefix + ".")):
+                return False
+        return True
+
     def _call_llm(self, messages: List[dict], system_prompt: str = None) -> str:
         """
         Call the LLM with the given messages.
@@ -164,12 +177,15 @@ class BaseAgent(ABC):
                 full_messages.append({"role": "system", "content": system_prompt})
             full_messages.extend(messages)
 
-            response = self.client.chat.completions.create(
-                model=model,
-                messages=full_messages,
-                temperature=self.llm_config.temperature,
-                max_tokens=self.llm_config.max_tokens,
-            )
+            params = {
+                "model": model,
+                "messages": full_messages,
+                "max_completion_tokens": self.llm_config.max_tokens,
+            }
+            if self._supports_temperature(model):
+                params["temperature"] = self.llm_config.temperature
+
+            response = self.client.chat.completions.create(**params)
             return response.choices[0].message.content
 
         elif provider == LLMProvider.ANTHROPIC:
@@ -205,12 +221,15 @@ class BaseAgent(ABC):
                 full_messages.append({"role": "system", "content": system_prompt})
             full_messages.extend(messages)
 
-            response = self.client.chat.completions.create(
-                model=model,
-                messages=full_messages,
-                temperature=self.llm_config.temperature,
-                max_tokens=self.llm_config.max_tokens,
-            )
+            params = {
+                "model": model,
+                "messages": full_messages,
+                "max_tokens": self.llm_config.max_tokens,
+            }
+            if self._supports_temperature(model):
+                params["temperature"] = self.llm_config.temperature
+
+            response = self.client.chat.completions.create(**params)
             return response.choices[0].message.content
 
         else:
