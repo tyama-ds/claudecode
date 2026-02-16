@@ -447,11 +447,14 @@ class DeepResearchTool:
                 result,
                 include_glossary=self.config.report.v2_include_glossary,
             )
-            # Save to file
+            # Save to file in the configured format
             output_dir = self.config.report.output_dir / "reports"
-            output_dir.mkdir(parents=True, exist_ok=True)
-            report_path = output_dir / f"report_{session.session_id}.md"
-            report_path.write_text(final_doc, encoding="utf-8")
+            report_path = generator.save_report(
+                markdown_content=final_doc,
+                output_dir=output_dir,
+                filename=f"report_{session.session_id}",
+                format=self.config.report.format,
+            )
         else:
             # V1: Original generation flow
             report_path = generator.generate_report(
@@ -1591,11 +1594,14 @@ def run_manual_research(
             result,
             include_glossary=config.report.v2_include_glossary,
         )
-        # Save to file
+        # Save to file in the configured format
         output_dir = config.report.output_dir / "reports"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        report_path = output_dir / f"report_{session.session_id}.md"
-        report_path.write_text(final_doc, encoding="utf-8")
+        report_path = generator.save_report(
+            markdown_content=final_doc,
+            output_dir=output_dir,
+            filename=f"report_{session.session_id}",
+            format=config.report.format,
+        )
     else:
         # V1: Original generation flow
         report_path = generator.generate_report(

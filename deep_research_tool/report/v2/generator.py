@@ -11,7 +11,9 @@ Version 2.0 adds:
 """
 
 import json
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Dict, Optional, Any, Callable
 from datetime import datetime
 
@@ -320,6 +322,19 @@ Output only JSON:"""
 
         try:
             response = self.llm.generate(prompt)
+
+            # Guard against None/empty response (OpenAI API can return content=None)
+            if not response or not response.content:
+                print(f"[ReportGeneratorV2] WARNING: Empty response for section {section_number} '{section_title}'")
+                return ChapterContent(
+                    section_number=section_number,
+                    section_title=section_title,
+                    content=f"## {section_number}. {section_title}\n\n"
+                            f"このセクションの内容を生成できませんでした（LLM応答が空でした）。",
+                    word_count=0,
+                    is_draft=True,
+                )
+
             content = response.content.strip()
 
             # Parse JSON
@@ -330,24 +345,48 @@ Output only JSON:"""
 
             data = json.loads(content)
 
+            chapter_content = data.get("content", "")
+            if not chapter_content:
+                print(f"[ReportGeneratorV2] WARNING: LLM returned empty 'content' field for section {section_number}")
+
             return ChapterContent(
                 section_number=section_number,
                 section_title=section_title,
-                content=data.get("content", ""),
-                word_count=data.get("word_count", len(data.get("content", ""))),
+                content=chapter_content,
+                word_count=data.get("word_count", len(chapter_content)),
                 key_points=data.get("key_points", []),
                 terms_used=data.get("terms_used", []),
                 facts_stated=data.get("facts_stated", []),
                 is_draft=True,
             )
 
-        except Exception as e:
-            print(f"[ReportGeneratorV2] Chapter generation failed: {e}")
-            # Return minimal chapter
+        except json.JSONDecodeError as e:
+            print(f"[ReportGeneratorV2] JSON parse failed for section {section_number}: {e}")
+            # If the response looks like direct markdown (not JSON), use it as-is
+            raw = response.content.strip() if response and response.content else ""
+            if raw and not raw.startswith("{"):
+                print(f"[ReportGeneratorV2] Using raw response as chapter content (non-JSON)")
+                return ChapterContent(
+                    section_number=section_number,
+                    section_title=section_title,
+                    content=f"## {section_number}. {section_title}\n\n{raw}",
+                    word_count=len(raw),
+                    is_draft=True,
+                )
             return ChapterContent(
                 section_number=section_number,
                 section_title=section_title,
-                content=f"# {section_number}. {section_title}\n\n（生成エラー: {e}）",
+                content=f"## {section_number}. {section_title}\n\n（JSON解析エラー: {e}）",
+                word_count=0,
+                is_draft=True,
+            )
+
+        except Exception as e:
+            print(f"[ReportGeneratorV2] Chapter generation failed for section {section_number}: {e}")
+            return ChapterContent(
+                section_number=section_number,
+                section_title=section_title,
+                content=f"## {section_number}. {section_title}\n\n（生成エラー: {e}）",
                 word_count=0,
                 is_draft=True,
             )
@@ -526,3 +565,239 @@ Output only the revised content (no JSON):"""
             lines.append(summary)
 
         return "\n".join(lines)
+
+    def save_report(
+        self,
+        markdown_content: str,
+        output_dir: Path,
+        filename: str,
+        format: str = "markdown",
+    ) -> Path:
+        """
+        Save the generated report in the specified format.
+
+        Args:
+            markdown_content: The report content as markdown string
+            output_dir: Directory to save the report
+            filename: Base filename (without extension)
+            format: Output format ('markdown', 'docx', 'pdf', 'html')
+
+        Returns:
+            Path to the saved report file
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        format_lower = format.lower() if isinstance(format, str) else format.value.lower()
+
+        if format_lower == "docx":
+            return self._save_as_docx(markdown_content, output_dir, filename)
+        elif format_lower == "html":
+            return self._save_as_html(markdown_content, output_dir, filename)
+        elif format_lower == "pdf":
+            # PDF: save as markdown with note (PDF generation requires additional setup)
+            md_path = self._save_as_markdown(markdown_content, output_dir, filename)
+            print("[ReportGeneratorV2] PDF format is not yet supported in V2. Saved as markdown.")
+            return md_path
+        else:
+            return self._save_as_markdown(markdown_content, output_dir, filename)
+
+    def _save_as_markdown(self, content: str, output_dir: Path, filename: str) -> Path:
+        """Save report as markdown file."""
+        filepath = output_dir / f"{filename}.md"
+        filepath.write_text(content, encoding="utf-8")
+        return filepath
+
+    def _save_as_docx(self, markdown_content: str, output_dir: Path, filename: str) -> Path:
+        """Convert markdown content to DOCX and save."""
+        try:
+            from docx import Document
+            from docx.shared import Pt
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
+        except ImportError:
+            print("[ReportGeneratorV2] python-docx not installed. Falling back to markdown.")
+            return self._save_as_markdown(markdown_content, output_dir, filename)
+
+        doc = Document()
+        lines = markdown_content.split("\n")
+        i = 0
+
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+
+            # Empty line
+            if not stripped:
+                i += 1
+                continue
+
+            # Headings
+            if stripped.startswith("#"):
+                level, text = self._parse_heading(stripped)
+                doc.add_heading(text, level=level)
+                i += 1
+                continue
+
+            # Unordered list items
+            if re.match(r'^[-*+]\s', stripped):
+                text = re.sub(r'^[-*+]\s+', '', stripped)
+                para = doc.add_paragraph(style='List Bullet')
+                self._add_formatted_runs(para, text)
+                i += 1
+                continue
+
+            # Ordered list items
+            if re.match(r'^\d+\.\s', stripped):
+                text = re.sub(r'^\d+\.\s+', '', stripped)
+                para = doc.add_paragraph(style='List Number')
+                self._add_formatted_runs(para, text)
+                i += 1
+                continue
+
+            # Italic metadata line (e.g., *Generated: 2024-01-01*)
+            if stripped.startswith("*") and stripped.endswith("*") and not stripped.startswith("**"):
+                para = doc.add_paragraph()
+                run = para.add_run(stripped.strip("*"))
+                run.italic = True
+                run.font.size = Pt(9)
+                para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                i += 1
+                continue
+
+            # Regular paragraph: collect consecutive non-empty, non-special lines
+            para_lines = []
+            while i < len(lines):
+                l = lines[i].strip()
+                if not l or l.startswith("#") or re.match(r'^[-*+]\s', l) or re.match(r'^\d+\.\s', l):
+                    break
+                para_lines.append(l)
+                i += 1
+
+            if para_lines:
+                para = doc.add_paragraph()
+                self._add_formatted_runs(para, " ".join(para_lines))
+            continue
+
+        filepath = output_dir / f"{filename}.docx"
+        doc.save(filepath)
+        return filepath
+
+    def _save_as_html(self, markdown_content: str, output_dir: Path, filename: str) -> Path:
+        """Convert markdown content to HTML and save."""
+        # Simple markdown to HTML conversion
+        html_body = self._markdown_to_html(markdown_content)
+        html_doc = f"""<!DOCTYPE html>
+<html lang="{self.language}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+body {{ font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', sans-serif; max-width: 900px; margin: 0 auto; padding: 2em; line-height: 1.8; }}
+h1 {{ border-bottom: 2px solid #333; padding-bottom: 0.3em; }}
+h2 {{ border-bottom: 1px solid #ccc; padding-bottom: 0.2em; }}
+ul, ol {{ padding-left: 1.5em; }}
+</style>
+</head>
+<body>
+{html_body}
+</body>
+</html>"""
+        filepath = output_dir / f"{filename}.html"
+        filepath.write_text(html_doc, encoding="utf-8")
+        return filepath
+
+    @staticmethod
+    def _parse_heading(line: str) -> tuple:
+        """Parse a markdown heading line into (level, text)."""
+        match = re.match(r'^(#{1,6})\s+(.*)', line)
+        if match:
+            level = min(len(match.group(1)), 4)  # docx supports levels 0-4
+            return level - 1, match.group(2).strip()
+        return 0, line.strip("#").strip()
+
+    @staticmethod
+    def _add_formatted_runs(paragraph, text: str):
+        """Add text with bold/italic formatting as runs to a paragraph."""
+        # Split by bold (**text**) and italic (*text*) markers
+        parts = re.split(r'(\*\*[^*]+\*\*|\*[^*]+\*)', text)
+        for part in parts:
+            if not part:
+                continue
+            if part.startswith("**") and part.endswith("**"):
+                run = paragraph.add_run(part[2:-2])
+                run.bold = True
+            elif part.startswith("*") and part.endswith("*"):
+                run = paragraph.add_run(part[1:-1])
+                run.italic = True
+            else:
+                paragraph.add_run(part)
+
+    @staticmethod
+    def _markdown_to_html(markdown_text: str) -> str:
+        """Simple markdown to HTML conversion."""
+        lines = markdown_text.split("\n")
+        html_lines = []
+        in_list = False
+        list_type = None
+
+        for line in lines:
+            stripped = line.strip()
+
+            if not stripped:
+                if in_list:
+                    html_lines.append(f"</{list_type}>")
+                    in_list = False
+                    list_type = None
+                html_lines.append("")
+                continue
+
+            # Headings
+            heading_match = re.match(r'^(#{1,6})\s+(.*)', stripped)
+            if heading_match:
+                if in_list:
+                    html_lines.append(f"</{list_type}>")
+                    in_list = False
+                level = len(heading_match.group(1))
+                text = heading_match.group(2)
+                html_lines.append(f"<h{level}>{text}</h{level}>")
+                continue
+
+            # Unordered list
+            if re.match(r'^[-*+]\s', stripped):
+                text = re.sub(r'^[-*+]\s+', '', stripped)
+                if not in_list or list_type != "ul":
+                    if in_list:
+                        html_lines.append(f"</{list_type}>")
+                    html_lines.append("<ul>")
+                    in_list = True
+                    list_type = "ul"
+                html_lines.append(f"  <li>{text}</li>")
+                continue
+
+            # Ordered list
+            ol_match = re.match(r'^\d+\.\s+(.*)', stripped)
+            if ol_match:
+                text = ol_match.group(1)
+                if not in_list or list_type != "ol":
+                    if in_list:
+                        html_lines.append(f"</{list_type}>")
+                    html_lines.append("<ol>")
+                    in_list = True
+                    list_type = "ol"
+                html_lines.append(f"  <li>{text}</li>")
+                continue
+
+            # Regular paragraph
+            if in_list:
+                html_lines.append(f"</{list_type}>")
+                in_list = False
+                list_type = None
+            # Apply inline formatting
+            formatted = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', stripped)
+            formatted = re.sub(r'\*([^*]+)\*', r'<em>\1</em>', formatted)
+            html_lines.append(f"<p>{formatted}</p>")
+
+        if in_list:
+            html_lines.append(f"</{list_type}>")
+
+        return "\n".join(html_lines)
