@@ -18,7 +18,8 @@ from ..evidence.content_filter import (
     create_moderate_filter,
 )
 from ..search.base import SearchResult
-from ..config import CrawlMode
+from ..search.multilingual import MultilingualSearcher, MultilingualSearchResult
+from ..config import CrawlMode, MultilingualSearchConfig
 from .query_generator import QueryGenerator, ResearchPlan, TableOfContents, TableOfContentsItem
 from .content_extractor import ContentExtractor, ExtractedContent
 from .site_crawler import SiteCrawler, CrawlResult, extract_keywords_from_topic
@@ -156,6 +157,8 @@ class Researcher:
         crawl_mode: CrawlMode = CrawlMode.STANDARD,
         fast_crawl_workers: int = 10,
         fast_crawl_batch_size: int = 5,
+        multilingual_config: MultilingualSearchConfig = None,
+        max_content_length: int = 50000,
     ):
         """
         Initialize Researcher.
@@ -181,6 +184,8 @@ class Researcher:
             crawl_mode: Crawl mode (standard, fast_batch, fast_parallel)
             fast_crawl_workers: Max parallel workers for fast crawl mode
             fast_crawl_batch_size: Pages per batch in batch evaluation mode
+            multilingual_config: Multilingual search configuration (None to disable)
+            max_content_length: Maximum content length for extraction truncation
         """
         self.llm = llm_client
         self.search = search_client
@@ -194,6 +199,7 @@ class Researcher:
 
         self.query_generator = QueryGenerator(llm_client, language)
         self.content_extractor = ContentExtractor(llm_client, language)
+        self.max_content_length = max_content_length
 
         # Use enhanced multi-pass content generation for better quality
         self.use_enhanced_synthesis = use_enhanced_synthesis
@@ -201,6 +207,18 @@ class Researcher:
         self.session: Optional[ResearchSession] = None
         self.evidence_locker: Optional[EvidenceLocker] = None
         self.progress_callback = progress_callback
+
+        # Multilingual search settings
+        self.multilingual_config = multilingual_config
+        self.multilingual_searcher: Optional[MultilingualSearcher] = None
+        if multilingual_config and multilingual_config.enabled:
+            self.multilingual_searcher = MultilingualSearcher(
+                config=multilingual_config,
+                search_client=search_client,
+                llm_client=llm_client,
+                progress_callback=progress_callback,
+            )
+            print(f"[Researcher] Multilingual search enabled: languages={multilingual_config.search_languages}")
 
         # Extended mode settings
         self.extended_mode = extended_mode
@@ -554,7 +572,29 @@ class Researcher:
             for query in queries[:self.max_queries_per_iteration]:
                 print(f"[DEBUG] Searching: {query[:50]}...")
                 try:
-                    results = self.search.search(query)
+                    # Use multilingual search if enabled, otherwise standard search
+                    if self.multilingual_searcher:
+                        ml_results, ml_stats = self.multilingual_searcher.search_parallel(query)
+                        # Convert MultilingualSearchResult to SearchResult for unified processing
+                        results = [
+                            SearchResult(
+                                title=mr.title,
+                                url=mr.url,
+                                snippet=mr.snippet,
+                                metadata={
+                                    "source_language": mr.source_language,
+                                    "is_translated": mr.is_translated,
+                                    "translation_confidence": mr.translation_confidence,
+                                    "relevance_score": mr.relevance_score,
+                                },
+                            )
+                            for mr in ml_results
+                        ]
+                        print(f"[DEBUG] Multilingual search returned {len(results)} results "
+                              f"(deduped from {ml_stats.total_results + ml_stats.duplicates_removed}, "
+                              f"languages: {ml_stats.results_by_language})")
+                    else:
+                        results = self.search.search(query)
                     print(f"[DEBUG] Search returned {len(results)} results")
                     iter_record.sources_found += len(results)
 
@@ -583,8 +623,13 @@ class Researcher:
                                     continue
                                 print(f"[FILTER] Quality score: {content_filter_result.quality_score:.2f}")
 
+                            # Apply max_content_length truncation
+                            raw_content = page.text_content
+                            if len(raw_content) > self.max_content_length:
+                                raw_content = raw_content[:self.max_content_length]
+
                             extracted = self.content_extractor.extract_relevant_content(
-                                raw_content=page.text_content,
+                                raw_content=raw_content,
                                 source_url=result.url,
                                 source_title=result.title,
                                 section_context=f"{section.section}. {section.title}",
@@ -599,15 +644,22 @@ class Researcher:
                                 iter_record.content_extracted += 1
                                 print(f"[DEBUG] Content added. Total parts: {len(section_content_parts)}")
 
-                                self.evidence_locker.add_evidence(
-                                    url=result.url,
-                                    title=result.title,
-                                    content_excerpt=extracted.processed_content[:500],
-                                    evidence_type=EvidenceType.WEB_PAGE,
-                                    search_query=query,
-                                    section_reference=section.section,
-                                    relevance_score=extracted.relevance_score,
-                                )
+                                # Build evidence kwargs with multilingual metadata
+                                evidence_kwargs = {
+                                    "url": result.url,
+                                    "title": result.title,
+                                    "content_excerpt": extracted.processed_content[:500],
+                                    "evidence_type": EvidenceType.WEB_PAGE,
+                                    "search_query": query,
+                                    "section_reference": section.section,
+                                    "relevance_score": extracted.relevance_score,
+                                }
+                                if result.metadata.get("source_language"):
+                                    evidence_kwargs["source_language"] = result.metadata["source_language"]
+                                    evidence_kwargs["is_translated"] = result.metadata.get("is_translated", False)
+                                    evidence_kwargs["translation_confidence"] = result.metadata.get("translation_confidence", 1.0)
+
+                                self.evidence_locker.add_evidence(**evidence_kwargs)
                             else:
                                 # Even low relevance content can be useful - add with note
                                 if extracted.processed_content and len(extracted.processed_content) > 100:
@@ -1044,7 +1096,23 @@ Return as JSON:
                 # Execute searches
                 for query in queries[:self.max_queries_per_iteration]:
                     try:
-                        results = self.search.search(query)
+                        # Use multilingual search if enabled
+                        if self.multilingual_searcher:
+                            ml_results, _ = self.multilingual_searcher.search_parallel(query)
+                            results = [
+                                SearchResult(
+                                    title=mr.title,
+                                    url=mr.url,
+                                    snippet=mr.snippet,
+                                    metadata={
+                                        "source_language": mr.source_language,
+                                        "is_translated": mr.is_translated,
+                                    },
+                                )
+                                for mr in ml_results
+                            ]
+                        else:
+                            results = self.search.search(query)
                         iter_record.sources_found += len(results)
 
                         for result in results[:self.max_pages_per_query]:
@@ -1072,8 +1140,13 @@ Return as JSON:
                                     if not content_filter_result.should_include:
                                         continue
 
+                                # Apply max_content_length truncation
+                                raw_content = page.text_content
+                                if len(raw_content) > self.max_content_length:
+                                    raw_content = raw_content[:self.max_content_length]
+
                                 extracted = self.content_extractor.extract_relevant_content(
-                                    raw_content=page.text_content,
+                                    raw_content=raw_content,
                                     source_url=result.url,
                                     source_title=result.title,
                                     section_context=f"{section.section}. {section.title}",
