@@ -140,6 +140,7 @@ class SeleniumBrowser(BaseSearchClient):
         """
         driver = self._get_driver()
         max_results = max_results or self.max_results
+        print(f"[Selenium/{search_engine}] Searching: {query}")
 
         if search_engine.lower() == "duckduckgo":
             return self._search_duckduckgo(driver, query, max_results)

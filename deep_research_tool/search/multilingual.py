@@ -205,6 +205,7 @@ Translated query:"""
             List of MultilingualSearchResult objects
         """
         region = self.config.get_region_for_language(query.target_language)
+        print(f"[Multilingual] Searching ({query.target_language}): {query.translated_query}")
 
         try:
             # Use the search client with language-specific region
