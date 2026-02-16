@@ -389,6 +389,31 @@ class ReportConfig:
     v2_enable_two_phase: bool = True
     v2_include_glossary: bool = True
 
+    # Auto figure/table generation settings
+    auto_figures: bool = False  # Auto-generate figures/tables during run_research
+    auto_figures_include_images: bool = True  # Include images from web sources
+    auto_figures_include_tables: bool = True  # Include extracted tables
+    auto_figures_include_charts: bool = True  # Include generated charts
+    auto_figures_max_images: int = 2  # Max images per section
+
+    # Numerical data extraction settings (for intelligent chart generation)
+    numerical_extraction: bool = True  # Extract numerical data during research
+    numerical_llm_extraction: bool = True  # Use LLM for extraction (vs pattern-only)
+    numerical_min_confidence: float = 0.5  # Minimum confidence for data points
+
+    # Unit conversion settings
+    enable_unit_conversion: bool = True  # Enable SI prefix normalization and unit conversion
+    enable_pint: bool = True  # Enable pint for dimensional analysis (requires: pip install pint)
+
+    # Derived metrics settings
+    derived_metrics: bool = True  # Calculate derived metrics (CAGR, growth rates)
+    derived_fill_missing: bool = True  # Fill missing data points (interpolation)
+
+    # Intelligent chart analysis settings
+    intelligent_charts: bool = True  # Use ChartAnalyzer for smart chart recommendations
+    chart_insights: bool = True  # Generate insights for charts
+    chart_max_per_section: int = 3  # Maximum charts per section
+
 
 @dataclass
 class Config:
@@ -524,6 +549,26 @@ def create_config(
     v2_enable_consistency_check: bool = True,
     v2_enable_two_phase: bool = True,
     v2_include_glossary: bool = True,
+    # Auto figure/table generation parameters
+    auto_figures: bool = False,
+    auto_figures_include_images: bool = True,
+    auto_figures_include_tables: bool = True,
+    auto_figures_include_charts: bool = True,
+    auto_figures_max_images: int = 2,
+    # Numerical data extraction parameters
+    numerical_extraction: bool = True,
+    numerical_llm_extraction: bool = True,
+    numerical_min_confidence: float = 0.5,
+    # Unit conversion parameters
+    enable_unit_conversion: bool = True,
+    enable_pint: bool = True,
+    # Derived metrics parameters
+    derived_metrics: bool = True,
+    derived_fill_missing: bool = True,
+    # Intelligent chart analysis parameters
+    intelligent_charts: bool = True,
+    chart_insights: bool = True,
+    chart_max_per_section: int = 3,
     **kwargs
 ) -> Config:
     """
@@ -579,6 +624,21 @@ def create_config(
         v2_enable_consistency_check: Enable V2 consistency checking
         v2_enable_two_phase: Enable V2 two-phase generation (draft + refinement)
         v2_include_glossary: Include glossary section in V2 reports
+        auto_figures: Auto-generate figures/tables during run_research
+        auto_figures_include_images: Include images from web sources in auto figures
+        auto_figures_include_tables: Include extracted tables in auto figures
+        auto_figures_include_charts: Include generated charts in auto figures
+        auto_figures_max_images: Maximum images per section in auto figures
+        numerical_extraction: Extract numerical data during research for intelligent charts
+        numerical_llm_extraction: Use LLM for numerical extraction (vs pattern-only)
+        numerical_min_confidence: Minimum confidence threshold for numerical data points
+        enable_unit_conversion: Enable SI prefix normalization and unit conversion tables
+        enable_pint: Enable pint library for dimensional analysis (requires: pip install pint)
+        derived_metrics: Calculate derived metrics (CAGR, growth rates, etc.)
+        derived_fill_missing: Fill missing data points via interpolation
+        intelligent_charts: Use ChartAnalyzer for smart chart recommendations
+        chart_insights: Generate insights and messages for charts
+        chart_max_per_section: Maximum charts per section
         **kwargs: Additional keyword arguments
 
     Returns:
@@ -633,6 +693,21 @@ def create_config(
         v2_enable_consistency_check=v2_enable_consistency_check,
         v2_enable_two_phase=v2_enable_two_phase,
         v2_include_glossary=v2_include_glossary,
+        auto_figures=auto_figures,
+        auto_figures_include_images=auto_figures_include_images,
+        auto_figures_include_tables=auto_figures_include_tables,
+        auto_figures_include_charts=auto_figures_include_charts,
+        auto_figures_max_images=auto_figures_max_images,
+        numerical_extraction=numerical_extraction,
+        numerical_llm_extraction=numerical_llm_extraction,
+        numerical_min_confidence=numerical_min_confidence,
+        enable_unit_conversion=enable_unit_conversion,
+        enable_pint=enable_pint,
+        derived_metrics=derived_metrics,
+        derived_fill_missing=derived_fill_missing,
+        intelligent_charts=intelligent_charts,
+        chart_insights=chart_insights,
+        chart_max_per_section=chart_max_per_section,
     )
 
     proxy_config = ProxyConfig(

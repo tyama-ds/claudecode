@@ -18,6 +18,13 @@ from .verification.verifier import Verifier
 from .report.generator import ReportGenerator
 from .report.length_controller import ContentLengthController, LengthTarget
 from .report.v2 import ReportGeneratorV2, ReportContext, WritingStyle, TargetAudience
+from .report.figure_table_generator import FigureTableGenerator, add_figures_to_report
+from .evidence.numerical_extractor import (
+    NumericalDataExtractor,
+    NumericalDataStore,
+    DerivedMetricsCalculator,
+)
+from .report.chart_analyzer import ChartAnalyzer, ChartRecommendation
 from .utils.document_reader import DocumentReader, auto_detect_additional_documents
 from .thinking import DeepThinkProcessor, DeepThinkConfig as ThinkingConfig
 from .thinking.reasoning_chain import ConsistencyMode
@@ -425,6 +432,18 @@ class DeepResearchTool:
                 target_characters=self.config.report.target_characters,
             )
 
+        # Auto figure/table generation (if enabled)
+        figures_report_path = None
+        if self.config.report.auto_figures:
+            if progress_callback:
+                progress_callback("Generating figures and tables...", 97)
+
+            figures_report_path = self._auto_generate_figures(
+                report_path=Path(report_path),
+                session=session,
+                evidence_locker=evidence_locker,
+            )
+
         # Clean up search client if selenium
         if hasattr(self.search_client, 'close'):
             self.search_client.close()
@@ -434,7 +453,9 @@ class DeepResearchTool:
 
         return {
             "session_id": session.session_id,
-            "report_path": str(report_path),
+            "report_path": str(figures_report_path or report_path),
+            "report_path_original": str(report_path),
+            "figures_report_path": str(figures_report_path) if figures_report_path else None,
             "evidence_json": str(evidence_json),
             "evidence_csv": str(evidence_csv),
             "verification_html": str(verification_html) if verification_html else None,
@@ -455,6 +476,255 @@ class DeepResearchTool:
             content_parts.append(section_data.get("content", ""))
 
         return "\n\n".join(content_parts)
+
+    def _auto_generate_figures(
+        self,
+        report_path: Path,
+        session: ResearchSession,
+        evidence_locker: EvidenceLocker,
+    ) -> Optional[Path]:
+        """
+        Auto-generate figures and tables and embed them into the report.
+
+        Uses intelligent chart analysis when enabled:
+        1. Extract numerical data from evidence
+        2. Calculate derived metrics (CAGR, growth rates)
+        3. Analyze data for chart opportunities
+        4. Generate charts with insights
+
+        Args:
+            report_path: Path to the generated report file
+            session: Research session with content
+            evidence_locker: Evidence locker with sources
+
+        Returns:
+            Path to the updated report with figures, or None if failed
+        """
+        try:
+            figures_dir = report_path.parent / "figures"
+            figures_dir.mkdir(parents=True, exist_ok=True)
+
+            # Get proxy settings
+            proxies = None
+            if self.config.proxy.is_configured():
+                proxies = self.config.proxy.get_proxies_dict()
+
+            # Step 1: Extract numerical data if enabled
+            numerical_store = None
+            chart_recommendations = []
+
+            if self.config.report.numerical_extraction:
+                numerical_store = self._extract_numerical_data(
+                    session=session,
+                    evidence_locker=evidence_locker,
+                )
+
+                # Step 2: Calculate derived metrics if enabled
+                if self.config.report.derived_metrics and numerical_store:
+                    calculator = DerivedMetricsCalculator(numerical_store)
+                    derived = calculator.calculate_all()
+                    numerical_store.add_many(derived)
+
+                    # Fill missing data if enabled
+                    if self.config.report.derived_fill_missing:
+                        for series in numerical_store.get_time_series():
+                            interpolated = calculator.interpolate_missing_years(series)
+                            numerical_store.add_many(interpolated)
+
+                # Step 3: Analyze for intelligent charts if enabled
+                if self.config.report.intelligent_charts and numerical_store:
+                    analyzer = ChartAnalyzer(
+                        llm_client=self.llm_client if self.config.report.chart_insights else None,
+                        language=self.config.research.language,
+                        min_confidence=self.config.report.numerical_min_confidence,
+                        use_llm_analysis=self.config.report.chart_insights,
+                        fill_missing_data=False,  # Already done above
+                        max_charts_per_section=self.config.report.chart_max_per_section,
+                    )
+
+                    research_topic = session.query if session else ""
+                    chart_recommendations = analyzer.analyze(
+                        store=numerical_store,
+                        research_topic=research_topic,
+                    )
+
+                # Save numerical data store
+                if numerical_store:
+                    store_path = figures_dir / "numerical_data.json"
+                    numerical_store.save_to_json(store_path)
+
+            # Step 4: Create figure generator
+            generator = FigureTableGenerator(
+                llm_client=self.llm_client,
+                output_dir=figures_dir,
+                language=self.config.research.language,
+                max_images_per_section=self.config.report.auto_figures_max_images,
+                proxies=proxies,
+                verify_ssl=self.config.proxy.verify_ssl,
+            )
+
+            # Step 5: Generate figures/tables/charts
+            # If we have intelligent chart recommendations, use them
+            if chart_recommendations:
+                collection = generator.generate_from_recommendations(
+                    session=session,
+                    evidence_locker=evidence_locker,
+                    recommendations=chart_recommendations,
+                    include_images=self.config.report.auto_figures_include_images,
+                    include_tables=self.config.report.auto_figures_include_tables,
+                )
+            else:
+                # Fallback to standard generation
+                collection = generator.generate_figures_and_tables(
+                    session=session,
+                    evidence_locker=evidence_locker,
+                    include_images=self.config.report.auto_figures_include_images,
+                    include_tables=self.config.report.auto_figures_include_tables,
+                    include_charts=self.config.report.auto_figures_include_charts,
+                )
+
+            # Skip if nothing was generated
+            total = len(collection.figures) + len(collection.tables) + len(collection.charts)
+            if total == 0:
+                return None
+
+            # Read the report content
+            content = None
+            encodings = ['utf-8', 'utf-8-sig', 'cp932', 'shift_jis', 'latin-1']
+            for encoding in encodings:
+                try:
+                    with open(report_path, 'r', encoding=encoding) as f:
+                        content = f.read()
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if content is None:
+                with open(report_path, 'r', encoding='utf-8', errors='replace') as f:
+                    content = f.read()
+
+            suffix = report_path.suffix.lower()
+
+            if suffix == '.md':
+                updated_content = generator.add_figures_to_markdown(content, collection)
+                updated_path = report_path.parent / f"{report_path.stem}_with_figures.md"
+                with open(updated_path, 'w', encoding='utf-8') as f:
+                    f.write(updated_content)
+            elif suffix == '.docx':
+                updated_path = generator.add_figures_to_docx(
+                    docx_path=report_path,
+                    collection=collection,
+                )
+                if not updated_path:
+                    updated_path = report_path
+            elif suffix in ('.pdf', '.html'):
+                updated_path = generator.add_figures_to_pdf(
+                    markdown_content=content,
+                    collection=collection,
+                    output_path=report_path.parent / f"{report_path.stem}_with_figures.pdf",
+                )
+                if not updated_path:
+                    updated_path = report_path
+            else:
+                # Fallback: treat as markdown
+                updated_content = generator.add_figures_to_markdown(content, collection)
+                updated_path = report_path.parent / f"{report_path.stem}_with_figures.md"
+                with open(updated_path, 'w', encoding='utf-8') as f:
+                    f.write(updated_content)
+
+            # Export collection metadata
+            collection_path = figures_dir / "figures_tables.json"
+            generator.export_collection(collection, collection_path)
+
+            return updated_path
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"Auto figure generation failed: {e}"
+            )
+            return None
+
+    def _extract_numerical_data(
+        self,
+        session: ResearchSession,
+        evidence_locker: EvidenceLocker,
+    ) -> NumericalDataStore:
+        """
+        Extract numerical data from evidence for intelligent chart generation.
+
+        Args:
+            session: Research session with content
+            evidence_locker: Evidence locker with sources
+
+        Returns:
+            NumericalDataStore with extracted data points
+        """
+        store = NumericalDataStore(
+            research_topic=session.query if session else ""
+        )
+
+        extractor = NumericalDataExtractor(
+            llm_client=self.llm_client if self.config.report.numerical_llm_extraction else None,
+            language=self.config.research.language,
+            min_confidence=self.config.report.numerical_min_confidence,
+            use_llm=self.config.report.numerical_llm_extraction,
+            enable_unit_conversion=self.config.report.enable_unit_conversion,
+            enable_pint=self.config.report.enable_pint,
+        )
+
+        # Extract from each evidence item
+        for evidence in evidence_locker.get_all_evidence():
+            if not evidence.content_excerpt:
+                continue
+
+            # Get section ID from evidence if available
+            section_id = ""
+            if session and session.section_contents:
+                # Try to match evidence to section
+                for sec_id, sec_data in session.section_contents.items():
+                    if sec_id.startswith("_"):
+                        continue
+                    sources = sec_data.get("sources", [])
+                    if evidence.url in [s.get("url", "") for s in sources]:
+                        section_id = sec_id
+                        break
+
+            # Determine source reliability from verification if available
+            source_reliability = 0.7  # Default
+            if hasattr(evidence, 'quality_score') and evidence.quality_score:
+                source_reliability = evidence.quality_score
+
+            data_points = extractor.extract_from_content(
+                content=evidence.content_excerpt,
+                source_url=evidence.url,
+                source_title=evidence.title,
+                evidence_id=evidence.evidence_id,
+                section_id=section_id,
+                source_reliability=source_reliability,
+                research_topic=session.query if session else "",
+            )
+
+            store.add_many(data_points)
+
+        # Also extract from section contents (may have synthesized data)
+        if session and session.section_contents:
+            for section_id, section_data in session.section_contents.items():
+                if section_id.startswith("_"):
+                    continue
+
+                content = section_data.get("content", "")
+                if not content:
+                    continue
+
+                data_points = extractor.extract_from_content(
+                    content=content,
+                    section_id=section_id,
+                    source_reliability=0.8,  # Higher for synthesized content
+                    research_topic=session.query if session else "",
+                )
+
+                store.add_many(data_points)
+
+        return store
 
     def _apply_deep_think(
         self,
@@ -721,6 +991,12 @@ def run_research(
     crawl_mode: str = "standard",
     fast_crawl_workers: int = 10,
     fast_crawl_batch_size: int = 5,
+    # Auto figure/table generation parameters
+    auto_figures: bool = False,
+    auto_figures_include_images: bool = True,
+    auto_figures_include_tables: bool = True,
+    auto_figures_include_charts: bool = True,
+    auto_figures_max_images: int = 2,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -766,6 +1042,11 @@ def run_research(
         crawl_mode: Crawl mode for performance ('standard', 'fast_batch', 'fast_parallel')
         fast_crawl_workers: Max parallel workers for fast crawl mode
         fast_crawl_batch_size: Pages per batch in batch evaluation mode
+        auto_figures: Auto-generate figures/tables and embed in report
+        auto_figures_include_images: Include images from web sources
+        auto_figures_include_tables: Include extracted tables
+        auto_figures_include_charts: Include generated charts
+        auto_figures_max_images: Max images per section
         **kwargs: Additional configuration options
 
     Returns:
@@ -858,6 +1139,11 @@ def run_research(
         crawl_mode=crawl_mode,
         fast_crawl_workers=fast_crawl_workers,
         fast_crawl_batch_size=fast_crawl_batch_size,
+        auto_figures=auto_figures,
+        auto_figures_include_images=auto_figures_include_images,
+        auto_figures_include_tables=auto_figures_include_tables,
+        auto_figures_include_charts=auto_figures_include_charts,
+        auto_figures_max_images=auto_figures_max_images,
         **api_key_param,
         **kwargs,
     )

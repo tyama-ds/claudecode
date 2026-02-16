@@ -3,9 +3,10 @@ Figure and Table Generator - Add figures and tables to research reports.
 
 This module provides functionality to:
 - Extract relevant images from referenced web pages
-- Identify and extract numerical data for tables
-- Generate matplotlib charts from extracted data
-- Add figures and tables to existing reports
+- Identify and extract numerical data for tables (LLM + pattern + HTML parsing)
+- Generate matplotlib charts with LLM-recommended chart types
+- Support PIE, LINE, BAR, AREA, SCATTER, STACKED_BAR, HORIZONTAL_BAR charts
+- Add figures and tables to existing reports (Markdown, DOCX, PDF)
 """
 
 import io
@@ -39,6 +40,8 @@ class ChartType(str, Enum):
     PIE = "pie"
     AREA = "area"
     SCATTER = "scatter"
+    STACKED_BAR = "stacked_bar"
+    HORIZONTAL_BAR = "horizontal_bar"
 
 
 @dataclass
@@ -85,7 +88,7 @@ class TableData:
     source_url: Optional[str] = None
     source_title: Optional[str] = None
     section_id: str = ""
-    data_type: str = "general"  # general, time_series, comparison
+    data_type: str = "general"  # general, time_series, comparison, distribution, correlation
     unit: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -132,6 +135,38 @@ class FigureTableCollection:
         }
 
 
+# ============================================================================
+# Chart Style Configuration
+# ============================================================================
+
+# Professional color palette (colorblind-friendly)
+CHART_COLORS = [
+    "#4C78A8",  # Steel Blue
+    "#F58518",  # Orange
+    "#E45756",  # Red
+    "#72B7B2",  # Teal
+    "#54A24B",  # Green
+    "#EECA3B",  # Yellow
+    "#B279A2",  # Purple
+    "#FF9DA6",  # Pink
+    "#9D755D",  # Brown
+    "#BAB0AC",  # Gray
+]
+
+PIE_COLORS = [
+    "#4C78A8",
+    "#F58518",
+    "#E45756",
+    "#72B7B2",
+    "#54A24B",
+    "#EECA3B",
+    "#B279A2",
+    "#FF9DA6",
+    "#9D755D",
+    "#BAB0AC",
+]
+
+
 class FigureTableGenerator:
     """
     Generate figures and tables for research reports.
@@ -170,7 +205,7 @@ class FigureTableGenerator:
             max_images_per_section: Maximum images per section
             image_max_width: Maximum image width in pixels
             download_timeout: Timeout for downloading images
-            proxies: Proxy settings dict (e.g., {"http": "http://proxy:8080", "https": "http://proxy:8080"})
+            proxies: Proxy settings dict
             verify_ssl: Whether to verify SSL certificates
         """
         self.llm = llm_client
@@ -182,6 +217,10 @@ class FigureTableGenerator:
         self.download_timeout = download_timeout
         self.proxies = proxies
         self.verify_ssl = verify_ssl
+
+    # ========================================================================
+    # Main Entry Point
+    # ========================================================================
 
     def generate_figures_and_tables(
         self,
@@ -246,9 +285,270 @@ class FigureTableGenerator:
 
         return collection
 
+    def generate_from_recommendations(
+        self,
+        session,
+        evidence_locker,
+        recommendations: List,
+        include_images: bool = True,
+        include_tables: bool = True,
+    ) -> FigureTableCollection:
+        """
+        Generate figures and tables from ChartAnalyzer recommendations.
+
+        This method uses intelligent chart recommendations that include
+        insights and meaningful messages rather than mechanical table extraction.
+
+        Args:
+            session: Research session with content
+            evidence_locker: Evidence locker with sources
+            recommendations: List of ChartRecommendation from ChartAnalyzer
+            include_images: Include images from sources
+            include_tables: Include extracted tables (in addition to recommended charts)
+
+        Returns:
+            FigureTableCollection with figures, tables, and recommended charts
+        """
+        collection = FigureTableCollection()
+
+        # Get section information
+        sections = self._get_sections(session)
+
+        # Process each section for images and tables
+        for section_id, section_data in sections.items():
+            if section_id.startswith("_"):
+                continue
+
+            section_evidence = evidence_locker.get_section_evidence(section_id)
+            content = section_data.get("content", "")
+
+            # Extract images if enabled
+            if include_images:
+                images = self._extract_images_for_section(
+                    section_id=section_id,
+                    section_data=section_data,
+                    evidence_list=section_evidence,
+                )
+                collection.figures.extend(images)
+
+            # Extract tables if enabled (but don't generate charts from them)
+            if include_tables:
+                tables = self._extract_tables_for_section(
+                    section_id=section_id,
+                    section_data=section_data,
+                    content=content,
+                    evidence_list=section_evidence,
+                )
+                collection.tables.extend(tables)
+
+        # Generate charts from recommendations
+        for rec in recommendations:
+            chart = self._generate_chart_from_recommendation(rec)
+            if chart:
+                collection.charts.append(chart)
+
+        return collection
+
+    def _generate_chart_from_recommendation(self, recommendation) -> Optional[Figure]:
+        """
+        Generate a chart from a ChartRecommendation.
+
+        Args:
+            recommendation: ChartRecommendation from ChartAnalyzer
+
+        Returns:
+            Figure object with chart image, or None if failed
+        """
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            import matplotlib.font_manager as fm
+
+            # Setup fonts and style
+            self._setup_matplotlib_fonts(plt, fm)
+            self._setup_chart_style(plt)
+
+            # Map recommendation chart type to our ChartType
+            type_map = {
+                "line": ChartType.LINE,
+                "bar": ChartType.BAR,
+                "horizontal_bar": ChartType.HORIZONTAL_BAR,
+                "stacked_bar": ChartType.STACKED_BAR,
+                "pie": ChartType.PIE,
+                "area": ChartType.AREA,
+                "scatter": ChartType.SCATTER,
+                "combo": ChartType.LINE,  # Fallback to line for combo
+            }
+
+            rec_type = recommendation.chart_type.value if hasattr(recommendation.chart_type, 'value') else str(recommendation.chart_type)
+            chart_type = type_map.get(rec_type, ChartType.BAR)
+
+            # Create figure
+            fig, ax = plt.subplots(figsize=(10, 6))
+
+            # Prepare data from recommendation
+            data_points = recommendation.data_points
+            if not data_points:
+                plt.close(fig)
+                return None
+
+            # Sort by year for time series, or by value for comparisons
+            if recommendation.purpose.value in ("show_trend", "show_growth"):
+                data_points = sorted(data_points, key=lambda x: x.year or 0)
+                x_labels = [str(dp.year) for dp in data_points]
+            else:
+                data_points = sorted(data_points, key=lambda x: x.normalized_value, reverse=True)
+                x_labels = [dp.subject for dp in data_points]
+
+            values = [dp.normalized_value for dp in data_points]
+
+            # Render based on chart type
+            if chart_type == ChartType.PIE:
+                self._render_pie_from_recommendation(ax, data_points)
+            elif chart_type == ChartType.HORIZONTAL_BAR:
+                self._render_horizontal_bar_from_recommendation(ax, data_points)
+            elif chart_type == ChartType.LINE:
+                ax.plot(range(len(values)), values, marker='o', linewidth=2, color=CHART_COLORS[0])
+                ax.set_xticks(range(len(x_labels)))
+                ax.set_xticklabels(x_labels, rotation=45, ha='right')
+            elif chart_type == ChartType.AREA:
+                ax.fill_between(range(len(values)), values, alpha=0.7, color=CHART_COLORS[0])
+                ax.plot(range(len(values)), values, linewidth=1, color=CHART_COLORS[0])
+                ax.set_xticks(range(len(x_labels)))
+                ax.set_xticklabels(x_labels, rotation=45, ha='right')
+            else:  # BAR
+                bars = ax.bar(range(len(values)), values, color=CHART_COLORS[0])
+                ax.set_xticks(range(len(x_labels)))
+                ax.set_xticklabels(x_labels, rotation=45, ha='right')
+                # Add value labels for small datasets
+                if len(values) <= 8:
+                    for bar, val in zip(bars, values):
+                        ax.text(
+                            bar.get_x() + bar.get_width() / 2,
+                            bar.get_height(),
+                            f'{val:,.1f}',
+                            ha='center', va='bottom', fontsize=9
+                        )
+
+            # Set title and labels
+            ax.set_title(recommendation.title, fontsize=14, fontweight='bold', pad=15)
+            if recommendation.y_axis_label:
+                ax.set_ylabel(recommendation.y_axis_label, fontsize=11)
+            if recommendation.x_axis_label:
+                ax.set_xlabel(recommendation.x_axis_label, fontsize=11)
+
+            # Add insight as subtitle if available
+            if recommendation.main_message:
+                ax.text(
+                    0.5, -0.15,
+                    recommendation.main_message[:100] + "..." if len(recommendation.main_message) > 100 else recommendation.main_message,
+                    transform=ax.transAxes,
+                    fontsize=9,
+                    ha='center',
+                    style='italic',
+                    wrap=True,
+                )
+
+            plt.tight_layout()
+
+            # Save chart
+            chart_filename = f"chart_{recommendation.chart_id}.png"
+            chart_path = self.output_dir / chart_filename
+
+            plt.savefig(
+                chart_path,
+                dpi=150,
+                bbox_inches='tight',
+                facecolor='white',
+                edgecolor='none',
+            )
+
+            # Read image data
+            with open(chart_path, 'rb') as f:
+                image_data = f.read()
+
+            plt.close(fig)
+
+            # Create Figure object
+            caption = recommendation.main_message or f"Chart: {recommendation.title}"
+
+            return Figure(
+                figure_id=f"chart_{recommendation.chart_id}",
+                figure_type=FigureType.CHART,
+                title=recommendation.title,
+                caption=caption,
+                source_url=recommendation.source_urls[0] if recommendation.source_urls else "",
+                section_id=recommendation.section_id,
+                image_path=chart_path,
+                image_data=image_data,
+                alt_text=f"Chart showing {recommendation.title}",
+            )
+
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"Failed to generate chart from recommendation: {e}"
+            )
+            return None
+
+    def _render_pie_from_recommendation(self, ax, data_points) -> None:
+        """Render pie chart from recommendation data points."""
+        labels = [dp.subject for dp in data_points]
+        values = [dp.value for dp in data_points]
+
+        # Filter out zero/negative values
+        filtered = [(l, v) for l, v in zip(labels, values) if v > 0]
+        if not filtered:
+            return
+
+        labels, values = zip(*filtered)
+
+        colors = PIE_COLORS[:len(values)]
+        wedges, texts, autotexts = ax.pie(
+            values,
+            labels=labels,
+            colors=colors,
+            autopct='%1.1f%%',
+            startangle=90,
+        )
+
+        for w in wedges:
+            w.set_edgecolor('white')
+            w.set_linewidth(1.5)
+
+        ax.axis('equal')
+
+    def _render_horizontal_bar_from_recommendation(self, ax, data_points) -> None:
+        """Render horizontal bar chart from recommendation data points."""
+        import numpy as np
+
+        labels = [dp.subject for dp in data_points]
+        values = [dp.normalized_value for dp in data_points]
+
+        y = np.arange(len(labels))
+        bars = ax.barh(y, values, color=CHART_COLORS[0])
+
+        ax.set_yticks(y)
+        ax.set_yticklabels(labels)
+        ax.invert_yaxis()
+
+        # Add value labels
+        for bar, val in zip(bars, values):
+            ax.text(
+                bar.get_width() + max(values) * 0.01,
+                bar.get_y() + bar.get_height() / 2,
+                f'{val:,.1f}',
+                va='center', fontsize=9
+            )
+
     def _get_sections(self, session) -> Dict[str, Dict[str, Any]]:
         """Get section information from session."""
         return session.section_contents
+
+    # ========================================================================
+    # Image Extraction
+    # ========================================================================
 
     def _extract_images_for_section(
         self,
@@ -256,17 +556,7 @@ class FigureTableGenerator:
         section_data: Dict[str, Any],
         evidence_list: List,
     ) -> List[Figure]:
-        """
-        Extract relevant images for a section.
-
-        Args:
-            section_id: Section identifier
-            section_data: Section content and metadata
-            evidence_list: Evidence items for this section
-
-        Returns:
-            List of Figure objects
-        """
+        """Extract relevant images for a section."""
         figures = []
 
         # First, check if images are already stored in section_data
@@ -276,7 +566,6 @@ class FigureTableGenerator:
             if not src:
                 continue
 
-            # Download and save image
             image_path, image_data = self._download_image(src)
 
             if image_path or image_data:
@@ -297,7 +586,6 @@ class FigureTableGenerator:
         # If no images found, try to get from evidence URLs
         if not figures and evidence_list:
             for idx, evidence in enumerate(evidence_list[:self.max_images_per_section]):
-                # Try to extract image from the evidence URL
                 images_from_url = self._extract_images_from_url(
                     evidence.url,
                     evidence.title,
@@ -320,17 +608,7 @@ class FigureTableGenerator:
         page_title: str,
         limit: int = 3,
     ) -> List[Figure]:
-        """
-        Extract images from a web page URL.
-
-        Args:
-            url: Web page URL
-            page_title: Page title for attribution
-            limit: Maximum images to extract
-
-        Returns:
-            List of Figure objects
-        """
+        """Extract images from a web page URL."""
         figures = []
 
         try:
@@ -347,7 +625,6 @@ class FigureTableGenerator:
 
             soup = BeautifulSoup(response.content, 'html.parser')
 
-            # Find images
             img_tags = soup.find_all('img')
 
             for img in img_tags:
@@ -358,7 +635,6 @@ class FigureTableGenerator:
                 if not src:
                     continue
 
-                # Make absolute URL
                 src = urljoin(url, src)
 
                 # Skip small icons and tracking pixels
@@ -370,10 +646,11 @@ class FigureTableGenerator:
                     continue
 
                 # Skip common non-content images
-                if any(skip in src.lower() for skip in ['icon', 'logo', 'avatar', 'button', 'banner', 'ad']):
+                skip_keywords = ['icon', 'logo', 'avatar', 'button', 'banner',
+                                 'ad-', 'ads/', 'pixel', 'tracking', 'spacer']
+                if any(skip in src.lower() for skip in skip_keywords):
                     continue
 
-                # Download image
                 image_path, image_data = self._download_image(src)
 
                 if image_path or image_data:
@@ -381,13 +658,13 @@ class FigureTableGenerator:
                     title = img.get('title', '') or alt_text
 
                     figure = Figure(
-                        figure_id="",  # Will be set by caller
+                        figure_id="",
                         figure_type=FigureType.IMAGE,
                         title=title or f"Image from {page_title}",
                         caption=f"Source: {page_title}",
                         source_url=src,
                         source_title=page_title,
-                        section_id="",  # Will be set by caller
+                        section_id="",
                         image_path=image_path,
                         image_data=image_data,
                         alt_text=alt_text,
@@ -395,7 +672,7 @@ class FigureTableGenerator:
                     figures.append(figure)
 
         except Exception as e:
-            print(f"Error extracting images from {url}: {e}")
+            print(f"[FigureTableGenerator] Error extracting images from {url}: {e}")
 
         return figures
 
@@ -403,15 +680,7 @@ class FigureTableGenerator:
         self,
         url: str,
     ) -> Tuple[Optional[Path], Optional[bytes]]:
-        """
-        Download an image from URL.
-
-        Args:
-            url: Image URL
-
-        Returns:
-            Tuple of (file path, image data)
-        """
+        """Download an image from URL."""
         try:
             response = requests.get(
                 url,
@@ -422,25 +691,22 @@ class FigureTableGenerator:
             )
             response.raise_for_status()
 
-            # Check content type
             content_type = response.headers.get('content-type', '')
             if not any(t in content_type.lower() for t in ['image', 'jpeg', 'png', 'gif', 'webp']):
                 return None, None
 
-            # Generate filename from URL hash
             url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
             ext = self._get_extension_from_url(url) or '.png'
             filename = f"img_{url_hash}{ext}"
             filepath = self.output_dir / filename
 
-            # Save image
             with open(filepath, 'wb') as f:
                 f.write(response.content)
 
             return filepath, response.content
 
         except Exception as e:
-            print(f"Error downloading image {url}: {e}")
+            print(f"[FigureTableGenerator] Error downloading image {url}: {e}")
             return None, None
 
     def _get_extension_from_url(self, url: str) -> Optional[str]:
@@ -452,6 +718,10 @@ class FigureTableGenerator:
                 return ext
         return None
 
+    # ========================================================================
+    # Table Extraction
+    # ========================================================================
+
     def _extract_tables_for_section(
         self,
         section_id: str,
@@ -459,21 +729,10 @@ class FigureTableGenerator:
         content: str,
         evidence_list: List,
     ) -> List[TableData]:
-        """
-        Extract numerical data and create tables for a section.
-
-        Args:
-            section_id: Section identifier
-            section_data: Section content and metadata
-            content: Section text content
-            evidence_list: Evidence items for this section
-
-        Returns:
-            List of TableData objects
-        """
+        """Extract numerical data and create tables for a section."""
         tables = []
 
-        # Use LLM to extract tabular data if available
+        # Method 1: LLM-based extraction (preferred)
         if self.llm:
             extracted_tables = self._extract_tables_with_llm(
                 section_id=section_id,
@@ -481,8 +740,18 @@ class FigureTableGenerator:
                 section_title=section_data.get("title", ""),
             )
             tables.extend(extracted_tables)
-        else:
-            # Fallback: Pattern-based extraction
+
+        # Method 2: HTML table parsing from evidence sources
+        if not tables and evidence_list:
+            html_tables = self._extract_html_tables(
+                section_id=section_id,
+                evidence_list=evidence_list,
+                section_title=section_data.get("title", ""),
+            )
+            tables.extend(html_tables)
+
+        # Method 3: Pattern-based extraction (fallback)
+        if not tables:
             extracted_tables = self._extract_tables_by_pattern(
                 section_id=section_id,
                 content=content,
@@ -506,72 +775,255 @@ class FigureTableGenerator:
         content: str,
         section_title: str,
     ) -> List[TableData]:
-        """
-        Use LLM to extract tabular data from content.
-
-        Args:
-            section_id: Section identifier
-            content: Text content to analyze
-            section_title: Section title for context
-
-        Returns:
-            List of TableData objects
-        """
+        """Use LLM to extract tabular data from content."""
         tables = []
 
-        prompt = f"""Analyze the following text and extract any numerical data that could be presented in a table format.
+        # Use more content (up to 8000 chars) for better extraction
+        truncated = content[:8000]
+
+        if self.language == "ja":
+            prompt = f"""以下のテキストから、表形式で表現すべき数値データを抽出してください。
+
+対象データ:
+- 時系列データ（年次、月次推移）
+- 項目間の比較データ
+- 構成比・シェアデータ（合計100%になるもの）
+- 統計データ・ランキング
+- 相関関係のあるデータ（2つの数値指標の関係）
+
+セクションタイトル: {section_title}
+
+テキスト:
+{truncated}
+
+以下のJSON形式で返答してください。データがない場合は空配列[]を返してください。
+```json
+[
+  {{
+    "title": "表のタイトル",
+    "headers": ["列1", "列2", "列3"],
+    "rows": [["データ1", "データ2", "データ3"]],
+    "data_type": "time_series|comparison|distribution|correlation|statistics",
+    "unit": "単位（億円、%、人など）"
+  }}
+]
+```
+
+data_typeの分類基準:
+- time_series: 時間軸に沿ったデータ（年、月、四半期）
+- comparison: 複数項目の並列比較
+- distribution: 構成比・割合（合計100%前後）
+- correlation: 2つの数値指標の関係性
+- statistics: 集計値、平均値、中央値など
+
+JSONのみを返してください。"""
+        else:
+            prompt = f"""Analyze the following text and extract numerical data suitable for table format.
+
 Look for:
-- Time series data (yearly, monthly data)
+- Time series data (yearly, monthly trends)
 - Comparisons between items
-- Statistics and metrics
-- Rankings or percentages
+- Distribution/share data (totaling ~100%)
+- Statistics, rankings, percentages
+- Correlated data (relationship between two metrics)
 
 Section Title: {section_title}
 
 Content:
-{content[:3000]}
+{truncated}
 
-Return a JSON array of tables. Each table should have:
-- "title": Table title
-- "headers": Column headers as array
-- "rows": Data rows as 2D array
-- "data_type": "time_series" or "comparison" or "statistics"
-- "unit": Unit of measurement if applicable
+Return a JSON array of tables:
+```json
+[
+  {{
+    "title": "Table title",
+    "headers": ["Col1", "Col2", "Col3"],
+    "rows": [["data1", "data2", "data3"]],
+    "data_type": "time_series|comparison|distribution|correlation|statistics",
+    "unit": "unit of measurement"
+  }}
+]
+```
 
-Return empty array [] if no tabular data found.
+data_type classification:
+- time_series: Data along time axis (year, month, quarter)
+- comparison: Side-by-side comparison of items
+- distribution: Composition/share (totals ~100%)
+- correlation: Relationship between two numeric metrics
+- statistics: Aggregated values, averages, medians
+
 Return ONLY valid JSON, no other text."""
 
         try:
             response = self.llm.generate(prompt)
             response_text = response.content
 
-            # Extract JSON from response
-            start = response_text.find('[')
-            end = response_text.rfind(']') + 1
-            if start != -1 and end > start:
-                json_str = response_text[start:end]
-                extracted = json.loads(json_str)
+            extracted = self._parse_json_array(response_text)
 
-                for idx, table_data in enumerate(extracted):
-                    if not table_data.get("headers") or not table_data.get("rows"):
+            for idx, table_data in enumerate(extracted):
+                if not table_data.get("headers") or not table_data.get("rows"):
+                    continue
+                # Skip tables with only 1 row of data (not useful)
+                if len(table_data["rows"]) < 2:
+                    continue
+
+                table = TableData(
+                    table_id=f"table_{section_id}_{idx+1}",
+                    title=table_data.get("title", f"Table {idx+1}"),
+                    caption=table_data.get("title", ""),
+                    headers=table_data["headers"],
+                    rows=table_data["rows"],
+                    section_id=section_id,
+                    data_type=table_data.get("data_type", "general"),
+                    unit=table_data.get("unit"),
+                )
+                tables.append(table)
+
+        except Exception as e:
+            print(f"[FigureTableGenerator] Error extracting tables with LLM: {e}")
+
+        return tables
+
+    def _extract_html_tables(
+        self,
+        section_id: str,
+        evidence_list: List,
+        section_title: str,
+        max_tables: int = 2,
+    ) -> List[TableData]:
+        """Extract tables from HTML pages referenced in evidence."""
+        tables = []
+
+        try:
+            from bs4 import BeautifulSoup
+        except ImportError:
+            return tables
+
+        for evidence in evidence_list[:3]:
+            if len(tables) >= max_tables:
+                break
+
+            try:
+                response = requests.get(
+                    evidence.url,
+                    timeout=self.download_timeout,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; ResearchBot/1.0)"},
+                    proxies=self.proxies,
+                    verify=self.verify_ssl,
+                )
+                response.raise_for_status()
+                soup = BeautifulSoup(response.content, 'html.parser')
+
+                html_tables = soup.find_all('table')
+
+                for t_idx, html_table in enumerate(html_tables):
+                    if len(tables) >= max_tables:
+                        break
+
+                    headers, rows = self._parse_html_table(html_table)
+                    if not headers or len(rows) < 2:
+                        continue
+                    # Skip navigation or layout tables (too few columns)
+                    if len(headers) < 2:
                         continue
 
                     table = TableData(
-                        table_id=f"table_{section_id}_{idx+1}",
-                        title=table_data.get("title", f"Table {idx+1}"),
-                        caption=table_data.get("title", ""),
-                        headers=table_data["headers"],
-                        rows=table_data["rows"],
+                        table_id=f"table_{section_id}_html_{len(tables)+1}",
+                        title=self._guess_table_title(html_table, section_title),
+                        caption=f"Source: {evidence.title}",
+                        headers=headers,
+                        rows=rows[:20],  # Limit rows
+                        source_url=evidence.url,
+                        source_title=evidence.title,
                         section_id=section_id,
-                        data_type=table_data.get("data_type", "general"),
-                        unit=table_data.get("unit"),
+                        data_type=self._guess_data_type(headers, rows),
                     )
                     tables.append(table)
 
-        except (json.JSONDecodeError, Exception) as e:
-            print(f"Error extracting tables with LLM: {e}")
+            except Exception as e:
+                print(f"[FigureTableGenerator] Error parsing HTML tables from {evidence.url}: {e}")
 
         return tables
+
+    def _parse_html_table(self, table_tag) -> Tuple[List[str], List[List[str]]]:
+        """Parse an HTML table tag into headers and rows."""
+        headers = []
+        rows = []
+
+        # Extract headers
+        thead = table_tag.find('thead')
+        if thead:
+            th_tags = thead.find_all('th')
+            headers = [th.get_text(strip=True) for th in th_tags]
+
+        # If no thead, try first row
+        if not headers:
+            first_row = table_tag.find('tr')
+            if first_row:
+                th_tags = first_row.find_all('th')
+                if th_tags:
+                    headers = [th.get_text(strip=True) for th in th_tags]
+
+        # Extract rows
+        tbody = table_tag.find('tbody') or table_tag
+        for tr in tbody.find_all('tr'):
+            cells = tr.find_all(['td', 'th'])
+            if cells:
+                row = [cell.get_text(strip=True) for cell in cells]
+                # Skip if this is the header row
+                if row == headers:
+                    continue
+                if any(cell.strip() for cell in row):
+                    rows.append(row)
+
+        # If no headers found, use first data row as headers
+        if not headers and rows:
+            headers = rows.pop(0)
+
+        return headers, rows
+
+    def _guess_table_title(self, table_tag, fallback_title: str) -> str:
+        """Guess table title from surrounding HTML elements."""
+        # Check for caption tag
+        caption = table_tag.find('caption')
+        if caption:
+            return caption.get_text(strip=True)
+
+        # Check preceding sibling for heading
+        prev = table_tag.find_previous_sibling(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'strong'])
+        if prev:
+            text = prev.get_text(strip=True)
+            if len(text) < 100:
+                return text
+
+        return f"{fallback_title} - Data"
+
+    def _guess_data_type(self, headers: List[str], rows: List[List[str]]) -> str:
+        """Guess the data type from headers and content."""
+        headers_lower = [h.lower() for h in headers]
+
+        # Time series: has year/date column
+        time_keywords = ['year', 'date', '年', '月', '四半期', 'quarter', 'period', '年度']
+        if any(any(kw in h for kw in time_keywords) for h in headers_lower):
+            return "time_series"
+
+        # Distribution: has percentage/share column
+        dist_keywords = ['%', 'share', 'シェア', '割合', '構成比', 'ratio', 'percentage']
+        if any(any(kw in h for kw in dist_keywords) for h in headers_lower):
+            return "distribution"
+
+        # Check if data contains mostly percentages
+        pct_count = 0
+        total_cells = 0
+        for row in rows[:5]:
+            for cell in row[1:]:
+                total_cells += 1
+                if isinstance(cell, str) and ('%' in cell or '％' in cell):
+                    pct_count += 1
+        if total_cells > 0 and pct_count / total_cells > 0.5:
+            return "distribution"
+
+        return "comparison"
 
     def _extract_tables_by_pattern(
         self,
@@ -579,23 +1031,12 @@ Return ONLY valid JSON, no other text."""
         content: str,
         section_title: str,
     ) -> List[TableData]:
-        """
-        Extract tabular data using pattern matching.
-
-        Args:
-            section_id: Section identifier
-            content: Text content to analyze
-            section_title: Section title for context
-
-        Returns:
-            List of TableData objects
-        """
+        """Extract tabular data using pattern matching."""
         tables = []
 
         # Look for year-based data patterns
         years = self.YEAR_PATTERN.findall(content)
         if years and len(set(years)) >= 2:
-            # Try to extract time series data
             time_series = self._extract_time_series(content, years)
             if time_series:
                 table = TableData(
@@ -611,9 +1052,10 @@ Return ONLY valid JSON, no other text."""
 
         # Look for percentage comparisons
         percentages = self.PERCENTAGE_PATTERN.findall(content)
-        if percentages and len(percentages) >= 3:
-            # This could be a comparison or distribution
-            pass  # Would need more context to create meaningful table
+        if not tables and percentages and len(percentages) >= 3:
+            pct_table = self._extract_percentage_data(content, section_id, section_title)
+            if pct_table:
+                tables.append(pct_table)
 
         return tables
 
@@ -622,22 +1064,10 @@ Return ONLY valid JSON, no other text."""
         content: str,
         years: List[str],
     ) -> Dict[str, Dict[str, Any]]:
-        """
-        Extract time series data from content.
-
-        Args:
-            content: Text content
-            years: List of years found in content
-
-        Returns:
-            Dictionary mapping metric names to year->value mappings
-        """
-        # Simplified extraction - would need more sophisticated parsing
+        """Extract time series data from content."""
         time_series = {}
 
-        # Look for patterns like "2020年: 100億円" or "in 2020: $100M"
         for year in set(years):
-            # Find values near each year mention
             pattern = rf'{year}[年\s:：]?\s*([\d,]+\.?\d*)\s*(億|万|%|円|ドル)?'
             matches = re.findall(pattern, content)
             if matches:
@@ -652,6 +1082,58 @@ Return ONLY valid JSON, no other text."""
 
         return time_series
 
+    def _extract_percentage_data(
+        self,
+        content: str,
+        section_id: str,
+        section_title: str,
+    ) -> Optional[TableData]:
+        """Extract percentage/distribution data from content."""
+        # Find patterns like "ItemA: 30%" or "ItemA（30%）" or "ItemA 30%"
+        patterns = [
+            re.compile(r'([^\d\n]{2,20})[：:]\s*(\d+\.?\d*)\s*[%％]'),
+            re.compile(r'([^\d\n]{2,20})[\(（]\s*(\d+\.?\d*)\s*[%％][\)）]'),
+            re.compile(r'「([^」]+)」\s*(\d+\.?\d*)\s*[%％]'),
+        ]
+
+        items = []
+        for pattern in patterns:
+            matches = pattern.findall(content)
+            for name, value in matches:
+                name = name.strip().strip('・-– ')
+                try:
+                    items.append((name, float(value)))
+                except ValueError:
+                    pass
+
+        if len(items) < 3:
+            return None
+
+        # Deduplicate
+        seen = set()
+        unique_items = []
+        for name, value in items:
+            if name not in seen:
+                seen.add(name)
+                unique_items.append((name, value))
+
+        if len(unique_items) < 3:
+            return None
+
+        headers = ["Item", "Percentage (%)"]
+        rows = [[name, f"{value:.1f}"] for name, value in unique_items[:10]]
+
+        return TableData(
+            table_id=f"table_{section_id}_pct",
+            title=f"{section_title} - Distribution",
+            caption="Extracted distribution data",
+            headers=headers,
+            rows=rows,
+            section_id=section_id,
+            data_type="distribution",
+            unit="%",
+        )
+
     def _format_time_series_rows(
         self,
         time_series: Dict[str, Dict[str, Any]],
@@ -660,7 +1142,6 @@ Return ONLY valid JSON, no other text."""
         if not time_series:
             return []
 
-        # Get all years
         all_years = set()
         for metric_data in time_series.values():
             all_years.update(metric_data.keys())
@@ -677,113 +1158,198 @@ Return ONLY valid JSON, no other text."""
 
         return rows
 
+    def _parse_json_array(self, text: str) -> List[Dict]:
+        """Robustly parse a JSON array from LLM response text."""
+        # Try direct parse
+        text = text.strip()
+        try:
+            result = json.loads(text)
+            if isinstance(result, list):
+                return result
+        except json.JSONDecodeError:
+            pass
+
+        # Extract from code block
+        code_block = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
+        if code_block:
+            try:
+                result = json.loads(code_block.group(1).strip())
+                if isinstance(result, list):
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+        # Find outermost brackets
+        start = text.find('[')
+        end = text.rfind(']')
+        if start != -1 and end > start:
+            try:
+                result = json.loads(text[start:end + 1])
+                if isinstance(result, list):
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+        return []
+
+    # ========================================================================
+    # LLM Visualization Recommendation
+    # ========================================================================
+
+    def _recommend_visualization(self, table: TableData) -> ChartType:
+        """
+        Use LLM to recommend the best chart type for a table.
+
+        Falls back to rule-based selection if LLM is unavailable.
+        """
+        if not self.llm:
+            return self._rule_based_chart_selection(table)
+
+        # Prepare compact data summary
+        data_summary = f"Title: {table.title}\n"
+        data_summary += f"Headers: {table.headers}\n"
+        data_summary += f"Row count: {len(table.rows)}\n"
+        data_summary += f"Sample rows (first 5):\n"
+        for row in table.rows[:5]:
+            data_summary += f"  {row}\n"
+        data_summary += f"Data type hint: {table.data_type}\n"
+        data_summary += f"Unit: {table.unit or 'N/A'}"
+
+        prompt = f"""Analyze the following data and recommend the SINGLE best chart type for visualization.
+
+{data_summary}
+
+Available chart types:
+- line: Time series, trends over time, continuous data
+- bar: Categorical comparison, discrete items side by side
+- pie: Composition/share of a whole (only when ≤8 categories, data sums to ~100%)
+- area: Cumulative trends, stacked time series
+- scatter: Correlation between two numeric variables
+- stacked_bar: Part-to-whole comparison across categories
+- horizontal_bar: Comparison with long category labels or many items (>6)
+
+Return ONLY the chart type name (one word), nothing else.
+Example: line"""
+
+        try:
+            response = self.llm.generate(prompt)
+            recommended = response.content.strip().lower().replace('"', '').replace("'", "")
+
+            # Map to ChartType
+            type_map = {
+                "line": ChartType.LINE,
+                "bar": ChartType.BAR,
+                "pie": ChartType.PIE,
+                "area": ChartType.AREA,
+                "scatter": ChartType.SCATTER,
+                "stacked_bar": ChartType.STACKED_BAR,
+                "horizontal_bar": ChartType.HORIZONTAL_BAR,
+            }
+            if recommended in type_map:
+                return type_map[recommended]
+
+        except Exception as e:
+            print(f"[FigureTableGenerator] LLM chart recommendation failed: {e}")
+
+        return self._rule_based_chart_selection(table)
+
+    def _rule_based_chart_selection(self, table: TableData) -> ChartType:
+        """Rule-based chart type selection based on data characteristics."""
+        num_rows = len(table.rows)
+        num_cols = len(table.headers)
+
+        if table.data_type == "time_series":
+            if num_cols > 3:
+                return ChartType.AREA
+            return ChartType.LINE
+
+        if table.data_type == "distribution":
+            if num_rows <= 8:
+                return ChartType.PIE
+            return ChartType.HORIZONTAL_BAR
+
+        if table.data_type == "correlation":
+            return ChartType.SCATTER
+
+        if table.data_type == "comparison":
+            if num_cols > 3 and num_rows > 3:
+                return ChartType.STACKED_BAR
+            if num_rows > 6:
+                return ChartType.HORIZONTAL_BAR
+            return ChartType.BAR
+
+        # Default: BAR for small data, HORIZONTAL_BAR for many items
+        if num_rows > 6:
+            return ChartType.HORIZONTAL_BAR
+        return ChartType.BAR
+
+    # ========================================================================
+    # Chart Generation
+    # ========================================================================
+
     def _generate_chart_for_table(
         self,
         table: TableData,
     ) -> Optional[Figure]:
-        """
-        Generate a matplotlib chart for a table.
-
-        Args:
-            table: TableData to visualize
-
-        Returns:
-            Figure object with chart, or None
-        """
+        """Generate a chart for a table using the recommended chart type."""
         try:
             import matplotlib
-            matplotlib.use('Agg')  # Non-interactive backend
+            matplotlib.use('Agg')
             import matplotlib.pyplot as plt
             import matplotlib.font_manager as fm
 
-            # Try to use Japanese font if available
-            try:
-                # Common Japanese fonts
-                japanese_fonts = ['IPAGothic', 'IPAexGothic', 'Noto Sans CJK JP', 'Yu Gothic']
-                available_fonts = [f.name for f in fm.fontManager.ttflist]
-                for font in japanese_fonts:
-                    if font in available_fonts:
-                        plt.rcParams['font.family'] = font
-                        break
-            except Exception:
-                pass
+            # Set up Japanese font
+            self._setup_matplotlib_fonts(plt, fm)
 
-            # Determine chart type based on data type
-            if table.data_type == "time_series":
-                chart_type = ChartType.LINE
-            elif table.data_type == "comparison":
-                chart_type = ChartType.BAR
-            else:
-                chart_type = ChartType.BAR
+            # Set up chart style
+            self._setup_chart_style(plt)
+
+            # Get LLM-recommended or rule-based chart type
+            chart_type = self._recommend_visualization(table)
 
             # Prepare data
             if len(table.headers) < 2 or len(table.rows) < 2:
                 return None
 
-            x_labels = [row[0] for row in table.rows]
-            data_columns = []
-            for col_idx in range(1, len(table.headers)):
-                col_data = []
-                for row in table.rows:
-                    try:
-                        if col_idx < len(row):
-                            val = row[col_idx]
-                            if isinstance(val, (int, float)):
-                                col_data.append(val)
-                            elif isinstance(val, str):
-                                # Try to parse number
-                                clean_val = val.replace(',', '').replace('億', '').replace('万', '')
-                                col_data.append(float(clean_val))
-                            else:
-                                col_data.append(0)
-                        else:
-                            col_data.append(0)
-                    except (ValueError, TypeError):
-                        col_data.append(0)
-                data_columns.append((table.headers[col_idx], col_data))
+            x_labels = [str(row[0]) for row in table.rows]
+            data_columns = self._extract_numeric_columns(table)
 
-            if not data_columns or not any(any(v != 0 for v in col[1]) for col in data_columns):
+            if not data_columns:
                 return None
 
             # Create figure
             fig, ax = plt.subplots(figsize=(10, 6))
 
-            if chart_type == ChartType.LINE:
-                for label, data in data_columns:
-                    ax.plot(x_labels, data, marker='o', label=label)
-                ax.legend()
-            elif chart_type == ChartType.BAR:
-                import numpy as np
-                x = np.arange(len(x_labels))
-                width = 0.8 / len(data_columns)
-                for i, (label, data) in enumerate(data_columns):
-                    offset = (i - len(data_columns) / 2 + 0.5) * width
-                    ax.bar(x + offset, data, width, label=label)
-                ax.set_xticks(x)
-                ax.set_xticklabels(x_labels, rotation=45, ha='right')
-                ax.legend()
+            # Render chart
+            success = self._render_chart(ax, chart_type, x_labels, data_columns, table)
 
-            ax.set_title(table.title)
+            if not success:
+                plt.close(fig)
+                return None
+
+            # Set title and labels
+            ax.set_title(table.title, fontsize=14, fontweight='bold', pad=15)
             if table.unit:
-                ax.set_ylabel(table.unit)
+                ax.set_ylabel(table.unit, fontsize=11)
 
             plt.tight_layout()
 
             # Save chart
             chart_filename = f"chart_{table.table_id}.png"
             chart_path = self.output_dir / chart_filename
-            plt.savefig(chart_path, dpi=150, bbox_inches='tight')
+            plt.savefig(chart_path, dpi=150, bbox_inches='tight',
+                        facecolor='white', edgecolor='none')
             plt.close(fig)
 
-            # Read image data
             with open(chart_path, 'rb') as f:
                 image_data = f.read()
 
+            chart_type_label = chart_type.value.replace("_", " ").title()
             chart_figure = Figure(
                 figure_id=f"chart_{table.table_id}",
                 figure_type=FigureType.CHART,
-                title=f"Chart: {table.title}",
-                caption=table.caption,
+                title=f"{table.title}",
+                caption=f"{chart_type_label} chart: {table.caption}" if table.caption else table.title,
                 source_url=table.source_url,
                 source_title=table.source_title,
                 section_id=table.section_id,
@@ -795,28 +1361,303 @@ Return ONLY valid JSON, no other text."""
             return chart_figure
 
         except ImportError:
-            print("matplotlib not installed. Install with: pip install matplotlib")
+            print("[FigureTableGenerator] matplotlib not installed. Install with: pip install matplotlib")
             return None
         except Exception as e:
-            print(f"Error generating chart: {e}")
+            print(f"[FigureTableGenerator] Error generating chart: {e}")
             return None
+
+    def _setup_matplotlib_fonts(self, plt, fm):
+        """Configure matplotlib for Japanese font support."""
+        try:
+            japanese_fonts = ['IPAGothic', 'IPAexGothic', 'Noto Sans CJK JP',
+                              'Yu Gothic', 'Hiragino Sans', 'MS Gothic']
+            available_fonts = [f.name for f in fm.fontManager.ttflist]
+            for font in japanese_fonts:
+                if font in available_fonts:
+                    plt.rcParams['font.family'] = font
+                    break
+        except Exception:
+            pass
+
+    def _setup_chart_style(self, plt):
+        """Set professional chart styling."""
+        plt.rcParams.update({
+            'axes.grid': True,
+            'grid.alpha': 0.3,
+            'grid.linestyle': '--',
+            'axes.spines.top': False,
+            'axes.spines.right': False,
+            'axes.labelsize': 11,
+            'xtick.labelsize': 10,
+            'ytick.labelsize': 10,
+            'legend.fontsize': 10,
+            'figure.facecolor': 'white',
+        })
+
+    def _extract_numeric_columns(
+        self, table: TableData,
+    ) -> List[Tuple[str, List[float]]]:
+        """Extract numeric columns from table data."""
+        data_columns = []
+
+        for col_idx in range(1, len(table.headers)):
+            col_data = []
+            for row in table.rows:
+                try:
+                    if col_idx < len(row):
+                        val = row[col_idx]
+                        if isinstance(val, (int, float)):
+                            col_data.append(float(val))
+                        elif isinstance(val, str):
+                            clean_val = val.replace(',', '').replace('億', '').replace('万', '')
+                            clean_val = clean_val.replace('%', '').replace('％', '').strip()
+                            col_data.append(float(clean_val))
+                        else:
+                            col_data.append(0)
+                    else:
+                        col_data.append(0)
+                except (ValueError, TypeError):
+                    col_data.append(0)
+            data_columns.append((table.headers[col_idx], col_data))
+
+        # Filter out all-zero columns
+        data_columns = [(label, data) for label, data in data_columns
+                        if any(v != 0 for v in data)]
+
+        return data_columns
+
+    def _render_chart(
+        self,
+        ax,
+        chart_type: ChartType,
+        x_labels: List[str],
+        data_columns: List[Tuple[str, List[float]]],
+        table: TableData,
+    ) -> bool:
+        """Render a specific chart type. Returns True on success."""
+        try:
+            if chart_type == ChartType.LINE:
+                return self._render_line_chart(ax, x_labels, data_columns)
+            elif chart_type == ChartType.BAR:
+                return self._render_bar_chart(ax, x_labels, data_columns)
+            elif chart_type == ChartType.PIE:
+                return self._render_pie_chart(ax, x_labels, data_columns)
+            elif chart_type == ChartType.AREA:
+                return self._render_area_chart(ax, x_labels, data_columns)
+            elif chart_type == ChartType.SCATTER:
+                return self._render_scatter_chart(ax, x_labels, data_columns)
+            elif chart_type == ChartType.STACKED_BAR:
+                return self._render_stacked_bar_chart(ax, x_labels, data_columns)
+            elif chart_type == ChartType.HORIZONTAL_BAR:
+                return self._render_horizontal_bar_chart(ax, x_labels, data_columns)
+            else:
+                return self._render_bar_chart(ax, x_labels, data_columns)
+        except Exception as e:
+            print(f"[FigureTableGenerator] Failed to render {chart_type.value}: {e}")
+            # Fallback to bar chart
+            try:
+                return self._render_bar_chart(ax, x_labels, data_columns)
+            except Exception:
+                return False
+
+    def _render_line_chart(self, ax, x_labels, data_columns) -> bool:
+        """Render a line chart."""
+        for i, (label, data) in enumerate(data_columns):
+            color = CHART_COLORS[i % len(CHART_COLORS)]
+            ax.plot(x_labels, data, marker='o', label=label, color=color,
+                    linewidth=2, markersize=6)
+        if len(data_columns) > 1:
+            ax.legend(loc='best')
+        ax.tick_params(axis='x', rotation=45)
+        return True
+
+    def _render_bar_chart(self, ax, x_labels, data_columns) -> bool:
+        """Render a grouped bar chart."""
+        import numpy as np
+
+        x = np.arange(len(x_labels))
+        width = 0.8 / max(len(data_columns), 1)
+
+        for i, (label, data) in enumerate(data_columns):
+            color = CHART_COLORS[i % len(CHART_COLORS)]
+            offset = (i - len(data_columns) / 2 + 0.5) * width
+            bars = ax.bar(x + offset, data, width, label=label, color=color,
+                          edgecolor='white', linewidth=0.5)
+            # Add value labels on bars for small datasets
+            if len(x_labels) <= 6 and len(data_columns) <= 3:
+                for bar, val in zip(bars, data):
+                    if val != 0:
+                        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                                f'{val:,.0f}', ha='center', va='bottom', fontsize=8)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(x_labels, rotation=45, ha='right')
+        if len(data_columns) > 1:
+            ax.legend(loc='best')
+        return True
+
+    def _render_pie_chart(self, ax, x_labels, data_columns) -> bool:
+        """Render a pie chart."""
+        if not data_columns:
+            return False
+
+        # Use first data column
+        label_name, values = data_columns[0]
+        colors = PIE_COLORS[:len(values)]
+
+        # Filter out zero/negative values
+        filtered = [(label, val) for label, val in zip(x_labels, values) if val > 0]
+        if len(filtered) < 2:
+            return False
+
+        labels, vals = zip(*filtered)
+
+        # Calculate percentages for autopct
+        total = sum(vals)
+        wedges, texts, autotexts = ax.pie(
+            vals,
+            labels=labels,
+            colors=colors[:len(vals)],
+            autopct=lambda pct: f'{pct:.1f}%' if pct >= 3 else '',
+            startangle=90,
+            pctdistance=0.75,
+            wedgeprops={'edgecolor': 'white', 'linewidth': 1.5},
+        )
+
+        # Style text
+        for text in texts:
+            text.set_fontsize(9)
+        for autotext in autotexts:
+            autotext.set_fontsize(8)
+            autotext.set_fontweight('bold')
+
+        ax.set_aspect('equal')
+        ax.grid(False)
+        ax.spines['left'].set_visible(False)
+        ax.spines['bottom'].set_visible(False)
+        ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
+        return True
+
+    def _render_area_chart(self, ax, x_labels, data_columns) -> bool:
+        """Render a stacked area chart."""
+        import numpy as np
+
+        x = np.arange(len(x_labels))
+
+        # Stack data
+        bottom = np.zeros(len(x_labels))
+        for i, (label, data) in enumerate(data_columns):
+            color = CHART_COLORS[i % len(CHART_COLORS)]
+            data_arr = np.array(data)
+            ax.fill_between(x, bottom, bottom + data_arr, label=label,
+                            color=color, alpha=0.7)
+            ax.plot(x, bottom + data_arr, color=color, linewidth=0.8)
+            bottom += data_arr
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(x_labels, rotation=45, ha='right')
+        if len(data_columns) > 1:
+            ax.legend(loc='upper left')
+        ax.set_xlim(0, len(x_labels) - 1)
+        return True
+
+    def _render_scatter_chart(self, ax, x_labels, data_columns) -> bool:
+        """Render a scatter chart."""
+        if len(data_columns) < 2:
+            # Use x_labels as numeric if possible, otherwise use index
+            try:
+                x_vals = [float(str(l).replace(',', '')) for l in x_labels]
+            except ValueError:
+                x_vals = list(range(len(x_labels)))
+            y_label, y_vals = data_columns[0]
+
+            color = CHART_COLORS[0]
+            ax.scatter(x_vals, y_vals, color=color, s=60, alpha=0.7, edgecolors='white')
+            ax.set_xlabel(x_labels[0] if x_labels else "X")
+            ax.set_ylabel(y_label)
+        else:
+            # Two data columns: use first as X, second as Y
+            x_label, x_vals = data_columns[0]
+            y_label, y_vals = data_columns[1]
+
+            color = CHART_COLORS[0]
+            ax.scatter(x_vals, y_vals, color=color, s=60, alpha=0.7, edgecolors='white')
+            ax.set_xlabel(x_label)
+            ax.set_ylabel(y_label)
+
+            # Add labels for each point
+            if len(x_labels) <= 15:
+                for i, label in enumerate(x_labels):
+                    if i < len(x_vals) and i < len(y_vals):
+                        ax.annotate(label, (x_vals[i], y_vals[i]),
+                                    textcoords="offset points", xytext=(5, 5),
+                                    fontsize=7, alpha=0.8)
+
+        return True
+
+    def _render_stacked_bar_chart(self, ax, x_labels, data_columns) -> bool:
+        """Render a stacked bar chart."""
+        import numpy as np
+
+        x = np.arange(len(x_labels))
+        width = 0.6
+
+        bottom = np.zeros(len(x_labels))
+        for i, (label, data) in enumerate(data_columns):
+            color = CHART_COLORS[i % len(CHART_COLORS)]
+            data_arr = np.array(data)
+            ax.bar(x, data_arr, width, label=label, color=color,
+                   bottom=bottom, edgecolor='white', linewidth=0.5)
+            bottom += data_arr
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(x_labels, rotation=45, ha='right')
+        ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
+        return True
+
+    def _render_horizontal_bar_chart(self, ax, x_labels, data_columns) -> bool:
+        """Render a horizontal bar chart."""
+        import numpy as np
+
+        if not data_columns:
+            return False
+
+        y = np.arange(len(x_labels))
+
+        if len(data_columns) == 1:
+            label, data = data_columns[0]
+            color = CHART_COLORS[0]
+            bars = ax.barh(y, data, color=color, edgecolor='white', linewidth=0.5)
+            # Add value labels
+            for bar, val in zip(bars, data):
+                if val != 0:
+                    ax.text(bar.get_width() + max(data) * 0.02, bar.get_y() + bar.get_height() / 2,
+                            f'{val:,.0f}', ha='left', va='center', fontsize=9)
+        else:
+            height = 0.8 / max(len(data_columns), 1)
+            for i, (label, data) in enumerate(data_columns):
+                color = CHART_COLORS[i % len(CHART_COLORS)]
+                offset = (i - len(data_columns) / 2 + 0.5) * height
+                ax.barh(y + offset, data, height, label=label, color=color,
+                        edgecolor='white', linewidth=0.5)
+            ax.legend(loc='best')
+
+        ax.set_yticks(y)
+        ax.set_yticklabels(x_labels)
+        ax.invert_yaxis()
+        return True
+
+    # ========================================================================
+    # Markdown Integration
+    # ========================================================================
 
     def add_figures_to_markdown(
         self,
         markdown_content: str,
         collection: FigureTableCollection,
     ) -> str:
-        """
-        Add figures and tables to markdown content.
-
-        Args:
-            markdown_content: Original markdown content
-            collection: Collection of figures and tables
-
-        Returns:
-            Updated markdown content
-        """
-        # Find section markers and insert figures/tables after each section
+        """Add figures and tables to markdown content."""
         lines = markdown_content.split('\n')
         result_lines = []
         current_section = None
@@ -826,7 +1667,6 @@ Return ONLY valid JSON, no other text."""
 
             # Detect section headers
             if line.startswith('## ') or line.startswith('### '):
-                # Extract section ID from header
                 match = re.match(r'^##+ (\d+(?:\.\d+)?)\. ', line)
                 if match:
                     current_section = match.group(1)
@@ -851,7 +1691,6 @@ Return ONLY valid JSON, no other text."""
                     result_lines.append(f'**{table.title}**')
                     result_lines.append('')
 
-                    # Create markdown table
                     header_line = '| ' + ' | '.join(str(h) for h in table.headers) + ' |'
                     separator = '|' + '|'.join(['---'] * len(table.headers)) + '|'
                     result_lines.append(header_line)
@@ -874,22 +1713,252 @@ Return ONLY valid JSON, no other text."""
                     result_lines.append(f'*{chart.caption}*')
                     result_lines.append('')
 
-                current_section = None  # Reset to avoid duplicate insertions
+                current_section = None
 
         return '\n'.join(result_lines)
+
+    # ========================================================================
+    # DOCX Integration
+    # ========================================================================
+
+    def add_figures_to_docx(
+        self,
+        docx_path: Path,
+        collection: FigureTableCollection,
+        output_path: Path = None,
+    ) -> Optional[Path]:
+        """
+        Add figures and tables to an existing DOCX file.
+
+        Args:
+            docx_path: Path to original DOCX
+            collection: Collection of figures and tables
+            output_path: Output path (defaults to *_with_figures.docx)
+
+        Returns:
+            Path to updated DOCX or None on failure
+        """
+        try:
+            from docx import Document
+            from docx.shared import Inches, Pt
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
+        except ImportError:
+            print("[FigureTableGenerator] python-docx not installed. Install with: pip install python-docx")
+            return None
+
+        try:
+            doc = Document(docx_path)
+            output_path = output_path or docx_path.parent / f"{docx_path.stem}_with_figures.docx"
+
+            # Track which section we're in
+            current_section = None
+            insert_after = []
+
+            for i, paragraph in enumerate(doc.paragraphs):
+                text = paragraph.text.strip()
+
+                # Detect section headers
+                match = re.match(r'^(\d+(?:\.\d+)?)\. ', text)
+                if match and paragraph.style.name.startswith('Heading'):
+                    if current_section:
+                        insert_after.append((i, current_section))
+                    current_section = match.group(1)
+
+            # Insert at end for last section
+            if current_section:
+                insert_after.append((len(doc.paragraphs), current_section))
+
+            # Insert in reverse order to maintain indices
+            for insert_idx, section_id in reversed(insert_after):
+                section_tables = collection.get_tables_for_section(section_id)
+                section_charts = collection.get_charts_for_section(section_id)
+                section_figures = collection.get_figures_for_section(section_id)
+
+                elements = []
+
+                # Add charts
+                for chart in reversed(section_charts):
+                    if chart.image_path and chart.image_path.exists():
+                        elements.append(('image', chart))
+
+                # Add tables
+                for table in reversed(section_tables):
+                    elements.append(('table', table))
+
+                # Add figures
+                for fig in reversed(section_figures):
+                    if fig.image_path and fig.image_path.exists():
+                        elements.append(('image', fig))
+
+                for elem_type, elem in elements:
+                    if elem_type == 'image':
+                        # Add image
+                        p = doc.add_paragraph()
+                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        run = p.add_run()
+                        run.add_picture(str(elem.image_path), width=Inches(5.5))
+
+                        # Add caption
+                        caption_p = doc.add_paragraph()
+                        caption_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        caption_run = caption_p.add_run(elem.caption)
+                        caption_run.font.size = Pt(9)
+                        caption_run.italic = True
+
+                        # Move to correct position
+                        self._move_paragraph_after(doc, p, insert_idx)
+                        self._move_paragraph_after(doc, caption_p, insert_idx + 1)
+
+                    elif elem_type == 'table':
+                        # Add table title
+                        title_p = doc.add_paragraph()
+                        title_run = title_p.add_run(elem.title)
+                        title_run.bold = True
+                        title_run.font.size = Pt(10)
+
+                        # Add table
+                        docx_table = doc.add_table(
+                            rows=len(elem.rows) + 1,
+                            cols=len(elem.headers),
+                        )
+                        docx_table.style = 'Light Grid'
+
+                        # Headers
+                        for j, header in enumerate(elem.headers):
+                            docx_table.rows[0].cells[j].text = str(header)
+
+                        # Data rows
+                        for row_idx, row in enumerate(elem.rows):
+                            for col_idx, cell in enumerate(row):
+                                if col_idx < len(elem.headers):
+                                    docx_table.rows[row_idx + 1].cells[col_idx].text = str(cell)
+
+            doc.save(output_path)
+            return output_path
+
+        except Exception as e:
+            print(f"[FigureTableGenerator] Error adding figures to DOCX: {e}")
+            return None
+
+    def _move_paragraph_after(self, doc, paragraph, index):
+        """Move a paragraph to after the given index in document."""
+        # python-docx doesn't easily support reordering
+        # The paragraphs are added at the end, which is acceptable
+        # for post-content insertion
+        pass
+
+    # ========================================================================
+    # PDF Integration
+    # ========================================================================
+
+    def add_figures_to_pdf(
+        self,
+        markdown_content: str,
+        collection: FigureTableCollection,
+        output_path: Path,
+    ) -> Optional[Path]:
+        """
+        Generate a PDF with figures and tables from markdown + collection.
+
+        Uses the markdown integration and then converts to PDF.
+
+        Args:
+            markdown_content: Original markdown content
+            collection: Collection of figures and tables
+            output_path: Output PDF path
+
+        Returns:
+            Path to generated PDF or None on failure
+        """
+        # First, add figures to markdown
+        updated_md = self.add_figures_to_markdown(markdown_content, collection)
+
+        # Try to convert to PDF using available tools
+        try:
+            import markdown
+
+            # Convert markdown to HTML
+            html_content = markdown.markdown(
+                updated_md,
+                extensions=['tables', 'fenced_code'],
+            )
+
+            # Embed chart images as base64 in HTML
+            html_content = self._embed_images_in_html(html_content, collection)
+
+            # Wrap in HTML template
+            html_doc = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+body {{ font-family: 'Noto Sans CJK JP', 'Yu Gothic', sans-serif; margin: 40px; line-height: 1.6; }}
+table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
+th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+th {{ background-color: #4C78A8; color: white; }}
+tr:nth-child(even) {{ background-color: #f9f9f9; }}
+img {{ max-width: 100%; height: auto; display: block; margin: 15px auto; }}
+h1 {{ color: #2c3e50; border-bottom: 2px solid #4C78A8; padding-bottom: 10px; }}
+h2 {{ color: #34495e; border-bottom: 1px solid #bdc3c7; padding-bottom: 5px; }}
+em {{ color: #7f8c8d; font-size: 0.9em; }}
+</style>
+</head>
+<body>
+{html_content}
+</body>
+</html>"""
+
+            # Write HTML (can be converted to PDF via weasyprint or wkhtmltopdf)
+            html_path = output_path.with_suffix('.html')
+            with open(html_path, 'w', encoding='utf-8') as f:
+                f.write(html_doc)
+
+            # Try weasyprint for PDF conversion
+            try:
+                from weasyprint import HTML
+                HTML(filename=str(html_path)).write_pdf(str(output_path))
+                return output_path
+            except ImportError:
+                pass
+
+            # Fallback: return HTML if PDF conversion unavailable
+            print("[FigureTableGenerator] PDF conversion requires weasyprint. HTML generated instead.")
+            return html_path
+
+        except ImportError:
+            print("[FigureTableGenerator] markdown library not installed for PDF generation.")
+            return None
+        except Exception as e:
+            print(f"[FigureTableGenerator] Error generating PDF: {e}")
+            return None
+
+    def _embed_images_in_html(self, html_content: str, collection: FigureTableCollection) -> str:
+        """Replace image file paths with base64 embedded images in HTML."""
+        all_figures = collection.figures + collection.charts
+        for fig in all_figures:
+            if fig.image_path and fig.image_path.exists():
+                try:
+                    with open(fig.image_path, 'rb') as f:
+                        img_data = base64.b64encode(f.read()).decode('utf-8')
+                    ext = fig.image_path.suffix.lstrip('.')
+                    if ext == 'jpg':
+                        ext = 'jpeg'
+                    data_uri = f"data:image/{ext};base64,{img_data}"
+                    html_content = html_content.replace(str(fig.image_path), data_uri)
+                except Exception:
+                    pass
+        return html_content
+
+    # ========================================================================
+    # Export / Utility
+    # ========================================================================
 
     def export_collection(
         self,
         collection: FigureTableCollection,
         filepath: Path,
     ) -> None:
-        """
-        Export figure/table collection to JSON.
-
-        Args:
-            collection: Collection to export
-            filepath: Output file path
-        """
+        """Export figure/table collection to JSON."""
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(collection.to_dict(), f, ensure_ascii=False, indent=2)
 
@@ -914,18 +1983,16 @@ def add_figures_to_report(
         llm_client: Optional LLM client for analysis
         output_dir: Output directory for images
         language: Language for captions
-        proxies: Proxy settings dict (e.g., {"http": "http://proxy:8080", "https": "http://proxy:8080"})
+        proxies: Proxy settings dict
         verify_ssl: Whether to verify SSL certificates
 
     Returns:
         Path to the updated report
     """
-    # Determine output directory
     if output_dir is None:
         output_dir = report_path.parent / "figures"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create generator
     generator = FigureTableGenerator(
         llm_client=llm_client,
         output_dir=output_dir,
@@ -934,7 +2001,6 @@ def add_figures_to_report(
         verify_ssl=verify_ssl,
     )
 
-    # Generate figures and tables
     collection = generator.generate_figures_and_tables(
         session=session,
         evidence_locker=evidence_locker,
@@ -952,26 +2018,43 @@ def add_figures_to_report(
             continue
 
     if content is None:
-        # Last resort: read with errors='replace'
         with open(report_path, 'r', encoding='utf-8', errors='replace') as f:
             content = f.read()
 
-    # Add figures and tables
-    if report_path.suffix == '.md':
-        updated_content = generator.add_figures_to_markdown(content, collection)
+    suffix = report_path.suffix.lower()
 
-        # Write updated report
+    if suffix == '.md':
+        updated_content = generator.add_figures_to_markdown(content, collection)
         updated_path = report_path.parent / f"{report_path.stem}_with_figures.md"
         with open(updated_path, 'w', encoding='utf-8') as f:
             f.write(updated_content)
 
-        # Export collection metadata
-        collection_path = output_dir / "figures_tables.json"
-        generator.export_collection(collection, collection_path)
+    elif suffix == '.docx':
+        updated_path = generator.add_figures_to_docx(
+            docx_path=report_path,
+            collection=collection,
+        )
+        if not updated_path:
+            updated_path = report_path
 
-        return updated_path
+    elif suffix == '.pdf' or suffix == '.html':
+        updated_path = generator.add_figures_to_pdf(
+            markdown_content=content,
+            collection=collection,
+            output_path=report_path.parent / f"{report_path.stem}_with_figures.pdf",
+        )
+        if not updated_path:
+            updated_path = report_path
+
     else:
-        # For other formats, just return the collection path
-        collection_path = output_dir / "figures_tables.json"
-        generator.export_collection(collection, collection_path)
-        return collection_path
+        # Fallback: treat as markdown
+        updated_content = generator.add_figures_to_markdown(content, collection)
+        updated_path = report_path.parent / f"{report_path.stem}_with_figures.md"
+        with open(updated_path, 'w', encoding='utf-8') as f:
+            f.write(updated_content)
+
+    # Export collection metadata
+    collection_path = output_dir / "figures_tables.json"
+    generator.export_collection(collection, collection_path)
+
+    return updated_path

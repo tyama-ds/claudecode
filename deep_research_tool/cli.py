@@ -150,6 +150,11 @@ def cli():
     help="Max sites to crawl per search in extended mode (default: 3)"
 )
 @click.option(
+    "--auto-figures/--no-auto-figures",
+    default=False,
+    help="Auto-generate figures/tables and embed in report"
+)
+@click.option(
     "--verbose", "-v",
     is_flag=True,
     help="Verbose output"
@@ -181,6 +186,7 @@ def research(
     crawl_max_pages: int,
     crawl_max_depth: int,
     crawl_max_sites: int,
+    auto_figures: bool,
     verbose: bool,
     openai_key: Optional[str],
     anthropic_key: Optional[str],
@@ -192,6 +198,7 @@ def research(
 
     Example:
         deep-research research "AI trends in healthcare 2024"
+        deep-research research "AI trends" --auto-figures
     """
     print_banner()
 
@@ -214,6 +221,7 @@ def research(
         crawl_max_pages=crawl_max_pages,
         crawl_max_depth=crawl_max_depth,
         crawl_max_sites=crawl_max_sites,
+        auto_figures=auto_figures,
     )
 
     # Validate config
@@ -253,10 +261,14 @@ def research(
 
         # Print results summary
         console.print("\n")
+        figures_line = ""
+        if result.get('figures_report_path'):
+            figures_line = f"\nReport (with figures): {result['figures_report_path']}"
         console.print(Panel(
             f"[bold green]Research completed![/bold green]\n\n"
             f"Session ID: {result['session_id']}\n"
-            f"Report: {result['report_path']}\n"
+            f"Report: {result['report_path']}"
+            f"{figures_line}\n"
             f"Evidence: {result.get('evidence_json', 'N/A')}\n"
             f"Verification: {result.get('verification_html', 'N/A')}",
             title="Results",
