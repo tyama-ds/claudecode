@@ -637,6 +637,59 @@ class Researcher:
                                 research_query=query,
                             )
 
+                            # Capture images from page content and attach to ExtractedContent
+                            page_images = getattr(page, 'images', []) or []
+                            if page_images and not extracted.images:
+                                extracted.images = [
+                                    {"src": img.get("src", ""), "alt": img.get("alt", ""),
+                                     "title": img.get("title", ""), "page_title": result.title}
+                                    for img in page_images[:5]
+                                    if img.get("src", "")
+                                ]
+
+                            # Follow links to PDF/XLSX/DOCX documents on the page
+                            page_links = getattr(page, 'links', []) or []
+                            doc_links = [
+                                link for link in page_links
+                                if any(link.get("url", "").lower().endswith(ext)
+                                       for ext in ('.pdf', '.xlsx', '.xls', '.docx', '.csv'))
+                            ]
+                            for doc_link in doc_links[:2]:  # Limit to 2 document links per page
+                                doc_url = doc_link.get("url", "")
+                                if doc_url:
+                                    try:
+                                        print(f"[DEBUG] Following document link: {doc_url[:60]}...")
+                                        doc_page = self.search.get_page_content(doc_url)
+                                        if doc_page.text_content and len(doc_page.text_content) > 50:
+                                            doc_extracted = self.content_extractor.extract_relevant_content(
+                                                raw_content=doc_page.text_content[:self.max_content_length],
+                                                source_url=doc_url,
+                                                source_title=doc_link.get("text", "") or doc_page.title,
+                                                section_context=f"{section.section}. {section.title}",
+                                                research_query=query,
+                                            )
+                                            if doc_extracted.relevance_score >= 0.2:
+                                                section_content_parts.append(doc_extracted)
+                                                iter_record.content_extracted += 1
+                                                # Determine evidence type from extension
+                                                doc_url_lower = doc_url.lower()
+                                                if doc_url_lower.endswith('.pdf'):
+                                                    ev_type = EvidenceType.PDF_DOCUMENT
+                                                else:
+                                                    ev_type = EvidenceType.WEB_PAGE
+                                                self.evidence_locker.add_evidence(
+                                                    url=doc_url,
+                                                    title=doc_link.get("text", "") or doc_page.title,
+                                                    content_excerpt=doc_extracted.processed_content[:500],
+                                                    evidence_type=ev_type,
+                                                    search_query=query,
+                                                    section_reference=section.section,
+                                                    relevance_score=doc_extracted.relevance_score,
+                                                )
+                                                print(f"[DEBUG] Document content added from {doc_url[:50]}")
+                                    except Exception as doc_e:
+                                        print(f"[DEBUG] Failed to extract document link {doc_url[:50]}: {doc_e}")
+
                             print(f"[DEBUG] Extracted relevance_score: {extracted.relevance_score}")
 
                             # Lower threshold to 0.2 to get more content

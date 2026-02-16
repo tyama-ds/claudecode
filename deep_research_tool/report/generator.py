@@ -449,10 +449,16 @@ class ReportGenerator:
         if self.include_toc and plan:
             doc.add_heading("Table of Contents", level=1)
             for item in plan.table_of_contents.items:
-                doc.add_paragraph(
-                    f"{item.section}. {item.title}",
-                    style="TOC Heading"
-                )
+                try:
+                    doc.add_paragraph(
+                        f"{item.section}. {item.title}",
+                        style="TOC Heading"
+                    )
+                except KeyError:
+                    # "TOC Heading" style may not exist in the default template
+                    para = doc.add_paragraph(f"{item.section}. {item.title}")
+                    if para.runs:
+                        para.runs[0].bold = True
 
         # Main Content
         if plan:

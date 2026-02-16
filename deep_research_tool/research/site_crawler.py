@@ -8,7 +8,7 @@ discovering and extracting relevant content from related pages within the same d
 import re
 import time
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Set, Callable
+from typing import List, Dict, Any, Optional, Set, Callable, Tuple
 from urllib.parse import urlparse, urljoin, urldefrag
 from collections import deque
 
@@ -130,11 +130,20 @@ class SiteCrawler:
         url, _ = urldefrag(url)
         return url.rstrip("/")
 
+    def is_document_url(self, url: str) -> bool:
+        """Check if URL is a downloadable document (PDF, XLSX, DOCX, CSV)."""
+        doc_extensions = [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".ppt", ".pptx"]
+        lower_url = url.lower()
+        return any(lower_url.endswith(ext) for ext in doc_extensions)
+
     def is_valid_page_url(self, url: str) -> bool:
-        """Check if URL is a valid page URL (not a file download, etc.)."""
-        # Skip common non-page URLs
+        """Check if URL is a valid page URL (not a file download, etc.).
+
+        Note: PDF/DOCX/XLSX documents are now handled separately via
+        is_document_url() and are not skipped outright.
+        """
+        # Skip binary/media files (but NOT PDF/DOCX/XLSX/CSV - those are now handled)
         skip_extensions = [
-            ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
             ".zip", ".rar", ".tar", ".gz", ".exe", ".dmg",
             ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp",
             ".mp3", ".mp4", ".avi", ".mov", ".wmv",
@@ -158,9 +167,15 @@ class SiteCrawler:
 
         return True
 
-    def extract_links(self, base_url: str, html_content: str) -> List[str]:
-        """Extract links from HTML content."""
-        links = []
+    def extract_links(self, base_url: str, html_content: str) -> Tuple[List[str], List[str]]:
+        """Extract links from HTML content.
+
+        Returns:
+            Tuple of (page_links, document_links) where document_links
+            are URLs to PDF/XLSX/DOCX/CSV files.
+        """
+        page_links = []
+        document_links = []
 
         # Simple regex to find href attributes
         href_pattern = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
@@ -181,13 +196,17 @@ class SiteCrawler:
             else:
                 full_url = urljoin(base_url, href)
 
-            # Only include same-domain URLs
-            if self.is_same_domain(full_url, base_url):
-                normalized = self.normalize_url(full_url)
-                if self.is_valid_page_url(normalized) and normalized not in links:
-                    links.append(normalized)
+            normalized = self.normalize_url(full_url)
 
-        return links
+            # Categorize: document link vs page link
+            if self.is_document_url(normalized):
+                if normalized not in document_links:
+                    document_links.append(normalized)
+            elif self.is_same_domain(full_url, base_url):
+                if self.is_valid_page_url(normalized) and normalized not in page_links:
+                    page_links.append(normalized)
+
+        return page_links, document_links
 
     def score_relevance_simple(
         self,
@@ -398,13 +417,17 @@ Focus on specific, actionable topics and queries. Limit to 5 each."""
                 )
 
             try:
-                # Fetch page
+                # Fetch page (handle both regular pages and document URLs)
+                is_doc = self.is_document_url(current_url)
                 page = self.search.get_page_content(current_url)
                 pages_crawled += 1
                 self._total_pages_crawled += 1
 
-                # Extract links for further crawling
-                links = self.extract_links(current_url, page.html_content or "")
+                # Extract links for further crawling (only for HTML pages)
+                page_links = []
+                doc_links = []
+                if not is_doc and page.html_content:
+                    page_links, doc_links = self.extract_links(current_url, page.html_content)
 
                 # Score relevance
                 if self.llm:
@@ -427,7 +450,7 @@ Focus on specific, actionable topics and queries. Limit to 5 each."""
                     url=current_url,
                     title=page.title or "",
                     content=page.text_content,
-                    links=links,
+                    links=page_links,
                     relevance_score=relevance,
                     depth=depth,
                     images=[{"url": img.get("src", ""), "alt": img.get("alt", "")}
@@ -438,8 +461,36 @@ Focus on specific, actionable topics and queries. Limit to 5 each."""
                 if relevance >= self.relevance_threshold:
                     crawled_pages.append(crawled_page)
 
-                # Add links to queue (prioritize links with topic keywords in URL)
-                for link in links:
+                # Process discovered document links (PDF/XLSX/DOCX/CSV)
+                for doc_url in doc_links[:3]:  # Limit document downloads per page
+                    if doc_url not in visited and self._total_pages_crawled < self.GLOBAL_MAX_PAGES:
+                        visited.add(doc_url)
+                        try:
+                            doc_page = self.search.get_page_content(doc_url)
+                            self._total_pages_crawled += 1
+                            if doc_page.text_content and len(doc_page.text_content) > 50:
+                                doc_relevance = self.score_relevance_simple(
+                                    doc_page.text_content,
+                                    doc_page.title or "",
+                                    research_topic,
+                                    keywords,
+                                )
+                                doc_crawled = CrawledPage(
+                                    url=doc_url,
+                                    title=doc_page.title or "",
+                                    content=doc_page.text_content,
+                                    links=[],
+                                    relevance_score=doc_relevance,
+                                    depth=depth + 1,
+                                )
+                                if doc_relevance >= self.relevance_threshold:
+                                    crawled_pages.append(doc_crawled)
+                                    print(f"[SiteCrawler] Extracted document: {doc_url[:60]} (relevance: {doc_relevance:.2f})")
+                        except Exception as doc_e:
+                            print(f"[SiteCrawler] Failed to extract document {doc_url[:60]}: {doc_e}")
+
+                # Add page links to queue (prioritize links with topic keywords in URL)
+                for link in page_links:
                     if link not in visited:
                         # Prioritize URLs containing topic keywords
                         priority_boost = any(

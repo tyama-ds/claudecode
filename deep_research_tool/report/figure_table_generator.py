@@ -561,6 +561,7 @@ class FigureTableGenerator:
 
         # First, check if images are already stored in section_data
         existing_images = section_data.get("images", [])
+        print(f"[FigureTableGenerator] Section {section_id}: found {len(existing_images)} stored images")
         for idx, img_data in enumerate(existing_images[:self.max_images_per_section]):
             src = img_data.get("src", "")
             if not src:
@@ -572,8 +573,8 @@ class FigureTableGenerator:
                 figure = Figure(
                     figure_id=f"fig_{section_id}_{idx+1}",
                     figure_type=FigureType.IMAGE,
-                    title=img_data.get("suggested_caption", f"Figure {idx+1}"),
-                    caption=img_data.get("suggested_caption", ""),
+                    title=img_data.get("suggested_caption", "") or img_data.get("alt", "") or f"Figure {idx+1}",
+                    caption=img_data.get("suggested_caption", "") or img_data.get("alt", ""),
                     source_url=src,
                     source_title=img_data.get("page_title", ""),
                     section_id=section_id,
@@ -582,24 +583,40 @@ class FigureTableGenerator:
                     alt_text=img_data.get("alt", ""),
                 )
                 figures.append(figure)
+                print(f"[FigureTableGenerator] Downloaded image from stored data: {src[:60]}")
 
-        # If no images found, try to get from evidence URLs
-        if not figures and evidence_list:
-            for idx, evidence in enumerate(evidence_list[:self.max_images_per_section]):
-                images_from_url = self._extract_images_from_url(
-                    evidence.url,
-                    evidence.title,
-                    limit=1,
-                )
-                for img in images_from_url:
-                    img.section_id = section_id
-                    img.figure_id = f"fig_{section_id}_{len(figures)+1}"
-                    figures.append(img)
-                    if len(figures) >= self.max_images_per_section:
-                        break
+        # If not enough images from stored data, try evidence URLs
+        if len(figures) < self.max_images_per_section and evidence_list:
+            print(f"[FigureTableGenerator] Section {section_id}: trying {len(evidence_list)} evidence URLs for images")
+            for idx, evidence in enumerate(evidence_list[:5]):  # Check more evidence URLs
                 if len(figures) >= self.max_images_per_section:
                     break
+                # Skip non-web evidence (PDFs etc.)
+                url = getattr(evidence, 'url', '')
+                if not url or not url.startswith('http'):
+                    continue
+                # Skip PDF/document URLs - they don't have extractable images
+                if any(url.lower().endswith(ext) for ext in ['.pdf', '.docx', '.xlsx', '.csv']):
+                    continue
 
+                try:
+                    images_from_url = self._extract_images_from_url(
+                        url,
+                        getattr(evidence, 'title', ''),
+                        limit=2,
+                    )
+                    for img in images_from_url:
+                        img.section_id = section_id
+                        img.figure_id = f"fig_{section_id}_{len(figures)+1}"
+                        figures.append(img)
+                        print(f"[FigureTableGenerator] Extracted image from evidence URL: {url[:60]}")
+                        if len(figures) >= self.max_images_per_section:
+                            break
+                except Exception as e:
+                    print(f"[FigureTableGenerator] Failed to extract images from {url[:60]}: {e}")
+                    continue
+
+        print(f"[FigureTableGenerator] Section {section_id}: total {len(figures)} images extracted")
         return figures
 
     def _extract_images_from_url(
@@ -640,10 +657,16 @@ class FigureTableGenerator:
                 # Skip small icons and tracking pixels
                 width = img.get('width')
                 height = img.get('height')
-                if width and int(width) < 100:
-                    continue
-                if height and int(height) < 100:
-                    continue
+                try:
+                    if width and int(str(width).rstrip('px%')) < 100:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+                try:
+                    if height and int(str(height).rstrip('px%')) < 100:
+                        continue
+                except (ValueError, TypeError):
+                    pass
 
                 # Skip common non-content images
                 skip_keywords = ['icon', 'logo', 'avatar', 'button', 'banner',
@@ -691,8 +714,36 @@ class FigureTableGenerator:
             )
             response.raise_for_status()
 
-            content_type = response.headers.get('content-type', '')
-            if not any(t in content_type.lower() for t in ['image', 'jpeg', 'png', 'gif', 'webp']):
+            content_type = response.headers.get('content-type', '').lower()
+
+            # Check content-type: accept image types, octet-stream, and URLs with image extensions
+            is_image_content = any(t in content_type for t in ['image', 'jpeg', 'png', 'gif', 'webp', 'svg'])
+            is_octet_stream = 'octet-stream' in content_type
+            has_image_extension = self._get_extension_from_url(url) is not None
+
+            if not is_image_content and not (is_octet_stream and has_image_extension) and not has_image_extension:
+                return None, None
+
+            # Validate that the content is actually an image by checking magic bytes
+            content = response.content
+            if len(content) < 8:
+                return None, None
+
+            # Check common image file signatures (magic bytes)
+            image_signatures = [
+                b'\xff\xd8\xff',      # JPEG
+                b'\x89PNG',            # PNG
+                b'GIF87a', b'GIF89a',  # GIF
+                b'RIFF',              # WEBP (RIFF....WEBP)
+                b'<svg',              # SVG
+                b'<?xml',             # SVG (XML format)
+            ]
+            is_valid_image = any(content[:len(sig)] == sig for sig in image_signatures)
+            # WEBP specific check
+            if content[:4] == b'RIFF' and len(content) > 11 and content[8:12] == b'WEBP':
+                is_valid_image = True
+
+            if not is_valid_image and not is_image_content:
                 return None, None
 
             url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
@@ -701,9 +752,9 @@ class FigureTableGenerator:
             filepath = self.output_dir / filename
 
             with open(filepath, 'wb') as f:
-                f.write(response.content)
+                f.write(content)
 
-            return filepath, response.content
+            return filepath, content
 
         except Exception as e:
             print(f"[FigureTableGenerator] Error downloading image {url}: {e}")
