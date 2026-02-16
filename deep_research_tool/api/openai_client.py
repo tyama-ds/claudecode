@@ -19,7 +19,7 @@ class OpenAIClient(BaseLLMClient):
         api_key: Optional[str] = None,
         model: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
         http_proxy: Optional[str] = None,
         https_proxy: Optional[str] = None,
         verify_ssl: bool = True,
