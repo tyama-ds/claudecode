@@ -20,6 +20,9 @@ class OpenAIClient:
     """Minimal OpenAI API client."""
 
     MODELS = {
+        "gpt-5": "gpt-5",
+        "gpt-5-mini": "gpt-5-mini",
+        "gpt-5-nano": "gpt-5-nano",
         "gpt-4o": "gpt-4o",
         "gpt-4o-mini": "gpt-4o-mini",
         "gpt-4-turbo": "gpt-4-turbo",
@@ -29,9 +32,9 @@ class OpenAIClient:
     }
 
     # Models that do not support temperature parameter
-    NO_TEMPERATURE_PREFIXES = ("o1", "o3", "o4")
+    NO_TEMPERATURE_PREFIXES = ("o1", "o3", "o4", "gpt-5")
 
-    def __init__(self, api_key: str | None = None, model: str = "gpt-4o-mini"):
+    def __init__(self, api_key: str | None = None, model: str = "gpt-5-mini"):
         self.api_key = api_key or os.getenv("OPENAI_API_KEY", "")
         self.model = model
         self._client = None
@@ -147,6 +150,9 @@ def get_available_models() -> dict:
     """Return available models grouped by provider."""
     return {
         "openai": [
+            {"id": "gpt-5", "name": "GPT-5"},
+            {"id": "gpt-5-mini", "name": "GPT-5 Mini"},
+            {"id": "gpt-5-nano", "name": "GPT-5 Nano"},
             {"id": "gpt-4o", "name": "GPT-4o"},
             {"id": "gpt-4o-mini", "name": "GPT-4o Mini"},
             {"id": "o1", "name": "o1"},

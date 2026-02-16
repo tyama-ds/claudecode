@@ -12,7 +12,7 @@ from .base import BaseLLMClient, Message, MessageRole, LLMResponse, TokenUsage, 
 class OpenAIClient(BaseLLMClient):
     """OpenAI API client for GPT models."""
 
-    DEFAULT_MODEL = "gpt-4o-mini"
+    DEFAULT_MODEL = "gpt-5-mini"
 
     def __init__(
         self,

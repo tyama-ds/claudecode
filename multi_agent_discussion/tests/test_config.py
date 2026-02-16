@@ -22,14 +22,14 @@ class TestLLMConfig:
         """Test default configuration values."""
         config = LLMConfig()
         assert config.provider == LLMProvider.OPENAI
-        assert config.openai_model == "gpt-4o-mini"
+        assert config.openai_model == "gpt-5-mini"
         assert config.anthropic_model == "claude-3-5-sonnet-20241022"
         assert config.temperature == 0.7
 
     def test_get_model_openai(self):
         """Test getting model for OpenAI provider."""
         config = LLMConfig(provider=LLMProvider.OPENAI)
-        assert config.get_model() == "gpt-4o-mini"
+        assert config.get_model() == "gpt-5-mini"
 
     def test_get_model_anthropic(self):
         """Test getting model for Anthropic provider."""
