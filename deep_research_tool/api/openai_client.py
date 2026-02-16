@@ -192,25 +192,59 @@ class OpenAIClient(BaseLLMClient):
         # Make API call
         response = self._client.chat.completions.create(**api_params)
 
-        # Extract response
+        # Extract response - handle missing/empty choices
+        if not response.choices:
+            print(f"[WARNING OpenAI] API returned no choices. Model: {model}")
+            return LLMResponse(
+                content="",
+                model=response.model if response else model,
+                usage={},
+                finish_reason="error",
+                raw_response=response,
+            )
+
         choice = response.choices[0]
+
+        # Handle None content - OpenAI can return content=None in several cases:
+        # - Content filter triggered (finish_reason="content_filter")
+        # - Reasoning models (o1/o3) with certain configs
+        # - Token limit exhausted before any output (finish_reason="length")
+        content = choice.message.content
+        if content is None:
+            # Check for refusal (newer OpenAI models)
+            refusal = getattr(choice.message, "refusal", None)
+            if refusal:
+                print(f"[WARNING OpenAI] Model refused request: {refusal}")
+                content = ""
+            else:
+                print(f"[WARNING OpenAI] Response content is None. "
+                      f"finish_reason={choice.finish_reason}, model={response.model}")
+                content = ""
+
+        if choice.finish_reason == "length":
+            print(f"[WARNING OpenAI] Response truncated (finish_reason=length). "
+                  f"Output may be incomplete. Consider increasing max_tokens.")
+        elif choice.finish_reason == "content_filter":
+            print(f"[WARNING OpenAI] Content was filtered by OpenAI safety system.")
+
         usage = {
-            "prompt_tokens": response.usage.prompt_tokens,
-            "completion_tokens": response.usage.completion_tokens,
-            "total_tokens": response.usage.total_tokens,
+            "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
+            "completion_tokens": response.usage.completion_tokens if response.usage else 0,
+            "total_tokens": response.usage.total_tokens if response.usage else 0,
         }
 
         # Record token usage to global tracker
-        token_usage = TokenUsage(
-            prompt_tokens=response.usage.prompt_tokens,
-            completion_tokens=response.usage.completion_tokens,
-            total_tokens=response.usage.total_tokens,
-            model=response.model,
-        )
-        get_token_stats().add_usage(token_usage)
+        if response.usage:
+            token_usage = TokenUsage(
+                prompt_tokens=response.usage.prompt_tokens,
+                completion_tokens=response.usage.completion_tokens,
+                total_tokens=response.usage.total_tokens,
+                model=response.model,
+            )
+            get_token_stats().add_usage(token_usage)
 
         return LLMResponse(
-            content=choice.message.content,
+            content=content,
             model=response.model,
             usage=usage,
             finish_reason=choice.finish_reason,
