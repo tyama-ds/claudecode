@@ -168,6 +168,7 @@ class DuckDuckGoSearch(BaseSearchClient):
             List of search results
         """
         max_results = max_results or self.max_results
+        print(f"[DuckDuckGo] Searching: {query}")
 
         for attempt in range(retry_count + 1):
             try:

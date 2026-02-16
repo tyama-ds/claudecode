@@ -159,7 +159,7 @@ class BaseLLMClient(ABC):
         api_key: Optional[str] = None,
         model: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
     ):
         """
         Initialize the LLM client.
@@ -168,7 +168,7 @@ class BaseLLMClient(ABC):
             api_key: API key for the provider
             model: Model name to use
             temperature: Sampling temperature
-            max_tokens: Maximum tokens in response
+            max_tokens: Maximum tokens in response (default: 8192)
         """
         self.api_key = api_key
         self.model = model

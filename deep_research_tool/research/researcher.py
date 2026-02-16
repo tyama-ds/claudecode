@@ -566,11 +566,12 @@ class Researcher:
                 break
 
             iter_record.queries_executed = queries
-            print(f"[DEBUG] Section {section.section} iteration {iteration}: executing {len(queries[:self.max_queries_per_iteration])} queries")
+            queries_to_run = queries[:self.max_queries_per_iteration]
+            print(f"\n[Search] Section {section.section} - {len(queries_to_run)} queries to execute")
 
             # Execute searches and extract content
-            for query in queries[:self.max_queries_per_iteration]:
-                print(f"[DEBUG] Searching: {query[:50]}...")
+            for qi, query in enumerate(queries_to_run, 1):
+                print(f"[Search] ({qi}/{len(queries_to_run)}) Query: {query}")
                 try:
                     # Use multilingual search if enabled, otherwise standard search
                     if self.multilingual_searcher:

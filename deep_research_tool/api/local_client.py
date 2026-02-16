@@ -96,7 +96,7 @@ class LocalLLMClient(BaseLLMClient):
         base_url: str = None,
         api_key: str = None,  # Some local servers may require auth
         temperature: float = 0.7,
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
         timeout: int = 120,
         http_proxy: str = None,
         https_proxy: str = None,
