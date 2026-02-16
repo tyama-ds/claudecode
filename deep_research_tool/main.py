@@ -424,6 +424,16 @@ class DeepResearchTool:
                 verification_html,
             )
 
+        # Enhance section contents with full evidence review before report generation
+        if progress_callback:
+            progress_callback("Reviewing all evidence for report enhancement...", 92)
+
+        session = self._enhance_sections_with_full_evidence(
+            session=session,
+            evidence_locker=evidence_locker,
+            query=query,
+        )
+
         # Generate report
         if progress_callback:
             progress_callback("Generating report...", 95)
@@ -510,6 +520,327 @@ class DeepResearchTool:
             content_parts.append(section_data.get("content", ""))
 
         return "\n\n".join(content_parts)
+
+    def _enhance_sections_with_full_evidence(
+        self,
+        session: ResearchSession,
+        evidence_locker: EvidenceLocker,
+        query: str,
+    ) -> ResearchSession:
+        """
+        Enhance report sections by reviewing ALL evidence across the entire locker.
+
+        This method:
+        1. Reviews all evidence in the locker (not just per-section)
+        2. Identifies key numerical data, notable events, and important facts
+        3. Re-accesses URLs that contain important data for precise extraction
+        4. Regenerates section content with comprehensive evidence integration
+
+        Args:
+            session: Research session with section contents
+            evidence_locker: Evidence locker with all collected evidence
+            query: Original research query
+
+        Returns:
+            Enhanced ResearchSession with improved section contents
+        """
+        try:
+            all_evidence = evidence_locker.get_all_evidence()
+            if not all_evidence:
+                print("[Evidence Review] No evidence available for enhancement")
+                return session
+
+            print(f"[Evidence Review] Reviewing {len(all_evidence)} evidence items across all sections")
+
+            # Step 1: Build a comprehensive evidence summary
+            evidence_summaries = []
+            urls_with_key_data = []
+            for ev in all_evidence:
+                url = getattr(ev, 'url', '')
+                title = getattr(ev, 'title', '')
+                excerpt = getattr(ev, 'content_excerpt', '')
+                section_ref = getattr(ev, 'section_reference', '')
+                relevance = getattr(ev, 'relevance_score', 0)
+                ev_type = getattr(ev, 'evidence_type', '')
+
+                evidence_summaries.append({
+                    "url": url,
+                    "title": title,
+                    "excerpt": excerpt[:300] if excerpt else "",
+                    "section": section_ref,
+                    "relevance": relevance,
+                    "type": str(ev_type),
+                })
+
+                # Identify URLs likely to contain important numerical data
+                if excerpt:
+                    import re
+                    has_numbers = bool(re.search(r'\d+[.,]?\d*\s*[%％億万兆ドル円]', excerpt))
+                    has_year_data = bool(re.search(r'(19|20)\d{2}年?', excerpt))
+                    if (has_numbers or has_year_data) and relevance and relevance >= 0.5:
+                        urls_with_key_data.append({
+                            "url": url,
+                            "title": title,
+                            "reason": "Contains key numerical data/dates",
+                        })
+
+            # Step 2: Re-access important URLs for precise data extraction
+            re_extracted_data = {}
+            if urls_with_key_data:
+                print(f"[Evidence Review] Re-accessing {min(len(urls_with_key_data), 5)} URLs for precise data")
+                for url_info in urls_with_key_data[:5]:  # Limit re-access
+                    url = url_info["url"]
+                    if not url or not url.startswith("http"):
+                        continue
+                    try:
+                        page = self.search_client.get_page_content(url)
+                        if page.text_content and len(page.text_content) > 100:
+                            re_extracted_data[url] = {
+                                "title": url_info["title"],
+                                "content": page.text_content[:3000],
+                            }
+                            print(f"[Evidence Review] Re-extracted data from: {url[:60]}")
+                    except Exception as e:
+                        print(f"[Evidence Review] Failed to re-access {url[:60]}: {e}")
+
+            # Step 3: Generate comprehensive evidence overview for LLM
+            evidence_overview = self._build_evidence_overview(evidence_summaries, re_extracted_data)
+
+            # Step 4: Enhance each section with full evidence context
+            section_keys = [k for k in session.section_contents.keys() if not k.startswith("_")]
+            if not section_keys:
+                print("[Evidence Review] No sections to enhance")
+                return session
+
+            # Collect all current section contents for cross-reference
+            all_sections_text = ""
+            for key in section_keys:
+                section_data = session.section_contents[key]
+                title = section_data.get("title", key)
+                content = section_data.get("content", "")
+                all_sections_text += f"\n### Section {key}: {title}\n{content[:500]}...\n"
+
+            for section_key in section_keys:
+                section_data = session.section_contents[section_key]
+                current_content = section_data.get("content", "")
+                section_title = section_data.get("title", section_key)
+
+                # Skip sections that already have substantial content
+                if current_content and len(current_content) > 200:
+                    # Still enhance with key data from re-accessed URLs
+                    enhanced = self._enhance_section_content(
+                        section_key=section_key,
+                        section_title=section_title,
+                        current_content=current_content,
+                        evidence_overview=evidence_overview,
+                        re_extracted_data=re_extracted_data,
+                        all_sections_text=all_sections_text,
+                        query=query,
+                    )
+                    if enhanced and len(enhanced) > len(current_content) * 0.8:
+                        session.section_contents[section_key]["content"] = enhanced
+                        print(f"[Evidence Review] Enhanced section {section_key}: {len(current_content)} -> {len(enhanced)} chars")
+                else:
+                    # Generate content for empty/short sections
+                    generated = self._generate_section_from_evidence(
+                        section_key=section_key,
+                        section_title=section_title,
+                        evidence_overview=evidence_overview,
+                        re_extracted_data=re_extracted_data,
+                        all_sections_text=all_sections_text,
+                        query=query,
+                    )
+                    if generated and len(generated) > 50:
+                        session.section_contents[section_key]["content"] = generated
+                        print(f"[Evidence Review] Generated content for section {section_key}: {len(generated)} chars")
+
+            print("[Evidence Review] Section enhancement complete")
+            return session
+
+        except Exception as e:
+            print(f"[Evidence Review] Enhancement failed: {e}")
+            return session
+
+    def _build_evidence_overview(
+        self,
+        evidence_summaries: List[Dict[str, Any]],
+        re_extracted_data: Dict[str, Dict[str, str]],
+    ) -> str:
+        """Build a comprehensive evidence overview string for LLM context."""
+        parts = []
+
+        # Key evidence items
+        parts.append("=== Evidence Overview ===")
+        for i, ev in enumerate(evidence_summaries[:30], 1):  # Top 30 evidence items
+            parts.append(
+                f"[{i}] {ev['title'][:80]} (section: {ev['section']}, relevance: {ev['relevance']:.1f})"
+                f"\n    {ev['excerpt'][:200]}"
+            )
+
+        # Re-extracted precise data
+        if re_extracted_data:
+            parts.append("\n=== Re-extracted Key Data ===")
+            for url, data in re_extracted_data.items():
+                parts.append(f"\nSource: {data['title']}")
+                parts.append(f"URL: {url}")
+                parts.append(f"Data: {data['content'][:500]}")
+
+        return "\n".join(parts)
+
+    def _enhance_section_content(
+        self,
+        section_key: str,
+        section_title: str,
+        current_content: str,
+        evidence_overview: str,
+        re_extracted_data: Dict[str, Dict[str, str]],
+        all_sections_text: str,
+        query: str,
+    ) -> Optional[str]:
+        """Enhance existing section content with full evidence context."""
+        try:
+            lang = self.config.research.language
+            if lang == "ja":
+                prompt = f"""あなたはリサーチレポートのセクション内容を強化するアシスタントです。
+
+【リサーチテーマ】
+{query}
+
+【現在のセクション】
+セクション {section_key}: {section_title}
+
+【現在の内容】
+{current_content[:3000]}
+
+【全エビデンスからの重要データ】
+{evidence_overview[:4000]}
+
+【他セクションの概要（重複回避用）】
+{all_sections_text[:1500]}
+
+【指示】
+上記のエビデンスデータを活用して、このセクションの内容を強化してください。
+
+重要ルール:
+1. 具体的な数字、統計データ、年月日は正確に引用すること（要約せず直接使用）
+2. 重要な出来事や数値データは具体的に記載すること
+3. エビデンスに含まれる特徴的なデータポイントを見逃さないこと
+4. 他のセクションと重複しないようにすること
+5. 元の内容の構造を維持しつつ、情報を充実させること
+6. 推測や仮定は明示すること
+
+強化した本文のみを出力してください（JSON不要）:"""
+            else:
+                prompt = f"""You are enhancing a research report section with comprehensive evidence.
+
+[RESEARCH TOPIC]
+{query}
+
+[CURRENT SECTION]
+Section {section_key}: {section_title}
+
+[CURRENT CONTENT]
+{current_content[:3000]}
+
+[KEY DATA FROM ALL EVIDENCE]
+{evidence_overview[:4000]}
+
+[OTHER SECTIONS OVERVIEW (for avoiding duplication)]
+{all_sections_text[:1500]}
+
+[INSTRUCTIONS]
+Enhance this section using the evidence data above.
+
+Key rules:
+1. Use exact numbers, statistics, dates from evidence (don't summarize - use directly)
+2. Include specific events and data points
+3. Don't miss distinctive data points from evidence
+4. Avoid duplication with other sections
+5. Maintain original structure while enriching content
+6. Mark speculation explicitly
+
+Output only the enhanced text (no JSON):"""
+
+            response = self.llm_client.generate(prompt)
+            if response and response.content and len(response.content.strip()) > 50:
+                return response.content.strip()
+        except Exception as e:
+            print(f"[Evidence Review] Section enhancement failed for {section_key}: {e}")
+        return None
+
+    def _generate_section_from_evidence(
+        self,
+        section_key: str,
+        section_title: str,
+        evidence_overview: str,
+        re_extracted_data: Dict[str, Dict[str, str]],
+        all_sections_text: str,
+        query: str,
+    ) -> Optional[str]:
+        """Generate section content from full evidence when content is missing."""
+        try:
+            lang = self.config.research.language
+            if lang == "ja":
+                prompt = f"""あなたはリサーチレポートのセクションを執筆するアシスタントです。
+
+【リサーチテーマ】
+{query}
+
+【執筆するセクション】
+セクション {section_key}: {section_title}
+
+【利用可能なエビデンス（全体）】
+{evidence_overview[:5000]}
+
+【他セクションの概要（重複回避用）】
+{all_sections_text[:1500]}
+
+【指示】
+上記のエビデンスに基づいて、このセクションの詳細な内容を執筆してください。
+
+重要ルール:
+1. エビデンスに含まれる具体的な数字、統計データ、年月日を正確に使用すること
+2. 重要なデータは要約せず直接引用すること
+3. 特徴的な数字や出来事を網羅的に取り込むこと
+4. 他のセクションと重複する内容は避けること
+5. 論理的な構成で記述すること
+6. エビデンスにない情報は含めないこと
+
+本文のみを出力してください（JSON不要、見出し不要）:"""
+            else:
+                prompt = f"""You are writing a research report section from evidence.
+
+[RESEARCH TOPIC]
+{query}
+
+[SECTION TO WRITE]
+Section {section_key}: {section_title}
+
+[AVAILABLE EVIDENCE (ALL)]
+{evidence_overview[:5000]}
+
+[OTHER SECTIONS (avoid duplication)]
+{all_sections_text[:1500]}
+
+[INSTRUCTIONS]
+Write detailed content for this section based on the evidence above.
+
+Key rules:
+1. Use exact numbers, statistics, dates from evidence
+2. Don't summarize key data - use it directly
+3. Include distinctive data points comprehensively
+4. Avoid content already covered in other sections
+5. Write with logical structure
+6. Don't include information not in the evidence
+
+Output only the text (no JSON, no heading):"""
+
+            response = self.llm_client.generate(prompt)
+            if response and response.content and len(response.content.strip()) > 50:
+                return response.content.strip()
+        except Exception as e:
+            print(f"[Evidence Review] Section generation failed for {section_key}: {e}")
+        return None
 
     def _auto_generate_figures(
         self,

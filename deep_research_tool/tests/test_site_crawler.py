@@ -119,8 +119,12 @@ class TestSiteCrawler:
         assert crawler.is_valid_page_url("https://example.com/article") is True
         assert crawler.is_valid_page_url("https://example.com/news/tech") is True
 
-        # Invalid URLs (files)
-        assert crawler.is_valid_page_url("https://example.com/file.pdf") is False
+        # Document URLs are now valid pages (handled separately via is_document_url)
+        assert crawler.is_valid_page_url("https://example.com/file.pdf") is True
+        assert crawler.is_document_url("https://example.com/file.pdf") is True
+        assert crawler.is_document_url("https://example.com/data.xlsx") is True
+
+        # Invalid URLs (media/binary files)
         assert crawler.is_valid_page_url("https://example.com/image.jpg") is False
         assert crawler.is_valid_page_url("https://example.com/script.js") is False
 
@@ -140,22 +144,28 @@ class TestSiteCrawler:
             <a href="https://other.com/external">External</a>
             <a href="#section">Anchor</a>
             <a href="javascript:void(0)">JS</a>
+            <a href="/report.pdf">PDF Report</a>
+            <a href="/data.xlsx">Excel Data</a>
         </body>
         </html>
         '''
 
-        links = crawler.extract_links(base_url, html)
+        page_links, doc_links = crawler.extract_links(base_url, html)
 
-        # Should include same-domain links
-        assert "https://example.com/about" in links
-        assert "https://example.com/contact" in links
+        # Should include same-domain page links
+        assert "https://example.com/about" in page_links
+        assert "https://example.com/contact" in page_links
 
-        # Should exclude external links
-        assert not any("other.com" in link for link in links)
+        # Document links should be in doc_links
+        assert any("report.pdf" in link for link in doc_links)
+        assert any("data.xlsx" in link for link in doc_links)
+
+        # Should exclude external links from page_links
+        assert not any("other.com" in link for link in page_links)
 
         # Should exclude anchors and javascript
-        assert "#section" not in links
-        assert "javascript:" not in str(links)
+        assert "#section" not in str(page_links)
+        assert "javascript:" not in str(page_links)
 
     def test_score_relevance_simple(self, crawler):
         """Test simple relevance scoring."""

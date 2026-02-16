@@ -612,75 +612,171 @@ Output only the revised content (no JSON):"""
         """Convert markdown content to DOCX and save."""
         try:
             from docx import Document
-            from docx.shared import Pt
+            from docx.shared import Pt, Inches, Cm
             from docx.enum.text import WD_ALIGN_PARAGRAPH
         except ImportError:
             print("[ReportGeneratorV2] python-docx not installed. Falling back to markdown.")
             return self._save_as_markdown(markdown_content, output_dir, filename)
 
-        doc = Document()
-        lines = markdown_content.split("\n")
-        i = 0
+        try:
+            doc = Document()
+            lines = markdown_content.split("\n")
+            i = 0
 
-        while i < len(lines):
-            line = lines[i]
-            stripped = line.strip()
-
-            # Empty line
-            if not stripped:
-                i += 1
-                continue
-
-            # Headings
-            if stripped.startswith("#"):
-                level, text = self._parse_heading(stripped)
-                doc.add_heading(text, level=level)
-                i += 1
-                continue
-
-            # Unordered list items
-            if re.match(r'^[-*+]\s', stripped):
-                text = re.sub(r'^[-*+]\s+', '', stripped)
-                para = doc.add_paragraph(style='List Bullet')
-                self._add_formatted_runs(para, text)
-                i += 1
-                continue
-
-            # Ordered list items
-            if re.match(r'^\d+\.\s', stripped):
-                text = re.sub(r'^\d+\.\s+', '', stripped)
-                para = doc.add_paragraph(style='List Number')
-                self._add_formatted_runs(para, text)
-                i += 1
-                continue
-
-            # Italic metadata line (e.g., *Generated: 2024-01-01*)
-            if stripped.startswith("*") and stripped.endswith("*") and not stripped.startswith("**"):
-                para = doc.add_paragraph()
-                run = para.add_run(stripped.strip("*"))
-                run.italic = True
-                run.font.size = Pt(9)
-                para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                i += 1
-                continue
-
-            # Regular paragraph: collect consecutive non-empty, non-special lines
-            para_lines = []
             while i < len(lines):
-                l = lines[i].strip()
-                if not l or l.startswith("#") or re.match(r'^[-*+]\s', l) or re.match(r'^\d+\.\s', l):
-                    break
-                para_lines.append(l)
-                i += 1
+                line = lines[i]
+                stripped = line.strip()
 
-            if para_lines:
+                # Empty line
+                if not stripped:
+                    i += 1
+                    continue
+
+                # Headings
+                if stripped.startswith("#"):
+                    level, text = self._parse_heading(stripped)
+                    doc.add_heading(text, level=level)
+                    i += 1
+                    continue
+
+                # Markdown table detection (lines starting with |)
+                if stripped.startswith("|") and "|" in stripped[1:]:
+                    table_lines = []
+                    while i < len(lines) and lines[i].strip().startswith("|"):
+                        table_lines.append(lines[i].strip())
+                        i += 1
+                    if table_lines:
+                        self._add_markdown_table_to_docx(doc, table_lines)
+                    continue
+
+                # Unordered list items
+                if re.match(r'^[-*+]\s', stripped):
+                    text = re.sub(r'^[-*+]\s+', '', stripped)
+                    try:
+                        para = doc.add_paragraph(style='List Bullet')
+                    except KeyError:
+                        para = doc.add_paragraph()
+                        text = "- " + text
+                    self._add_formatted_runs(para, text)
+                    i += 1
+                    continue
+
+                # Ordered list items
+                if re.match(r'^\d+\.\s', stripped):
+                    text = re.sub(r'^\d+\.\s+', '', stripped)
+                    try:
+                        para = doc.add_paragraph(style='List Number')
+                    except KeyError:
+                        para = doc.add_paragraph()
+                        text = stripped  # Keep the number prefix
+                    self._add_formatted_runs(para, text)
+                    i += 1
+                    continue
+
+                # Italic metadata line (e.g., *Generated: 2024-01-01*)
+                if stripped.startswith("*") and stripped.endswith("*") and not stripped.startswith("**"):
+                    para = doc.add_paragraph()
+                    run = para.add_run(stripped.strip("*"))
+                    run.italic = True
+                    run.font.size = Pt(9)
+                    para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                    i += 1
+                    continue
+
+                # Image reference: ![alt](path)
+                img_match = re.match(r'!\[([^\]]*)\]\(([^)]+)\)', stripped)
+                if img_match:
+                    alt_text = img_match.group(1)
+                    img_path = img_match.group(2)
+                    self._add_image_to_docx(doc, img_path, alt_text)
+                    i += 1
+                    continue
+
+                # Regular paragraph: collect consecutive non-empty, non-special lines
+                para_lines = []
+                while i < len(lines):
+                    l = lines[i].strip()
+                    if not l or l.startswith("#") or re.match(r'^[-*+]\s', l) or re.match(r'^\d+\.\s', l) or l.startswith("|"):
+                        break
+                    # Check for image reference
+                    if re.match(r'!\[([^\]]*)\]\(([^)]+)\)', l):
+                        break
+                    para_lines.append(l)
+                    i += 1
+
+                if para_lines:
+                    para = doc.add_paragraph()
+                    self._add_formatted_runs(para, " ".join(para_lines))
+                continue
+
+            filepath = output_dir / f"{filename}.docx"
+            doc.save(filepath)
+            return filepath
+
+        except Exception as e:
+            print(f"[ReportGeneratorV2] DOCX generation failed: {e}. Falling back to markdown.")
+            return self._save_as_markdown(markdown_content, output_dir, filename)
+
+    def _add_markdown_table_to_docx(self, doc, table_lines: list):
+        """Convert markdown table lines to a DOCX table."""
+        try:
+            from docx.shared import Pt
+
+            # Parse header row
+            rows_data = []
+            for line in table_lines:
+                cells = [c.strip() for c in line.strip("|").split("|")]
+                # Skip separator row (contains only -, :, spaces)
+                if all(re.match(r'^[-:]+$', c.strip()) for c in cells if c.strip()):
+                    continue
+                rows_data.append(cells)
+
+            if not rows_data:
+                return
+
+            num_cols = max(len(row) for row in rows_data)
+            table = doc.add_table(rows=len(rows_data), cols=num_cols)
+            table.style = "Table Grid"
+
+            for row_idx, row_data in enumerate(rows_data):
+                for col_idx, cell_text in enumerate(row_data):
+                    if col_idx < num_cols:
+                        cell = table.rows[row_idx].cells[col_idx]
+                        cell.text = cell_text.strip()
+                        # Bold header row
+                        if row_idx == 0:
+                            for paragraph in cell.paragraphs:
+                                for run in paragraph.runs:
+                                    run.bold = True
+                                    run.font.size = Pt(9)
+
+            doc.add_paragraph()  # Spacing after table
+        except Exception as e:
+            print(f"[ReportGeneratorV2] Table insertion failed: {e}")
+
+    def _add_image_to_docx(self, doc, img_path: str, alt_text: str = ""):
+        """Add an image to the DOCX document."""
+        try:
+            from docx.shared import Inches
+            import os
+
+            # Check if file exists (handle both absolute and relative paths)
+            if os.path.exists(img_path):
+                doc.add_picture(img_path, width=Inches(5.5))
+            elif os.path.exists(os.path.join(str(self.output_dir if hasattr(self, 'output_dir') else '.'), img_path)):
+                full_path = os.path.join(str(self.output_dir if hasattr(self, 'output_dir') else '.'), img_path)
+                doc.add_picture(full_path, width=Inches(5.5))
+
+            if alt_text:
                 para = doc.add_paragraph()
-                self._add_formatted_runs(para, " ".join(para_lines))
-            continue
-
-        filepath = output_dir / f"{filename}.docx"
-        doc.save(filepath)
-        return filepath
+                run = para.add_run(alt_text)
+                run.italic = True
+                from docx.shared import Pt
+                run.font.size = Pt(9)
+        except Exception as e:
+            # If image can't be added, add alt text as placeholder
+            if alt_text:
+                doc.add_paragraph(f"[Image: {alt_text}]")
 
     def _save_as_html(self, markdown_content: str, output_dir: Path, filename: str) -> Path:
         """Convert markdown content to HTML and save."""
