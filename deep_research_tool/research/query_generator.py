@@ -8,6 +8,11 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 from deep_research_tool.utils.helpers import extract_json_from_response
+from deep_research_tool.utils.japanese_text import (
+    extract_content_words_set,
+    title_contains_topic_keywords,
+    is_generic_title_morphological,
+)
 
 
 @dataclass
@@ -193,18 +198,26 @@ class QueryGenerator:
         self.language = language
 
     def _is_generic_title(self, title: str) -> bool:
-        """Check if a section title is too generic."""
+        """Check if a section title is too generic.
+
+        Uses morphological analysis (janome) for accurate base-form comparison
+        of Japanese titles, with regex fallback.
+        """
+        # Direct string match first (fast path)
         title_lower = title.lower().strip()
 
-        # Check Japanese generic titles
         for generic in self.GENERIC_SECTION_TITLES_JA:
             if generic in title_lower or title_lower == generic:
                 return True
 
-        # Check English generic titles
         for generic in self.GENERIC_SECTION_TITLES_EN:
             if generic in title_lower or title_lower == generic:
                 return True
+
+        # Morphological base-form check (catches inflected forms)
+        all_generics = self.GENERIC_SECTION_TITLES_JA + self.GENERIC_SECTION_TITLES_EN
+        if is_generic_title_morphological(title, all_generics):
+            return True
 
         return False
 
@@ -260,15 +273,12 @@ class QueryGenerator:
             issues.append(f"Not enough sections with subsections: {sections_with_subsections} (minimum 2)")
 
         # Check if titles are topic-specific (contain keywords from query)
-        query_words = set(query.lower().split())
-        # Remove common stop words
-        stop_words = {"の", "を", "に", "は", "が", "と", "で", "a", "the", "of", "in", "to", "and", "for"}
-        query_words = query_words - stop_words
+        # Use morphological analysis for proper Japanese keyword extraction
+        query_words = extract_content_words_set(query)
 
         topic_relevant_sections = 0
         for item in toc.items:
-            item_words = set(item.title.lower().split())
-            if query_words & item_words:  # intersection
+            if title_contains_topic_keywords(item.title, query):
                 topic_relevant_sections += 1
 
         if len(toc.items) >= 3 and topic_relevant_sections < 1:

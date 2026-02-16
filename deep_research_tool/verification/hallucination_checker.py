@@ -361,8 +361,9 @@ Focus on verifiable factual claims. Extract 15-30 significant claims."""
 
     def _extract_claims_by_pattern(self, content: str) -> List[DetailedClaim]:
         """Fallback claim extraction using patterns."""
+        from deep_research_tool.utils.japanese_text import split_sentences
         claims = []
-        sentences = re.split(r'[。.!?！？]', content)
+        sentences = split_sentences(content, min_length=20)
         claim_id = 0
 
         for sentence in sentences:

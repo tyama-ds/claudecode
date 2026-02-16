@@ -331,11 +331,10 @@ class DeepThinkProcessor:
                 if fact:
                     facts.append(fact)
 
-        # If no bullet points found, split by sentences
+        # If no bullet points found, split by sentences using morphological analysis
         if not facts:
-            import re
-            sentences = re.split(r'[。.！!？?]', response.content)
-            facts = [s.strip() for s in sentences if s.strip()]
+            from deep_research_tool.utils.japanese_text import split_sentences
+            facts = split_sentences(response.content, min_length=10)
 
         return facts[:20]  # Limit to 20 facts
 
