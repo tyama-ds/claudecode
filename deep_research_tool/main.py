@@ -4,6 +4,7 @@ Main module for Deep Research Tool.
 This module provides the main interface for conducting automated research.
 """
 
+import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable
 
@@ -146,6 +147,7 @@ class DeepResearchTool:
         """
         self.config = config or Config()
         self._validate_config()
+        self._setup_logging()
 
         # Initialize components
         self.llm_client = self._create_llm_client()
@@ -189,6 +191,23 @@ class DeepResearchTool:
             language=self.config.research.language,
         )
 
+    def _setup_logging(self) -> None:
+        """Configure logging based on config settings."""
+        logger = logging.getLogger("deep_research_tool")
+        level = logging.DEBUG if self.config.verbose else logging.INFO
+        logger.setLevel(level)
+
+        # Add file handler if log_file is configured
+        if self.config.log_file:
+            self.config.log_file.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = logging.FileHandler(self.config.log_file, encoding="utf-8")
+            file_handler.setLevel(level)
+            formatter = logging.Formatter(
+                "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+            )
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+
     def _validate_config(self) -> None:
         """Validate configuration."""
         errors = self.config.validate()
@@ -230,6 +249,10 @@ class DeepResearchTool:
         if self.config.search.method == SearchMethod.SELENIUM:
             kwargs["headless"] = self.config.search.headless
             kwargs["browser"] = self.config.search.browser
+            kwargs["implicit_wait"] = self.config.search.implicit_wait
+        elif self.config.search.method == SearchMethod.DUCKDUCKGO:
+            kwargs["region"] = self.config.search.region
+            kwargs["safe_search"] = self.config.search.safe_search
 
         return get_search_client(
             method=self.config.search.method.value,
@@ -334,6 +357,8 @@ class DeepResearchTool:
             crawl_mode=self.config.research.crawl_mode,
             fast_crawl_workers=self.config.research.fast_crawl_workers,
             fast_crawl_batch_size=self.config.research.fast_crawl_batch_size,
+            multilingual_config=self.config.multilingual if self.config.multilingual.enabled else None,
+            max_content_length=self.config.research.max_content_length,
         )
 
         # Conduct research
@@ -361,9 +386,15 @@ class DeepResearchTool:
                 progress_callback=progress_callback,
             )
 
-        # Export evidence
-        evidence_json = evidence_locker.export_to_json()
-        evidence_csv = evidence_locker.export_to_csv()
+        # Export evidence (respecting save_evidence and evidence_format settings)
+        evidence_json = None
+        evidence_csv = None
+        if self.config.research.save_evidence:
+            evidence_format = self.config.research.evidence_format
+            if evidence_format in ("json", "both"):
+                evidence_json = evidence_locker.export_to_json()
+            if evidence_format in ("csv", "both"):
+                evidence_csv = evidence_locker.export_to_csv()
 
         # Verification (if enabled)
         verification_html = None
@@ -416,11 +447,14 @@ class DeepResearchTool:
                 result,
                 include_glossary=self.config.report.v2_include_glossary,
             )
-            # Save to file
+            # Save to file in the configured format
             output_dir = self.config.report.output_dir / "reports"
-            output_dir.mkdir(parents=True, exist_ok=True)
-            report_path = output_dir / f"report_{session.session_id}.md"
-            report_path.write_text(final_doc, encoding="utf-8")
+            report_path = generator.save_report(
+                markdown_content=final_doc,
+                output_dir=output_dir,
+                filename=f"report_{session.session_id}",
+                format=self.config.report.format,
+            )
         else:
             # V1: Original generation flow
             report_path = generator.generate_report(
@@ -1560,11 +1594,14 @@ def run_manual_research(
             result,
             include_glossary=config.report.v2_include_glossary,
         )
-        # Save to file
+        # Save to file in the configured format
         output_dir = config.report.output_dir / "reports"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        report_path = output_dir / f"report_{session.session_id}.md"
-        report_path.write_text(final_doc, encoding="utf-8")
+        report_path = generator.save_report(
+            markdown_content=final_doc,
+            output_dir=output_dir,
+            filename=f"report_{session.session_id}",
+            format=config.report.format,
+        )
     else:
         # V1: Original generation flow
         report_path = generator.generate_report(

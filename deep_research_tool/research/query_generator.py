@@ -572,6 +572,14 @@ Requirements:
         # Parse response
         try:
             content = response.content
+            if not content or not content.strip():
+                finish_reason = getattr(response, "finish_reason", "unknown")
+                model = getattr(response, "model", "unknown")
+                usage = getattr(response, "usage", {})
+                print(f"[QueryGenerator] Empty response from LLM. "
+                      f"finish_reason={finish_reason}, model={model}, usage={usage}")
+                return None
+
             data = extract_json_from_response(content)
 
             # Build TOC

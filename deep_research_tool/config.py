@@ -498,12 +498,16 @@ def create_config(
     anthropic_api_key: Optional[str] = None,
     model: Optional[str] = None,
     search_method: str = "duckduckgo",
+    search_region: str = "wt-wt",
+    safe_search: str = "moderate",
+    implicit_wait: int = 10,
     research_iterations: int = 3,
     output_format: str = "markdown",
     output_dir: str = "./output",
     additional_documents: Optional[List[str]] = None,
     enable_verification: bool = True,
     verbose: bool = False,
+    log_file: Optional[str] = None,
     target_pages: Optional[int] = None,
     target_characters: Optional[int] = None,
     extended_mode: bool = False,
@@ -530,6 +534,10 @@ def create_config(
     translate_results: bool = True,
     # Enhanced synthesis
     use_enhanced_synthesis: bool = True,
+    # Research content settings
+    max_content_length: int = 50000,
+    save_evidence: bool = True,
+    evidence_format: str = "json",
     # Search depth parameters
     max_queries_per_iteration: int = 3,
     max_pages_per_query: int = 3,
@@ -580,12 +588,16 @@ def create_config(
         anthropic_api_key: Anthropic API key (optional, uses env var if not provided)
         model: Model name to use (optional, uses default for provider)
         search_method: Web search method ('duckduckgo' or 'selenium')
+        search_region: DuckDuckGo search region (e.g., 'wt-wt' worldwide, 'jp-jp' Japan)
+        safe_search: DuckDuckGo safe search level ('off', 'moderate', 'strict')
+        implicit_wait: Selenium implicit wait time in seconds
         research_iterations: Number of research iterations
         output_format: Report format ('docx', 'pdf', or 'markdown')
         output_dir: Output directory path
         additional_documents: List of additional document paths
         enable_verification: Enable hallucination verification
         verbose: Enable verbose logging
+        log_file: Path to log file (optional, logs to file if specified)
         target_pages: Target page count for output (approximate)
         target_characters: Target character count for output
         extended_mode: Enable extended mode (deep site crawling)
@@ -609,6 +621,9 @@ def create_config(
         query_translation: Query translation method ('llm' or 'none')
         translate_results: Whether to translate results to output language
         use_enhanced_synthesis: Use multi-pass content generation for better quality
+        max_content_length: Maximum content length for extraction truncation (default: 50000)
+        save_evidence: Whether to save evidence exports (default: True)
+        evidence_format: Evidence export format: 'json', 'csv', or 'both' (default: 'json')
         max_queries_per_iteration: Max queries to execute per research iteration (default: 3)
         max_pages_per_query: Max pages to process per search query (default: 3)
         content_filter_mode: Content filter strictness ('strict', 'moderate', 'minimal', 'none')
@@ -660,6 +675,9 @@ def create_config(
         method=SearchMethod(search_method),
         headless=kwargs.get("headless", True),
         max_results=kwargs.get("max_results", 10),
+        region=search_region,
+        safe_search=safe_search,
+        implicit_wait=implicit_wait,
     )
 
     research_config = ResearchConfig(
@@ -667,7 +685,10 @@ def create_config(
         max_iterations=kwargs.get("max_iterations", research_iterations + 5),
         max_queries_per_iteration=max_queries_per_iteration,
         max_pages_per_query=max_pages_per_query,
+        max_content_length=max_content_length,
         language=kwargs.get("language", "ja"),
+        save_evidence=save_evidence,
+        evidence_format=evidence_format,
         extended_mode=extended_mode,
         crawl_max_pages=crawl_max_pages,
         crawl_max_depth=crawl_max_depth,
@@ -756,4 +777,5 @@ def create_config(
         process_additional_documents=bool(additional_documents),
         enable_verification=enable_verification,
         verbose=verbose,
+        log_file=Path(log_file) if log_file else None,
     )
