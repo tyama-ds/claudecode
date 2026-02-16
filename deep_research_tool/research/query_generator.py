@@ -355,13 +355,16 @@ class QueryGenerator:
         if has_user_toc_preference:
             print(f"[QueryGenerator] User ToC preference detected, skipping validation")
 
+        # Initialize issues before loop to avoid UnboundLocalError when plan is None on first attempt
+        issues = []
+
         for attempt in range(max_retries + 1):
             plan = self._generate_research_plan_attempt(
                 query=query,
                 requirements=requirements,
                 additional_context=additional_context,
                 is_retry=attempt > 0,
-                previous_issues=[] if attempt == 0 else issues,
+                previous_issues=issues,
                 user_toc_preference=user_toc_text if has_user_toc_preference else "",
             )
 
