@@ -35,9 +35,17 @@ class TestQueryGenerator:
                 "title": "Test Research Report",
                 "summary": "Test summary",
                 "table_of_contents": [
-                    {"section": "1", "title": "Introduction", "description": "Overview", "subsections": []},
-                    {"section": "2", "title": "Analysis", "description": "Main analysis", "subsections": [
-                        {"section": "2.1", "title": "Part A", "description": "First part"}
+                    {"section": "1", "title": "Test Topic Market Size and Growth", "description": "Market analysis", "subsections": [
+                        {"section": "1.1", "title": "Global Market Trends", "description": "Worldwide trends"},
+                        {"section": "1.2", "title": "Regional Breakdown", "description": "By region"},
+                    ]},
+                    {"section": "2", "title": "Test Topic Technical Architecture", "description": "Technical details", "subsections": [
+                        {"section": "2.1", "title": "Core Components", "description": "Main parts"},
+                        {"section": "2.2", "title": "Integration Patterns", "description": "How parts connect"},
+                    ]},
+                    {"section": "3", "title": "Test Topic Competitive Landscape", "description": "Key players", "subsections": [
+                        {"section": "3.1", "title": "Major Vendors", "description": "Top companies"},
+                        {"section": "3.2", "title": "Market Share Distribution", "description": "Share data"},
                     ]},
                 ],
                 "search_queries": ["query1", "query2", "query3"],
@@ -52,7 +60,7 @@ class TestQueryGenerator:
         plan = generator.create_research_plan("Test topic")
 
         assert plan.title == "Test Research Report"
-        assert len(plan.table_of_contents.items) == 2
+        assert len(plan.table_of_contents.items) == 3
         assert len(plan.search_queries) == 3
         mock_llm.generate.assert_called_once()
 

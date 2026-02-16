@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional, Dict, Any
 
+from deep_research_tool.utils.helpers import extract_json_from_response
 from .sentence_splitter import Sentence
 
 
@@ -386,12 +387,7 @@ If the sentence contains no verifiable claims (pure opinion), return an empty cl
 
         try:
             content = response.content
-            start = content.find('{')
-            end = content.rfind('}') + 1
-            if start != -1 and end > start:
-                data = json.loads(content[start:end])
-            else:
-                raise ValueError("No JSON found in response")
+            data = extract_json_from_response(content)
         except (json.JSONDecodeError, ValueError):
             # Fallback to pattern-based extraction
             primary_type = detected_types[0] if detected_types else ClaimType.FACTUAL

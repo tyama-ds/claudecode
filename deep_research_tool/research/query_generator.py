@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
+from deep_research_tool.utils.helpers import extract_json_from_response
+
 
 @dataclass
 class TableOfContentsItem:
@@ -570,12 +572,7 @@ Requirements:
         # Parse response
         try:
             content = response.content
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start != -1 and end > start:
-                data = json.loads(content[start:end])
-            else:
-                raise ValueError("No JSON found in response")
+            data = extract_json_from_response(content)
 
             # Build TOC
             toc_items = []
@@ -733,13 +730,14 @@ Return as a JSON array of specific gaps:
 
     def _create_fallback_plan(self, query: str, error: str) -> ResearchPlan:
         """Create a basic fallback plan when LLM parsing fails."""
-        # Create basic TOC structure
+        # Use query-derived section names instead of generic ones
+        short_query = query[:60] if len(query) > 60 else query
         basic_sections = [
-            TableOfContentsItem("1", "Introduction", "Background and context"),
-            TableOfContentsItem("2", "Main Analysis", "Core analysis of the topic"),
-            TableOfContentsItem("3", "Key Findings", "Important discoveries"),
-            TableOfContentsItem("4", "Discussion", "Analysis and interpretation"),
-            TableOfContentsItem("5", "Conclusion", "Summary and recommendations"),
+            TableOfContentsItem("1", f"{short_query} - Current State and Context", f"Current state and context of {short_query}"),
+            TableOfContentsItem("2", f"{short_query} - Technical Details and Mechanisms", f"Detailed technical analysis of {short_query}"),
+            TableOfContentsItem("3", f"{short_query} - Real-World Examples and Evidence", f"Case studies and evidence related to {short_query}"),
+            TableOfContentsItem("4", f"{short_query} - Challenges and Trade-offs", f"Challenges and trade-offs in {short_query}"),
+            TableOfContentsItem("5", f"{short_query} - Future Directions and Implications", f"Future directions and implications for {short_query}"),
         ]
 
         toc = TableOfContents(

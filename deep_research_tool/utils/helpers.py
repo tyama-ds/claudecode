@@ -2,11 +2,13 @@
 Helper utilities for Deep Research Tool.
 """
 
+import json
 import logging
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 
 def setup_logging(
@@ -248,6 +250,82 @@ def chunk_text(
             start = end - overlap
 
     return chunks
+
+
+def extract_json_from_response(text: str) -> Dict[str, Any]:
+    """
+    Extract JSON object from LLM response text.
+
+    Handles common LLM output patterns:
+    - JSON wrapped in markdown code blocks (```json ... ``` or ``` ... ```)
+    - JSON with surrounding text
+    - Plain JSON
+
+    Args:
+        text: Raw LLM response text
+
+    Returns:
+        Parsed JSON as a dictionary
+
+    Raises:
+        ValueError: If no valid JSON object is found
+    """
+    if not text:
+        raise ValueError("Empty response text")
+
+    # Strip markdown code blocks first
+    # Match ```json\n...\n``` or ```\n...\n```
+    code_block_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', text, re.DOTALL)
+    if code_block_match:
+        candidate = code_block_match.group(1).strip()
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    # Try to find JSON object by matching braces
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("No JSON found in response")
+
+    # Find matching closing brace by tracking nesting
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == '\\' and in_string:
+            escape_next = True
+            continue
+        if ch == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                candidate = text[start:i + 1]
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    # Try continuing to find another valid JSON
+                    break
+
+    # Fallback: try first '{' to last '}'
+    end = text.rfind("}") + 1
+    if start != -1 and end > start:
+        try:
+            return json.loads(text[start:end])
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError("No valid JSON found in response")
 
 
 def merge_dicts(*dicts, deep: bool = True) -> dict:
