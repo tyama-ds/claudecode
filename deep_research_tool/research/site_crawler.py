@@ -597,33 +597,18 @@ def extract_keywords_from_topic(topic: str) -> List[str]:
     """
     Extract keywords from a research topic.
 
+    Uses janome morphological analysis for proper Japanese word segmentation.
+    Falls back to regex splitting when janome is unavailable.
+
+    Example:
+        "炭素繊維市場の動向" -> ["炭素", "繊維", "市場", "動向"]
+        (instead of the whole string as one token with simple space-based split)
+
     Args:
         topic: Research topic string
 
     Returns:
         List of keywords
     """
-    # Remove common stop words
-    stop_words = {
-        "the", "a", "an", "is", "are", "was", "were", "be", "been",
-        "being", "have", "has", "had", "do", "does", "did", "will",
-        "would", "could", "should", "may", "might", "must", "shall",
-        "can", "of", "to", "in", "for", "on", "with", "at", "by",
-        "from", "as", "into", "through", "during", "before", "after",
-        "above", "below", "between", "under", "again", "further",
-        "then", "once", "and", "or", "but", "if", "than", "too",
-        "very", "just", "only", "own", "same", "so", "more", "most",
-        "other", "some", "such", "no", "nor", "not", "about", "what",
-        # Japanese particles and common words
-        "の", "に", "は", "を", "が", "と", "で", "も", "や", "から",
-        "まで", "より", "など", "について", "における", "として",
-    }
-
-    # Split and filter
-    words = re.split(r'[\s、。，．・]+', topic)
-    keywords = [
-        word for word in words
-        if len(word) > 1 and word.lower() not in stop_words
-    ]
-
-    return keywords
+    from deep_research_tool.utils.japanese_text import extract_keywords
+    return extract_keywords(topic, max_keywords=30)

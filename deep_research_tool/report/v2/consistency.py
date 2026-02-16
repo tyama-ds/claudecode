@@ -298,18 +298,14 @@ class ConsistencyChecker:
         """
         report = ConsistencyReport()
 
-        # Extract sentences from each chapter
+        # Extract sentences from each chapter using morphological analysis
+        from deep_research_tool.utils.japanese_text import split_sentences
         chapter_sentences: Dict[str, List[str]] = {}
         for section, content in chapters.items():
-            # Split into sentences (simple approach)
-            if self.language == "ja":
-                sentences = re.split(r'[。！？\n]', content)
-            else:
-                sentences = re.split(r'[.!?\n]', content)
-            # Filter short sentences and normalize
+            sentences = split_sentences(content, min_length=30)
+            # Normalize for comparison
             chapter_sentences[section] = [
                 s.strip().lower() for s in sentences
-                if len(s.strip()) > 30  # Only check substantial sentences
             ]
 
         # Check for duplicates

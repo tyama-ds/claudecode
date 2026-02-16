@@ -2,7 +2,8 @@
 Sentence splitter for breaking text into individual sentences.
 
 Uses a hybrid approach:
-- Rule-based splitting for reliability (primary)
+- Janome morphological analysis for Japanese (primary)
+- Rule-based splitting for reliability (fallback)
 - Optional NLP-based splitting using spaCy
 - Optional LLM-based splitting for complex cases
 
@@ -13,6 +14,11 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional, Tuple
+
+from deep_research_tool.utils.japanese_text import (
+    split_sentences as janome_split_sentences,
+    is_japanese,
+)
 
 
 class SplitMethod(str, Enum):
@@ -197,35 +203,17 @@ class SentenceSplitter:
         return sentences
 
     def _split_japanese(self, text: str) -> List[str]:
-        """Split Japanese text into sentences."""
-        # Pattern for Japanese sentence endings and English sentence endings
-        # Handle 。」 (closing quote after period) as single ending
-        # Also handle English ". " (period+space before uppercase) in mixed text
-        pattern = r'([。！？．…]+[」』）\)】]?|(?<=[^0-9])[.!?]+(?=\s+[A-Z])|(?<=[^0-9])[.!?]+(?:\s|$))'
+        """Split Japanese text into sentences using janome morphological analysis.
 
-        parts = re.split(pattern, text)
-
-        sentences = []
-        current = ""
-
-        for i, part in enumerate(parts):
-            if not part:
-                continue
-
-            if re.match(r'^[。！？．…]+[」』）\)】]?$', part) or re.match(r'^[.!?]+$', part.strip()):
-                # This is an ending, append to current
-                current += part
-                if current.strip():
-                    sentences.append(current.strip())
-                current = ""
-            else:
-                current += part
-
-        # Don't forget the last part
-        if current.strip():
-            sentences.append(current.strip())
-
-        return sentences
+        Uses janome for accurate sentence boundary detection, with regex fallback.
+        Handles:
+        - Standard punctuation (。！？)
+        - Closing brackets after punctuation (。」)
+        - Mixed Japanese/English text
+        - Paragraph boundaries
+        """
+        # Use janome-based splitting from shared utility
+        return janome_split_sentences(text, min_length=self.min_sentence_length)
 
     def _split_english(self, text: str) -> List[str]:
         """Split English text into sentences."""
