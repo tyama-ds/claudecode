@@ -697,7 +697,7 @@ class DeepResearchTool:
                 content=evidence.content_excerpt,
                 source_url=evidence.url,
                 source_title=evidence.title,
-                evidence_id=evidence.evidence_id,
+                evidence_id=evidence.id,
                 section_id=section_id,
                 source_reliability=source_reliability,
                 research_topic=session.query if session else "",
@@ -752,9 +752,9 @@ class DeepResearchTool:
         # Get source texts from evidence locker
         source_texts = {}
         for evidence in evidence_locker.get_all_evidence():
-            # Use evidence_id as the key and content_excerpt as the source text
-            if evidence.evidence_id and evidence.content_excerpt:
-                source_texts[evidence.evidence_id] = evidence.content_excerpt
+            # Use evidence id as the key and content_excerpt as the source text
+            if evidence.id and evidence.content_excerpt:
+                source_texts[evidence.id] = evidence.content_excerpt
 
         # Process each section
         deep_think_results = {}
@@ -1488,9 +1488,9 @@ def run_manual_research(
 
         # Get source texts
         source_texts = {
-            e.evidence_id: e.content_excerpt
+            e.id: e.content_excerpt
             for e in evidence_locker.get_all_evidence()
-            if e.evidence_id and e.content_excerpt
+            if e.id and e.content_excerpt
         }
 
         # Process sections

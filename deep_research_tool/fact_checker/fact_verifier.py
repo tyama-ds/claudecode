@@ -19,6 +19,7 @@ from datetime import datetime
 from enum import Enum
 from typing import List, Optional, Dict, Any
 
+from deep_research_tool.utils.helpers import extract_json_from_response
 from .claim_extractor import Claim, ClaimType
 from .web_crawler import CrawlResult
 
@@ -387,13 +388,7 @@ If the claim appears false but you're not 100% certain, use SUSPICIOUS."""
     ) -> SentenceVerificationResult:
         """Parse LLM response into verification result."""
         try:
-            # Extract JSON from response
-            start = response_content.find('{')
-            end = response_content.rfind('}') + 1
-            if start != -1 and end > start:
-                data = json.loads(response_content[start:end])
-            else:
-                raise ValueError("No JSON found in response")
+            data = extract_json_from_response(response_content)
         except (json.JSONDecodeError, ValueError):
             # Fallback: could not parse, mark as not verified
             return SentenceVerificationResult(
