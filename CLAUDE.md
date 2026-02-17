@@ -78,6 +78,13 @@ git push -u origin <branch-name>
 
 ## For AI Assistants
 
+### Approval Required Before Coding
+
+- **コーディングは必ずオーナーの「許可」を得てから開始すること。**
+- まず提案（方針・設計・変更内容）を提示し、オーナーが内容を吟味・決定するのを待つ。
+- オーナーから明示的な許可が出るまで、コードの作成・編集・ファイル変更を行ってはならない。
+- 許可なく勝手にコーディングを進めることは禁止する。
+
 ### Before Making Changes
 
 1. **Read First**: Always read relevant files before modifying them
