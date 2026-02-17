@@ -67,6 +67,7 @@ all = [
 [project.scripts]
 deep-research = "deep_research_tool.cli:main"
 info-gather = "info_gathering_agent.cli:main"
+patent-research = "patent_research.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/your-repo/deep-research-tool"
