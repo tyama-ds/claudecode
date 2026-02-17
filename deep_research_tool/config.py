@@ -144,6 +144,7 @@ class APIConfig:
     # API parameters
     temperature: float = 0.7
     max_tokens: int = 4096
+    max_tokens_limit: int = 200_000  # Upper bound for auto-retry on truncation
 
     # Available models for reference
     OPENAI_MODELS: tuple = (

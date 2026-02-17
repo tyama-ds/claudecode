@@ -220,6 +220,7 @@ class DeepResearchTool:
             "provider": self.config.api.provider.value,
             "api_key": self.config.api.get_active_api_key(),
             "model": self.config.api.get_active_model(),
+            "max_tokens_limit": self.config.api.max_tokens_limit,
             "http_proxy": self.config.proxy.http_proxy,
             "https_proxy": self.config.proxy.https_proxy,
             "verify_ssl": self.config.proxy.verify_ssl,
