@@ -26,6 +26,16 @@ class EvidenceType(str, Enum):
     USER_PROVIDED = "user_provided"
     OTHER = "other"
 
+    # Patent research specific types
+    PATENT_DOCUMENT = "patent_document"
+    PATENT_CLAIM = "patent_claim"
+    ACADEMIC_PAPER_JST = "academic_paper_jst"
+    ACADEMIC_PAPER_CINII = "academic_paper_cinii"
+    ACADEMIC_PAPER_SCHOLAR = "academic_paper_scholar"
+    EXAMINATION_DOCUMENT = "examination_document"
+    BUSINESS_REPORT = "business_report"
+    TECHNICAL_STANDARD = "technical_standard"
+
 
 class QualityCategory(str, Enum):
     """Information quality categories."""
