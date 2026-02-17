@@ -57,6 +57,8 @@ class DuckDuckGoSearch(BaseSearchClient):
         max_images: int = 5,
         proxies: dict = None,
         verify_ssl: bool = True,
+        simplify_min_results: int = 3,
+        simplify_max_retries: int = 3,
     ):
         """
         Initialize DuckDuckGo search client.
@@ -70,6 +72,8 @@ class DuckDuckGoSearch(BaseSearchClient):
             max_images: Maximum number of images to extract per page
             proxies: Proxy settings dict (e.g., {"http": "http://proxy:8080", "https": "http://proxy:8080"})
             verify_ssl: Verify SSL certificates
+            simplify_min_results: Trigger query simplification when results <= this
+            simplify_max_retries: Max simplification levels to try (1-3)
         """
         super().__init__(
             max_results=max_results,
@@ -81,6 +85,8 @@ class DuckDuckGoSearch(BaseSearchClient):
         self.safe_search = safe_search
         self.proxies = proxies
         self.verify_ssl = verify_ssl
+        self.simplify_min_results = simplify_min_results
+        self.simplify_max_retries = min(simplify_max_retries, 3)  # cap at 3 levels
         self._ddgs = None
         self._ddgs_class = None
         self._using_new_package = False
@@ -156,18 +162,78 @@ class DuckDuckGoSearch(BaseSearchClient):
         **kwargs
     ) -> List[SearchResult]:
         """
-        Perform a DuckDuckGo web search.
+        Perform a DuckDuckGo web search with automatic query simplification.
+
+        When results are insufficient (≤ simplify_min_results), the query is
+        progressively simplified and re-searched up to simplify_max_retries
+        times. Results from all attempts are merged with URL deduplication.
 
         Args:
             query: The search query
             max_results: Override default max results
-            retry_count: Number of retries on failure
+            retry_count: Number of retries on failure (per-attempt)
             **kwargs: Additional search parameters
 
         Returns:
             List of search results
         """
         max_results = max_results or self.max_results
+
+        # Initial search
+        results = self._execute_search(query, max_results, retry_count, **kwargs)
+
+        # If we have enough results, return immediately
+        if len(results) >= self.simplify_min_results:
+            return results
+
+        # Query simplification retry loop
+        seen_urls = {r.url for r in results}
+        last_simplified = query
+
+        for level in range(1, self.simplify_max_retries + 1):
+            simplified = self.simplify_query(query, level=level)
+
+            # Skip if simplification didn't change the query
+            if simplified == last_simplified:
+                continue
+            last_simplified = simplified
+
+            print(f"[DuckDuckGo] Results insufficient ({len(results)}/{self.simplify_min_results}), "
+                  f"retrying with simplified query (level {level}): {simplified}")
+
+            new_results = self._execute_search(simplified, max_results, retry_count, **kwargs)
+
+            # Merge new results (deduplicate by URL)
+            for r in new_results:
+                if r.url not in seen_urls:
+                    results.append(r)
+                    seen_urls.add(r.url)
+
+            if len(results) >= self.simplify_min_results:
+                print(f"[DuckDuckGo] Simplification successful: {len(results)} results after level {level}")
+                break
+
+        return results
+
+    def _execute_search(
+        self,
+        query: str,
+        max_results: int,
+        retry_count: int = 2,
+        **kwargs
+    ) -> List[SearchResult]:
+        """
+        Execute a single DuckDuckGo search with retries on failure.
+
+        Args:
+            query: The search query
+            max_results: Maximum number of results
+            retry_count: Number of retries on failure
+            **kwargs: Additional search parameters
+
+        Returns:
+            List of search results
+        """
         print(f"[DuckDuckGo] Searching: {query}")
 
         for attempt in range(retry_count + 1):

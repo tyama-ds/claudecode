@@ -254,6 +254,8 @@ class DeepResearchTool:
         elif self.config.search.method == SearchMethod.DUCKDUCKGO:
             kwargs["region"] = self.config.search.region
             kwargs["safe_search"] = self.config.search.safe_search
+            kwargs["simplify_min_results"] = self.config.search.query_simplify_min_results
+            kwargs["simplify_max_retries"] = self.config.search.query_simplify_max_retries
 
         return get_search_client(
             method=self.config.search.method.value,

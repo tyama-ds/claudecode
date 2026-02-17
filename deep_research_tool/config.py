@@ -232,6 +232,10 @@ class SearchConfig:
     extract_images: bool = True
     max_images_per_page: int = 5
 
+    # Query simplification retry settings
+    query_simplify_min_results: int = 3      # Trigger simplification when results <= this
+    query_simplify_max_retries: int = 3      # Max simplification levels (1-3)
+
 
 @dataclass
 class MultilingualSearchConfig:
