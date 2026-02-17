@@ -52,25 +52,46 @@ def _section_sort_key(item) -> Tuple:
     return tuple(parts)
 
 
+class ReportFormatError(Exception):
+    """Raised when report cannot be saved in the requested format (strict_format mode)."""
+
+    def __init__(self, message: str, debug_md_path: str = None, original_error: Exception = None):
+        super().__init__(message)
+        self.debug_md_path = debug_md_path
+        self.original_error = original_error
+
+
+# Pre-compiled regex for XML sanitization (covers ALL illegal XML 1.0 characters)
+# XML 1.0 legal chars: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+# Everything else is illegal and must be removed.
+_XML_ILLEGAL_CHARS_RE = re.compile(
+    '['
+    '\x00-\x08'          # C0 control chars (except TAB \x09)
+    '\x0b\x0c'           # VT, FF (except LF \x0a, CR \x0d)
+    '\x0e-\x1f'          # C0 control chars (cont.)
+    '\x7f'               # DEL
+    '\x80-\x84'          # C1 control chars
+    '\x86-\x9f'          # C1 control chars (except NEL \x85)
+    '\ud800-\udfff'      # Surrogate pairs (isolated)
+    '\ufdd0-\ufdef'      # Non-characters
+    '\ufffe\uffff'        # Non-characters (BOM reverse, etc.)
+    ']',
+)
+
+
 def _sanitize_for_xml(text: str) -> str:
     """
     Remove characters illegal in XML 1.0 from text.
 
-    DOCX files are XML internally. XML 1.0 forbids these characters:
-    - 0x00-0x08, 0x0B-0x0C, 0x0E-0x1F (control chars except tab/newline/carriage return)
-    - 0xFFFE, 0xFFFF
+    DOCX files are XML internally. XML 1.0 spec defines legal chars as:
+        #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
 
-    If these characters are present (e.g., from LLM output), doc.save()
-    will raise an XML serialization error.
+    All other characters (control chars, surrogates, non-characters, DEL, C1 range)
+    are stripped to prevent doc.save() XML serialization errors.
     """
     if not text:
         return text
-    # Remove illegal XML 1.0 characters
-    return re.sub(
-        r'[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]',
-        '',
-        text,
-    )
+    return _XML_ILLEGAL_CHARS_RE.sub('', text)
 
 
 @dataclass
@@ -623,6 +644,7 @@ Output only the revised content (no JSON):"""
         output_dir: Path,
         filename: str,
         format: str = "markdown",
+        strict_format: bool = False,
     ) -> Path:
         """
         Save the generated report in the specified format.
@@ -632,9 +654,14 @@ Output only the revised content (no JSON):"""
             output_dir: Directory to save the report
             filename: Base filename (without extension)
             format: Output format ('markdown', 'docx', 'pdf', 'html')
+            strict_format: If True, raise ReportFormatError instead of falling
+                          back to markdown when DOCX generation fails.
 
         Returns:
             Path to the saved report file
+
+        Raises:
+            ReportFormatError: When strict_format=True and DOCX generation fails.
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -642,7 +669,7 @@ Output only the revised content (no JSON):"""
         format_lower = format.lower() if isinstance(format, str) else format.value.lower()
 
         if format_lower == "docx":
-            return self._save_as_docx(markdown_content, output_dir, filename)
+            return self._save_as_docx(markdown_content, output_dir, filename, strict_format=strict_format)
         elif format_lower == "html":
             return self._save_as_html(markdown_content, output_dir, filename)
         elif format_lower == "pdf":
@@ -659,17 +686,47 @@ Output only the revised content (no JSON):"""
         filepath.write_text(content, encoding="utf-8")
         return filepath
 
-    def _save_as_docx(self, markdown_content: str, output_dir: Path, filename: str) -> Path:
-        """Convert markdown content to DOCX and save."""
+    def _save_as_docx(
+        self,
+        markdown_content: str,
+        output_dir: Path,
+        filename: str,
+        strict_format: bool = False,
+    ) -> Path:
+        """Convert markdown content to DOCX and save.
+
+        Uses 3-layer defense against XML illegal characters:
+        1. Pre-sanitize the entire markdown content
+        2. Sanitize every text insertion into the Document
+        3. BytesIO pre-validation before writing to disk
+
+        Args:
+            markdown_content: Markdown text to convert
+            output_dir: Output directory
+            filename: Base filename (without extension)
+            strict_format: If True, raise ReportFormatError on failure instead
+                          of falling back to markdown.
+
+        Returns:
+            Path to the saved DOCX file.
+
+        Raises:
+            ReportFormatError: When strict_format=True and DOCX generation fails.
+        """
         try:
             from docx import Document
             from docx.shared import Pt, Inches, Cm
             from docx.enum.text import WD_ALIGN_PARAGRAPH
         except ImportError:
+            if strict_format:
+                raise ReportFormatError(
+                    "python-docx is not installed. Cannot generate DOCX in strict_format mode. "
+                    "Install with: pip install python-docx"
+                )
             logger.error("[ReportGeneratorV2] python-docx not installed. Falling back to markdown.")
             return self._save_as_markdown(markdown_content, output_dir, filename)
 
-        # Sanitize content to remove illegal XML characters BEFORE processing
+        # Layer 1: Pre-sanitize the entire markdown content
         markdown_content = _sanitize_for_xml(markdown_content)
 
         doc = Document()
@@ -685,9 +742,13 @@ Output only the revised content (no JSON):"""
                 i += 1
                 continue
 
+            # Layer 2: Sanitize every text fragment before insertion
+            stripped = _sanitize_for_xml(stripped)
+
             # Headings
             if stripped.startswith("#"):
                 level, text = self._parse_heading(stripped)
+                text = _sanitize_for_xml(text)
                 try:
                     doc.add_heading(text, level=level)
                 except Exception as e:
@@ -700,7 +761,7 @@ Output only the revised content (no JSON):"""
             if stripped.startswith("|") and "|" in stripped[1:]:
                 table_lines = []
                 while i < len(lines) and lines[i].strip().startswith("|"):
-                    table_lines.append(lines[i].strip())
+                    table_lines.append(_sanitize_for_xml(lines[i].strip()))
                     i += 1
                 if table_lines:
                     self._add_markdown_table_to_docx(doc, table_lines)
@@ -708,7 +769,7 @@ Output only the revised content (no JSON):"""
 
             # Unordered list items
             if re.match(r'^[-*+]\s', stripped):
-                text = re.sub(r'^[-*+]\s+', '', stripped)
+                text = _sanitize_for_xml(re.sub(r'^[-*+]\s+', '', stripped))
                 try:
                     para = doc.add_paragraph(style='List Bullet')
                 except KeyError:
@@ -720,7 +781,7 @@ Output only the revised content (no JSON):"""
 
             # Ordered list items
             if re.match(r'^\d+\.\s', stripped):
-                text = re.sub(r'^\d+\.\s+', '', stripped)
+                text = _sanitize_for_xml(re.sub(r'^\d+\.\s+', '', stripped))
                 try:
                     para = doc.add_paragraph(style='List Number')
                 except KeyError:
@@ -733,7 +794,7 @@ Output only the revised content (no JSON):"""
             # Italic metadata line (e.g., *Generated: 2024-01-01*)
             if stripped.startswith("*") and stripped.endswith("*") and not stripped.startswith("**"):
                 para = doc.add_paragraph()
-                run = para.add_run(stripped.strip("*"))
+                run = para.add_run(_sanitize_for_xml(stripped.strip("*")))
                 run.italic = True
                 run.font.size = Pt(9)
                 para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
@@ -743,7 +804,7 @@ Output only the revised content (no JSON):"""
             # Image reference: ![alt](path)
             img_match = re.match(r'!\[([^\]]*)\]\(([^)]+)\)', stripped)
             if img_match:
-                alt_text = img_match.group(1)
+                alt_text = _sanitize_for_xml(img_match.group(1))
                 img_path = img_match.group(2)
                 self._add_image_to_docx(doc, img_path, alt_text)
                 i += 1
@@ -759,7 +820,7 @@ Output only the revised content (no JSON):"""
                 # Check for image reference
                 if re.match(r'!\[([^\]]*)\]\(([^)]+)\)', l):
                     break
-                para_lines.append(l)
+                para_lines.append(_sanitize_for_xml(l))
                 i += 1
 
             # Safety: if no lines were consumed, force advance to avoid infinite loop
@@ -771,18 +832,45 @@ Output only the revised content (no JSON):"""
                 self._add_formatted_runs(para, " ".join(para_lines))
             continue
 
+        # Layer 3: BytesIO pre-validation - test XML serialization before writing to disk
         filepath = output_dir / f"{filename}.docx"
+        from io import BytesIO
+
         try:
-            doc.save(filepath)
+            buf = BytesIO()
+            doc.save(buf)
+            # Serialization succeeded - write to disk
+            buf.seek(0)
+            with open(filepath, 'wb') as f:
+                f.write(buf.read())
         except Exception as save_error:
-            logger.error(f"[ReportGeneratorV2] doc.save() failed: {save_error}")
-            # Second attempt: sanitize more aggressively and retry
+            logger.error(f"[ReportGeneratorV2] BytesIO pre-validation failed: {save_error}")
+            # Retry: aggressive per-paragraph sanitization
             try:
-                logger.info("[ReportGeneratorV2] Retrying with aggressive sanitization...")
+                logger.info("[ReportGeneratorV2] Retrying with per-paragraph sanitization...")
                 self._sanitize_docx_paragraphs(doc)
-                doc.save(filepath)
+                self._sanitize_docx_tables(doc)
+                buf2 = BytesIO()
+                doc.save(buf2)
+                buf2.seek(0)
+                with open(filepath, 'wb') as f:
+                    f.write(buf2.read())
+                logger.info("[ReportGeneratorV2] Retry succeeded after per-element sanitization.")
             except Exception as retry_error:
-                logger.error(f"[ReportGeneratorV2] Retry also failed: {retry_error}. Falling back to markdown.")
+                if strict_format:
+                    # Save debug markdown so content is not lost
+                    debug_md_path = self._save_as_markdown(markdown_content, output_dir, f"{filename}_debug")
+                    raise ReportFormatError(
+                        f"DOCX generation failed even after sanitization. "
+                        f"Original error: {save_error} / Retry error: {retry_error}. "
+                        f"Debug markdown saved to: {debug_md_path}",
+                        debug_md_path=str(debug_md_path),
+                        original_error=retry_error,
+                    )
+                logger.error(
+                    f"[ReportGeneratorV2] Retry also failed: {retry_error}. "
+                    f"Falling back to markdown."
+                )
                 return self._save_as_markdown(markdown_content, output_dir, filename)
         return filepath
 
@@ -793,6 +881,17 @@ Output only the revised content (no JSON):"""
             for run in paragraph.runs:
                 if run.text:
                     run.text = _sanitize_for_xml(run.text)
+
+    @staticmethod
+    def _sanitize_docx_tables(doc):
+        """Sanitize all table cell text in a Document to remove illegal XML chars."""
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for paragraph in cell.paragraphs:
+                        for run in paragraph.runs:
+                            if run.text:
+                                run.text = _sanitize_for_xml(run.text)
 
     def _add_markdown_table_to_docx(self, doc, table_lines: list):
         """Convert markdown table lines to a DOCX table."""
@@ -819,7 +918,7 @@ Output only the revised content (no JSON):"""
                 for col_idx, cell_text in enumerate(row_data):
                     if col_idx < num_cols:
                         cell = table.rows[row_idx].cells[col_idx]
-                        cell.text = cell_text.strip()
+                        cell.text = _sanitize_for_xml(cell_text.strip())
                         # Bold header row
                         if row_idx == 0:
                             for paragraph in cell.paragraphs:
@@ -891,19 +990,20 @@ ul, ol {{ padding-left: 1.5em; }}
     @staticmethod
     def _add_formatted_runs(paragraph, text: str):
         """Add text with bold/italic formatting as runs to a paragraph."""
+        text = _sanitize_for_xml(text)
         # Split by bold (**text**) and italic (*text*) markers
         parts = re.split(r'(\*\*[^*]+\*\*|\*[^*]+\*)', text)
         for part in parts:
             if not part:
                 continue
             if part.startswith("**") and part.endswith("**"):
-                run = paragraph.add_run(part[2:-2])
+                run = paragraph.add_run(_sanitize_for_xml(part[2:-2]))
                 run.bold = True
             elif part.startswith("*") and part.endswith("*"):
-                run = paragraph.add_run(part[1:-1])
+                run = paragraph.add_run(_sanitize_for_xml(part[1:-1]))
                 run.italic = True
             else:
-                paragraph.add_run(part)
+                paragraph.add_run(_sanitize_for_xml(part))
 
     @staticmethod
     def _markdown_to_html(markdown_text: str) -> str:

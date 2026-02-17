@@ -18,7 +18,7 @@ from .evidence.locker import EvidenceLocker
 from .verification.verifier import Verifier
 from .report.generator import ReportGenerator
 from .report.length_controller import ContentLengthController, LengthTarget
-from .report.v2 import ReportGeneratorV2, ReportContext, WritingStyle, TargetAudience
+from .report.v2 import ReportGeneratorV2, ReportFormatError, ReportContext, WritingStyle, TargetAudience
 from .report.figure_table_generator import FigureTableGenerator, add_figures_to_report
 from .evidence.numerical_extractor import (
     NumericalDataExtractor,
@@ -464,6 +464,7 @@ class DeepResearchTool:
                 output_dir=output_dir,
                 filename=f"report_{session.session_id}",
                 format=self.config.report.format,
+                strict_format=self.config.report.strict_format,
             )
         else:
             # V1: Original generation flow
@@ -1362,6 +1363,8 @@ def run_research(
     auto_figures_include_tables: bool = True,
     auto_figures_include_charts: bool = True,
     auto_figures_max_images: int = 2,
+    # Format strictness
+    strict_format: bool = False,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -1412,6 +1415,8 @@ def run_research(
         auto_figures_include_tables: Include extracted tables
         auto_figures_include_charts: Include generated charts
         auto_figures_max_images: Max images per section
+        strict_format: If True, raise error instead of falling back to markdown
+                      when DOCX generation fails (default: False)
         **kwargs: Additional configuration options
 
     Returns:
@@ -1509,6 +1514,7 @@ def run_research(
         auto_figures_include_tables=auto_figures_include_tables,
         auto_figures_include_charts=auto_figures_include_charts,
         auto_figures_max_images=auto_figures_max_images,
+        strict_format=strict_format,
         **api_key_param,
         **kwargs,
     )
@@ -1636,6 +1642,8 @@ def run_manual_research(
     consistency_mode: str = "warn",
     # Enhanced synthesis
     use_enhanced_synthesis: bool = True,
+    # Format strictness
+    strict_format: bool = False,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -1764,6 +1772,7 @@ def run_manual_research(
         consistency_threshold=consistency_threshold,
         consistency_mode=consistency_mode,
         use_enhanced_synthesis=use_enhanced_synthesis,
+        strict_format=strict_format,
         **api_key_param,
         **kwargs,
     )
@@ -1932,6 +1941,7 @@ def run_manual_research(
             output_dir=output_dir,
             filename=f"report_{session.session_id}",
             format=config.report.format,
+            strict_format=config.report.strict_format,
         )
     else:
         # V1: Original generation flow
@@ -1976,5 +1986,6 @@ __all__ = [
     "LLMProvider",
     "SearchMethod",
     "ReportFormat",
+    "ReportFormatError",
     "ManualTableOfContents",
 ]
