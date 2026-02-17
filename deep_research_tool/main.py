@@ -18,7 +18,7 @@ from .evidence.locker import EvidenceLocker
 from .verification.verifier import Verifier
 from .report.generator import ReportGenerator
 from .report.length_controller import ContentLengthController, LengthTarget
-from .report.v2 import ReportGeneratorV2, ReportContext, WritingStyle, TargetAudience
+from .report.v2 import ReportGeneratorV2, ReportFormatError, ReportContext, WritingStyle, TargetAudience
 from .report.figure_table_generator import FigureTableGenerator, add_figures_to_report
 from .evidence.numerical_extractor import (
     NumericalDataExtractor,
@@ -464,6 +464,7 @@ class DeepResearchTool:
                 output_dir=output_dir,
                 filename=f"report_{session.session_id}",
                 format=self.config.report.format,
+                strict_format=self.config.report.strict_format,
             )
         else:
             # V1: Original generation flow
@@ -865,20 +866,22 @@ Output only the text (no JSON, no heading):"""
         Returns:
             Path to the updated report with figures, or None if failed
         """
-        try:
-            figures_dir = report_path.parent / "figures"
-            figures_dir.mkdir(parents=True, exist_ok=True)
+        import traceback
 
-            # Get proxy settings
-            proxies = None
-            if self.config.proxy.is_configured():
-                proxies = self.config.proxy.get_proxies_dict()
+        figures_dir = report_path.parent / "figures"
+        figures_dir.mkdir(parents=True, exist_ok=True)
 
-            # Step 1: Extract numerical data if enabled
-            numerical_store = None
-            chart_recommendations = []
+        # Get proxy settings
+        proxies = None
+        if self.config.proxy.is_configured():
+            proxies = self.config.proxy.get_proxies_dict()
 
-            if self.config.report.numerical_extraction:
+        # Step 1-3: Extract numerical data and analyze for charts
+        numerical_store = None
+        chart_recommendations = []
+
+        if self.config.report.numerical_extraction:
+            try:
                 numerical_store = self._extract_numerical_data(
                     session=session,
                     evidence_locker=evidence_locker,
@@ -918,18 +921,23 @@ Output only the text (no JSON, no heading):"""
                     store_path = figures_dir / "numerical_data.json"
                     numerical_store.save_to_json(store_path)
 
-            # Step 4: Create figure generator
-            generator = FigureTableGenerator(
-                llm_client=self.llm_client,
-                output_dir=figures_dir,
-                language=self.config.research.language,
-                max_images_per_section=self.config.report.auto_figures_max_images,
-                proxies=proxies,
-                verify_ssl=self.config.proxy.verify_ssl,
-            )
+            except Exception as e:
+                print(f"[AutoFigures] Numerical data extraction/analysis failed: {e}")
+                traceback.print_exc()
+                # Continue without numerical data — figure/table extraction can still work
 
-            # Step 5: Generate figures/tables/charts
-            # If we have intelligent chart recommendations, use them
+        # Step 4: Create figure generator
+        generator = FigureTableGenerator(
+            llm_client=self.llm_client,
+            output_dir=figures_dir,
+            language=self.config.research.language,
+            max_images_per_section=self.config.report.auto_figures_max_images,
+            proxies=proxies,
+            verify_ssl=self.config.proxy.verify_ssl,
+        )
+
+        # Step 5: Generate figures/tables/charts
+        try:
             if chart_recommendations:
                 collection = generator.generate_from_recommendations(
                     session=session,
@@ -947,13 +955,27 @@ Output only the text (no JSON, no heading):"""
                     include_tables=self.config.report.auto_figures_include_tables,
                     include_charts=self.config.report.auto_figures_include_charts,
                 )
+        except Exception as e:
+            print(f"[AutoFigures] Figure/table generation failed: {e}")
+            traceback.print_exc()
+            return None
 
-            # Skip if nothing was generated
-            total = len(collection.figures) + len(collection.tables) + len(collection.charts)
-            if total == 0:
-                return None
+        # Report extraction results
+        n_figures = len(collection.figures)
+        n_tables = len(collection.tables)
+        n_charts = len(collection.charts)
+        total = n_figures + n_tables + n_charts
 
-            # Read the report content
+        print(f"[AutoFigures] Extraction complete: "
+              f"{n_figures} figure(s), {n_tables} table(s), {n_charts} chart(s)")
+
+        if total == 0:
+            print("[AutoFigures] No figures, tables, or charts were extracted. "
+                  "Skipping insertion into report.")
+            return None
+
+        # Step 6: Read the report content
+        try:
             content = None
             encodings = ['utf-8', 'utf-8-sig', 'cp932', 'shift_jis', 'latin-1']
             for encoding in encodings:
@@ -966,7 +988,12 @@ Output only the text (no JSON, no heading):"""
             if content is None:
                 with open(report_path, 'r', encoding='utf-8', errors='replace') as f:
                     content = f.read()
+        except Exception as e:
+            print(f"[AutoFigures] Failed to read report file {report_path}: {e}")
+            return None
 
+        # Step 7: Insert figures/tables into the report
+        try:
             suffix = report_path.suffix.lower()
 
             if suffix == '.md':
@@ -996,17 +1023,22 @@ Output only the text (no JSON, no heading):"""
                 with open(updated_path, 'w', encoding='utf-8') as f:
                     f.write(updated_content)
 
-            # Export collection metadata
+            print(f"[AutoFigures] Report with figures saved to: {updated_path}")
+
+        except Exception as e:
+            print(f"[AutoFigures] Failed to insert figures into report: {e}")
+            traceback.print_exc()
+            return None
+
+        # Export collection metadata
+        try:
             collection_path = figures_dir / "figures_tables.json"
             generator.export_collection(collection, collection_path)
-
-            return updated_path
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning(
-                f"Auto figure generation failed: {e}"
-            )
-            return None
+            print(f"[AutoFigures] Failed to export collection metadata: {e}")
+            # Non-fatal — the report was already saved
+
+        return updated_path
 
     def _extract_numerical_data(
         self,
@@ -1362,6 +1394,8 @@ def run_research(
     auto_figures_include_tables: bool = True,
     auto_figures_include_charts: bool = True,
     auto_figures_max_images: int = 2,
+    # Format strictness
+    strict_format: bool = False,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -1412,6 +1446,8 @@ def run_research(
         auto_figures_include_tables: Include extracted tables
         auto_figures_include_charts: Include generated charts
         auto_figures_max_images: Max images per section
+        strict_format: If True, raise error instead of falling back to markdown
+                      when DOCX generation fails (default: False)
         **kwargs: Additional configuration options
 
     Returns:
@@ -1509,6 +1545,7 @@ def run_research(
         auto_figures_include_tables=auto_figures_include_tables,
         auto_figures_include_charts=auto_figures_include_charts,
         auto_figures_max_images=auto_figures_max_images,
+        strict_format=strict_format,
         **api_key_param,
         **kwargs,
     )
@@ -1636,6 +1673,8 @@ def run_manual_research(
     consistency_mode: str = "warn",
     # Enhanced synthesis
     use_enhanced_synthesis: bool = True,
+    # Format strictness
+    strict_format: bool = False,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -1764,6 +1803,7 @@ def run_manual_research(
         consistency_threshold=consistency_threshold,
         consistency_mode=consistency_mode,
         use_enhanced_synthesis=use_enhanced_synthesis,
+        strict_format=strict_format,
         **api_key_param,
         **kwargs,
     )
@@ -1932,6 +1972,7 @@ def run_manual_research(
             output_dir=output_dir,
             filename=f"report_{session.session_id}",
             format=config.report.format,
+            strict_format=config.report.strict_format,
         )
     else:
         # V1: Original generation flow
@@ -1976,5 +2017,6 @@ __all__ = [
     "LLMProvider",
     "SearchMethod",
     "ReportFormat",
+    "ReportFormatError",
     "ManualTableOfContents",
 ]

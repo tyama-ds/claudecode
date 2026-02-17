@@ -60,6 +60,7 @@ from .glossary import (
 # Report generation
 from .generator import (
     ReportGeneratorV2,
+    ReportFormatError,
     ChapterContent,
     GenerationResult,
 )
@@ -83,6 +84,7 @@ __all__ = [
     "TermCandidate",
     # Generator
     "ReportGeneratorV2",
+    "ReportFormatError",
     "ChapterContent",
     "GenerationResult",
 ]

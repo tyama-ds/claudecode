@@ -364,6 +364,10 @@ class ReportConfig:
 
     format: ReportFormat = ReportFormat.MARKDOWN
 
+    # Format strictness: if True, never fall back to markdown when DOCX/PDF/HTML fails.
+    # Raises ReportFormatError instead.
+    strict_format: bool = False
+
     # Output settings
     output_dir: Path = field(default_factory=lambda: Path("./output"))
     include_images: bool = True
@@ -577,6 +581,8 @@ def create_config(
     intelligent_charts: bool = True,
     chart_insights: bool = True,
     chart_max_per_section: int = 3,
+    # Format strictness
+    strict_format: bool = False,
     **kwargs
 ) -> Config:
     """
@@ -704,6 +710,7 @@ def create_config(
 
     report_config = ReportConfig(
         format=ReportFormat(output_format),
+        strict_format=strict_format,
         output_dir=Path(output_dir),
         target_pages=target_pages,
         target_characters=target_characters,

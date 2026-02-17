@@ -780,35 +780,64 @@ class FigureTableGenerator:
         content: str,
         evidence_list: List,
     ) -> List[TableData]:
-        """Extract numerical data and create tables for a section."""
+        """Extract numerical data and create tables for a section.
+
+        Extraction priority (evidence-first to reduce hallucination):
+          1. HTML table parsing from evidence URLs (most reliable)
+          2. LLM-based extraction from evidence content (evidence-grounded)
+          3. Pattern-based extraction from evidence/content (fallback)
+        """
         tables = []
+        section_title = section_data.get("title", "")
 
-        # Method 1: LLM-based extraction (preferred)
-        if self.llm:
-            extracted_tables = self._extract_tables_with_llm(
-                section_id=section_id,
-                content=content,
-                section_title=section_data.get("title", ""),
-            )
-            tables.extend(extracted_tables)
+        # Build evidence text once for reuse
+        evidence_text = self._build_evidence_text(evidence_list)
 
-        # Method 2: HTML table parsing from evidence sources
-        if not tables and evidence_list:
+        # Method 1 (Priority): HTML table parsing from evidence sources
+        if evidence_list:
             html_tables = self._extract_html_tables(
                 section_id=section_id,
                 evidence_list=evidence_list,
-                section_title=section_data.get("title", ""),
+                section_title=section_title,
             )
             tables.extend(html_tables)
+            if html_tables:
+                print(f"[FigureTableGenerator] Section {section_id}: "
+                      f"extracted {len(html_tables)} table(s) from HTML sources")
+
+        # Method 2: LLM-based extraction from evidence content (not LLM prose)
+        if not tables and self.llm:
+            # Prefer evidence text; fall back to section content only if no evidence
+            source_text = evidence_text or content
+            if source_text:
+                extracted_tables = self._extract_tables_with_llm(
+                    section_id=section_id,
+                    content=source_text,
+                    section_title=section_title,
+                )
+                tables.extend(extracted_tables)
+                if extracted_tables:
+                    print(f"[FigureTableGenerator] Section {section_id}: "
+                          f"extracted {len(extracted_tables)} table(s) via LLM from evidence")
 
         # Method 3: Pattern-based extraction (fallback)
         if not tables:
+            # Use evidence text if available, otherwise fall back to section content
+            pattern_source = evidence_text or content
             extracted_tables = self._extract_tables_by_pattern(
                 section_id=section_id,
-                content=content,
-                section_title=section_data.get("title", ""),
+                content=pattern_source,
+                section_title=section_title,
             )
             tables.extend(extracted_tables)
+            if extracted_tables:
+                print(f"[FigureTableGenerator] Section {section_id}: "
+                      f"extracted {len(extracted_tables)} table(s) via pattern matching")
+
+        if not tables:
+            print(f"[FigureTableGenerator] Section {section_id}: "
+                  f"no tables extracted (evidence_text={len(evidence_text)} chars, "
+                  f"content={len(content)} chars)")
 
         # Add source attribution
         if tables and evidence_list:
@@ -819,6 +848,23 @@ class FigureTableGenerator:
                     table.source_title = primary_source.title
 
         return tables
+
+    def _build_evidence_text(self, evidence_list: List) -> str:
+        """Build combined text from evidence content for table extraction.
+
+        Uses the original source content (content_excerpt / original_content)
+        rather than LLM-generated prose to reduce hallucination risk.
+        """
+        parts = []
+        for evidence in evidence_list[:5]:  # Limit to avoid token overflow
+            text = (
+                getattr(evidence, 'content_excerpt', '')
+                or getattr(evidence, 'original_content', '')
+                or ''
+            )
+            if text.strip():
+                parts.append(text.strip())
+        return "\n\n".join(parts)
 
     def _extract_tables_with_llm(
         self,
