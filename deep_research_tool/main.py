@@ -563,6 +563,10 @@ class DeepResearchTool:
                 min_confidence_threshold=self.config.fermi_estimation.min_confidence_threshold,
                 write_to_data_store=self.config.fermi_estimation.write_to_data_store,
                 include_sensitivity=self.config.fermi_estimation.include_sensitivity,
+                enable_sub_decomposition=self.config.fermi_estimation.enable_sub_decomposition,
+                sub_decomposition_confidence_threshold=self.config.fermi_estimation.sub_decomposition_confidence_threshold,
+                sub_decomposition_max_iterations=self.config.fermi_estimation.sub_decomposition_max_iterations,
+                sub_decomposition_min_sensitivity_pct=self.config.fermi_estimation.sub_decomposition_min_sensitivity_pct,
             )
 
             estimator = FermiEstimator(

@@ -333,6 +333,12 @@ class FermiEstimationConfig:
     write_to_data_store: bool = True
     include_sensitivity: bool = True
 
+    # Sub-decomposition settings
+    enable_sub_decomposition: bool = True
+    sub_decomposition_confidence_threshold: float = 0.65
+    sub_decomposition_max_iterations: int = 3
+    sub_decomposition_min_sensitivity_pct: float = 10.0
+
 
 class ContentFilterMode(str, Enum):
     """Content filter strictness modes."""
@@ -624,6 +630,10 @@ def create_config(
     fermi_monte_carlo: int = 1000,
     fermi_validate: bool = True,
     fermi_include_sensitivity: bool = True,
+    fermi_enable_sub_decomposition: bool = True,
+    fermi_sub_decomposition_max_iterations: int = 3,
+    fermi_sub_decomposition_confidence_threshold: float = 0.65,
+    fermi_sub_decomposition_min_sensitivity_pct: float = 10.0,
     **kwargs
 ) -> Config:
     """
@@ -821,6 +831,10 @@ def create_config(
         monte_carlo_iterations=fermi_monte_carlo,
         validate_with_llm=fermi_validate,
         include_sensitivity=fermi_include_sensitivity,
+        enable_sub_decomposition=fermi_enable_sub_decomposition,
+        sub_decomposition_max_iterations=fermi_sub_decomposition_max_iterations,
+        sub_decomposition_confidence_threshold=fermi_sub_decomposition_confidence_threshold,
+        sub_decomposition_min_sensitivity_pct=fermi_sub_decomposition_min_sensitivity_pct,
     )
 
     return Config(
