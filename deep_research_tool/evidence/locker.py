@@ -709,7 +709,7 @@ class EvidenceLocker:
                     "publisher": evidence.publisher,
                     "published_date": evidence.published_date,
                     "content_excerpt": evidence.content_excerpt[:500],
-                    "extracted_text": evidence.extracted_text[:2000],
+                    "extracted_text": evidence.extracted_text,
                     "accessed_at": evidence.accessed_at,
                     "search_query": evidence.search_query,
                     "section_reference": evidence.section_reference,
