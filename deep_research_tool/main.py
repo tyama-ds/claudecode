@@ -1552,7 +1552,8 @@ Output only the text (no JSON, no heading):"""
                     if sec_id.startswith("_"):
                         continue
                     sources = sec_data.get("sources", [])
-                    if evidence.url in [s.get("url", "") for s in sources]:
+                    # sources is a list of URL strings, not dicts
+                    if evidence.url in sources:
                         section_id = sec_id
                         break
 
