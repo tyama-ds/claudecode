@@ -1985,6 +1985,10 @@ Example: line"""
                                 if col_idx < len(elem.headers):
                                     docx_table.rows[row_idx + 1].cells[col_idx].text = str(cell)
 
+                        # Move title and table to correct position
+                        self._move_paragraph_after(doc, title_p, insert_idx)
+                        self._move_table_after(doc, docx_table, insert_idx + 1)
+
             doc.save(output_path)
             return output_path
 
@@ -1992,12 +1996,61 @@ Example: line"""
             print(f"[FigureTableGenerator] Error adding figures to DOCX: {e}")
             return None
 
-    def _move_paragraph_after(self, doc, paragraph, index):
-        """Move a paragraph to after the given index in document."""
-        # python-docx doesn't easily support reordering
-        # The paragraphs are added at the end, which is acceptable
-        # for post-content insertion
-        pass
+    @staticmethod
+    def _move_paragraph_after(doc, paragraph, index):
+        """Move a paragraph/table to after the given index in document body.
+
+        Uses lxml XML manipulation to relocate the element, since
+        python-docx does not natively support paragraph reordering.
+        """
+        try:
+            body = doc.element.body
+            # Collect all block-level children (paragraphs + tables)
+            children = list(body)
+            para_elem = paragraph._element  # noqa: SLF001
+
+            # Clamp index
+            if index < 0:
+                index = 0
+            if index >= len(children):
+                # Already at the end, nothing to move
+                return
+
+            # Remove from current position
+            body.remove(para_elem)
+            # Re-read children after removal
+            children = list(body)
+
+            if index >= len(children):
+                body.append(para_elem)
+            else:
+                children[index].addprevious(para_elem)
+        except Exception as e:
+            # Non-fatal: figure stays at end of document
+            print(f"[FigureTableGenerator] Could not reposition element: {e}")
+
+    @staticmethod
+    def _move_table_after(doc, table, index):
+        """Move a table element to after the given index in document body."""
+        try:
+            body = doc.element.body
+            children = list(body)
+            tbl_elem = table._tbl  # noqa: SLF001
+
+            if index < 0:
+                index = 0
+            if index >= len(children):
+                return
+
+            body.remove(tbl_elem)
+            children = list(body)
+
+            if index >= len(children):
+                body.append(tbl_elem)
+            else:
+                children[index].addprevious(tbl_elem)
+        except Exception as e:
+            print(f"[FigureTableGenerator] Could not reposition table: {e}")
 
     # ========================================================================
     # PDF Integration

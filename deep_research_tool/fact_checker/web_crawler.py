@@ -17,6 +17,8 @@ from typing import List, Optional, Dict, Set, Any
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 
+from ..utils.helpers import ResearchWarnings
+
 
 class SearchEngine:
     """Supported search engines."""
@@ -435,6 +437,11 @@ class RecursiveWebCrawler:
 
         except Exception as e:
             print(f"Google search error: {e}")
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.MEDIUM,
+                "WebCrawler",
+                f"Google search failed. All Google results for this query lost. Error: {e}",
+            )
 
         return results
 
@@ -501,6 +508,11 @@ class RecursiveWebCrawler:
 
         except Exception as e:
             print(f"DuckDuckGo search error: {e}")
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.MEDIUM,
+                "WebCrawler",
+                f"DuckDuckGo search failed. All DDG results for this query lost. Error: {e}",
+            )
 
         return results
 
@@ -557,6 +569,11 @@ class RecursiveWebCrawler:
 
         except Exception as e:
             print(f"Bing search error: {e}")
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.MEDIUM,
+                "WebCrawler",
+                f"Bing search failed. All Bing results for this query lost. Error: {e}",
+            )
 
         return results
 

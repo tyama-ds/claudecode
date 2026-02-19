@@ -17,6 +17,7 @@ from ..evidence.content_filter import (
     ContentFilterConfig,
     create_moderate_filter,
 )
+from ..utils.helpers import ResearchWarnings
 from ..search.base import SearchResult
 from ..search.multilingual import MultilingualSearcher, MultilingualSearchResult
 from ..config import CrawlMode, MultilingualSearchConfig
@@ -689,6 +690,12 @@ class Researcher:
                                                 print(f"[DEBUG] Document content added from {doc_url[:50]}")
                                     except Exception as doc_e:
                                         print(f"[DEBUG] Failed to extract document link {doc_url[:50]}: {doc_e}")
+                                        ResearchWarnings.get_instance().add(
+                                            ResearchWarnings.HIGH,
+                                            "Researcher",
+                                            f"Document extraction failed: {doc_url[:80]}. "
+                                            f"PDF/XLSX/DOCX content lost. Error: {doc_e}",
+                                        )
 
                             print(f"[DEBUG] Extracted relevance_score: {extracted.relevance_score}")
 
@@ -722,12 +729,24 @@ class Researcher:
 
                         except Exception as e:
                             print(f"[ERROR] Content extraction error for {result.url}: {e}")
+                            ResearchWarnings.get_instance().add(
+                                ResearchWarnings.HIGH,
+                                "Researcher",
+                                f"Content extraction failed for {result.url[:80]}. "
+                                f"All evidence from this page lost. Error: {e}",
+                            )
                             continue
 
                     time.sleep(0.3)
 
                 except Exception as e:
                     print(f"[ERROR] Search error for query '{query}': {e}")
+                    ResearchWarnings.get_instance().add(
+                        ResearchWarnings.HIGH,
+                        "Researcher",
+                        f"Search query failed: '{query[:60]}'. "
+                        f"All results for this query lost. Error: {e}",
+                    )
                     continue
 
             iter_record.completed_at = datetime.now().isoformat()
@@ -884,6 +903,12 @@ Return JSON:
                     print(f"[DEBUG] Issues found: {result['issues']}")
         except Exception as e:
             print(f"[WARNING] Coherence check failed: {e}")
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.HIGH,
+                "Researcher",
+                f"Cross-section coherence check failed entirely. "
+                f"Logical inconsistencies may exist between sections. Error: {e}",
+            )
 
     def _conduct_extended_research(
         self,
@@ -1015,7 +1040,14 @@ Return as JSON:
             if start != -1 and end > start:
                 synthesis = json.loads(content[start:end])
                 self.session.section_contents["_executive_summary"] = synthesis
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError) as _sum_err:
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.HIGH,
+                "Researcher",
+                f"Executive summary generation failed (JSON parse error). "
+                f"Summary, key_findings, and recommendations are empty placeholders. "
+                f"Error: {_sum_err}",
+            )
             self.session.section_contents["_executive_summary"] = {
                 "executive_summary": "Summary generation failed",
                 "key_findings": [],

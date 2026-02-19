@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable
 
+from .utils.helpers import ResearchWarnings
 from .config import Config, LLMProvider, SearchMethod, ReportFormat, ReportGeneratorVersion
 from .api import get_client
 from .api.base import get_token_stats, reset_token_stats
@@ -326,7 +327,9 @@ class DeepResearchTool:
             - session: ResearchSession object
             - evidence_locker: EvidenceLocker object
         """
-        # Process additional documents
+        # Reset warning collector for this run
+        ResearchWarnings.reset()
+
         # Log informational note when both enhanced_synthesis and V2 two_phase are active
         if (self.config.research.use_enhanced_synthesis
                 and self.config.report.generator_version == ReportGeneratorVersion.V2
@@ -469,6 +472,22 @@ class DeepResearchTool:
         )
         self.report_generator = generator
 
+        # --- Run Fermi estimation early (before report save) ---
+        # This must happen before DOCX/PDF conversion so that the Fermi
+        # section is included in non-text formats.
+        fermi_results = None
+        fermi_markdown = ""
+        if self.config.fermi_estimation.enabled:
+            if progress_callback:
+                progress_callback("Running Fermi estimation...", 96)
+
+            fermi_results, fermi_markdown = self._run_fermi_estimation(
+                session=session,
+                evidence_locker=evidence_locker,
+                query=query,
+                pre_deep_think_content=_pre_deep_think_content,
+            )
+
         if is_v2:
             # V2: Use new generation flow
             result = generator.generate_report(
@@ -476,13 +495,24 @@ class DeepResearchTool:
                 research_plan=session.research_plan,
                 section_contents=session.section_contents,
             )
-            # Generate final document
+            # Generate final document as markdown
             final_doc = generator.generate_final_document(
                 result,
                 include_glossary=self.config.report.v2_include_glossary,
                 evidence_locker=evidence_locker,
             )
-            # Save to file in the configured format
+
+            # Append Fermi estimation to markdown BEFORE format conversion
+            if fermi_markdown:
+                final_doc += fermi_markdown
+
+            # Append warnings to markdown BEFORE format conversion
+            warnings_collector = ResearchWarnings.get_instance()
+            if warnings_collector.has_warnings():
+                language = getattr(self.config.research, "language", "en")
+                final_doc += warnings_collector.to_report_section(language)
+
+            # Save to file in the configured format (DOCX/PDF/HTML/MD)
             output_dir = self.config.report.output_dir / "reports"
             report_path = generator.save_report(
                 markdown_content=final_doc,
@@ -502,6 +532,11 @@ class DeepResearchTool:
                 target_characters=self.config.report.target_characters,
             )
 
+            # For V1 non-markdown formats, fermi section was not included
+            # in the generator. Append to markdown files only.
+            if fermi_markdown and Path(report_path).suffix.lower() == ".md":
+                self._append_text_to_file(Path(report_path), fermi_markdown)
+
         # Auto figure/table generation (if enabled)
         figures_report_path = None
         if self.config.report.auto_figures:
@@ -517,33 +552,39 @@ class DeepResearchTool:
             except Exception as e:
                 print(f"[AutoFigures] Failed with error: {e}. "
                       f"Continuing with original report.")
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.MEDIUM,
+                    "AutoFigures",
+                    f"Figure/table generation failed entirely. "
+                    f"Report will not contain auto-generated figures or tables. Error: {e}",
+                )
                 figures_report_path = None
 
             if figures_report_path and not Path(figures_report_path).exists():
                 print(f"[AutoFigures] Output file not found: {figures_report_path}. "
                       f"Falling back to original report.")
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.MEDIUM,
+                    "AutoFigures",
+                    f"Figure-enhanced report file not found on disk. "
+                    f"Falling back to original report without figures.",
+                )
                 figures_report_path = None
 
-        # Determine the active report path for subsequent steps
+        # Determine the active report path
         active_report_path = Path(figures_report_path) if figures_report_path else Path(report_path)
-
-        # Fermi estimation (if enabled)
-        fermi_results = None
-        if self.config.fermi_estimation.enabled:
-            if progress_callback:
-                progress_callback("Running Fermi estimation...", 98)
-
-            fermi_results = self._apply_fermi_estimation(
-                session=session,
-                evidence_locker=evidence_locker,
-                query=query,
-                report_path=active_report_path,
-                pre_deep_think_content=_pre_deep_think_content,
-            )
 
         # Clean up search client if selenium
         if hasattr(self.search_client, 'close'):
             self.search_client.close()
+
+        # Append warnings section to the report if any fallbacks occurred
+        # (V2 already has warnings in markdown before format conversion;
+        #  V1 needs post-save appending for markdown files)
+        warnings_collector = ResearchWarnings.get_instance()
+        if not is_v2 and warnings_collector.has_warnings():
+            self._append_warnings_to_report(
+                active_report_path, warnings_collector)
 
         # Get token usage statistics
         token_stats = get_token_stats()
@@ -562,7 +603,156 @@ class DeepResearchTool:
             "deep_think_results": deep_think_results,
             "fermi_estimation_results": fermi_results,
             "token_usage": token_stats.to_dict(),
+            "warnings": warnings_collector.to_dict_list(),
+            "warning_count": warnings_collector.count(),
         }
+
+    def _run_fermi_estimation(
+        self,
+        session: ResearchSession,
+        evidence_locker: EvidenceLocker,
+        query: str,
+        pre_deep_think_content: Optional[Dict] = None,
+    ) -> tuple:
+        """Run Fermi estimation and return results + markdown section.
+
+        Unlike _apply_fermi_estimation, this does NOT write to any file.
+        Returns the results and a markdown string that can be appended to
+        the report content before format conversion.
+
+        Returns:
+            Tuple of (result_dicts_list_or_None, fermi_markdown_string)
+        """
+        import traceback
+
+        try:
+            config = EstimationConfig(
+                enabled=True,
+                target_metrics=self.config.fermi_estimation.target_metrics,
+                auto_detect_targets=self.config.fermi_estimation.auto_detect_targets,
+                max_tree_depth=self.config.fermi_estimation.max_tree_depth,
+                max_leaf_nodes=self.config.fermi_estimation.max_leaf_nodes,
+                monte_carlo_iterations=self.config.fermi_estimation.monte_carlo_iterations,
+                validate_with_llm=self.config.fermi_estimation.validate_with_llm,
+                min_confidence_threshold=self.config.fermi_estimation.min_confidence_threshold,
+                write_to_data_store=self.config.fermi_estimation.write_to_data_store,
+                include_sensitivity=self.config.fermi_estimation.include_sensitivity,
+                enable_sub_decomposition=self.config.fermi_estimation.enable_sub_decomposition,
+                sub_decomposition_confidence_threshold=self.config.fermi_estimation.sub_decomposition_confidence_threshold,
+                sub_decomposition_max_iterations=self.config.fermi_estimation.sub_decomposition_max_iterations,
+                sub_decomposition_min_sensitivity_pct=self.config.fermi_estimation.sub_decomposition_min_sensitivity_pct,
+            )
+
+            estimator = FermiEstimator(
+                llm_client=self.llm_client,
+                config=config,
+                language=self.config.research.language,
+            )
+
+            # Extract numerical data
+            data_store = NumericalDataStore(research_topic=query)
+            extractor = NumericalDataExtractor(
+                llm_client=self.llm_client,
+                language=self.config.research.language,
+            )
+            for evidence in evidence_locker.get_all_evidence():
+                content = evidence.content_excerpt or ""
+                if content:
+                    points = extractor.extract_from_content(
+                        content=content[:3000],
+                        source_url=evidence.url,
+                        source_title=evidence.title,
+                        evidence_id=evidence.id,
+                    )
+                    data_store.add_many(points)
+
+            # Determine target metrics
+            target_metrics = config.target_metrics
+            if not target_metrics and config.auto_detect_targets:
+                detected = estimator.detect_target_metrics(query, data_store)
+                target_metrics = [d["metric"] for d in detected[:3]]
+                print(f"[FermiEstimation] Auto-detected targets: {target_metrics}")
+
+            if not target_metrics:
+                print("[FermiEstimation] No target metrics found. Skipping.")
+                return None, ""
+
+            # Build context from pre-DeepThink content if available
+            if pre_deep_think_content:
+                context_parts = []
+                for section_num, section_data in pre_deep_think_content.items():
+                    if str(section_num).startswith("_"):
+                        continue
+                    context_parts.append(section_data.get("content", ""))
+                context = "\n\n".join(context_parts)[:5000]
+            else:
+                context = self._get_content_for_verification(session)[:5000]
+
+            results = estimator.estimate_multiple(
+                target_metrics=target_metrics,
+                data_store=data_store,
+                evidence_locker=evidence_locker,
+                context=context,
+            )
+
+            if not results:
+                return None, ""
+
+            # Build markdown section
+            fermi_md = self._build_fermi_markdown(results)
+            return [r.to_dict() for r in results], fermi_md
+
+        except Exception as e:
+            print(f"[FermiEstimation] Failed: {e}")
+            traceback.print_exc()
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.MEDIUM,
+                "FermiEstimation",
+                f"Fermi estimation failed entirely. "
+                f"No quantitative estimation section will be added to the report. Error: {e}",
+            )
+            return None, ""
+
+    def _build_fermi_markdown(self, results: list) -> str:
+        """Build a markdown section from Fermi estimation results."""
+        section_lines = ["\n\n---\n"]
+        if self.config.research.language == "ja":
+            section_lines.append("## フェルミ推定\n")
+        else:
+            section_lines.append("## Fermi Estimation\n")
+
+        for result in results:
+            section_lines.append(result.to_summary(self.config.research.language))
+            section_lines.append("")
+
+        return "\n".join(section_lines)
+
+    def _append_text_to_file(self, filepath: Path, text: str) -> None:
+        """Atomically append text to a file (for markdown files)."""
+        import os
+        import tempfile
+
+        try:
+            content = filepath.read_text(encoding="utf-8")
+            content += text
+
+            fd, tmp_path = tempfile.mkstemp(
+                dir=filepath.parent,
+                suffix=filepath.suffix,
+                prefix=".append_tmp_",
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                os.replace(tmp_path, str(filepath))
+            except BaseException:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+        except Exception as e:
+            print(f"[AppendText] Failed to append to {filepath}: {e}")
 
     def _apply_fermi_estimation(
         self,
@@ -668,6 +858,12 @@ class DeepResearchTool:
         except Exception as e:
             print(f"[FermiEstimation] Failed: {e}")
             traceback.print_exc()
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.MEDIUM,
+                "FermiEstimation",
+                f"Fermi estimation failed entirely. "
+                f"No quantitative estimation section will be added to the report. Error: {e}",
+            )
             return None
 
     def _append_fermi_to_report(
@@ -721,6 +917,57 @@ class DeepResearchTool:
 
         except Exception as e:
             print(f"[FermiEstimation] Failed to append to report: {e}")
+
+    def _append_warnings_to_report(
+        self,
+        report_path: Path,
+        warnings_collector: ResearchWarnings,
+    ) -> None:
+        """Append a warnings section to the end of the report file.
+
+        Only appends to markdown (.md) files. For other formats the warnings
+        are still available via the ``warnings`` key in the result dict.
+        """
+        try:
+            if not report_path.exists():
+                return
+            suffix = report_path.suffix.lower()
+            if suffix != ".md":
+                # For non-markdown formats, skip file modification but
+                # warnings are still in the result dict.
+                return
+
+            language = getattr(self.config.research, "language", "en")
+            section_text = warnings_collector.to_report_section(language)
+            if not section_text:
+                return
+
+            import os
+            import tempfile
+
+            content = report_path.read_text(encoding="utf-8")
+            content += section_text
+
+            fd, tmp_path = tempfile.mkstemp(
+                dir=report_path.parent,
+                suffix=report_path.suffix,
+                prefix=".warnings_tmp_",
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                os.replace(tmp_path, str(report_path))
+            except BaseException:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+
+            print(f"[Warnings] Appended {warnings_collector.count()} warning(s) to report")
+
+        except Exception as e:
+            print(f"[Warnings] Failed to append warnings to report: {e}")
 
     def _get_content_for_verification(self, session: ResearchSession) -> str:
         """Extract content from session for verification."""
@@ -1135,6 +1382,13 @@ Output only the text (no JSON, no heading):"""
             except Exception as e:
                 print(f"[AutoFigures] Numerical data extraction/analysis failed: {e}")
                 traceback.print_exc()
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.MEDIUM,
+                    "AutoFigures",
+                    f"Numerical data extraction/analysis failed. "
+                    f"Intelligent charts will not be generated; "
+                    f"only basic figure/table extraction may still work. Error: {e}",
+                )
                 # Continue without numerical data — figure/table extraction can still work
 
         # Step 4: Create figure generator
@@ -1169,6 +1423,12 @@ Output only the text (no JSON, no heading):"""
         except Exception as e:
             print(f"[AutoFigures] Figure/table generation failed: {e}")
             traceback.print_exc()
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.MEDIUM,
+                "AutoFigures",
+                f"Figure/table/chart generation failed. "
+                f"Report will not contain any auto-generated visual elements. Error: {e}",
+            )
             return None
 
         # Report extraction results
@@ -1844,6 +2104,17 @@ def run_research(
         token_stats = get_token_stats()
         language = config.research.language if hasattr(config.research, 'language') else "en"
         print("\n" + token_stats.get_summary(language))
+
+    # Display warning summary
+    warning_count = result.get("warning_count", 0)
+    if warning_count > 0:
+        language = config.research.language if hasattr(config.research, 'language') else "en"
+        if language == "ja":
+            print(f"\n[注意] 処理中に {warning_count} 件のフォールバック警告が発生しました。"
+                  f"レポート末尾の「処理中の警告・注意事項」セクションを確認してください。")
+        else:
+            print(f"\n[NOTICE] {warning_count} fallback warning(s) occurred during processing. "
+                  f"Check the 'Processing Warnings' section at the end of the report.")
 
     return result
 
