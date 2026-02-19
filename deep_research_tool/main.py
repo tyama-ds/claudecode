@@ -2587,13 +2587,43 @@ def run_manual_research(
             research_plan=session.research_plan,
             section_contents=session.section_contents,
         )
+
+        # Pre-generate figures if auto_figures is enabled
+        figure_collection = None
+        if config.report.auto_figures:
+            try:
+                fig_generator = FigureTableGenerator(
+                    llm_client=llm_client,
+                    output_dir=config.report.output_dir / "reports" / "figures",
+                    language=config.research.language,
+                    proxies=config.proxy.get_proxies_dict(),
+                    verify_ssl=config.proxy.verify_ssl,
+                )
+                figure_collection = fig_generator.generate_figures_and_tables(
+                    session=session,
+                    evidence_locker=evidence_locker,
+                )
+            except Exception as e:
+                if verbose:
+                    print(f"[V3/AutoFigures] Failed: {e}. Continuing without figures.")
+
+        # Build warnings text
+        warnings_text = ""
+        warnings_collector = ResearchWarnings.get_instance()
+        if warnings_collector.has_warnings():
+            warnings_text = warnings_collector.to_report_section(
+                config.research.language
+            )
+
         output_dir = config.report.output_dir / "reports"
         report_path = generator.generate_and_save(
             result=result,
             output_dir=output_dir,
             filename=f"report_{session.session_id}",
             evidence_locker=evidence_locker,
+            figure_collection=figure_collection,
             include_glossary=config.report.v2_include_glossary,
+            warnings_text=warnings_text,
         )
     elif version_tag == "v2":
         # V2: Use new generation flow with consistency features
