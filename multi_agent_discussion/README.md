@@ -239,6 +239,78 @@ print(f"ラウンド数: {len(session.rounds)}")
 print(f"メッセージ数: {session.message_count}")
 ```
 
+### 7. 情報収集付き議論（Research Participant）
+
+各参加者が議論中にウェブ検索で情報を収集し、根拠に基づいた議論を行います。
+
+```python
+from multi_agent_discussion import run_discussion
+
+# enable_search=True で情報収集を有効化
+result = run_discussion(
+    topic="量子コンピューティング分野の日本における未来は？",
+    participant_personas=[
+        {"name": "技術担当", "persona": "量子コンピューティングの技術動向に詳しい専門家"},
+        {"name": "市場担当", "persona": "市場動向・ビジネス展開に詳しいアナリスト"},
+        {"name": "法規制担当", "persona": "法規制・政策に詳しい専門家"},
+    ],
+    enable_search=True,
+    search_config={"region": "jp-jp", "max_queries_per_turn": 2},
+    max_rounds=3,
+)
+```
+
+詳細な設定:
+
+```python
+from multi_agent_discussion import (
+    Config, LLMConfig, AgentConfig, DiscussionConfig,
+    AgentRole, LLMProvider, MultiAgentDiscussion,
+)
+
+config = Config(
+    llm=LLMConfig(provider=LLMProvider.OPENAI),
+    discussion=DiscussionConfig(topic="AIの未来", max_rounds=3),
+    agents=[
+        AgentConfig(
+            name="コーディネーター",
+            role=AgentRole.MODERATOR,
+            persona="各専門家の意見を統合し議論を導くコーディネーター",
+        ),
+        AgentConfig(
+            name="技術担当",
+            role=AgentRole.RESEARCH_PARTICIPANT,  # 情報収集付き
+            persona="技術動向に詳しい専門家",
+            search_config={
+                "region": "jp-jp",
+                "max_queries_per_turn": 2,
+                "max_results_per_query": 5,
+            },
+        ),
+        AgentConfig(
+            name="特許担当",
+            role=AgentRole.RESEARCH_PARTICIPANT,
+            persona="特許・知的財産に詳しい専門家",
+            search_config={"region": "jp-jp"},
+        ),
+        AgentConfig(name="評価者", role=AgentRole.EVALUATOR),
+    ],
+)
+
+discussion = MultiAgentDiscussion(config)
+result = discussion.run()
+```
+
+**検索設定オプション:**
+
+| パラメータ | デフォルト | 説明 |
+|---|---|---|
+| `enabled` | `True` | 検索機能の有効/無効 |
+| `search_method` | `"duckduckgo"` | 検索方法（`duckduckgo` or `selenium`） |
+| `max_queries_per_turn` | `3` | 1ターンあたりの最大クエリ数 |
+| `max_results_per_query` | `5` | 1クエリあたりの最大結果数 |
+| `region` | `"jp-jp"` | 検索リージョン |
+
 ---
 
 ## CLI
@@ -432,6 +504,8 @@ multi_agent_discussion/
 │   ├── base.py              # BaseAgent（LLMクライアント生成・プロキシ対応）
 │   ├── moderator.py         # モデレーターエージェント
 │   ├── participant.py       # 参加者エージェント
+│   ├── research_participant.py  # 情報収集付き参加者エージェント
+│   ├── search_mixin.py      # 検索機能ミックスイン
 │   └── evaluator.py         # 評価者エージェント
 ├── conversation/
 │   ├── __init__.py
@@ -455,12 +529,14 @@ multi_agent_discussion/
 ├── examples/
 │   ├── basic_discussion.py
 │   ├── custom_personas.py
+│   ├── research_discussion.py  # 情報収集付き議論の例
 │   └── multi_provider_discussion.py
 └── tests/
     ├── test_config.py
     ├── test_session.py
     ├── test_imports.py
-    └── test_orchestrator.py
+    ├── test_orchestrator.py
+    └── test_research_agent.py  # 情報収集機能のテスト
 ```
 
 ## テスト
