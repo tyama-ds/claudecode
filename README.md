@@ -24,6 +24,10 @@ AIを活用した自動リサーチツール。OpenAI/Anthropic APIとWeb検索�
 - **高速クロールモード**: 並列フェッチとバッチ/並列LLM評価で情報収集を高速化
 - **レポート生成V2**: 章間の一貫性を保証する用語統一・コンテキスト引き継ぎ・自動修正機能
 - **フェルミ推定**: 分解木ベースの定量推定。エビデンス自動照合、感度分析、モンテカルロシミュレーション、低信頼度リーフの再帰的サブ分解に対応
+- **レポート生成V3 (DOCX-Native)**: python-docx APIでDOCXを直接構築。Markdown中間変換を排除し、図表・引用の高精度な配置を実現
+- **検索クエリ最適化**: 複合クエリの自動分割（Split）とフォローアップクエリのテーマアンカリング（Anchor）で後半セクションの検索精度を向上
+- **ResearchWarnings**: パイプライン実行中のフォールバックやエラーを重要度別に収集し、レポート末尾に透過的に表示
+- **情報収集付きマルチエージェント議論**: Web検索機能を持つ`ResearchParticipantAgent`で、根拠に基づいた議論を実現
 
 ## インストール
 
@@ -1878,7 +1882,7 @@ config = create_config(
     research_iterations=5,
 
     # V2レポート生成の設定
-    report_generator_version="v2",      # v1 または v2
+    report_generator_version="v2",      # v1 / v2 / v3 (v3はDOCX-Native)
     v2_writing_style="business",        # 文体スタイル
     v2_target_audience="business",      # 想定読者
     v2_technical_level=3,               # 技術レベル (1-5)
@@ -2049,7 +2053,233 @@ for issue in report.issues:
 
 ---
 
-## 追加機能10：フェルミ推定（Fermi Estimation）
+## 追加機能10：レポート生成 V3（DOCX-Native Generator）
+
+### 概要
+
+Report Generator V3は、DOCX出力をpython-docx APIで直接構築するジェネレーターです。V2ではMarkdown→DOCX変換を行っていたため、図表の配置や書式が意図通りにならないケースがありました。V3はMarkdown中間表現を経由せず、LLMが生成したコンテンツをそのままpython-docxのDocument オブジェクトに書き込みます。
+
+### V2との違い
+
+| 項目 | V2 | V3 |
+|------|-----|-----|
+| DOCX生成方式 | Markdown → python-docx変換 | python-docx API直接構築 |
+| 図表挿入 | Markdownタグ経由 | `doc.add_picture()` / `doc.add_table()` |
+| 引用・脚注 | Markdown記法 | DOCXネイティブ要素 |
+| 一貫性機能（用語集・コンテキスト） | あり | V2を継承 |
+| Markdown出力 | メイン | フォールバック対応 |
+| 推奨用途 | Markdown/HTML/PDF出力 | DOCX出力に特化 |
+
+### 処理フロー
+
+```
+【V3の処理フロー】
+┌─────────────────────────────────────────────────────┐
+│  コンテンツ生成（V2エンジンを再利用）                  │
+│    ├─ 用語集管理（Glossary）                          │
+│    ├─ コンテキスト引き継ぎ                            │
+│    ├─ 2フェーズ生成（ドラフト → 一貫性チェック）       │
+│    └─ 自動修正                                        │
+└─────────────────────────────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────┐
+│  DOCX直接構築（V3固有）                               │
+│    ├─ doc.add_heading()      → 見出し                │
+│    ├─ doc.add_paragraph()    → 本文（スタイル付き）   │
+│    ├─ doc.add_table()        → 表データ              │
+│    ├─ doc.add_picture()      → 図・グラフ            │
+│    ├─ XML sanitization       → 不正文字の除去        │
+│    └─ ResearchWarnings       → 警告セクション追加     │
+└─────────────────────────────────────────────────────┘
+                         ↓
+                    output.docx
+```
+
+### Pythonでの使用
+
+```python
+from deep_research_tool import run_research
+
+# V3でリサーチ実行（DOCX出力時に自動適用）
+result = run_research(
+    query="次世代半導体の技術動向",
+    provider="anthropic",
+    output_format="docx",
+    report_generator_version="v3",   # ★ V3を指定
+)
+```
+
+### V3ジェネレーターの直接使用
+
+```python
+from deep_research_tool.report.v3 import (
+    DocxReportGeneratorV3,
+    WritingStyle,
+    TargetAudience,
+)
+from deep_research_tool.api import get_client
+
+llm_client = get_client(provider="anthropic")
+
+generator = DocxReportGeneratorV3(
+    llm_client=llm_client,
+    writing_style=WritingStyle.TECHNICAL,
+    target_audience=TargetAudience.ENGINEER,
+    technical_level=4,
+    enable_consistency_check=True,
+    enable_two_phase=True,
+    language="ja",
+)
+
+# コンテンツ生成（V2エンジン）
+result = generator.generate_report(
+    research_topic="量子コンピュータの技術動向",
+    research_plan=research_plan,
+    section_contents=section_contents,
+)
+
+# DOCX保存（V3固有）
+report_path = generator.generate_and_save(
+    result,
+    output_dir=Path("./output"),
+    filename="report",
+    evidence_locker=evidence_locker,
+)
+```
+
+### 注意事項
+
+- V3は`python-docx`パッケージが必須です（`pip install python-docx`）
+- Markdown/HTML/PDF出力にはV1またはV2を使用してください
+- V2の全設定パラメータ（`v2_writing_style`等）がそのまま利用可能です
+
+---
+
+## 追加機能11：検索クエリ最適化（Query Optimization）
+
+### 概要
+
+リサーチの後半セクションで検索クエリがテーマから逸脱する問題（クエリドリフト）を解決するための2段階の最適化機能です。
+
+### 問題の背景
+
+```
+初期クエリ（25個） ÷ 3クエリ/セクション = 約8セクションで枯渇
+セクション9以降 → フォローアップクエリをLLMで動的生成
+  → セクションタイトルしか参照しない
+  → テーマから離れた一般論クエリが生成される（ドリフト）
+
+例: テーマ「炭素繊維の技術動向調査」
+  セクション9.2「インタビュー・現地調査とデータ検証フロー」
+  ✗ ドリフト: "リモートインタビュー 対面調査 比較 信頼性"（一般論）
+  ✓ 期待値: "炭素繊維メーカー 工場視察 調査手法"（テーマ紐付き）
+```
+
+### 対策A：複合クエリの自動分割（Split）
+
+LLMが生成する検索クエリには、複数のキーワードを1つに詰め込んだ長い複合クエリが含まれることがあります。これを検索エンジンが扱いやすい短いクエリに自動分割します。
+
+```
+分割ルール:
+1. 35文字以下 → そのまま維持
+2. 括弧付き列挙 → 個別クエリに展開
+   "炭素繊維メーカー（東レ・帝人・三菱等）の生産能力"
+   → "炭素繊維メーカー 東レ の生産能力"
+   → "炭素繊維メーカー 帝人 の生産能力"
+   → "炭素繊維メーカー 三菱 の生産能力"
+
+3. 中黒区切りの列挙 → 個別クエリに展開
+   "IR収集 年度別売上・CF比率・CAPEX"
+   → "IR収集 年度別売上"
+   → "IR収集 CF比率"
+   → "IR収集 CAPEX"
+
+4. 読点区切りの長文クエリ（50文字超） → 分割
+```
+
+### 対策B：フォローアップクエリのテーマアンカリング（Anchor）
+
+フォローアップクエリ生成時に、元の調査テーマをプロンプトに注入し、さらに生成後のクエリにキーワード重複チェックを適用します。
+
+```
+【プロンプト注入（A案）】
+generate_follow_up_queries() のプロンプトに追加:
+  "元の調査テーマ: 炭素繊維の技術動向調査
+   検索クエリは必ずこの調査テーマの文脈内で生成してください。"
+
+【キーワード安全網（B案）】
+_anchor_queries_to_topic() で事後チェック:
+  topic_words = {"炭素繊維", "技術動向", "調査", ...}
+  query_words = {"リモート", "インタビュー", "対面", ...}
+  overlap = query_words ∩ topic_words
+
+  空の場合 → 主要キーワードを先頭に付与:
+  "リモートインタビュー 対面調査" → "炭素繊維 リモートインタビュー 対面調査"
+```
+
+### テーマの性質による挙動
+
+| テーマの性質 | Split効果 | Anchor効果 | 結果 |
+|---|---|---|---|
+| 具体的テーマ（炭素繊維の技術動向） | 長いクエリを分割 | ドリフト抑制 | 効果大 |
+| 一般的テーマ（インタビュー調査） | 同様に分割 | 実質no-op（無害） | 既存挙動を壊さない |
+
+### 使用方法
+
+クエリ最適化は自動的に適用されるため、特別な設定は不要です。`run_research()` や `FastCrawler` を通常通り使用するだけで有効になります。
+
+ログで動作を確認できます:
+
+```
+[QueryGenerator] Split compound query (1→3): 'メーカー（東レ・帝人・三菱等）生産能力'
+[QueryGenerator] Anchored drifting query: 'インタビュー手法 比較' → '炭素繊維 インタビュー手法 比較'
+```
+
+---
+
+## 追加機能12：ResearchWarnings（パイプライン警告の可視化）
+
+### 概要
+
+リサーチパイプラインの実行中に発生するフォールバックやエラーを、スレッドセーフなシングルトンコレクターに収集し、レポート末尾に自動表示する機能です。
+
+### 背景
+
+従来、パイプライン内でエラーが発生してフォールバック処理が実行された場合（例：画像ダウンロード失敗、図表生成スキップ等）、ユーザーはその情報を知る手段がありませんでした。ResearchWarningsはこれらの情報をレポートに透過的に含めます。
+
+### 重要度レベル
+
+| レベル | 意味 | 例 |
+|--------|------|-----|
+| `CRITICAL` | 出力が不正確または不完全な可能性 | データ消失、致命的なパース失敗 |
+| `HIGH` | オプション機能全体がスキップ | フェルミ推定全体の失敗、V3フォールバック |
+| `MEDIUM` | 機能内の部分的データ欠落 | 一部の図表生成失敗、画像ダウンロード失敗 |
+| `LOW` | 見た目・書式の劣化 | フォント不足、マイナーな書式崩れ |
+
+### 使用方法
+
+ResearchWarningsは `run_research()` 実行時に自動的に有効化されます。
+
+```python
+from deep_research_tool.utils.helpers import ResearchWarnings
+
+# シングルトンインスタンスを取得
+warnings = ResearchWarnings.get_instance()
+
+# 警告を追加（パイプライン内部で自動的に呼ばれる）
+warnings.add("MEDIUM", "image_download", "Failed to download 2 images from source")
+
+# 警告一覧を取得
+for w in warnings.get_all():
+    print(f"[{w['severity']}] {w['category']}: {w['message']}")
+
+# レポート用のMarkdown出力
+md = warnings.to_markdown()
+```
+
+---
+
+## 追加機能13：フェルミ推定（Fermi Estimation）
 
 ### 概要
 
@@ -2394,6 +2624,7 @@ print(f"トークン使用量: {result['token_usage']}")
 | **基本** | `provider`, `model`, `iterations` | LLM選択、調査深度 |
 | **出力** | `output_format`, `target_pages` | レポート形式・長さ |
 | **V2レポート** | `report_generator_version="v2"`, `v2_*` | 一貫性保証、用語統一 |
+| **V3レポート** | `report_generator_version="v3"` | DOCX-Native出力 |
 | **DeepThink** | `deep_think=True`, `deep_think_level` | 推論品質の強化 |
 | **多言語** | `multilingual=True`, `search_languages` | 複数言語で情報収集 |
 | **クロール** | `crawl_mode`, `extended_mode` | 深層・高速情報収集 |
@@ -2833,12 +3064,43 @@ deep_research_tool/
 ├── report/              # レポート生成
 │   ├── generator.py
 │   ├── length_controller.py
-│   └── figure_table_generator.py
+│   ├── figure_table_generator.py
+│   ├── chart_analyzer.py
+│   ├── v2/              # V2（一貫性保証）
+│   │   ├── generator.py
+│   │   ├── context.py
+│   │   ├── consistency.py
+│   │   └── glossary.py
+│   └── v3/              # V3（DOCX-Native）
+│       ├── __init__.py
+│       └── docx_generator.py
 ├── utils/               # ユーティリティ
 │   ├── document_reader.py
-│   └── helpers.py
+│   ├── helpers.py       # ResearchWarnings, extract_content_words_set 等
+│   └── japanese_text.py # 日本語テキスト処理
 └── salvage.ipynb        # データサルベージ用ノートブック
 ```
+
+---
+
+## 更新履歴
+
+### 2026-02-20
+
+- 検索クエリ最適化: 複合クエリの自動分割（`split_complex_queries`）を追加
+- 検索クエリ最適化: フォローアップクエリのテーマアンカリング（`_anchor_queries_to_topic`）を追加
+
+### 2026-02-19
+
+- レポート生成V3（DOCX-Native Generator）を追加（`DocxReportGeneratorV3`）
+- `run_research()` V3ブロックのパラメータ不足を修正
+- ResearchWarnings（パイプライン警告可視化）を追加
+- フェルミ推定モジュールを追加（分解木・エビデンス照合・モンテカルロ・サブ分解）
+- マルチエージェント議論に情報収集付き参加者エージェント（`ResearchParticipantAgent`）を追加
+- 画像ダウンロードエラー（base64、`_image_exists`スコープバグ）を修正
+- DOCX出力の修正: フェルミ推定セクション、引用、図表配置
+- 表キャプションと`extracted_text`フィールドをエビデンスに追加
+- 7件の機能間コンフリクトを解消
 
 ---
 

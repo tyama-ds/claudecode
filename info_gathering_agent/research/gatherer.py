@@ -409,7 +409,8 @@ class Gatherer:
         queries = available_queries[:self.max_queries_per_iteration]
         if not queries:
             queries = self.query_generator.generate_follow_up_queries(
-                section, "", []
+                section, "", [],
+                research_topic=self.session.query,
             )
 
         print(f"[FastCrawler] Processing section {section.section} with {len(queries)} queries")
@@ -490,7 +491,8 @@ class Gatherer:
                 )
                 iter_record.gaps_identified = gaps
                 queries = self.query_generator.generate_follow_up_queries(
-                    section, current_content, gaps
+                    section, current_content, gaps,
+                    research_topic=self.session.query,
                 )
 
             if not queries:

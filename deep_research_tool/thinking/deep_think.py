@@ -310,33 +310,183 @@ class DeepThinkProcessor:
             deep_think_level=self.config.level
         )
 
+    # -- Chunked fact extraction constants --
+    _CHUNK_SIZE = 16000       # Primary chunk size (raised from 4000)
+    _RUNT_RATIO = 0.20        # Last chunk < 20% of CHUNK_SIZE → merge with previous
+    _MAX_FACTS = 20           # Upper bound on extracted facts
+
+    SUMMARY_PROMPT = """以下の文書の概要を1000文字以内で要約してください。
+主要なテーマ、登場する固有名詞、数値データを必ず含めてください。
+
+文書:
+{content}
+
+概要:"""
+
+    CHUNKED_FACT_EXTRACTION_PROMPT = """以下の文書チャンクから客観的な事実を抽出してください。
+意見や推測ではなく、確認可能な事実のみを箇条書きで列挙してください。
+
+【文書全体の概要】
+{summary}
+
+【このチャンクのテキスト】
+{chunk}
+
+抽出した事実:"""
+
     def _extract_facts(
         self,
         content: str,
         progress_callback: Callable[[str, float], None] = None
     ) -> List[str]:
-        """Extract facts from content using LLM."""
+        """Extract facts from content using LLM.
+
+        For short content (<= _CHUNK_SIZE), uses a single LLM call.
+        For longer content, generates a summary of the full text first,
+        then splits into chunks and extracts facts from each chunk with
+        the summary as context.  The last chunk is merged into the
+        previous one when it is shorter than _RUNT_RATIO * _CHUNK_SIZE
+        to avoid extracting noise from a trailing fragment.
+        """
         if progress_callback:
             progress_callback("DeepThink: Extracting facts...", 10)
 
-        prompt = self.FACT_EXTRACTION_PROMPT.format(source_text=content[:4000])
-        response = self.llm_client.generate(prompt)
+        # Short content – single-pass extraction (original behaviour)
+        if len(content) <= self._CHUNK_SIZE:
+            return self._extract_facts_single(content)
 
-        # Parse bullet points from response
+        # Long content – summary + chunked extraction
+        return self._extract_facts_chunked(content, progress_callback)
+
+    # -- internal helpers ------------------------------------------------
+
+    def _extract_facts_single(self, content: str) -> List[str]:
+        """Extract facts from content that fits in a single chunk."""
+        prompt = self.FACT_EXTRACTION_PROMPT.format(source_text=content)
+        response = self.llm_client.generate(prompt)
+        return self._parse_facts(response.content)
+
+    def _extract_facts_chunked(
+        self,
+        content: str,
+        progress_callback: Callable[[str, float], None] = None,
+    ) -> List[str]:
+        """Extract facts from long content via summary + chunked extraction."""
+        # 1. Generate summary of the full content
+        if progress_callback:
+            progress_callback("DeepThink: Summarising full content...", 12)
+
+        summary_prompt = self.SUMMARY_PROMPT.format(content=content)
+        summary = self.llm_client.generate(summary_prompt).content
+
+        # 2. Split into chunks with runt-chunk handling
+        chunks = self._split_into_chunks(content)
+
+        if progress_callback:
+            progress_callback(
+                f"DeepThink: Extracting facts from {len(chunks)} chunks...", 15
+            )
+
+        # 3. Extract facts from each chunk with the summary as context
+        all_facts: List[str] = []
+        for idx, chunk in enumerate(chunks):
+            prompt = self.CHUNKED_FACT_EXTRACTION_PROMPT.format(
+                summary=summary,
+                chunk=chunk,
+            )
+            response = self.llm_client.generate(prompt)
+            chunk_facts = self._parse_facts(response.content)
+            all_facts.extend(chunk_facts)
+
+        # 4. Deduplicate while preserving order
+        deduped = self._deduplicate_facts(all_facts)
+        return deduped[: self._MAX_FACTS]
+
+    def _split_into_chunks(self, content: str) -> List[str]:
+        """Split content into chunks, merging a trailing runt into the previous chunk.
+
+        A runt chunk is one whose length is less than _RUNT_RATIO * _CHUNK_SIZE.
+        Merging avoids wasting an LLM call on a tiny trailing fragment that is
+        unlikely to contain independently meaningful facts.
+        """
+        size = self._CHUNK_SIZE
+        chunks = [content[i: i + size] for i in range(0, len(content), size)]
+
+        if len(chunks) >= 2:
+            last = chunks[-1]
+            runt_threshold = int(size * self._RUNT_RATIO)
+            if len(last) < runt_threshold:
+                # Merge runt into previous chunk
+                chunks[-2] += last
+                chunks.pop()
+
+        return chunks
+
+    def _parse_facts(self, text: str) -> List[str]:
+        """Parse bullet-pointed facts from LLM response text."""
         facts = []
-        for line in response.content.split('\n'):
+        for line in text.split("\n"):
             line = line.strip()
-            if line and (line.startswith('-') or line.startswith('・') or line.startswith('*')):
-                fact = line.lstrip('-・* ').strip()
+            if line and (
+                line.startswith("-")
+                or line.startswith("・")
+                or line.startswith("*")
+            ):
+                fact = line.lstrip("-・* ").strip()
                 if fact:
                     facts.append(fact)
 
-        # If no bullet points found, split by sentences using morphological analysis
+        # Fallback: split by sentences if no bullet points found
         if not facts:
-            from deep_research_tool.utils.japanese_text import split_sentences
-            facts = split_sentences(response.content, min_length=10)
+            try:
+                from deep_research_tool.utils.japanese_text import split_sentences
+                facts = split_sentences(text, min_length=10)
+            except ImportError:
+                # Simple sentence split fallback
+                for sent in text.replace("。", "。\n").split("\n"):
+                    sent = sent.strip()
+                    if len(sent) >= 10:
+                        facts.append(sent)
 
-        return facts[:20]  # Limit to 20 facts
+        return facts
+
+    def _deduplicate_facts(self, facts: List[str]) -> List[str]:
+        """Remove near-duplicate facts while preserving order.
+
+        Uses character-bigram Jaccard coefficient so that Japanese text
+        (which lacks whitespace word boundaries) is handled correctly.
+        Two facts with Jaccard >= 0.60 are considered duplicates; the
+        first occurrence is kept.
+        """
+        if not facts:
+            return facts
+
+        def _char_bigrams(text: str) -> set:
+            """Generate character bigram set for Jaccard comparison."""
+            # Normalise: strip whitespace/punctuation to compare content
+            import re as _re
+            t = _re.sub(r'[\s\u3000,.、。：:；;！!？?（）()「」『』【】\-・/]', '', text)
+            if len(t) < 2:
+                return {t}
+            return {t[i: i + 2] for i in range(len(t) - 1)}
+
+        unique: List[str] = []
+        unique_bigram_sets: List[set] = []
+
+        for fact in facts:
+            bg = _char_bigrams(fact)
+            is_dup = False
+            for existing_bg in unique_bigram_sets:
+                intersection = bg & existing_bg
+                union = bg | existing_bg
+                if union and len(intersection) / len(union) >= 0.60:
+                    is_dup = True
+                    break
+            if not is_dup:
+                unique.append(fact)
+                unique_bigram_sets.append(bg)
+
+        return unique
 
     def _perform_reasoning_iteration(
         self,

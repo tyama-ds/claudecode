@@ -160,6 +160,8 @@ class Researcher:
         fast_crawl_batch_size: int = 5,
         multilingual_config: MultilingualSearchConfig = None,
         max_content_length: int = 50000,
+        target_pages: int = None,
+        target_characters: int = None,
     ):
         """
         Initialize Researcher.
@@ -187,6 +189,8 @@ class Researcher:
             fast_crawl_batch_size: Pages per batch in batch evaluation mode
             multilingual_config: Multilingual search configuration (None to disable)
             max_content_length: Maximum content length for extraction truncation
+            target_pages: Target output page count (used for dynamic content sizing)
+            target_characters: Target output character count (overrides target_pages)
         """
         self.llm = llm_client
         self.search = search_client
@@ -199,8 +203,14 @@ class Researcher:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.query_generator = QueryGenerator(llm_client, language)
-        self.content_extractor = ContentExtractor(llm_client, language)
         self.max_content_length = max_content_length
+
+        # Store target length info (used to calculate per-section target after plan is created)
+        self._target_pages = target_pages
+        self._target_characters = target_characters
+        # ContentExtractor is created without per-section target initially;
+        # it will be updated in _execute_research_loop once we know the section count.
+        self.content_extractor = ContentExtractor(llm_client, language)
 
         # Use enhanced multi-pass content generation for better quality
         self.use_enhanced_synthesis = use_enhanced_synthesis
@@ -384,6 +394,18 @@ class Researcher:
             print("[ERROR] No sections found in table of contents!")
             return
 
+        # Calculate per-section character target and propagate to ContentExtractor
+        if total_sections > 0 and (self._target_pages or self._target_characters):
+            if self._target_characters:
+                total_target = self._target_characters
+            else:
+                chars_per_page = 1500 if self.language == "ja" else 2500
+                total_target = self._target_pages * chars_per_page
+            target_per_section = total_target // total_sections
+            self.content_extractor.target_chars_per_section = target_per_section
+            print(f"[DEBUG] Dynamic content sizing: {total_target:,} total chars / "
+                  f"{total_sections} sections = {target_per_section:,} chars/section")
+
         # Initial queries from plan
         available_queries = list(self.session.research_plan.search_queries)
         print(f"[DEBUG] Initial search queries: {len(available_queries)}")
@@ -465,7 +487,8 @@ class Researcher:
         if not queries:
             # Generate queries if none available
             queries = self.query_generator.generate_follow_up_queries(
-                section, "", []
+                section, "", [],
+                research_topic=self.session.query,
             )
 
         print(f"[FastCrawler] Processing section {section.section} with {len(queries)} queries")
@@ -563,7 +586,8 @@ class Researcher:
                 )
                 iter_record.gaps_identified = gaps
                 queries = self.query_generator.generate_follow_up_queries(
-                    section, current_content, gaps
+                    section, current_content, gaps,
+                    research_topic=self.session.query,
                 )
 
             if not queries:
@@ -811,6 +835,17 @@ class Researcher:
                 "sources": [ec.source_url for ec in section_content_parts],
                 "images": [img for ec in section_content_parts for img in ec.images][:5],
                 "gaps": synthesized.get("information_gaps", []),
+                "extracted_content": [
+                    {
+                        "title": ec.source_title,
+                        "url": ec.source_url,
+                        "content": ec.processed_content,
+                        "raw_content": ec.raw_content,
+                        "key_points": ec.key_points,
+                        "relevance_score": ec.relevance_score,
+                    }
+                    for ec in section_content_parts
+                ],
             }
 
             section.content = content
@@ -1175,7 +1210,8 @@ Return as JSON:
                 # Generate queries focusing on gaps or expanding content
                 if focus_on_gaps and gaps:
                     queries = self.query_generator.generate_follow_up_queries(
-                        section, existing_text, gaps
+                        section, existing_text, gaps,
+                        research_topic=self.session.query,
                     )
                     iter_record.gaps_identified = gaps
                 else:
@@ -1312,8 +1348,16 @@ Return as JSON:
         Returns:
             List of expansion queries
         """
-        prompt = f"""Based on this section and its existing content, generate search queries to find additional detailed information.
+        research_topic = self.session.query
 
+        topic_anchor = ""
+        if research_topic:
+            topic_anchor = f"""
+Original Research Topic: {research_topic}
+IMPORTANT: All queries must stay within the context of this research topic. Do not generate generic queries."""
+
+        prompt = f"""Based on this section and its existing content, generate search queries to find additional detailed information.
+{topic_anchor}
 Section: {section.section}. {section.title}
 Description: {section.description}
 

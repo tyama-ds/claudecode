@@ -305,7 +305,32 @@ class HallucinationChecker:
 
     def _extract_and_categorize_claims(self, content: str) -> List[DetailedClaim]:
         """Extract claims and categorize them by type."""
-        prompt = f"""Analyze this content and extract all verifiable claims with their types.
+        if self.language == "ja":
+            prompt = f"""以下の文章を分析し、検証可能な主張をタイプ別に抽出してください。
+
+文章:
+{content[:8000]}
+
+各主張について以下を特定してください:
+1. 主張の正確なテキスト
+2. 主張のタイプ: statistical, temporal, quotation, causal, comparative, absolute, factual, opinion, prediction, historical
+3. 所属セクション（特定できる場合）
+4. 簡潔なコンテキスト（周辺テキストの要約）
+
+JSON配列で返してください:
+[
+    {{
+        "text": "主張の正確なテキスト",
+        "type": "statistical/temporal/quotation/causal/comparative/absolute/factual/opinion/prediction/historical",
+        "section": "セクション名（空でも可）",
+        "context": "簡潔なコンテキスト"
+    }},
+    ...
+]
+
+検証可能な事実主張に焦点を当て、15〜30個の重要な主張を抽出してください。"""
+        else:
+            prompt = f"""Analyze this content and extract all verifiable claims with their types.
 
 Content:
 {content[:8000]}
@@ -438,13 +463,52 @@ Focus on verifiable factual claims. Extract 15-30 significant claims."""
                 evidence_text += f"Content: {evidence.content_excerpt[:400]}\n---"
 
         # LLM verification
-        strictness_instruction = {
-            "low": "Be lenient - only flag clearly false claims",
-            "medium": "Be balanced - flag unsupported and suspicious claims",
-            "high": "Be strict - require strong evidence for all claims",
-        }.get(strictness, "Be balanced")
+        if self.language == "ja":
+            strictness_instruction = {
+                "low": "寛容に判定 - 明らかに誤った主張のみ指摘する",
+                "medium": "バランスよく判定 - 根拠不足および疑わしい主張を指摘する",
+                "high": "厳格に判定 - すべての主張に強い根拠を要求する",
+            }.get(strictness, "バランスよく判定")
 
-        prompt = f"""Verify this claim against the available evidence.
+            no_evidence = "直接関連するエビデンスが見つかりませんでした"
+
+            prompt = f"""以下の主張をエビデンスと照合して検証してください。
+
+主張: {claim.text}
+主張タイプ: {claim.claim_type.value}
+コンテキスト: {claim.context}
+
+利用可能なエビデンス:
+{evidence_text if evidence_text else no_evidence}
+
+厳格さ: {strictness_instruction}
+
+詳細に分析してください:
+1. この主張はエビデンスによって支持・部分支持・矛盾のいずれですか？
+2. 事実誤認や不正確さはありますか？
+3. AIハルシネーションが起きやすいタイプの主張ですか？
+4. エビデンスの質に基づく確信度はどのレベルですか？
+
+JSONで返してください:
+{{
+    "confidence": "high/medium/low/unsupported/contradicted",
+    "hallucination_risk": "critical/high/medium/low/none",
+    "risk_score": 0.0-1.0,
+    "supporting_evidence": ["エビデンスID1"],
+    "contradicting_evidence": ["エビデンスID2"],
+    "reasoning": "詳細な説明（日本語）",
+    "verified_facts": ["確認された事実1"],
+    "issues_found": ["発見された問題1"],
+    "suggestions": "改善・検証方法（日本語）"
+}}"""
+        else:
+            strictness_instruction = {
+                "low": "Be lenient - only flag clearly false claims",
+                "medium": "Be balanced - flag unsupported and suspicious claims",
+                "high": "Be strict - require strong evidence for all claims",
+            }.get(strictness, "Be balanced")
+
+            prompt = f"""Verify this claim against the available evidence.
 
 Claim: {claim.text}
 Claim Type: {claim.claim_type.value}
@@ -573,53 +637,100 @@ Return as JSON:
 
     def _generate_issues_and_recommendations(self, result: HallucinationCheckResult) -> None:
         """Generate issues and recommendations based on findings."""
+        ja = self.language == "ja"
+
         # Critical issues
         for claim in result.claims:
             if claim.hallucination_risk == HallucinationRisk.CRITICAL:
-                result.critical_issues.append(
-                    f"[{claim.id}] Critical hallucination risk: {claim.text[:100]}..."
-                )
+                if ja:
+                    result.critical_issues.append(
+                        f"[{claim.id}] 重大なハルシネーションリスク: {claim.text[:100]}..."
+                    )
+                else:
+                    result.critical_issues.append(
+                        f"[{claim.id}] Critical hallucination risk: {claim.text[:100]}..."
+                    )
             if claim.contradicting_evidence:
-                result.critical_issues.append(
-                    f"[{claim.id}] Contradicted by evidence: {claim.text[:100]}..."
-                )
+                if ja:
+                    result.critical_issues.append(
+                        f"[{claim.id}] エビデンスと矛盾: {claim.text[:100]}..."
+                    )
+                else:
+                    result.critical_issues.append(
+                        f"[{claim.id}] Contradicted by evidence: {claim.text[:100]}..."
+                    )
 
         # Warnings
         for claim in result.claims:
             if claim.hallucination_risk == HallucinationRisk.HIGH:
-                result.warnings.append(
-                    f"[{claim.id}] High risk ({claim.claim_type.value}): {claim.text[:80]}..."
-                )
+                if ja:
+                    result.warnings.append(
+                        f"[{claim.id}] 高リスク（{claim.claim_type.value}）: {claim.text[:80]}..."
+                    )
+                else:
+                    result.warnings.append(
+                        f"[{claim.id}] High risk ({claim.claim_type.value}): {claim.text[:80]}..."
+                    )
             if not claim.supporting_evidence and claim.confidence != ConfidenceLevel.HIGH:
-                result.warnings.append(
-                    f"[{claim.id}] No supporting evidence: {claim.text[:80]}..."
-                )
+                if ja:
+                    result.warnings.append(
+                        f"[{claim.id}] 裏付けエビデンスなし: {claim.text[:80]}..."
+                    )
+                else:
+                    result.warnings.append(
+                        f"[{claim.id}] No supporting evidence: {claim.text[:80]}..."
+                    )
 
         # Recommendations
         if result.likely_hallucinations > 0:
-            result.recommendations.append(
-                f"Review and verify {result.likely_hallucinations} claims flagged as likely hallucinations"
-            )
+            if ja:
+                result.recommendations.append(
+                    f"ハルシネーションの可能性がある{result.likely_hallucinations}件の主張を確認・検証してください"
+                )
+            else:
+                result.recommendations.append(
+                    f"Review and verify {result.likely_hallucinations} claims flagged as likely hallucinations"
+                )
 
         if result.evidence_coverage_score < 0.5:
-            result.recommendations.append(
-                "Evidence coverage is low - consider adding more source citations"
-            )
+            if ja:
+                result.recommendations.append(
+                    "エビデンスカバレッジが低いため、ソース引用の追加を検討してください"
+                )
+            else:
+                result.recommendations.append(
+                    "Evidence coverage is low - consider adding more source citations"
+                )
 
         if result.source_quality_score < 0.5:
-            result.recommendations.append(
-                "Source quality is low - consider using more authoritative sources"
-            )
+            if ja:
+                result.recommendations.append(
+                    "ソース品質が低いため、より権威のあるソースの使用を検討してください"
+                )
+            else:
+                result.recommendations.append(
+                    "Source quality is low - consider using more authoritative sources"
+                )
 
         # Type-specific recommendations
         if result.risks_by_type.get("statistical", 0) > 2:
-            result.recommendations.append(
-                "Multiple statistical claims need verification - double-check all numbers"
-            )
+            if ja:
+                result.recommendations.append(
+                    "複数の統計的主張に検証が必要です — すべての数値を再確認してください"
+                )
+            else:
+                result.recommendations.append(
+                    "Multiple statistical claims need verification - double-check all numbers"
+                )
         if result.risks_by_type.get("temporal", 0) > 2:
-            result.recommendations.append(
-                "Multiple date/time claims need verification - verify all dates"
-            )
+            if ja:
+                result.recommendations.append(
+                    "複数の日時に関する主張に検証が必要です — すべての日付を確認してください"
+                )
+            else:
+                result.recommendations.append(
+                    "Multiple date/time claims need verification - verify all dates"
+                )
 
     def generate_detailed_html_report(
         self,
@@ -655,6 +766,15 @@ Return as JSON:
             "contradicted": "#6f42c1",
         }
 
+        # Localized labels
+        ja = self.language == "ja"
+        lbl_analysis = "分析" if ja else "Analysis"
+        lbl_supporting = "支持エビデンス" if ja else "Supporting"
+        lbl_contradicting = "矛盾エビデンス" if ja else "Contradicting"
+        lbl_issues = "問題点" if ja else "Issues"
+        lbl_suggestions = "改善提案" if ja else "Suggestions"
+        lbl_context = "コンテキスト" if ja else "Context"
+
         # Build claims HTML
         claims_html = []
         for claim in result.claims:
@@ -664,14 +784,14 @@ Return as JSON:
             # Evidence links
             evidence_links = ""
             if claim.supporting_evidence:
-                evidence_links = "<div class='evidence-links'><strong>Supporting:</strong> "
+                evidence_links = f"<div class='evidence-links'><strong>{lbl_supporting}:</strong> "
                 evidence_links += ", ".join(
                     f'<span class="evidence-tag support">{eid}</span>'
                     for eid in claim.supporting_evidence
                 )
                 evidence_links += "</div>"
             if claim.contradicting_evidence:
-                evidence_links += "<div class='evidence-links'><strong>Contradicting:</strong> "
+                evidence_links += f"<div class='evidence-links'><strong>{lbl_contradicting}:</strong> "
                 evidence_links += ", ".join(
                     f'<span class="evidence-tag contradict">{eid}</span>'
                     for eid in claim.contradicting_evidence
@@ -681,9 +801,12 @@ Return as JSON:
             # Issues and facts
             issues_html = ""
             if claim.issues_found:
-                issues_html = "<div class='issues'><strong>Issues:</strong><ul>"
+                issues_html = f"<div class='issues'><strong>{lbl_issues}:</strong><ul>"
                 issues_html += "".join(f"<li>{issue}</li>" for issue in claim.issues_found)
                 issues_html += "</ul></div>"
+
+            lbl_risk_prefix = "リスク" if ja else "Risk"
+            lbl_score_prefix = "スコア" if ja else "Score"
 
             claims_html.append(f"""
             <div class="claim-card" data-risk="{claim.hallucination_risk.value}"
@@ -692,20 +815,20 @@ Return as JSON:
                     <span class="claim-id">{claim.id}</span>
                     <span class="claim-type-badge">{claim.claim_type.value}</span>
                     <span class="risk-badge" style="background-color: {risk_color};">
-                        Risk: {claim.hallucination_risk.value.upper()}
+                        {lbl_risk_prefix}: {claim.hallucination_risk.value.upper()}
                     </span>
                     <span class="conf-badge" style="background-color: {conf_color};">
                         {claim.confidence.value.upper()}
                     </span>
-                    <span class="risk-score">Score: {claim.risk_score:.2f}</span>
+                    <span class="risk-score">{lbl_score_prefix}: {claim.risk_score:.2f}</span>
                 </div>
                 <div class="claim-text">{claim.text}</div>
-                {f'<div class="claim-context">Context: {claim.context}</div>' if claim.context else ''}
+                {f'<div class="claim-context">{lbl_context}: {claim.context}</div>' if claim.context else ''}
                 <div class="claim-analysis">
-                    <div class="reasoning"><strong>Analysis:</strong> {claim.reasoning}</div>
+                    <div class="reasoning"><strong>{lbl_analysis}:</strong> {claim.reasoning}</div>
                     {evidence_links}
                     {issues_html}
-                    {f'<div class="suggestions"><strong>Suggestions:</strong> {claim.suggestions}</div>' if claim.suggestions else ''}
+                    {f'<div class="suggestions"><strong>{lbl_suggestions}:</strong> {claim.suggestions}</div>' if claim.suggestions else ''}
                 </div>
             </div>
             """)
@@ -714,13 +837,19 @@ Return as JSON:
         type_data = json.dumps(result.claims_by_type)
         risk_data = json.dumps(result.risks_by_type)
 
+        # Alert labels
+        lbl_critical = "重大な問題" if ja else "Critical Issues"
+        lbl_warnings = "警告" if ja else "Warnings"
+        lbl_recommendations = "推奨事項" if ja else "Recommendations"
+        lbl_more = "他{n}件" if ja else "...and {n} more"
+
         # Critical issues HTML
         critical_html = ""
         if result.critical_issues:
             critical_items = "".join(f"<li>{issue}</li>" for issue in result.critical_issues)
             critical_html = f"""
             <div class="alert alert-danger">
-                <h4>Critical Issues ({len(result.critical_issues)})</h4>
+                <h4>{lbl_critical}（{len(result.critical_issues)}件）</h4>
                 <ul>{critical_items}</ul>
             </div>
             """
@@ -729,11 +858,14 @@ Return as JSON:
         warnings_html = ""
         if result.warnings:
             warning_items = "".join(f"<li>{w}</li>" for w in result.warnings[:10])
+            overflow = ""
+            if len(result.warnings) > 10:
+                overflow = f'<p>{lbl_more.format(n=len(result.warnings) - 10)}</p>'
             warnings_html = f"""
             <div class="alert alert-warning">
-                <h4>Warnings ({len(result.warnings)})</h4>
+                <h4>{lbl_warnings}（{len(result.warnings)}件）</h4>
                 <ul>{warning_items}</ul>
-                {f'<p>...and {len(result.warnings) - 10} more</p>' if len(result.warnings) > 10 else ''}
+                {overflow}
             </div>
             """
 
@@ -743,18 +875,38 @@ Return as JSON:
             rec_items = "".join(f"<li>{r}</li>" for r in result.recommendations)
             rec_html = f"""
             <div class="alert alert-info">
-                <h4>Recommendations</h4>
+                <h4>{lbl_recommendations}</h4>
                 <ul>{rec_items}</ul>
             </div>
             """
 
+        # Page-level labels
+        lbl_page_title = "ハルシネーションチェックレポート" if ja else "Hallucination Check Report"
+        lbl_checked = "検証日時" if ja else "Checked"
+        lbl_total_claims = "総主張数" if ja else "Total Claims"
+        lbl_verified_lbl = "検証済み" if ja else "Verified"
+        lbl_suspicious = "要確認" if ja else "Suspicious"
+        lbl_likely_hal = "ハルシネーション疑い" if ja else "Likely Hallucinations"
+        lbl_quality = "品質スコア" if ja else "Quality Scores"
+        lbl_accuracy = "全体精度" if ja else "Overall Accuracy"
+        lbl_coverage = "エビデンスカバレッジ" if ja else "Evidence Coverage"
+        lbl_src_quality = "ソース品質" if ja else "Source Quality"
+        lbl_filter = "主張フィルター" if ja else "Filter Claims"
+        lbl_by_risk = "リスク別" if ja else "By Risk"
+        lbl_by_type = "タイプ別" if ja else "By Type"
+        lbl_all = "すべて" if ja else "All"
+        lbl_statistical = "統計" if ja else "Statistical"
+        lbl_temporal = "時間" if ja else "Temporal"
+        lbl_factual = "事実" if ja else "Factual"
+        lbl_causal = "因果" if ja else "Causal"
+
         html_content = f"""
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="{'ja' if ja else 'en'}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hallucination Check Report - {result.document_title}</title>
+    <title>{lbl_page_title} - {result.document_title}</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
@@ -946,35 +1098,35 @@ Return as JSON:
 <body>
     <div class="container">
         <div class="header">
-            <h1>Hallucination Check Report</h1>
+            <h1>{lbl_page_title}</h1>
             <p class="meta">{result.document_title}</p>
-            <p class="meta">Checked: {result.checked_at}</p>
+            <p class="meta">{lbl_checked}: {result.checked_at}</p>
         </div>
 
         <div class="dashboard">
             <div class="metric-card">
                 <div class="metric-value">{result.total_claims}</div>
-                <div class="metric-label">Total Claims</div>
+                <div class="metric-label">{lbl_total_claims}</div>
             </div>
             <div class="metric-card">
                 <div class="metric-value metric-good">{result.verified_claims}</div>
-                <div class="metric-label">Verified</div>
+                <div class="metric-label">{lbl_verified_lbl}</div>
             </div>
             <div class="metric-card">
                 <div class="metric-value metric-warning">{result.suspicious_claims}</div>
-                <div class="metric-label">Suspicious</div>
+                <div class="metric-label">{lbl_suspicious}</div>
             </div>
             <div class="metric-card">
                 <div class="metric-value metric-danger">{result.likely_hallucinations}</div>
-                <div class="metric-label">Likely Hallucinations</div>
+                <div class="metric-label">{lbl_likely_hal}</div>
             </div>
         </div>
 
         <div class="score-bars">
-            <h3>Quality Scores</h3>
+            <h3>{lbl_quality}</h3>
             <div class="score-bar">
                 <div class="score-bar-label">
-                    <span>Overall Accuracy</span>
+                    <span>{lbl_accuracy}</span>
                     <span>{result.overall_accuracy_score:.1%}</span>
                 </div>
                 <div class="score-bar-track">
@@ -983,7 +1135,7 @@ Return as JSON:
             </div>
             <div class="score-bar">
                 <div class="score-bar-label">
-                    <span>Evidence Coverage</span>
+                    <span>{lbl_coverage}</span>
                     <span>{result.evidence_coverage_score:.1%}</span>
                 </div>
                 <div class="score-bar-track">
@@ -992,7 +1144,7 @@ Return as JSON:
             </div>
             <div class="score-bar">
                 <div class="score-bar-label">
-                    <span>Source Quality</span>
+                    <span>{lbl_src_quality}</span>
                     <span>{result.source_quality_score:.1%}</span>
                 </div>
                 <div class="score-bar-track">
@@ -1008,10 +1160,10 @@ Return as JSON:
         </div>
 
         <div class="filters">
-            <h3>Filter Claims</h3>
+            <h3>{lbl_filter}</h3>
             <div class="filter-group">
-                <strong>By Risk:</strong>
-                <button class="filter-btn active" style="background: #6c757d; color: white;" onclick="filterBy('risk', 'all')">All</button>
+                <strong>{lbl_by_risk}:</strong>
+                <button class="filter-btn active" style="background: #6c757d; color: white;" onclick="filterBy('risk', 'all')">{lbl_all}</button>
                 <button class="filter-btn" style="background: #dc3545; color: white;" onclick="filterBy('risk', 'critical')">Critical</button>
                 <button class="filter-btn" style="background: #fd7e14; color: white;" onclick="filterBy('risk', 'high')">High</button>
                 <button class="filter-btn" style="background: #ffc107;" onclick="filterBy('risk', 'medium')">Medium</button>
@@ -1019,12 +1171,12 @@ Return as JSON:
                 <button class="filter-btn" style="background: #28a745; color: white;" onclick="filterBy('risk', 'none')">None</button>
             </div>
             <div class="filter-group">
-                <strong>By Type:</strong>
-                <button class="filter-btn" style="background: #e9ecef;" onclick="filterBy('type', 'all')">All</button>
-                <button class="filter-btn" style="background: #e9ecef;" onclick="filterBy('type', 'statistical')">Statistical</button>
-                <button class="filter-btn" style="background: #e9ecef;" onclick="filterBy('type', 'temporal')">Temporal</button>
-                <button class="filter-btn" style="background: #e9ecef;" onclick="filterBy('type', 'factual')">Factual</button>
-                <button class="filter-btn" style="background: #e9ecef;" onclick="filterBy('type', 'causal')">Causal</button>
+                <strong>{lbl_by_type}:</strong>
+                <button class="filter-btn" style="background: #e9ecef;" onclick="filterBy('type', 'all')">{lbl_all}</button>
+                <button class="filter-btn" style="background: #e9ecef;" onclick="filterBy('type', 'statistical')">{lbl_statistical}</button>
+                <button class="filter-btn" style="background: #e9ecef;" onclick="filterBy('type', 'temporal')">{lbl_temporal}</button>
+                <button class="filter-btn" style="background: #e9ecef;" onclick="filterBy('type', 'factual')">{lbl_factual}</button>
+                <button class="filter-btn" style="background: #e9ecef;" onclick="filterBy('type', 'causal')">{lbl_causal}</button>
             </div>
         </div>
 
@@ -1072,7 +1224,32 @@ Return as JSON:
         Returns:
             Quick check result dictionary
         """
-        prompt = f"""Quickly analyze this content for potential hallucinations and factual accuracy.
+        if self.language == "ja":
+            prompt = f"""以下の文章について、ハルシネーションや事実の正確性を簡易分析してください。
+
+文章:
+{content[:5000]}
+
+以下を特定してください:
+1. 捏造または根拠のない主張
+2. 疑わしい統計・数値
+3. 帰属が不正確な可能性のある引用
+4. 論理的な矛盾
+5. ハルシネーションが起きやすい過度に具体的な詳細
+
+JSONで返してください:
+{{
+    "overall_risk": "critical/high/medium/low",
+    "accuracy_estimate": 0.0-1.0,
+    "suspicious_claims": [
+        {{"text": "主張テキスト", "reason": "疑わしい理由", "risk": "high/medium/low"}}
+    ],
+    "likely_hallucinations": ["主張1", "主張2"],
+    "verification_priorities": ["最優先で検証すべき項目"],
+    "summary": "全体評価の要約（日本語）"
+}}"""
+        else:
+            prompt = f"""Quickly analyze this content for potential hallucinations and factual accuracy.
 
 Content:
 {content[:5000]}

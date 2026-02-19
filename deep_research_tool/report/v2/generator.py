@@ -333,17 +333,33 @@ class ReportGeneratorV2:
         # Build the prompt with full context
         context_prompt = context.get_full_context_prompt()
 
-        # Format content data
+        # Format content data — include both summary and raw content per source
         if isinstance(content_data, dict):
             sources = content_data.get("sources", [])
             extracted = content_data.get("extracted_content", [])
-            content_summary = "\n".join([
-                f"- [SOURCE {i+1}] {e.get('title', 'N/A')}: {e.get('content', '')[:500]}"
-                for i, e in enumerate(extracted[:10])
-            ]) if extracted else "情報なし"
+            if extracted:
+                source_blocks = []
+                for i, e in enumerate(extracted[:10]):
+                    title = e.get("title", "N/A")
+                    summary = e.get("content", "")
+                    raw = e.get("raw_content", "")
+                    key_pts = e.get("key_points", [])
+                    block = f"[SOURCE {i+1}] {title}\n"
+                    if summary:
+                        block += f"【要約】\n{summary}\n"
+                    if key_pts:
+                        block += f"【要点】{', '.join(key_pts[:5])}\n"
+                    if raw:
+                        block += f"【原文】\n{raw}\n"
+                    source_blocks.append(block)
+                content_summary = "\n---\n".join(source_blocks)
+            else:
+                # Fallback: use pre-synthesized content
+                fallback = content_data.get("content", "")
+                content_summary = fallback if fallback else "情報なし"
         else:
             sources = []
-            content_summary = str(content_data)[:2000] if content_data else "情報なし"
+            content_summary = str(content_data) if content_data else "情報なし"
 
         length_instruction_ja = ""
         length_instruction_en = ""
@@ -369,9 +385,10 @@ class ReportGeneratorV2:
 1. 用語統一ルールに従い、一貫した用語を使用する
 2. 前章までの内容と矛盾しないようにする
 3. 文体・スタイル指示に従う
-4. 事実に基づいた記述を行い、推測は明示する
+4. 事実に基づいた記述を行い、推測・推定の箇所には「（推定）」と付記する
 5. 必要に応じて前章を参照・引用する
-6. 情報の出典を示すため、該当箇所に [SOURCE N] の形式で引用番号を付与する（Nは上記情報のSOURCE番号）{length_instruction_ja}
+6. 情報の出典を示すため、該当箇所に [SOURCE N] の形式で引用番号を付与する（Nは上記情報のSOURCE番号）
+7. 本文は散文パラグラフで記述する。箇条書き（-、*、1.）や表は、比較一覧・手順・仕様など列挙が本質的に適切な場合のみ使用し、通常の説明・分析・考察は必ず文章で書く{length_instruction_ja}
 
 出力形式（JSON）:
 {{
@@ -401,9 +418,10 @@ Important notes:
 1. Follow terminology consistency rules
 2. Do not contradict previous chapters
 3. Follow style instructions
-4. Base writing on facts; clearly mark speculation
+4. Base writing on facts; mark speculative statements with "(estimated)" or "(speculative)"
 5. Reference previous chapters when appropriate
-6. Include citation markers [SOURCE N] in the text where information from sources is used (N corresponds to the SOURCE number above){length_instruction_en}
+6. Include citation markers [SOURCE N] in the text where information from sources is used (N corresponds to the SOURCE number above)
+7. Write in continuous prose paragraphs. Use bullet lists or tables only for comparisons, specifications, or steps where enumeration is inherently appropriate{length_instruction_en}
 
 Output format (JSON):
 {{

@@ -227,8 +227,19 @@ Create a detailed research plan. Return your response as a JSON object with this
     "estimated_complexity": "low/medium/high"
 }}
 
-Generate at least 5 main sections and 15 search queries.
-Make search queries specific and actionable."""
+Generate at least 5 main sections and 25 search queries.
+Make search queries specific and actionable.
+
+CRITICAL RULES FOR SEARCH QUERIES:
+- Each query MUST focus on ONE specific concept, metric, or topic (one-query-one-topic rule)
+- Keep each query under 40 characters (aim for ~30 characters)
+- NEVER combine multiple items with separators like ・ 、 / , in a single query
+- Examples:
+  ✗ Bad: "IR KPI 年度別売上・CF部門比率・生産能力・CAPEX テンプレート"
+  ○ Good: "IR KPI 年度別売上 テンプレート", "IR CF部門比率 開示事例", "IR CAPEX 開示項目"
+  ✗ Bad: "carbon fiber market size, manufacturer share, applications, price trends"
+  ○ Good: "carbon fiber market size 2024", "carbon fiber manufacturer share", "carbon fiber price trends"
+- More focused queries yield better search results"""
 
         response = self.llm.generate(prompt, system_prompt=system_prompt)
 
@@ -266,11 +277,17 @@ Make search queries specific and actionable."""
                 items=toc_items,
             )
 
+            # Split long compound queries into focused sub-queries
+            raw_queries = data.get("search_queries", [])
+            split_queries = self.split_complex_queries(raw_queries)
+            if len(split_queries) != len(raw_queries):
+                print(f"[QueryGenerator] Split queries: {len(raw_queries)} → {len(split_queries)}")
+
             return ResearchPlan(
                 title=data.get("title", query),
                 summary=data.get("summary", ""),
                 table_of_contents=toc,
-                search_queries=data.get("search_queries", []),
+                search_queries=split_queries,
                 key_terms=data.get("key_terms", []),
                 suggested_sources=data.get("suggested_sources", []),
                 methodology_notes=data.get("methodology_notes", ""),
@@ -286,6 +303,7 @@ Make search queries specific and actionable."""
         section: TableOfContentsItem,
         gathered_info: str,
         gaps: List[str] = None,
+        research_topic: str = "",
     ) -> List[str]:
         """
         Generate follow-up queries for a section.
@@ -294,6 +312,7 @@ Make search queries specific and actionable."""
             section: The section to generate queries for
             gathered_info: Summary of information already gathered
             gaps: Identified information gaps
+            research_topic: Original research topic/query to keep queries on-topic
 
         Returns:
             List of follow-up search queries
@@ -305,9 +324,33 @@ Make search queries specific and actionable."""
 
         gaps_text = "\n".join(f"- {gap}" for gap in gaps) if gaps else "Not yet identified"
 
+        # Build topic anchoring instruction
+        topic_anchor = ""
+        if research_topic:
+            if self.language == "ja":
+                topic_anchor = f"""
+【重要：調査テーマの文脈を維持すること】
+元の調査テーマ: {research_topic}
+検索クエリは必ずこの調査テーマの文脈内で生成してください。
+セクションタイトルだけを見て一般論的なクエリを生成してはいけません。
+例：調査テーマが「炭素繊維の市場・技術調査」でセクションが「インタビュー・現地調査」の場合
+  ✗ 悪い例: "リモートインタビューと対面調査の比較"（一般論）
+  ○ 良い例: "炭素繊維メーカー 工場視察 調査手法"（テーマに紐づく）
+"""
+            else:
+                topic_anchor = f"""
+CRITICAL: Keep queries anchored to the original research topic.
+Original Research Topic: {research_topic}
+All queries MUST be generated within the context of this topic.
+Do NOT generate generic queries based only on the section title.
+Example: If the topic is "Carbon fiber market research" and the section is "Interview methodology":
+  ✗ Bad: "remote interview vs in-person survey comparison" (too generic)
+  ○ Good: "carbon fiber manufacturer site visit methodology" (topic-anchored)
+"""
+
         prompt = f"""Section: {section.section}. {section.title}
 Description: {section.description}
-
+{topic_anchor}
 Information Already Gathered:
 {gathered_info[:2000] if gathered_info else "Initial research phase"}
 
@@ -322,6 +365,12 @@ Generate 5-8 specific search queries that will:
 3. Explore different perspectives
 4. Deepen understanding of key concepts
 
+IMPORTANT query rules:
+- Each query must focus on ONE specific topic (one-query-one-topic)
+- Keep each query under 40 characters
+- Do NOT combine multiple items with ・ 、 / in a single query
+- Every query MUST relate to the original research topic
+
 Return as a JSON array of strings only:
 ["query1", "query2", ...]"""
 
@@ -332,14 +381,65 @@ Return as a JSON array of strings only:
             start = content.find("[")
             end = content.rfind("]") + 1
             if start != -1 and end > start:
-                return json.loads(content[start:end])
+                queries = json.loads(content[start:end])
+                queries = self.split_complex_queries(queries)
+                return self._anchor_queries_to_topic(queries, research_topic)
         except (json.JSONDecodeError, ValueError):
             pass
 
         # Fallback: extract any quoted strings
         import re
         queries = re.findall(r'"([^"]+)"', response.content)
-        return queries[:8] if queries else [f"{section.title} detailed information"]
+        queries = queries[:8] if queries else [f"{section.title} detailed information"]
+        queries = self.split_complex_queries(queries)
+        return self._anchor_queries_to_topic(queries, research_topic)
+
+    @staticmethod
+    def _anchor_queries_to_topic(
+        queries: List[str],
+        research_topic: str,
+    ) -> List[str]:
+        """
+        Ensure generated queries contain at least one keyword from the research topic.
+
+        Uses simple character-based overlap check. If a query has no overlap
+        with topic keywords, prepend a primary keyword to anchor it.
+
+        Args:
+            queries: Generated search queries
+            research_topic: Original research topic
+
+        Returns:
+            Queries with topic-anchoring applied where needed
+        """
+        if not research_topic:
+            return queries
+
+        import re as _re
+        # Extract meaningful words (2+ chars, no particles)
+        topic_words = set(
+            w for w in _re.findall(r'[\w]{2,}', research_topic)
+            if len(w) >= 2
+        )
+        if not topic_words:
+            return queries
+
+        # Pick the most representative keyword (longest word)
+        primary_keyword = max(topic_words, key=len)
+
+        anchored = []
+        for q in queries:
+            q_words = set(_re.findall(r'[\w]{2,}', q))
+            if q_words & topic_words:
+                anchored.append(q)
+            else:
+                new_q = f"{primary_keyword} {q}"
+                if len(new_q) > 50:
+                    new_q = new_q[:50]
+                anchored.append(new_q)
+                print(f"[QueryGenerator] Anchored drifting query: '{q}' → '{new_q}'")
+
+        return anchored
 
     def identify_gaps(
         self,
@@ -396,6 +496,112 @@ Return as a JSON array of specific gaps:
             pass
 
         return ["More detailed information needed", "Additional sources required"]
+
+    @staticmethod
+    def split_complex_queries(queries: List[str]) -> List[str]:
+        """
+        Split long compound queries into focused sub-queries.
+
+        Detects queries that combine multiple distinct topics (e.g. items
+        separated by ・、/ or parenthesised lists) and splits them so that
+        each resulting query targets a single concept.
+
+        Rules:
+        1. Queries <= 35 chars → keep as-is (already focused).
+        2. Queries containing enumerated items (・/ 、separated, or
+           parenthesised lists with ・) → extract common prefix/suffix and
+           create one query per item.
+        3. Remaining long queries (> 60 chars) with Japanese commas/
+           connectors → attempt a simpler split.
+
+        Args:
+            queries: Original list of search queries.
+
+        Returns:
+            Expanded list with long compound queries split into shorter ones.
+        """
+        import re
+
+        result: List[str] = []
+
+        for query in queries:
+            q = query.strip()
+
+            # Rule 1: short enough → keep
+            if len(q) <= 35:
+                result.append(q)
+                continue
+
+            # Rule 2: detect parenthesised list  e.g. "...（A・B・C等）..."
+            paren_match = re.search(r'[（(]([^）)]+)[）)]', q)
+            if paren_match:
+                inner = paren_match.group(1)
+                # Remove trailing 等/など
+                inner_clean = re.sub(r'[等など]$', '', inner).strip()
+                items = re.split(r'[・/、，,]', inner_clean)
+                items = [it.strip() for it in items if len(it.strip()) >= 2]
+
+                if len(items) >= 3:
+                    prefix = q[:paren_match.start()].strip()
+                    suffix = q[paren_match.end():].strip()
+                    # Remove trailing punctuation from prefix
+                    prefix = re.sub(r'[：:、，,\s]+$', '', prefix)
+                    for item in items:
+                        sub = f"{prefix} {item}" if prefix else item
+                        if suffix:
+                            sub = f"{sub} {suffix}"
+                        if len(sub) <= 60:
+                            result.append(sub)
+                        else:
+                            result.append(sub[:60])
+                    continue
+
+            # Rule 3: mid-dot separated list without parentheses
+            dot_items = re.split(r'[・]', q)
+            if len(dot_items) >= 3:
+                first = dot_items[0].strip()
+                last = dot_items[-1].strip()
+                mid_items = [it.strip() for it in dot_items[1:-1] if len(it.strip()) >= 2]
+
+                first_parts = re.split(r'\s+', first)
+                if len(first_parts) > 1:
+                    prefix = ' '.join(first_parts[:-1])
+                    first_item = first_parts[-1]
+                else:
+                    prefix = ''
+                    first_item = first
+
+                all_items = [first_item] + mid_items + [last]
+
+                for item in all_items:
+                    sub = f"{prefix} {item}" if prefix else item
+                    if len(sub) <= 60:
+                        result.append(sub)
+                    else:
+                        result.append(sub[:60])
+                continue
+
+            # Rule 4: comma / 、 separated long query
+            comma_items = re.split(r'[、，,]', q)
+            if len(comma_items) >= 3 and len(q) > 50:
+                for item in comma_items:
+                    item = item.strip()
+                    if len(item) >= 4:
+                        result.append(item)
+                continue
+
+            # Default: keep original
+            result.append(q)
+
+        # Deduplicate while preserving order
+        seen = set()
+        deduped: List[str] = []
+        for q in result:
+            if q not in seen:
+                seen.add(q)
+                deduped.append(q)
+
+        return deduped
 
     def _create_fallback_plan(self, query: str, error: str) -> ResearchPlan:
         """Create a basic fallback plan when LLM parsing fails."""

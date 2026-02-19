@@ -383,6 +383,12 @@ class QueryGenerator:
             if plan is None:
                 continue
 
+            # Split long compound queries into focused sub-queries
+            original_count = len(plan.search_queries)
+            plan.search_queries = self.split_complex_queries(plan.search_queries)
+            if len(plan.search_queries) != original_count:
+                print(f"[QueryGenerator] Split queries: {original_count} → {len(plan.search_queries)}")
+
             # Skip validation if user specified their own ToC preference
             if has_user_toc_preference:
                 print(f"[QueryGenerator] Respecting user ToC preference, returning plan without strict validation")
@@ -540,8 +546,19 @@ When creating a research plan:
 必須条件：
 - 最低5つのメインセクション
 - 各メインセクションに2-3個のサブセクション
-- 15個以上の検索クエリ
-- 一般的なセクション名（はじめに、背景、考察、結論等）は使用しない"""
+- 25個以上の検索クエリ
+- 一般的なセクション名（はじめに、背景、考察、結論等）は使用しない
+
+【検索クエリに関する重要ルール】
+- 各クエリは1つの具体的な概念・指標・トピックに絞ること（1クエリ1トピック原則）
+- 1クエリは30文字以内を目安とし、最大でも40文字以内にすること
+- 複数の項目を「・」「、」「/」で列挙した長いクエリは禁止
+- 例：
+  ✗ 悪い例: "IR KPI 必須項目 年度別売上・CF部門比率・生産能力・CAPEX・主要顧客・用途別比率 テンプレート"
+  ○ 良い例: "IR KPI 年度別売上 テンプレート", "IR CF部門比率 開示事例", "IR CAPEX 開示項目", "IR 主要顧客 開示例", "IR 用途別比率 チェックリスト"
+  ✗ 悪い例: "炭素繊維 市場規模・メーカーシェア・用途・価格動向 分析"
+  ○ 良い例: "炭素繊維 市場規模 2024", "炭素繊維 メーカー シェア", "炭素繊維 用途別 需要", "炭素繊維 価格動向"
+- 焦点を絞ったクエリを数多く生成することで、検索精度が向上する"""
         else:
             prompt = f"""Research Topic: {query}
 
@@ -574,8 +591,17 @@ Create a detailed research plan. Return your response as a JSON object with this
 Requirements:
 - Generate at least 5 main sections
 - Each main section MUST have 2-3 subsections
-- Generate at least 15 search queries
-- DO NOT use generic section names (Introduction, Background, Discussion, Conclusion)"""
+- Generate at least 25 search queries
+- DO NOT use generic section names (Introduction, Background, Discussion, Conclusion)
+
+CRITICAL RULES FOR SEARCH QUERIES:
+- Each query MUST focus on ONE specific concept, metric, or topic (one-query-one-topic rule)
+- Keep each query under 40 characters (aim for ~30 characters)
+- NEVER combine multiple items with separators like ・ 、 / , in a single query
+- Examples:
+  ✗ Bad: "carbon fiber market size, manufacturer share, applications, price trends analysis"
+  ○ Good: "carbon fiber market size 2024", "carbon fiber manufacturer share", "carbon fiber applications demand", "carbon fiber price trends"
+- More focused queries yield better search results"""
 
         response = self.llm.generate(prompt, system_prompt=system_prompt)
 
@@ -635,6 +661,7 @@ Requirements:
         section: TableOfContentsItem,
         gathered_info: str,
         gaps: List[str] = None,
+        research_topic: str = "",
     ) -> List[str]:
         """
         Generate follow-up queries for a section.
@@ -643,6 +670,7 @@ Requirements:
             section: The section to generate queries for
             gathered_info: Summary of information already gathered
             gaps: Identified information gaps
+            research_topic: Original research topic/query to keep queries on-topic
 
         Returns:
             List of follow-up search queries
@@ -654,9 +682,33 @@ Requirements:
 
         gaps_text = "\n".join(f"- {gap}" for gap in gaps) if gaps else "Not yet identified"
 
+        # Build topic anchoring instruction
+        topic_anchor = ""
+        if research_topic:
+            if self.language == "ja":
+                topic_anchor = f"""
+【重要：調査テーマの文脈を維持すること】
+元の調査テーマ: {research_topic}
+検索クエリは必ずこの調査テーマの文脈内で生成してください。
+セクションタイトルだけを見て一般論的なクエリを生成してはいけません。
+例：調査テーマが「炭素繊維の市場・技術調査」でセクションが「インタビュー・現地調査」の場合
+  ✗ 悪い例: "リモートインタビューと対面調査の比較"（一般論）
+  ○ 良い例: "炭素繊維メーカー 工場視察 調査手法"（テーマに紐づく）
+"""
+            else:
+                topic_anchor = f"""
+CRITICAL: Keep queries anchored to the original research topic.
+Original Research Topic: {research_topic}
+All queries MUST be generated within the context of this topic.
+Do NOT generate generic queries based only on the section title.
+Example: If the topic is "Carbon fiber market research" and the section is "Interview methodology":
+  ✗ Bad: "remote interview vs in-person survey comparison" (too generic)
+  ○ Good: "carbon fiber manufacturer site visit methodology" (topic-anchored)
+"""
+
         prompt = f"""Section: {section.section}. {section.title}
 Description: {section.description}
-
+{topic_anchor}
 Information Already Gathered:
 {gathered_info[:2000] if gathered_info else "Initial research phase"}
 
@@ -671,6 +723,12 @@ Generate 5-8 specific search queries that will:
 3. Explore different perspectives
 4. Deepen understanding of key concepts
 
+IMPORTANT query rules:
+- Each query must focus on ONE specific topic (one-query-one-topic)
+- Keep each query under 40 characters
+- Do NOT combine multiple items with ・ 、 / in a single query
+- Every query MUST relate to the original research topic
+
 Return as a JSON array of strings only:
 ["query1", "query2", ...]"""
 
@@ -681,14 +739,63 @@ Return as a JSON array of strings only:
             start = content.find("[")
             end = content.rfind("]") + 1
             if start != -1 and end > start:
-                return json.loads(content[start:end])
+                queries = json.loads(content[start:end])
+                queries = self.split_complex_queries(queries)
+                return self._anchor_queries_to_topic(queries, research_topic)
         except (json.JSONDecodeError, ValueError):
             pass
 
         # Fallback: extract any quoted strings
         import re
         queries = re.findall(r'"([^"]+)"', response.content)
-        return queries[:8] if queries else [f"{section.title} detailed information"]
+        queries = queries[:8] if queries else [f"{section.title} detailed information"]
+        queries = self.split_complex_queries(queries)
+        return self._anchor_queries_to_topic(queries, research_topic)
+
+    def _anchor_queries_to_topic(
+        self,
+        queries: List[str],
+        research_topic: str,
+    ) -> List[str]:
+        """
+        Ensure generated queries contain at least one keyword from the research topic.
+
+        If a query has no overlap with the topic keywords, prepend the primary
+        topic keyword to anchor it.
+
+        Args:
+            queries: Generated search queries
+            research_topic: Original research topic
+
+        Returns:
+            Queries with topic-anchoring applied where needed
+        """
+        if not research_topic:
+            return queries
+
+        topic_words = extract_content_words_set(research_topic)
+        if not topic_words:
+            return queries
+
+        # Pick the most representative keyword (longest content word)
+        primary_keyword = max(topic_words, key=len)
+
+        anchored = []
+        for q in queries:
+            q_words = extract_content_words_set(q)
+            if q_words & topic_words:
+                # Query already contains a topic keyword
+                anchored.append(q)
+            else:
+                # Prepend primary keyword to anchor the query
+                new_q = f"{primary_keyword} {q}"
+                # Trim if too long
+                if len(new_q) > 50:
+                    new_q = new_q[:50]
+                anchored.append(new_q)
+                print(f"[QueryGenerator] Anchored drifting query: '{q}' → '{new_q}'")
+
+        return anchored
 
     def identify_gaps(
         self,
@@ -745,6 +852,120 @@ Return as a JSON array of specific gaps:
             pass
 
         return ["More detailed information needed", "Additional sources required"]
+
+    @staticmethod
+    def split_complex_queries(queries: List[str]) -> List[str]:
+        """
+        Split long compound queries into focused sub-queries.
+
+        Detects queries that combine multiple distinct topics (e.g. items
+        separated by ・、/ or parenthesised lists) and splits them so that
+        each resulting query targets a single concept.
+
+        Rules:
+        1. Queries <= 35 chars → keep as-is (already focused).
+        2. Queries containing enumerated items (・/ 、separated, or
+           parenthesised lists with ・) → extract common prefix/suffix and
+           create one query per item.
+        3. Remaining long queries (> 60 chars) with Japanese commas/
+           connectors → attempt a simpler split.
+
+        Args:
+            queries: Original list of search queries.
+
+        Returns:
+            Expanded list with long compound queries split into shorter ones.
+        """
+        import re
+
+        result: List[str] = []
+
+        for query in queries:
+            q = query.strip()
+
+            # Rule 1: short enough → keep
+            if len(q) <= 35:
+                result.append(q)
+                continue
+
+            # Rule 2: detect parenthesised list  e.g. "...（A・B・C等）..."
+            paren_match = re.search(r'[（(]([^）)]+)[）)]', q)
+            if paren_match:
+                inner = paren_match.group(1)
+                # Remove trailing 等/など
+                inner_clean = re.sub(r'[等など]$', '', inner).strip()
+                items = re.split(r'[・/、，,]', inner_clean)
+                items = [it.strip() for it in items if len(it.strip()) >= 2]
+
+                if len(items) >= 3:
+                    prefix = q[:paren_match.start()].strip()
+                    suffix = q[paren_match.end():].strip()
+                    # Remove trailing punctuation from prefix
+                    prefix = re.sub(r'[：:、，,\s]+$', '', prefix)
+                    for item in items:
+                        sub = f"{prefix} {item}" if prefix else item
+                        if suffix:
+                            sub = f"{sub} {suffix}"
+                        # Trim to reasonable length
+                        if len(sub) <= 60:
+                            result.append(sub)
+                        else:
+                            result.append(sub[:60])
+                    continue
+
+            # Rule 3: mid-dot separated list without parentheses
+            #   e.g. "IR収集 年度別売上・CF比率・CAPEX チェックリスト"
+            dot_items = re.split(r'[・]', q)
+            if len(dot_items) >= 3:
+                # Heuristic: first segment likely contains the prefix context,
+                # last segment likely contains the suffix context.
+                # Items in between are the enumerated concepts.
+                first = dot_items[0].strip()
+                last = dot_items[-1].strip()
+                mid_items = [it.strip() for it in dot_items[1:-1] if len(it.strip()) >= 2]
+
+                # Split first segment into prefix words and the first item
+                # e.g. "IR収集テンプレート KPI 年度別売上" → prefix="IR収集テンプレート KPI", first_item="年度別売上"
+                # We take everything up to the last space-separated token as prefix
+                first_parts = re.split(r'\s+', first)
+                if len(first_parts) > 1:
+                    prefix = ' '.join(first_parts[:-1])
+                    first_item = first_parts[-1]
+                else:
+                    prefix = ''
+                    first_item = first
+
+                all_items = [first_item] + mid_items + [last]
+
+                for item in all_items:
+                    sub = f"{prefix} {item}" if prefix else item
+                    if len(sub) <= 60:
+                        result.append(sub)
+                    else:
+                        result.append(sub[:60])
+                continue
+
+            # Rule 4: comma / 、 separated long query
+            comma_items = re.split(r'[、，,]', q)
+            if len(comma_items) >= 3 and len(q) > 50:
+                for item in comma_items:
+                    item = item.strip()
+                    if len(item) >= 4:
+                        result.append(item)
+                continue
+
+            # Default: keep original
+            result.append(q)
+
+        # Deduplicate while preserving order
+        seen = set()
+        deduped: List[str] = []
+        for q in result:
+            if q not in seen:
+                seen.add(q)
+                deduped.append(q)
+
+        return deduped
 
     def _create_fallback_plan(self, query: str, error: str) -> ResearchPlan:
         """Create a basic fallback plan when LLM parsing fails."""

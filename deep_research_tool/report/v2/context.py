@@ -216,12 +216,13 @@ class ReportContext:
 
     def get_style_instructions(self) -> str:
         """Generate style instructions for chapter generation prompts."""
+        prose_rule = "本文は散文パラグラフで記述し、箇条書きは比較・手順など列挙が自然な場合に限定する。"
         style_map = {
-            WritingStyle.FORMAL: "学術的で客観的な文体。「である」調を使用。",
-            WritingStyle.BUSINESS: "ビジネス文書として適切な文体。「です・ます」調。簡潔で明確。",
-            WritingStyle.TECHNICAL: "技術文書として正確で詳細。専門用語を適切に使用。",
-            WritingStyle.EXECUTIVE: "経営層向けに簡潔。要点を先に、詳細は後に。",
-            WritingStyle.CASUAL: "読みやすく親しみやすい文体。",
+            WritingStyle.FORMAL: f"学術的で客観的な文体。「である」調を使用。{prose_rule}",
+            WritingStyle.BUSINESS: f"ビジネス文書として適切な文体。「です・ます」調。簡潔で明確。{prose_rule}",
+            WritingStyle.TECHNICAL: f"技術文書として正確で詳細。専門用語を適切に使用。{prose_rule}",
+            WritingStyle.EXECUTIVE: f"経営層向けに簡潔。要点を先に、詳細は後に。{prose_rule}",
+            WritingStyle.CASUAL: f"読みやすく親しみやすい文体。{prose_rule}",
         }
 
         audience_map = {

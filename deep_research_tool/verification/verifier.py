@@ -189,7 +189,26 @@ class Verifier:
 
     def _extract_claims(self, content: str) -> List[str]:
         """Extract verifiable claims from content."""
-        prompt = f"""Analyze this content and extract all verifiable factual claims.
+        if self.language == "ja":
+            prompt = f"""以下の文章を分析し、検証可能な事実主張をすべて抽出してください。
+
+文章:
+{content[:6000]}
+
+各主張について以下を特定してください:
+1. 具体的な事実記述
+2. 統計的・数値的な主張
+3. 引用文
+4. 因果関係の主張
+5. 歴史的・時間的な主張
+
+JSON配列で返してください:
+["主張1", "主張2", ...]
+
+検証可能な事実主張（意見ではなく）に焦点を当ててください。
+意味のある主張を10〜20個以上抽出してください。"""
+        else:
+            prompt = f"""Analyze this content and extract all verifiable factual claims.
 
 Content:
 {content[:6000]}
@@ -247,13 +266,45 @@ Reliability: {evidence.reliability_score:.2f}
         strictness: str,
     ) -> ClaimVerification:
         """Verify a single claim against evidence."""
-        strictness_instruction = {
-            "low": "Be lenient - only flag clearly unsupported claims",
-            "medium": "Be balanced - flag claims without clear evidence",
-            "high": "Be strict - require strong evidence for all claims",
-        }.get(strictness, "Be balanced")
+        if self.language == "ja":
+            strictness_instruction = {
+                "low": "寛容に判定 - 明らかに根拠のない主張のみ指摘する",
+                "medium": "バランスよく判定 - 明確な根拠がない主張を指摘する",
+                "high": "厳格に判定 - すべての主張に強い根拠を要求する",
+            }.get(strictness, "バランスよく判定")
 
-        prompt = f"""Verify this claim against the available evidence.
+            prompt = f"""以下の主張をエビデンスと照合して検証してください。
+
+主張: {claim}
+
+利用可能なエビデンス:
+{evidence_summaries[:4000]}
+
+検証の厳格さ: {strictness_instruction}
+
+分析内容:
+1. この主張はエビデンスによって裏付けられていますか？
+2. ハルシネーションが起きやすいタイプの主張ですか（統計、日付、引用）？
+3. 確信度はどのレベルですか？
+4. どのソースがこの主張を支持または矛盾していますか？
+
+JSONで返してください:
+{{
+    "confidence": "high/medium/low/unsupported/contradicted",
+    "source_support": ["ソースキー1", "ソースキー2"],
+    "reasoning": "この確信度の理由（日本語）",
+    "is_hallucination_risk": true/false,
+    "hallucination_type": "statistics/dates/quotes/causal/none",
+    "suggestions": "この主張を改善・検証する方法（日本語）"
+}}"""
+        else:
+            strictness_instruction = {
+                "low": "Be lenient - only flag clearly unsupported claims",
+                "medium": "Be balanced - flag claims without clear evidence",
+                "high": "Be strict - require strong evidence for all claims",
+            }.get(strictness, "Be balanced")
+
+            prompt = f"""Verify this claim against the available evidence.
 
 Claim: {claim}
 
@@ -313,26 +364,42 @@ Return as JSON:
         """Generate summary notes about verification."""
         notes = []
 
-        # Overall assessment
-        if result.overall_reliability_score >= 0.8:
-            notes.append("Overall reliability: HIGH - Most claims are well-supported")
-        elif result.overall_reliability_score >= 0.6:
-            notes.append("Overall reliability: MEDIUM - Many claims need additional verification")
+        if self.language == "ja":
+            if result.overall_reliability_score >= 0.8:
+                notes.append("全体信頼度: 高 — 大半の主張が十分に裏付けられています")
+            elif result.overall_reliability_score >= 0.6:
+                notes.append("全体信頼度: 中 — 多くの主張に追加検証が必要です")
+            else:
+                notes.append("全体信頼度: 低 — 大幅な検証が必要です")
+
+            if result.hallucination_risk_count > 0:
+                notes.append(
+                    f"ハルシネーションリスク: {result.hallucination_risk_count}件の主張に"
+                    "不正確な情報が含まれている可能性があります"
+                )
+
+            if result.unsupported_count > 0:
+                notes.append(
+                    f"根拠不足の主張: {result.unsupported_count}件の主張にソースエビデンスがありません"
+                )
         else:
-            notes.append("Overall reliability: LOW - Significant verification needed")
+            if result.overall_reliability_score >= 0.8:
+                notes.append("Overall reliability: HIGH - Most claims are well-supported")
+            elif result.overall_reliability_score >= 0.6:
+                notes.append("Overall reliability: MEDIUM - Many claims need additional verification")
+            else:
+                notes.append("Overall reliability: LOW - Significant verification needed")
 
-        # Hallucination risks
-        if result.hallucination_risk_count > 0:
-            notes.append(
-                f"Hallucination risks identified: {result.hallucination_risk_count} claims "
-                "may contain inaccurate information"
-            )
+            if result.hallucination_risk_count > 0:
+                notes.append(
+                    f"Hallucination risks identified: {result.hallucination_risk_count} claims "
+                    "may contain inaccurate information"
+                )
 
-        # Unsupported claims
-        if result.unsupported_count > 0:
-            notes.append(
-                f"Unsupported claims: {result.unsupported_count} claims lack source evidence"
-            )
+            if result.unsupported_count > 0:
+                notes.append(
+                    f"Unsupported claims: {result.unsupported_count} claims lack source evidence"
+                )
 
         return "\n".join(notes)
 
@@ -360,12 +427,20 @@ Return as JSON:
             "contradicted": "#6f42c1",  # Purple
         }
 
+        # Labels
+        ja = self.language == "ja"
+        lbl_reasoning = "分析理由" if ja else "Reasoning"
+        lbl_sources = "ソース" if ja else "Sources"
+        lbl_suggestions = "改善提案" if ja else "Suggestions"
+        lbl_none_cited = "引用なし" if ja else "None cited"
+        lbl_risk_badge = "ハルシネーションリスク" if ja else "Hallucination Risk"
+
         # Build claims HTML
         claims_html = []
         for claim in result.verified_claims:
             color = confidence_colors.get(claim.confidence.value, "#6c757d")
             risk_badge = (
-                '<span class="badge bg-danger">Hallucination Risk</span>'
+                f'<span class="badge bg-danger">{lbl_risk_badge}</span>'
                 if claim.is_hallucination_risk else ""
             )
 
@@ -379,9 +454,9 @@ Return as JSON:
                 </div>
                 <div class="claim-text">{claim.claim_text}</div>
                 <div class="claim-details">
-                    <p><strong>Reasoning:</strong> {claim.reasoning}</p>
-                    <p><strong>Sources:</strong> {', '.join(claim.source_support) or 'None cited'}</p>
-                    <p><strong>Suggestions:</strong> {claim.suggestions}</p>
+                    <p><strong>{lbl_reasoning}:</strong> {claim.reasoning}</p>
+                    <p><strong>{lbl_sources}:</strong> {', '.join(claim.source_support) or lbl_none_cited}</p>
+                    <p><strong>{lbl_suggestions}:</strong> {claim.suggestions}</p>
                 </div>
             </div>
             """)
@@ -395,13 +470,29 @@ Return as JSON:
             "unsupported": (result.unsupported_count / total) * 100,
         }
 
+        # Section labels
+        lbl_title = "検証レポート" if ja else "Verification Report"
+        lbl_verified = "検証日時" if ja else "Verified"
+        lbl_total = "総主張数" if ja else "Total Claims"
+        lbl_reliability = "信頼性スコア" if ja else "Reliability Score"
+        lbl_hal_risks = "ハルシネーションリスク" if ja else "Hallucination Risks"
+        lbl_unsupported = "根拠不足" if ja else "Unsupported Claims"
+        lbl_conf_dist = "確信度分布" if ja else "Confidence Distribution"
+        lbl_high_conf = "高確信" if ja else "High Confidence"
+        lbl_medium_conf = "中程度" if ja else "Medium"
+        lbl_low_conf = "低確信" if ja else "Low"
+        lbl_unsup_conf = "根拠不足" if ja else "Unsupported"
+        lbl_verified_claims = "検証済み主張" if ja else "Verified Claims"
+        lbl_all = "すべて" if ja else "All"
+        lbl_notes = "検証ノート" if ja else "Verification Notes"
+
         html_content = f"""
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="{'ja' if ja else 'en'}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Verification Report - {result.document_title}</title>
+    <title>{lbl_title} - {result.document_title}</title>
     <style>
         * {{ box-sizing: border-box; }}
         body {{
@@ -527,32 +618,32 @@ Return as JSON:
 </head>
 <body>
     <div class="header">
-        <h1>Verification Report</h1>
+        <h1>{lbl_title}</h1>
         <p>{result.document_title}</p>
-        <p>Verified: {result.verified_at}</p>
+        <p>{lbl_verified}: {result.verified_at}</p>
     </div>
 
     <div class="summary-cards">
         <div class="summary-card">
             <h3>{result.total_claims}</h3>
-            <p>Total Claims</p>
+            <p>{lbl_total}</p>
         </div>
         <div class="summary-card">
             <h3 style="color: #28a745;">{result.overall_reliability_score:.1%}</h3>
-            <p>Reliability Score</p>
+            <p>{lbl_reliability}</p>
         </div>
         <div class="summary-card">
             <h3 style="color: #dc3545;">{result.hallucination_risk_count}</h3>
-            <p>Hallucination Risks</p>
+            <p>{lbl_hal_risks}</p>
         </div>
         <div class="summary-card">
             <h3 style="color: #fd7e14;">{result.unsupported_count}</h3>
-            <p>Unsupported Claims</p>
+            <p>{lbl_unsupported}</p>
         </div>
     </div>
 
     <div class="reliability-meter">
-        <h3>Confidence Distribution</h3>
+        <h3>{lbl_conf_dist}</h3>
         <div class="meter-bar">
             <div class="meter-segment" style="width: {chart_data['high']}%; background-color: #28a745;">
                 {result.high_confidence_count}
@@ -568,27 +659,27 @@ Return as JSON:
             </div>
         </div>
         <div style="display: flex; justify-content: space-between; margin-top: 10px; font-size: 12px;">
-            <span><span style="color: #28a745;">&#9632;</span> High Confidence</span>
-            <span><span style="color: #ffc107;">&#9632;</span> Medium</span>
-            <span><span style="color: #fd7e14;">&#9632;</span> Low</span>
-            <span><span style="color: #dc3545;">&#9632;</span> Unsupported</span>
+            <span><span style="color: #28a745;">&#9632;</span> {lbl_high_conf}</span>
+            <span><span style="color: #ffc107;">&#9632;</span> {lbl_medium_conf}</span>
+            <span><span style="color: #fd7e14;">&#9632;</span> {lbl_low_conf}</span>
+            <span><span style="color: #dc3545;">&#9632;</span> {lbl_unsup_conf}</span>
         </div>
     </div>
 
     <div class="claims-section">
-        <h2>Verified Claims</h2>
+        <h2>{lbl_verified_claims}</h2>
 
         <div class="filter-buttons">
             <button class="filter-btn" style="background: #28a745; color: white;"
-                onclick="filterClaims('high')">High ({result.high_confidence_count})</button>
+                onclick="filterClaims('high')">{lbl_high_conf} ({result.high_confidence_count})</button>
             <button class="filter-btn" style="background: #ffc107;"
-                onclick="filterClaims('medium')">Medium ({result.medium_confidence_count})</button>
+                onclick="filterClaims('medium')">{lbl_medium_conf} ({result.medium_confidence_count})</button>
             <button class="filter-btn" style="background: #fd7e14; color: white;"
-                onclick="filterClaims('low')">Low ({result.low_confidence_count})</button>
+                onclick="filterClaims('low')">{lbl_low_conf} ({result.low_confidence_count})</button>
             <button class="filter-btn" style="background: #dc3545; color: white;"
-                onclick="filterClaims('unsupported')">Unsupported ({result.unsupported_count})</button>
+                onclick="filterClaims('unsupported')">{lbl_unsup_conf} ({result.unsupported_count})</button>
             <button class="filter-btn" style="background: #6c757d; color: white;"
-                onclick="filterClaims('all')">All</button>
+                onclick="filterClaims('all')">{lbl_all}</button>
         </div>
 
         <div id="claims-container">
@@ -596,7 +687,7 @@ Return as JSON:
         </div>
 
         <div class="notes-section">
-            <h4>Verification Notes</h4>
+            <h4>{lbl_notes}</h4>
             <pre>{result.verification_notes}</pre>
         </div>
     </div>
@@ -644,7 +735,30 @@ Return as JSON:
         Returns:
             Quick verification result dictionary
         """
-        prompt = f"""Quickly analyze this content for potential hallucinations and accuracy issues.
+        if self.language == "ja":
+            prompt = f"""以下の文章について、ハルシネーションや正確性の問題がないか簡易分析してください。
+
+文章:
+{content[:4000]}
+
+{f"エビデンス要約: {evidence_summaries[:2000]}" if evidence_summaries else ""}
+
+以下を特定してください:
+1. 根拠が不十分または疑わしい主張
+2. 検証が必要な統計・数値
+3. 出典確認が必要な引用文
+4. 過度に単純化された因果関係の主張
+5. 全体的な信頼性評価
+
+JSONで返してください:
+{{
+    "overall_reliability": "high/medium/low",
+    "suspicious_claims": ["疑わしい主張1", "疑わしい主張2"],
+    "verification_needed": ["検証が必要な項目"],
+    "recommendations": ["推奨事項1"]
+}}"""
+        else:
+            prompt = f"""Quickly analyze this content for potential hallucinations and accuracy issues.
 
 Content:
 {content[:4000]}
