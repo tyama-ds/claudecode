@@ -70,7 +70,7 @@ class MultiAgentDiscussion:
 
             if agent_config.role == AgentRole.MODERATOR:
                 self.moderator = agent
-            elif agent_config.role == AgentRole.PARTICIPANT:
+            elif agent_config.role in (AgentRole.PARTICIPANT, AgentRole.RESEARCH_PARTICIPANT):
                 self.participants.append(agent)
             elif agent_config.role == AgentRole.EVALUATOR:
                 self.evaluator = agent
@@ -318,6 +318,8 @@ def run_discussion(
     participant_personas: Optional[List[dict]] = None,
     max_rounds: int = 5,
     output_language: str = "ja",
+    enable_search: bool = False,
+    search_config: Optional[dict] = None,
     progress_callback: Optional[Callable[[str, float], None]] = None,
     message_callback: Optional[Callable[[Message], None]] = None,
 ) -> Dict[str, Any]:
@@ -331,6 +333,8 @@ def run_discussion(
         participant_personas: List of dicts with 'name' and 'persona' keys
         max_rounds: Maximum number of discussion rounds
         output_language: Output language code
+        enable_search: If True, participants will search the web for information
+        search_config: Optional search configuration for research participants
         progress_callback: Optional callback for progress updates
         message_callback: Optional callback for new messages
 
@@ -344,6 +348,8 @@ def run_discussion(
         participant_personas=participant_personas,
         max_rounds=max_rounds,
         output_language=output_language,
+        enable_search=enable_search,
+        search_config=search_config,
     )
 
     discussion = MultiAgentDiscussion(config)
