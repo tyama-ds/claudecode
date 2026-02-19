@@ -472,6 +472,22 @@ class DeepResearchTool:
         )
         self.report_generator = generator
 
+        # --- Run Fermi estimation early (before report save) ---
+        # This must happen before DOCX/PDF conversion so that the Fermi
+        # section is included in non-text formats.
+        fermi_results = None
+        fermi_markdown = ""
+        if self.config.fermi_estimation.enabled:
+            if progress_callback:
+                progress_callback("Running Fermi estimation...", 96)
+
+            fermi_results, fermi_markdown = self._run_fermi_estimation(
+                session=session,
+                evidence_locker=evidence_locker,
+                query=query,
+                pre_deep_think_content=_pre_deep_think_content,
+            )
+
         if is_v2:
             # V2: Use new generation flow
             result = generator.generate_report(
@@ -479,13 +495,24 @@ class DeepResearchTool:
                 research_plan=session.research_plan,
                 section_contents=session.section_contents,
             )
-            # Generate final document
+            # Generate final document as markdown
             final_doc = generator.generate_final_document(
                 result,
                 include_glossary=self.config.report.v2_include_glossary,
                 evidence_locker=evidence_locker,
             )
-            # Save to file in the configured format
+
+            # Append Fermi estimation to markdown BEFORE format conversion
+            if fermi_markdown:
+                final_doc += fermi_markdown
+
+            # Append warnings to markdown BEFORE format conversion
+            warnings_collector = ResearchWarnings.get_instance()
+            if warnings_collector.has_warnings():
+                language = getattr(self.config.research, "language", "en")
+                final_doc += warnings_collector.to_report_section(language)
+
+            # Save to file in the configured format (DOCX/PDF/HTML/MD)
             output_dir = self.config.report.output_dir / "reports"
             report_path = generator.save_report(
                 markdown_content=final_doc,
@@ -504,6 +531,11 @@ class DeepResearchTool:
                 target_pages=self.config.report.target_pages,
                 target_characters=self.config.report.target_characters,
             )
+
+            # For V1 non-markdown formats, fermi section was not included
+            # in the generator. Append to markdown files only.
+            if fermi_markdown and Path(report_path).suffix.lower() == ".md":
+                self._append_text_to_file(Path(report_path), fermi_markdown)
 
         # Auto figure/table generation (if enabled)
         figures_report_path = None
@@ -539,30 +571,18 @@ class DeepResearchTool:
                 )
                 figures_report_path = None
 
-        # Determine the active report path for subsequent steps
+        # Determine the active report path
         active_report_path = Path(figures_report_path) if figures_report_path else Path(report_path)
-
-        # Fermi estimation (if enabled)
-        fermi_results = None
-        if self.config.fermi_estimation.enabled:
-            if progress_callback:
-                progress_callback("Running Fermi estimation...", 98)
-
-            fermi_results = self._apply_fermi_estimation(
-                session=session,
-                evidence_locker=evidence_locker,
-                query=query,
-                report_path=active_report_path,
-                pre_deep_think_content=_pre_deep_think_content,
-            )
 
         # Clean up search client if selenium
         if hasattr(self.search_client, 'close'):
             self.search_client.close()
 
         # Append warnings section to the report if any fallbacks occurred
+        # (V2 already has warnings in markdown before format conversion;
+        #  V1 needs post-save appending for markdown files)
         warnings_collector = ResearchWarnings.get_instance()
-        if warnings_collector.has_warnings():
+        if not is_v2 and warnings_collector.has_warnings():
             self._append_warnings_to_report(
                 active_report_path, warnings_collector)
 
@@ -586,6 +606,153 @@ class DeepResearchTool:
             "warnings": warnings_collector.to_dict_list(),
             "warning_count": warnings_collector.count(),
         }
+
+    def _run_fermi_estimation(
+        self,
+        session: ResearchSession,
+        evidence_locker: EvidenceLocker,
+        query: str,
+        pre_deep_think_content: Optional[Dict] = None,
+    ) -> tuple:
+        """Run Fermi estimation and return results + markdown section.
+
+        Unlike _apply_fermi_estimation, this does NOT write to any file.
+        Returns the results and a markdown string that can be appended to
+        the report content before format conversion.
+
+        Returns:
+            Tuple of (result_dicts_list_or_None, fermi_markdown_string)
+        """
+        import traceback
+
+        try:
+            config = EstimationConfig(
+                enabled=True,
+                target_metrics=self.config.fermi_estimation.target_metrics,
+                auto_detect_targets=self.config.fermi_estimation.auto_detect_targets,
+                max_tree_depth=self.config.fermi_estimation.max_tree_depth,
+                max_leaf_nodes=self.config.fermi_estimation.max_leaf_nodes,
+                monte_carlo_iterations=self.config.fermi_estimation.monte_carlo_iterations,
+                validate_with_llm=self.config.fermi_estimation.validate_with_llm,
+                min_confidence_threshold=self.config.fermi_estimation.min_confidence_threshold,
+                write_to_data_store=self.config.fermi_estimation.write_to_data_store,
+                include_sensitivity=self.config.fermi_estimation.include_sensitivity,
+                enable_sub_decomposition=self.config.fermi_estimation.enable_sub_decomposition,
+                sub_decomposition_confidence_threshold=self.config.fermi_estimation.sub_decomposition_confidence_threshold,
+                sub_decomposition_max_iterations=self.config.fermi_estimation.sub_decomposition_max_iterations,
+                sub_decomposition_min_sensitivity_pct=self.config.fermi_estimation.sub_decomposition_min_sensitivity_pct,
+            )
+
+            estimator = FermiEstimator(
+                llm_client=self.llm_client,
+                config=config,
+                language=self.config.research.language,
+            )
+
+            # Extract numerical data
+            data_store = NumericalDataStore(research_topic=query)
+            extractor = NumericalDataExtractor(
+                llm_client=self.llm_client,
+                language=self.config.research.language,
+            )
+            for evidence in evidence_locker.get_all_evidence():
+                content = evidence.content_excerpt or ""
+                if content:
+                    points = extractor.extract_from_content(
+                        content=content[:3000],
+                        source_url=evidence.url,
+                        source_title=evidence.title,
+                        evidence_id=evidence.id,
+                    )
+                    data_store.add_many(points)
+
+            # Determine target metrics
+            target_metrics = config.target_metrics
+            if not target_metrics and config.auto_detect_targets:
+                detected = estimator.detect_target_metrics(query, data_store)
+                target_metrics = [d["metric"] for d in detected[:3]]
+                print(f"[FermiEstimation] Auto-detected targets: {target_metrics}")
+
+            if not target_metrics:
+                print("[FermiEstimation] No target metrics found. Skipping.")
+                return None, ""
+
+            # Build context from pre-DeepThink content if available
+            if pre_deep_think_content:
+                context_parts = []
+                for section_num, section_data in pre_deep_think_content.items():
+                    if str(section_num).startswith("_"):
+                        continue
+                    context_parts.append(section_data.get("content", ""))
+                context = "\n\n".join(context_parts)[:5000]
+            else:
+                context = self._get_content_for_verification(session)[:5000]
+
+            results = estimator.estimate_multiple(
+                target_metrics=target_metrics,
+                data_store=data_store,
+                evidence_locker=evidence_locker,
+                context=context,
+            )
+
+            if not results:
+                return None, ""
+
+            # Build markdown section
+            fermi_md = self._build_fermi_markdown(results)
+            return [r.to_dict() for r in results], fermi_md
+
+        except Exception as e:
+            print(f"[FermiEstimation] Failed: {e}")
+            traceback.print_exc()
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.MEDIUM,
+                "FermiEstimation",
+                f"Fermi estimation failed entirely. "
+                f"No quantitative estimation section will be added to the report. Error: {e}",
+            )
+            return None, ""
+
+    def _build_fermi_markdown(self, results: list) -> str:
+        """Build a markdown section from Fermi estimation results."""
+        section_lines = ["\n\n---\n"]
+        if self.config.research.language == "ja":
+            section_lines.append("## フェルミ推定\n")
+        else:
+            section_lines.append("## Fermi Estimation\n")
+
+        for result in results:
+            section_lines.append(result.to_summary(self.config.research.language))
+            section_lines.append("")
+
+        return "\n".join(section_lines)
+
+    def _append_text_to_file(self, filepath: Path, text: str) -> None:
+        """Atomically append text to a file (for markdown files)."""
+        import os
+        import tempfile
+
+        try:
+            content = filepath.read_text(encoding="utf-8")
+            content += text
+
+            fd, tmp_path = tempfile.mkstemp(
+                dir=filepath.parent,
+                suffix=filepath.suffix,
+                prefix=".append_tmp_",
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                os.replace(tmp_path, str(filepath))
+            except BaseException:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+        except Exception as e:
+            print(f"[AppendText] Failed to append to {filepath}: {e}")
 
     def _apply_fermi_estimation(
         self,

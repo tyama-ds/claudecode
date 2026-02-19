@@ -1177,11 +1177,19 @@ class ReportGenerator:
         return text
 
     def _strip_citations(self, text: str) -> str:
-        """Remove citation markers from text."""
-        text = re.sub(r'\[\d+\]', '', text)
-        text = re.sub(r'\[SOURCE:\s*\d+\]', '', text)
-        text = re.sub(r'\[\?\d+\]', '', text)  # Remove unmapped citations
-        text = text.replace('[ANALYSIS]', '')
+        """Normalize citation markers for DOCX output.
+
+        Keeps reference numbers as [N] in the text so that they remain
+        visible and correspond to the References section at the end.
+        Only removes legacy/internal markers that are not user-facing.
+        """
+        # Keep [N] references — these match the References section numbering.
+        # Normalize [SOURCE: N] to [N]
+        text = re.sub(r'\[SOURCE:\s*(\d+)\]', r'[\1]', text)
+        # Remove unmapped citations [?N]
+        text = re.sub(r'\[\?\d+\]', '', text)
+        # Convert [ANALYSIS] to visible marker
+        text = text.replace('[ANALYSIS]', '(Analysis)')
         return text.strip()
 
     def _markdown_to_html(self, text: str) -> str:
