@@ -82,6 +82,8 @@ def _create_report_generator(
             enable_consistency_check=config.report.v2_enable_consistency_check,
             enable_two_phase=config.report.v2_enable_two_phase,
             language=config.research.language,
+            target_pages=config.report.target_pages,
+            target_characters=config.report.target_characters,
         )
         return generator, True
     else:
@@ -325,6 +327,15 @@ class DeepResearchTool:
             - evidence_locker: EvidenceLocker object
         """
         # Process additional documents
+        # Log informational note when both enhanced_synthesis and V2 two_phase are active
+        if (self.config.research.use_enhanced_synthesis
+                and self.config.report.generator_version == ReportGeneratorVersion.V2
+                and self.config.report.v2_enable_two_phase):
+            print("[Info] Both use_enhanced_synthesis and v2_enable_two_phase are active. "
+                  "These are complementary: enhanced_synthesis improves information "
+                  "gathering quality (research layer), while two_phase improves "
+                  "report writing quality (report layer).")
+
         doc_contents = []
         if additional_documents:
             reader = DocumentReader()
@@ -380,6 +391,15 @@ class DeepResearchTool:
             session=session,
             progress_callback=progress_callback,
         )
+
+        # Save pre-DeepThink content snapshot for Fermi estimation context.
+        # DeepThink modifies session.section_contents in place, which could
+        # bias Fermi estimation toward DeepThink's reasoning rather than
+        # raw evidence. We preserve the original content for Fermi's context.
+        _pre_deep_think_content = None
+        if self.config.deep_think.enabled and self.config.fermi_estimation.enabled:
+            import copy
+            _pre_deep_think_content = copy.deepcopy(session.section_contents)
 
         # Apply DeepThink processing if enabled
         deep_think_results = None
@@ -488,11 +508,24 @@ class DeepResearchTool:
             if progress_callback:
                 progress_callback("Generating figures and tables...", 97)
 
-            figures_report_path = self._auto_generate_figures(
-                report_path=Path(report_path),
-                session=session,
-                evidence_locker=evidence_locker,
-            )
+            try:
+                figures_report_path = self._auto_generate_figures(
+                    report_path=Path(report_path),
+                    session=session,
+                    evidence_locker=evidence_locker,
+                )
+            except Exception as e:
+                print(f"[AutoFigures] Failed with error: {e}. "
+                      f"Continuing with original report.")
+                figures_report_path = None
+
+            if figures_report_path and not Path(figures_report_path).exists():
+                print(f"[AutoFigures] Output file not found: {figures_report_path}. "
+                      f"Falling back to original report.")
+                figures_report_path = None
+
+        # Determine the active report path for subsequent steps
+        active_report_path = Path(figures_report_path) if figures_report_path else Path(report_path)
 
         # Fermi estimation (if enabled)
         fermi_results = None
@@ -504,7 +537,8 @@ class DeepResearchTool:
                 session=session,
                 evidence_locker=evidence_locker,
                 query=query,
-                report_path=Path(figures_report_path or report_path),
+                report_path=active_report_path,
+                pre_deep_think_content=_pre_deep_think_content,
             )
 
         # Clean up search client if selenium
@@ -516,7 +550,7 @@ class DeepResearchTool:
 
         return {
             "session_id": session.session_id,
-            "report_path": str(figures_report_path or report_path),
+            "report_path": str(active_report_path),
             "report_path_original": str(report_path),
             "figures_report_path": str(figures_report_path) if figures_report_path else None,
             "evidence_json": str(evidence_json),
@@ -536,6 +570,7 @@ class DeepResearchTool:
         evidence_locker: EvidenceLocker,
         query: str,
         report_path: Path,
+        pre_deep_think_content: Optional[Dict] = None,
     ) -> Optional[List[Dict[str, Any]]]:
         """
         Run Fermi estimation and append results to the report.
@@ -545,6 +580,9 @@ class DeepResearchTool:
             evidence_locker: Evidence locker with sources
             query: Original research query
             report_path: Path to the generated report file
+            pre_deep_think_content: Original section_contents before DeepThink
+                processing (if available). Used to avoid bias from DeepThink
+                reasoning when building the estimation context.
 
         Returns:
             List of estimation result dicts, or None if failed
@@ -603,8 +641,17 @@ class DeepResearchTool:
                 print("[FermiEstimation] No target metrics found. Skipping.")
                 return None
 
-            # Run estimations
-            context = self._get_content_for_verification(session)[:5000]
+            # Build context from pre-DeepThink content if available,
+            # to avoid bias from DeepThink reasoning.
+            if pre_deep_think_content:
+                context_parts = []
+                for section_num, section_data in pre_deep_think_content.items():
+                    if str(section_num).startswith("_"):
+                        continue
+                    context_parts.append(section_data.get("content", ""))
+                context = "\n\n".join(context_parts)[:5000]
+            else:
+                context = self._get_content_for_verification(session)[:5000]
             results = estimator.estimate_multiple(
                 target_metrics=target_metrics,
                 data_store=data_store,
@@ -628,7 +675,13 @@ class DeepResearchTool:
         results: list,
         report_path: Path,
     ) -> None:
-        """Append Fermi estimation section to the report file."""
+        """Append Fermi estimation section to the report file.
+
+        Uses atomic write (write to temp file + rename) to prevent data loss
+        if the process is interrupted mid-write.
+        """
+        import tempfile
+
         try:
             content = report_path.read_text(encoding="utf-8")
 
@@ -643,7 +696,27 @@ class DeepResearchTool:
                 section_lines.append("")
 
             content += "\n".join(section_lines)
-            report_path.write_text(content, encoding="utf-8")
+
+            # Atomic write: write to temp file in the same directory, then rename.
+            # os.replace() is atomic on POSIX and near-atomic on Windows.
+            import os
+            fd, tmp_path = tempfile.mkstemp(
+                dir=report_path.parent,
+                suffix=report_path.suffix,
+                prefix=".fermi_tmp_",
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                os.replace(tmp_path, str(report_path))
+            except BaseException:
+                # Clean up temp file on failure; original report is untouched.
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+
             print(f"[FermiEstimation] Appended estimation section to {report_path}")
 
         except Exception as e:
@@ -1534,6 +1607,27 @@ def run_research(
     auto_figures_max_images: int = 2,
     # Format strictness
     strict_format: bool = False,
+    # Fermi estimation parameters
+    fermi_estimation: bool = False,
+    fermi_target_metrics: List[str] = None,
+    fermi_auto_detect: bool = True,
+    fermi_max_tree_depth: int = 4,
+    fermi_max_leaf_nodes: int = 10,
+    fermi_monte_carlo: int = 1000,
+    fermi_validate: bool = True,
+    fermi_include_sensitivity: bool = True,
+    fermi_enable_sub_decomposition: bool = True,
+    fermi_sub_decomposition_max_iterations: int = 3,
+    fermi_sub_decomposition_confidence_threshold: float = 0.65,
+    fermi_sub_decomposition_min_sensitivity_pct: float = 10.0,
+    # V2 report generation parameters
+    report_generator_version: str = "v1",
+    v2_writing_style: str = "business",
+    v2_target_audience: str = "business",
+    v2_technical_level: int = 3,
+    v2_enable_consistency_check: bool = True,
+    v2_enable_two_phase: bool = True,
+    v2_include_glossary: bool = True,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -1571,6 +1665,10 @@ def run_research(
         results_per_language: Number of results per language
         translate_results: Whether to translate results to output language
         use_enhanced_synthesis: Use multi-pass content generation for better quality
+            (Note: This operates at the research/synthesis layer. When using V2 reports
+            with v2_enable_two_phase=True, both can be active simultaneously —
+            enhanced_synthesis improves information gathering quality, while two_phase
+            improves report writing quality. They are complementary, not redundant.)
         max_queries_per_iteration: Max queries to execute per research iteration (default: 3)
         max_pages_per_query: Max pages to process per search query (default: 3)
         content_filter_mode: Content filter strictness ('strict', 'moderate', 'minimal', 'none')
@@ -1586,6 +1684,25 @@ def run_research(
         auto_figures_max_images: Max images per section
         strict_format: If True, raise error instead of falling back to markdown
                       when DOCX generation fails (default: False)
+        fermi_estimation: Enable Fermi estimation for quantitative metrics
+        fermi_target_metrics: List of target metrics to estimate (empty = auto-detect)
+        fermi_auto_detect: Auto-detect target metrics from research content
+        fermi_max_tree_depth: Max depth for decomposition tree (1-6)
+        fermi_max_leaf_nodes: Max leaf nodes in decomposition tree (2-20)
+        fermi_monte_carlo: Number of Monte Carlo simulation iterations
+        fermi_validate: Validate estimation results with LLM
+        fermi_include_sensitivity: Include sensitivity analysis
+        fermi_enable_sub_decomposition: Enable sub-decomposition for low-confidence leaves
+        fermi_sub_decomposition_max_iterations: Max sub-decomposition iterations (0-10)
+        fermi_sub_decomposition_confidence_threshold: Confidence threshold for sub-decomposition
+        fermi_sub_decomposition_min_sensitivity_pct: Min sensitivity % to trigger sub-decomposition
+        report_generator_version: Report generator version ('v1' or 'v2')
+        v2_writing_style: V2 writing style ('formal', 'business', 'technical', 'executive', 'casual')
+        v2_target_audience: V2 target audience ('expert', 'business', 'engineer', 'general', 'student')
+        v2_technical_level: V2 technical level (1-5, 5 = most technical)
+        v2_enable_consistency_check: V2 cross-chapter consistency check
+        v2_enable_two_phase: V2 two-phase generation (draft + refinement)
+        v2_include_glossary: V2 append glossary at end of report
         **kwargs: Additional configuration options
 
     Returns:
@@ -1684,6 +1801,25 @@ def run_research(
         auto_figures_include_charts=auto_figures_include_charts,
         auto_figures_max_images=auto_figures_max_images,
         strict_format=strict_format,
+        fermi_estimation=fermi_estimation,
+        fermi_target_metrics=fermi_target_metrics,
+        fermi_auto_detect=fermi_auto_detect,
+        fermi_max_tree_depth=fermi_max_tree_depth,
+        fermi_max_leaf_nodes=fermi_max_leaf_nodes,
+        fermi_monte_carlo=fermi_monte_carlo,
+        fermi_validate=fermi_validate,
+        fermi_include_sensitivity=fermi_include_sensitivity,
+        fermi_enable_sub_decomposition=fermi_enable_sub_decomposition,
+        fermi_sub_decomposition_max_iterations=fermi_sub_decomposition_max_iterations,
+        fermi_sub_decomposition_confidence_threshold=fermi_sub_decomposition_confidence_threshold,
+        fermi_sub_decomposition_min_sensitivity_pct=fermi_sub_decomposition_min_sensitivity_pct,
+        report_generator_version=report_generator_version,
+        v2_writing_style=v2_writing_style,
+        v2_target_audience=v2_target_audience,
+        v2_technical_level=v2_technical_level,
+        v2_enable_consistency_check=v2_enable_consistency_check,
+        v2_enable_two_phase=v2_enable_two_phase,
+        v2_include_glossary=v2_include_glossary,
         **api_key_param,
         **kwargs,
     )

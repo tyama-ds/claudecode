@@ -627,6 +627,7 @@ def create_config(
     fermi_target_metrics: Optional[List[str]] = None,
     fermi_auto_detect: bool = True,
     fermi_max_tree_depth: int = 4,
+    fermi_max_leaf_nodes: int = 10,
     fermi_monte_carlo: int = 1000,
     fermi_validate: bool = True,
     fermi_include_sensitivity: bool = True,
@@ -823,11 +824,28 @@ def create_config(
     if additional_documents:
         docs = [Path(doc) for doc in additional_documents]
 
+    # Validate kwargs: warn about unrecognized keys to catch typos
+    _KNOWN_KWARGS = {
+        "headless", "max_results", "max_iterations", "language",
+        "_expansion_tolerance", "_deviation_weights",
+        "dedup_threshold", "max_concurrent_searches", "include_language_stats",
+    }
+    _unknown_kwargs = set(kwargs.keys()) - _KNOWN_KWARGS
+    if _unknown_kwargs:
+        import warnings
+        warnings.warn(
+            f"create_config() received unrecognized keyword arguments: "
+            f"{sorted(_unknown_kwargs)}. These will be ignored. "
+            f"Check for typos or use explicit parameters instead.",
+            stacklevel=2,
+        )
+
     fermi_config = FermiEstimationConfig(
         enabled=fermi_estimation,
         target_metrics=fermi_target_metrics or [],
         auto_detect_targets=fermi_auto_detect,
         max_tree_depth=fermi_max_tree_depth,
+        max_leaf_nodes=fermi_max_leaf_nodes,
         monte_carlo_iterations=fermi_monte_carlo,
         validate_with_llm=fermi_validate,
         include_sensitivity=fermi_include_sensitivity,
