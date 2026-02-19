@@ -150,6 +150,8 @@ class ReportGeneratorV2:
         enable_consistency_check: bool = True,
         enable_two_phase: bool = True,
         progress_callback: Callable[[str, int, int], None] = None,
+        target_pages: Optional[int] = None,
+        target_characters: Optional[int] = None,
     ):
         """
         Initialize ReportGeneratorV2.
@@ -163,6 +165,8 @@ class ReportGeneratorV2:
             enable_consistency_check: Run consistency check after generation
             enable_two_phase: Enable two-phase generation (draft + refinement)
             progress_callback: Progress callback function
+            target_pages: Target page count (approximate, 1 page ≈ 1500 chars ja / 500 words en)
+            target_characters: Target character count (overrides target_pages if set)
         """
         self.llm = llm_client
         self.language = language
@@ -172,6 +176,8 @@ class ReportGeneratorV2:
         self.enable_consistency_check = enable_consistency_check
         self.enable_two_phase = enable_two_phase
         self.progress_callback = progress_callback
+        self.target_pages = target_pages
+        self.target_characters = target_characters
 
         # Initialize components
         self.glossary_manager = GlossaryManager(llm_client, language)
@@ -226,6 +232,15 @@ class ReportGeneratorV2:
         # Get sections from plan
         sections = self._get_sections_from_plan(research_plan)
         total_sections = len(sections)
+
+        # Calculate per-chapter target length
+        self._chapter_target_chars = None
+        if total_sections > 0:
+            if self.target_characters:
+                self._chapter_target_chars = self.target_characters // total_sections
+            elif self.target_pages:
+                chars_per_page = 1500 if self.language == "ja" else 2500
+                self._chapter_target_chars = (self.target_pages * chars_per_page) // total_sections
 
         # Phase 1: Generate drafts
         chapters: Dict[str, ChapterContent] = {}
@@ -329,6 +344,12 @@ class ReportGeneratorV2:
             sources = []
             content_summary = str(content_data)[:2000] if content_data else "情報なし"
 
+        length_instruction_ja = ""
+        length_instruction_en = ""
+        if self._chapter_target_chars:
+            length_instruction_ja = f"\n7. このセクションは約{self._chapter_target_chars}文字を目安に執筆する"
+            length_instruction_en = f"\n7. Target approximately {self._chapter_target_chars} characters for this section"
+
         if self.language == "ja":
             prompt = f"""{context_prompt}
 
@@ -349,7 +370,7 @@ class ReportGeneratorV2:
 3. 文体・スタイル指示に従う
 4. 事実に基づいた記述を行い、推測は明示する
 5. 必要に応じて前章を参照・引用する
-6. 情報の出典を示すため、該当箇所に [SOURCE N] の形式で引用番号を付与する（Nは上記情報のSOURCE番号）
+6. 情報の出典を示すため、該当箇所に [SOURCE N] の形式で引用番号を付与する（Nは上記情報のSOURCE番号）{length_instruction_ja}
 
 出力形式（JSON）:
 {{
@@ -381,7 +402,7 @@ Important notes:
 3. Follow style instructions
 4. Base writing on facts; clearly mark speculation
 5. Reference previous chapters when appropriate
-6. Include citation markers [SOURCE N] in the text where information from sources is used (N corresponds to the SOURCE number above)
+6. Include citation markers [SOURCE N] in the text where information from sources is used (N corresponds to the SOURCE number above){length_instruction_en}
 
 Output format (JSON):
 {{
