@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .assumptions import Assumption, AssumptionManager, AssumptionSource
 from .calculator import Calculator, ScenarioResult, SensitivityAnalysis
-from .decomposer import Decomposer, DecompositionTree
+from .decomposer import Decomposer, DecompositionTree, TreeNode
 from .validator import ValidationResult, Validator
 
 logger = logging.getLogger(__name__)
@@ -44,10 +44,25 @@ class FermiEstimationConfig:
     write_to_data_store: bool = True
     include_sensitivity: bool = True
 
+    # Sub-decomposition settings
+    enable_sub_decomposition: bool = True
+    sub_decomposition_confidence_threshold: float = 0.65
+    sub_decomposition_max_iterations: int = 3
+    sub_decomposition_min_sensitivity_pct: float = 10.0
+
     def __post_init__(self):
         self.max_tree_depth = max(1, min(6, self.max_tree_depth))
         self.max_leaf_nodes = max(2, min(20, self.max_leaf_nodes))
         self.min_confidence_threshold = max(0.0, min(1.0, self.min_confidence_threshold))
+        self.sub_decomposition_confidence_threshold = max(
+            0.0, min(1.0, self.sub_decomposition_confidence_threshold)
+        )
+        self.sub_decomposition_max_iterations = max(
+            0, min(10, self.sub_decomposition_max_iterations)
+        )
+        self.sub_decomposition_min_sensitivity_pct = max(
+            0.0, min(100.0, self.sub_decomposition_min_sensitivity_pct)
+        )
 
 
 @dataclass
@@ -383,6 +398,75 @@ class FermiEstimator:
                         if a.node_id == item.node_id:
                             a.sensitivity_rank = getattr(item, 'sensitivity_rank', 0)
 
+        # Step 5b: Sub-decomposition of low-confidence, high-sensitivity leaves
+        if (
+            self.config.enable_sub_decomposition
+            and sensitivity
+            and self.config.sub_decomposition_max_iterations > 0
+        ):
+            sub_decomposition_applied = False
+            for iteration in range(self.config.sub_decomposition_max_iterations):
+                candidates = self._identify_sub_decomposition_candidates(
+                    tree, sensitivity
+                )
+                if not candidates:
+                    break
+
+                if progress_callback:
+                    progress_callback(
+                        f"Fermi Estimation: Sub-decomposing "
+                        f"'{candidates[0].name}'...",
+                        72 + iteration * 2,
+                    )
+
+                success = self._apply_sub_decomposition(
+                    tree=tree,
+                    target_node=candidates[0],
+                    data_store=data_store,
+                    context=context,
+                )
+
+                if success:
+                    sub_decomposition_applied = True
+                    scenarios = self._calculator.evaluate_tree(tree)
+                    base = scenarios["base"].final_value
+                    low = scenarios["pessimistic"].final_value
+                    high = scenarios["optimistic"].final_value
+                    unit = scenarios["base"].unit
+                    sensitivity = self._calculator.sensitivity_analysis(tree)
+                else:
+                    break
+
+            if sub_decomposition_applied:
+                # Rebuild assumption list from current leaves
+                assumptions = []
+                for leaf in tree.get_all_leaves():
+                    source = (
+                        AssumptionSource.EVIDENCE_DIRECT
+                        if leaf.is_evidence_backed
+                        else AssumptionSource.LLM_ESTIMATE
+                    )
+                    assumptions.append(Assumption(
+                        node_id=leaf.node_id,
+                        parameter_name=leaf.name,
+                        value=leaf.value or 0.0,
+                        value_low=leaf.value_low or 0.0,
+                        value_high=leaf.value_high or 0.0,
+                        unit=leaf.unit,
+                        source=source,
+                        evidence_data_id=leaf.evidence_data_id,
+                        reasoning=leaf.estimation_reasoning,
+                        confidence=leaf.confidence,
+                    ))
+                # Re-run sensitivity with updated assumptions
+                if self.config.include_sensitivity and sensitivity:
+                    for item in sensitivity.items:
+                        for a in assumptions:
+                            if a.node_id == item.node_id:
+                                a.sensitivity_rank = getattr(
+                                    item, 'sensitivity_rank', 0
+                                )
+
         # Step 6: Monte Carlo
         monte_carlo = None
         if self.config.monte_carlo_iterations > 0:
@@ -548,6 +632,143 @@ class FermiEstimator:
         for leaf in leaves:
             assumption_mgr.resolve_leaf_node(leaf, context)
         return assumption_mgr.get_all_assumptions()
+
+    def _identify_sub_decomposition_candidates(
+        self,
+        tree: DecompositionTree,
+        sensitivity: SensitivityAnalysis,
+    ) -> List[TreeNode]:
+        """
+        Identify leaf nodes that should be sub-decomposed.
+
+        Criteria: low confidence AND high sensitivity impact.
+        Returns nodes sorted by priority (highest impact first).
+        """
+        threshold = self.config.sub_decomposition_confidence_threshold
+        min_sensitivity = self.config.sub_decomposition_min_sensitivity_pct
+        max_depth = self.config.max_tree_depth
+
+        sensitivity_map = {
+            item.node_id: item.sensitivity_pct
+            for item in (sensitivity.items if sensitivity else [])
+        }
+
+        candidates = []
+        for leaf in tree.get_all_leaves():
+            if leaf.confidence >= threshold:
+                continue
+            sens_pct = sensitivity_map.get(leaf.node_id, 0.0)
+            if sens_pct < min_sensitivity:
+                continue
+            node_depth = tree.get_node_depth(leaf.node_id)
+            if node_depth >= max_depth - 1:
+                continue
+            candidates.append((leaf, sens_pct))
+
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return [node for node, _ in candidates]
+
+    def _apply_sub_decomposition(
+        self,
+        tree: DecompositionTree,
+        target_node: TreeNode,
+        data_store,
+        context: str,
+    ) -> bool:
+        """
+        Sub-decompose a single leaf node and re-resolve its new children.
+
+        Modifies the tree in-place. Returns True if the sub-decomposition
+        improved confidence (or at least produced children).
+        """
+        available_summary = self._summarize_available_data(data_store)
+        parent_context = f"{tree.target_metric}: {tree.decomposition_reasoning}"
+
+        node_depth = tree.get_node_depth(target_node.node_id)
+        max_sub_depth = min(self.config.max_tree_depth - node_depth, 2)
+
+        # Save original state for rollback
+        original_value = target_node.value
+        original_value_low = target_node.value_low
+        original_value_high = target_node.value_high
+        original_confidence = target_node.confidence
+        original_is_leaf = target_node.is_leaf
+        original_children = target_node.children
+        original_operation = target_node.operation
+        original_is_evidence_backed = target_node.is_evidence_backed
+
+        new_node = self._decomposer.sub_decompose(
+            node=target_node,
+            available_data_summary=available_summary,
+            parent_context=parent_context,
+            max_sub_depth=max_sub_depth,
+        )
+
+        if new_node is None:
+            return False
+
+        # Graft: replace the leaf's properties with the sub-tree's properties
+        target_node.children = new_node.children
+        target_node.operation = new_node.operation
+        target_node.is_leaf = False
+        target_node.description = new_node.description or target_node.description
+
+        # Resolve new leaves
+        assumption_mgr = AssumptionManager(
+            llm_client=self.llm_client,
+            data_store=data_store,
+            language=self.language,
+        )
+        new_leaves = tree.get_all_leaves()
+        sub_leaves = [
+            leaf for leaf in new_leaves
+            if leaf.value is None or leaf.confidence == 0.5  # unresolved leaves
+        ]
+        # If no sub_leaves detected via value check, resolve all leaves under the target
+        if not sub_leaves:
+            sub_leaves = []
+            self._collect_leaves(target_node, sub_leaves)
+
+        for leaf in sub_leaves:
+            assumption_mgr.resolve_leaf_node(leaf, context)
+
+        new_assumptions = assumption_mgr.get_all_assumptions()
+
+        # Check if sub-decomposition improved confidence
+        if new_assumptions:
+            avg_new_confidence = (
+                sum(a.confidence for a in new_assumptions) / len(new_assumptions)
+            )
+            if avg_new_confidence <= original_confidence:
+                logger.info(
+                    f"Sub-decomposition of '{target_node.name}' did not improve "
+                    f"confidence ({avg_new_confidence:.2f} <= "
+                    f"{original_confidence:.2f}), rolling back"
+                )
+                target_node.children = original_children
+                target_node.operation = original_operation
+                target_node.is_leaf = original_is_leaf
+                target_node.value = original_value
+                target_node.value_low = original_value_low
+                target_node.value_high = original_value_high
+                target_node.confidence = original_confidence
+                target_node.is_evidence_backed = original_is_evidence_backed
+                return False
+
+            logger.info(
+                f"Sub-decomposed '{target_node.name}': "
+                f"{len(sub_leaves)} new leaves, avg confidence {avg_new_confidence:.2f}"
+            )
+        return True
+
+    @staticmethod
+    def _collect_leaves(node: TreeNode, result: List[TreeNode]) -> None:
+        """Collect all leaf nodes under a node."""
+        if node.is_leaf:
+            result.append(node)
+        else:
+            for child in node.children:
+                FermiEstimator._collect_leaves(child, result)
 
     def _write_to_data_store(
         self,

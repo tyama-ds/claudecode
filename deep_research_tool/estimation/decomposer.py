@@ -49,6 +49,12 @@ class TreeNode:
     estimation_reasoning: str = ""
     confidence: float = 0.5
 
+    def get_depth(self) -> int:
+        """Return the depth of the subtree rooted at this node."""
+        if self.is_leaf or not self.children:
+            return 1
+        return 1 + max(child.get_depth() for child in self.children)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "node_id": self.node_id,
@@ -104,6 +110,25 @@ class DecompositionTree:
             nodes.append(node)
             queue.extend(node.children)
         return nodes
+
+    def get_node_depth(self, node_id: str) -> int:
+        """Return the depth of a specific node from the root (root=0)."""
+        if not self.root:
+            return -1
+        queue = deque([(self.root, 0)])
+        while queue:
+            node, depth = queue.popleft()
+            if node.node_id == node_id:
+                return depth
+            for child in node.children:
+                queue.append((child, depth + 1))
+        return -1
+
+    def get_tree_depth(self) -> int:
+        """Return the maximum depth of the tree."""
+        if not self.root:
+            return 0
+        return self.root.get_depth()
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -205,6 +230,94 @@ The following numerical data is already available. Use them where possible:
 
 Output only JSON:"""
 
+    SUB_DECOMPOSITION_PROMPT_JA = """あなたはフェルミ推定の専門家です。
+以下のパラメータを、より推定しやすいサブコンポーネントに分解してください。
+
+## 分解対象パラメータ
+パラメータ名: {parameter_name}
+説明: {description}
+単位: {unit}
+現在の推定値: {current_value}（信頼度: {confidence}）
+
+## 親の推定全体のコンテキスト
+{parent_context}
+
+## 利用可能なデータ
+{available_data_summary}
+
+## 指示
+1. このパラメータを、より具体的で証拠が見つかりやすいサブコンポーネントに分解
+2. 各サブコンポーネントは統計データ等から直接取得可能なものが望ましい
+3. 分解の深さは1-2階層まで
+4. 元のパラメータの値が再現できるように分解すること
+
+## 出力形式 (JSON)
+{{
+    "decomposition_reasoning": "分解の考え方の説明",
+    "tree": {{
+        "name": "{parameter_name}",
+        "name_en": "English name",
+        "description": "説明",
+        "unit": "{unit}",
+        "operation": "add",
+        "children": [
+            {{
+                "name": "サブコンポーネント名",
+                "name_en": "English name",
+                "description": "説明",
+                "unit": "単位",
+                "children": []
+            }}
+        ]
+    }}
+}}
+
+JSONのみを出力:"""
+
+    SUB_DECOMPOSITION_PROMPT_EN = """You are a Fermi estimation expert.
+Decompose the following parameter into more estimable sub-components.
+
+## Parameter to Decompose
+Name: {parameter_name}
+Description: {description}
+Unit: {unit}
+Current estimate: {current_value} (confidence: {confidence})
+
+## Parent Estimation Context
+{parent_context}
+
+## Available Data
+{available_data_summary}
+
+## Instructions
+1. Decompose this parameter into more specific sub-components with better evidence availability
+2. Prefer sub-components that can be directly sourced from statistical data
+3. Limit sub-decomposition to 1-2 additional levels
+4. Ensure the sub-components combine to reproduce the original parameter
+
+## Output (JSON only)
+{{
+    "decomposition_reasoning": "Explanation of decomposition approach",
+    "tree": {{
+        "name": "{parameter_name}",
+        "name_en": "English name",
+        "description": "Description",
+        "unit": "{unit}",
+        "operation": "add",
+        "children": [
+            {{
+                "name": "Sub-component name",
+                "name_en": "English name",
+                "description": "Description",
+                "unit": "unit",
+                "children": []
+            }}
+        ]
+    }}
+}}
+
+Output only JSON:"""
+
     def __init__(self, llm_client, language: str = "ja"):
         self.llm_client = llm_client
         self.language = language
@@ -237,11 +350,70 @@ Output only JSON:"""
             logger.error(f"Decomposition failed: {e}")
             return self._fallback_tree(target_metric)
 
-    def _parse_tree_response(self, content: str, target_metric: str) -> DecompositionTree:
-        """Parse LLM JSON response into DecompositionTree."""
-        content = content.strip()
+    def sub_decompose(
+        self,
+        node: TreeNode,
+        available_data_summary: str = "",
+        parent_context: str = "",
+        max_sub_depth: int = 2,
+    ) -> Optional[TreeNode]:
+        """
+        Decompose a single leaf node into sub-components.
 
-        # Extract JSON from markdown code blocks if present
+        Returns a new TreeNode (with children) to replace the leaf,
+        or None if sub-decomposition fails or produces no improvement.
+        """
+        no_data = "なし" if self.language == "ja" else "None"
+        template = (
+            self.SUB_DECOMPOSITION_PROMPT_JA
+            if self.language == "ja"
+            else self.SUB_DECOMPOSITION_PROMPT_EN
+        )
+        prompt = template.format(
+            parameter_name=node.name,
+            description=node.description or node.name,
+            unit=node.unit,
+            current_value=node.value,
+            confidence=node.confidence,
+            parent_context=parent_context or no_data,
+            available_data_summary=available_data_summary or no_data,
+        )
+
+        try:
+            response = self.llm_client.generate(prompt)
+            if not response or not response.content:
+                logger.warning(f"Empty LLM response for sub-decomposition of '{node.name}'")
+                return None
+
+            data = self._parse_json_content(response.content)
+            if not data:
+                return None
+
+            tree_data = data.get("tree", {})
+            new_node = self._build_tree_node(tree_data)
+
+            # Validate: must have children and respect depth limit
+            if new_node.is_leaf or not new_node.children:
+                logger.warning(f"Sub-decomposition produced no children for '{node.name}'")
+                return None
+
+            if new_node.get_depth() > max_sub_depth + 1:
+                logger.warning(f"Sub-decomposition exceeds depth limit for '{node.name}'")
+                return None
+
+            # Preserve original node_id so tree references remain valid
+            new_node.node_id = node.node_id
+
+            return new_node
+
+        except Exception as e:
+            logger.error(f"Sub-decomposition failed for '{node.name}': {e}")
+            return None
+
+    @staticmethod
+    def _parse_json_content(content: str) -> Optional[Dict[str, Any]]:
+        """Parse JSON from LLM response, handling code blocks and extra text."""
+        content = content.strip()
         if "```" in content:
             parts = content.split("```")
             for part in parts[1:]:
@@ -252,21 +424,24 @@ Output only JSON:"""
                 if cleaned.startswith("{"):
                     content = cleaned
                     break
-
         try:
-            data = json.loads(content)
+            return json.loads(content)
         except json.JSONDecodeError:
-            # Try to find JSON object in the content
             start = content.find("{")
             end = content.rfind("}") + 1
             if start >= 0 and end > start:
                 try:
-                    data = json.loads(content[start:end])
+                    return json.loads(content[start:end])
                 except json.JSONDecodeError:
-                    logger.error("Failed to parse decomposition JSON")
-                    return self._fallback_tree(target_metric)
-            else:
-                return self._fallback_tree(target_metric)
+                    return None
+        return None
+
+    def _parse_tree_response(self, content: str, target_metric: str) -> DecompositionTree:
+        """Parse LLM JSON response into DecompositionTree."""
+        data = self._parse_json_content(content)
+        if not data:
+            logger.error("Failed to parse decomposition JSON")
+            return self._fallback_tree(target_metric)
 
         tree_data = data.get("tree", {})
         root = self._build_tree_node(tree_data)
