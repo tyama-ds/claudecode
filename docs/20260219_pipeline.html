@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Deep Research Tool - パイプライン &amp; パラメータマップ</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --surface2: #334155;
+    --border: #475569;
+    --text: #e2e8f0;
+    --text-muted: #94a3b8;
+    --accent: #38bdf8;
+    --accent2: #818cf8;
+    --green: #4ade80;
+    --yellow: #fbbf24;
+    --orange: #fb923c;
+    --pink: #f472b6;
+    --red: #f87171;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 2rem;
+  }
+  .container { max-width: 1200px; margin: 0 auto; }
+
+  /* Header */
+  header {
+    text-align: center;
+    padding: 2rem 0 1rem;
+    border-bottom: 2px solid var(--accent);
+    margin-bottom: 2rem;
+  }
+  header h1 {
+    font-size: 2rem;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  header .subtitle { color: var(--text-muted); margin-top: 0.5rem; font-size: 0.95rem; }
+
+  /* Section */
+  section { margin-bottom: 3rem; }
+  section > h2 {
+    font-size: 1.4rem;
+    color: var(--accent);
+    border-left: 4px solid var(--accent);
+    padding-left: 0.75rem;
+    margin-bottom: 1.5rem;
+  }
+  h3 {
+    font-size: 1.1rem;
+    color: var(--accent2);
+    margin: 1.5rem 0 0.75rem;
+  }
+
+  /* Pipeline Flow */
+  .pipeline { display: flex; flex-direction: column; gap: 0; align-items: center; }
+  .phase-box {
+    width: 100%;
+    max-width: 900px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem 1.5rem;
+    position: relative;
+  }
+  .phase-box .phase-num {
+    position: absolute;
+    top: -12px;
+    left: 20px;
+    background: var(--accent);
+    color: var(--bg);
+    font-weight: 700;
+    font-size: 0.75rem;
+    padding: 2px 10px;
+    border-radius: 10px;
+  }
+  .phase-box h4 {
+    color: var(--text);
+    font-size: 1.05rem;
+    margin-bottom: 0.5rem;
+  }
+  .phase-box .desc {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+  }
+  .phase-box .sub-items {
+    margin-top: 0.5rem;
+    padding-left: 1.2rem;
+    font-size: 0.88rem;
+    color: var(--text-muted);
+  }
+  .phase-box .sub-items li { margin-bottom: 0.2rem; list-style: none; }
+  .phase-box .sub-items li::before { content: "├─ "; color: var(--border); font-family: monospace; }
+  .phase-box .sub-items li:last-child::before { content: "└─ "; color: var(--border); font-family: monospace; }
+
+  .arrow-down {
+    width: 2px;
+    height: 28px;
+    background: var(--border);
+    position: relative;
+  }
+  .arrow-down::after {
+    content: "▼";
+    position: absolute;
+    bottom: -10px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: var(--border);
+    font-size: 0.7rem;
+  }
+
+  .conditional { border-left: 3px solid var(--yellow); }
+  .conditional .phase-num { background: var(--yellow); }
+
+  /* Tables */
+  .param-table-wrapper { overflow-x: auto; margin-bottom: 1.5rem; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+    background: var(--surface);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  thead th {
+    background: var(--surface2);
+    color: var(--accent);
+    padding: 0.6rem 0.8rem;
+    text-align: left;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  tbody td {
+    padding: 0.5rem 0.8rem;
+    border-top: 1px solid var(--border);
+    vertical-align: top;
+  }
+  tbody tr:hover { background: rgba(56, 189, 248, 0.05); }
+  td:first-child { font-family: 'Consolas', 'SF Mono', monospace; color: var(--green); white-space: nowrap; }
+  td:nth-child(2) { color: var(--pink); font-family: monospace; font-size: 0.82rem; white-space: nowrap; }
+  td:nth-child(3) { color: var(--orange); font-family: monospace; font-size: 0.82rem; }
+
+  /* Comparison */
+  .compare-table td:first-child { color: var(--text); font-family: inherit; }
+  .compare-table thead th:first-child { min-width: 180px; }
+  .check { color: var(--green); }
+  .cross { color: var(--red); opacity: 0.5; }
+
+  /* Tags */
+  .tag {
+    display: inline-block;
+    font-size: 0.72rem;
+    padding: 1px 8px;
+    border-radius: 8px;
+    font-weight: 600;
+    margin-right: 4px;
+  }
+  .tag-toggle { background: var(--green); color: var(--bg); }
+  .tag-internal { background: var(--surface2); color: var(--text-muted); border: 1px solid var(--border); }
+
+  /* Timing chart */
+  .timing-grid {
+    display: grid;
+    grid-template-columns: 180px 1fr;
+    gap: 0;
+    font-size: 0.88rem;
+    background: var(--surface);
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .timing-label {
+    background: var(--surface2);
+    padding: 0.7rem 1rem;
+    font-weight: 600;
+    color: var(--accent);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+  }
+  .timing-items {
+    padding: 0.7rem 1rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    align-items: center;
+  }
+  .timing-chip {
+    display: inline-block;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 10px;
+    font-size: 0.82rem;
+    font-family: monospace;
+    color: var(--text);
+  }
+
+  /* Footer */
+  footer {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    padding-top: 2rem;
+    border-top: 1px solid var(--border);
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>Deep Research Tool</h1>
+  <div class="subtitle">パイプライン &amp; パラメータ リファレンスマップ — 2026-02-19</div>
+</header>
+
+<!-- ============================================================ -->
+<section>
+  <h2>1. パイプライン全体フロー</h2>
+
+  <div class="pipeline">
+
+    <div class="phase-box">
+      <span class="phase-num">Phase 1</span>
+      <h4>Config構築</h4>
+      <div class="desc"><code>create_config()</code> → 8つのサブ設定を持つ <code>Config</code> オブジェクト生成</div>
+    </div>
+    <div class="arrow-down"></div>
+
+    <div class="phase-box">
+      <span class="phase-num">Phase 2</span>
+      <h4>コンポーネント初期化</h4>
+      <div class="desc"><code>DeepResearchTool(config)</code></div>
+      <ul class="sub-items">
+        <li>LLMClient（OpenAI / Anthropic / Local）</li>
+        <li>SearchClient（DuckDuckGo / Selenium）</li>
+        <li>ContentFilter（strict / moderate / minimal / none）</li>
+        <li>DeepThinkProcessor（deep_think=True 時のみ）</li>
+      </ul>
+    </div>
+    <div class="arrow-down"></div>
+
+    <div class="phase-box">
+      <span class="phase-num">Phase 3</span>
+      <h4>リサーチ実行</h4>
+      <div class="desc"><code>Researcher.conduct_research(query, requirements)</code></div>
+      <ul class="sub-items">
+        <li>クエリ生成・リサーチ計画策定</li>
+        <li>反復検索ループ（min〜max iterations）</li>
+        <li><span class="tag tag-toggle">条件付き</span> 多言語検索（multilingual=True）</li>
+        <li><span class="tag tag-toggle">条件付き</span> 拡張クロール（extended_mode=True）→ SiteCrawler</li>
+        <li>ContentExtractor：チャンク分割（6000字+500字overlap）→ LLM抽出 → Jaccard重複排除</li>
+        <li><span class="tag tag-toggle">条件付き</span> 拡張合成（use_enhanced_synthesis=True）：ポイント生成→統合→最終合成</li>
+        <li>EvidenceLockerにエビデンス保存</li>
+      </ul>
+    </div>
+    <div class="arrow-down"></div>
+
+    <div class="phase-box">
+      <span class="phase-num">Phase 4</span>
+      <h4>コンテンツ拡張</h4>
+      <div class="desc"><code>_expand_if_needed()</code> — 目標文字数に不足時、追加調査を実行</div>
+    </div>
+    <div class="arrow-down"></div>
+
+    <div class="phase-box conditional">
+      <span class="phase-num">Phase 5</span>
+      <h4>DeepThink処理 <span class="tag tag-toggle">deep_think=True</span></h4>
+      <div class="desc"><code>_apply_deep_think()</code></div>
+      <ul class="sub-items">
+        <li>Tree of Thought推論（reasoning_iterations回）</li>
+        <li>一貫性チェック（consistency_threshold）</li>
+        <li>ソース忠実度検証（fidelity_threshold）</li>
+      </ul>
+    </div>
+    <div class="arrow-down"></div>
+
+    <div class="phase-box">
+      <span class="phase-num">Phase 6</span>
+      <h4>エビデンスエクスポート</h4>
+      <div class="desc"><code>evidence_locker.export_to_json()</code> / <code>export_to_csv()</code></div>
+    </div>
+    <div class="arrow-down"></div>
+
+    <div class="phase-box conditional">
+      <span class="phase-num">Phase 7</span>
+      <h4>検証 <span class="tag tag-toggle">enable_verification=True</span></h4>
+      <div class="desc"><code>Verifier.verify_content(content, evidence_locker, strictness)</code></div>
+      <ul class="sub-items">
+        <li>クレーム抽出・分類（statistics / dates / quotes / causal / comparative / absolute / predictions / historical）</li>
+        <li>エビデンス照合 → 信頼度スコアリング（HIGH / MEDIUM / LOW / UNSUPPORTED / CONTRADICTED）</li>
+        <li>HTML検証レポート生成（日本語対応済み）</li>
+      </ul>
+    </div>
+    <div class="arrow-down"></div>
+
+    <div class="phase-box">
+      <span class="phase-num">Phase 8</span>
+      <h4>レポート生成</h4>
+      <div class="desc"><code>_create_report_generator()</code> → V1 / V2 / V3 から選択</div>
+      <ul class="sub-items">
+        <li><strong>V1</strong>：基本Markdown生成 → 各形式に変換</li>
+        <li><strong>V2</strong>：用語集管理・章間一貫性・2段階生成・原文+要約参照・散文スタイル</li>
+        <li><strong>V3</strong>：V2全機能 + DOCX直接生成・インライン図表挿入</li>
+      </ul>
+    </div>
+    <div class="arrow-down"></div>
+
+    <div class="phase-box conditional">
+      <span class="phase-num">Phase 9</span>
+      <h4>オプション後処理</h4>
+      <ul class="sub-items">
+        <li><span class="tag tag-toggle">fermi_estimation=True</span> フェルミ推定 → 分解ツリー・モンテカルロ・感度分析</li>
+        <li><span class="tag tag-toggle">auto_figures=True</span> 自動図表生成 → FigureTableGenerator</li>
+      </ul>
+    </div>
+    <div class="arrow-down"></div>
+
+    <div class="phase-box" style="border-color: var(--green); text-align: center;">
+      <h4 style="color: var(--green);">結果Dict返却</h4>
+      <div class="desc">report_path, evidence_json/csv, verification_html, deep_think_results, fermi_results, token_usage</div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+  <h2>2. 全パラメータ一覧</h2>
+
+  <!-- 2.1 API -->
+  <h3>2.1 API設定</h3>
+  <div class="param-table-wrapper">
+  <table>
+    <thead><tr><th>パラメータ</th><th>型</th><th>デフォルト</th><th>説明</th></tr></thead>
+    <tbody>
+      <tr><td>provider</td><td>str</td><td>"openai"</td><td>LLMプロバイダ: openai / anthropic / local</td></tr>
+      <tr><td>api_key</td><td>str</td><td>None</td><td>APIキー</td></tr>
+      <tr><td>model</td><td>str</td><td>None</td><td>モデル名（未指定時はプロバイダデフォルト）</td></tr>
+      <tr><td>temperature</td><td>float</td><td>0.7</td><td>生成温度</td></tr>
+      <tr><td>max_tokens</td><td>int</td><td>4096</td><td>最大トークン数</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <!-- 2.2 Search -->
+  <h3>2.2 検索設定</h3>
+  <div class="param-table-wrapper">
+  <table>
+    <thead><tr><th>パラメータ</th><th>型</th><th>デフォルト</th><th>説明</th></tr></thead>
+    <tbody>
+      <tr><td>search_method</td><td>str</td><td>"duckduckgo"</td><td>検索方法: duckduckgo / selenium</td></tr>
+      <tr><td>max_queries_per_iteration</td><td>int</td><td>3</td><td>反復あたりの最大クエリ数</td></tr>
+      <tr><td>max_pages_per_query</td><td>int</td><td>3</td><td>クエリあたりの最大ページ数</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <!-- 2.3 Research -->
+  <h3>2.3 リサーチ設定</h3>
+  <div class="param-table-wrapper">
+  <table>
+    <thead><tr><th>パラメータ</th><th>型</th><th>デフォルト</th><th>説明</th></tr></thead>
+    <tbody>
+      <tr><td>iterations</td><td>int</td><td>3</td><td>リサーチ反復回数（min_iterations）</td></tr>
+      <tr><td>use_enhanced_synthesis</td><td>bool</td><td>True</td><td>3フェーズ拡張合成を使用</td></tr>
+      <tr><td>content_filter_mode</td><td>str</td><td>"moderate"</td><td>コンテンツフィルタ: strict / moderate / minimal / none</td></tr>
+      <tr><td>custom_blocked_domains</td><td>List[str]</td><td>[]</td><td>ブロックドメインリスト</td></tr>
+      <tr><td>custom_whitelisted_domains</td><td>List[str]</td><td>[]</td><td>ホワイトリストドメイン</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <!-- 2.4 Extended Mode -->
+  <h3>2.4 拡張モード（Extended Mode）</h3>
+  <div class="param-table-wrapper">
+  <table>
+    <thead><tr><th>パラメータ</th><th>型</th><th>デフォルト</th><th>説明</th></tr></thead>
+    <tbody>
+      <tr><td>extended_mode</td><td>bool</td><td>False</td><td><span class="tag tag-toggle">トグル</span> サイト深層クロールを有効化</td></tr>
+      <tr><td>crawl_max_pages</td><td>int</td><td>10</td><td>サイトあたり最大クロールページ数</td></tr>
+      <tr><td>crawl_max_depth</td><td>int</td><td>2</td><td>リンク追跡最大深度</td></tr>
+      <tr><td>crawl_max_sites</td><td>int</td><td>3</td><td>検索あたり最大クロールサイト数</td></tr>
+      <tr><td>crawl_mode</td><td>str</td><td>"standard"</td><td>クロール方式: standard / fast_batch / fast_parallel</td></tr>
+      <tr><td>fast_crawl_workers</td><td>int</td><td>10</td><td>並列ワーカー数（fast系モード時）</td></tr>
+      <tr><td>fast_crawl_batch_size</td><td>int</td><td>5</td><td>バッチサイズ（fast系モード時）</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <!-- 2.5 DeepThink -->
+  <h3>2.5 DeepThink</h3>
+  <div class="param-table-wrapper">
+  <table>
+    <thead><tr><th>パラメータ</th><th>型</th><th>デフォルト</th><th>説明</th></tr></thead>
+    <tbody>
+      <tr><td>deep_think</td><td>bool</td><td>False</td><td><span class="tag tag-toggle">トグル</span> DeepThink推論を有効化</td></tr>
+      <tr><td>deep_think_level</td><td>float</td><td>0.5</td><td>思考レベル（0.0=保守的 → 1.0=探索的）</td></tr>
+      <tr><td>reasoning_iterations</td><td>int</td><td>3</td><td>推論サイクル回数（1-10）</td></tr>
+      <tr><td>consistency_threshold</td><td>float</td><td>0.3</td><td>一貫性チェック閾値（0.0-1.0）</td></tr>
+      <tr><td>consistency_mode</td><td>str</td><td>"warn"</td><td>モード: warn / revise / strict</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3 style="margin-top: 0.5rem;">2.5.1 DeepThink 内部パラメータ</h3>
+  <div class="param-table-wrapper">
+  <table>
+    <thead><tr><th>パラメータ</th><th>型</th><th>デフォルト</th><th>説明</th></tr></thead>
+    <tbody>
+      <tr><td>fidelity_threshold</td><td>float</td><td>0.7</td><td><span class="tag tag-internal">内部</span> ソース忠実度閾値</td></tr>
+      <tr><td>_expansion_tolerance</td><td>float</td><td>0.2</td><td><span class="tag tag-internal">内部</span> 拡張許容度</td></tr>
+      <tr><td>_deviation_weights</td><td>tuple</td><td>(0.4, 0.4, 0.2)</td><td><span class="tag tag-internal">内部</span> 逸脱重み（意味・論理・矛盾）</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <!-- 2.6 Multilingual -->
+  <h3>2.6 多言語検索</h3>
+  <div class="param-table-wrapper">
+  <table>
+    <thead><tr><th>パラメータ</th><th>型</th><th>デフォルト</th><th>説明</th></tr></thead>
+    <tbody>
+      <tr><td>multilingual</td><td>bool</td><td>False</td><td><span class="tag tag-toggle">トグル</span> 多言語検索を有効化</td></tr>
+      <tr><td>search_languages</td><td>List[str]</td><td>["ja","en"]</td><td>検索言語（ISO 639-1コード）</td></tr>
+      <tr><td>results_per_language</td><td>int</td><td>10</td><td>言語あたり結果数</td></tr>
+      <tr><td>translate_results</td><td>bool</td><td>True</td><td>結果を出力言語に翻訳</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <!-- 2.7 Fermi -->
+  <h3>2.7 フェルミ推定</h3>
+  <div class="param-table-wrapper">
+  <table>
+    <thead><tr><th>パラメータ</th><th>型</th><th>デフォルト</th><th>説明</th></tr></thead>
+    <tbody>
+      <tr><td>fermi_estimation</td><td>bool</td><td>False</td><td><span class="tag tag-toggle">トグル</span> フェルミ推定を有効化</td></tr>
+      <tr><td>fermi_target_metrics</td><td>List[str]</td><td>[]</td><td>推定対象メトリクス（空=自動検出）</td></tr>
+      <tr><td>fermi_auto_detect</td><td>bool</td><td>True</td><td>コンテンツからメトリクスを自動検出</td></tr>
+      <tr><td>fermi_max_tree_depth</td><td>int</td><td>4</td><td>分解ツリー最大深度（1-6）</td></tr>
+      <tr><td>fermi_max_leaf_nodes</td><td>int</td><td>10</td><td>最大リーフノード数（2-20）</td></tr>
+      <tr><td>fermi_monte_carlo</td><td>int</td><td>1000</td><td>モンテカルロ反復回数</td></tr>
+      <tr><td>fermi_validate</td><td>bool</td><td>True</td><td>LLMによる結果検証</td></tr>
+      <tr><td>fermi_include_sensitivity</td><td>bool</td><td>True</td><td>感度分析を含む</td></tr>
+      <tr><td>fermi_enable_sub_decomposition</td><td>bool</td><td>True</td><td>低信頼度ノードの再分解</td></tr>
+      <tr><td>fermi_sub_decomposition_max_iterations</td><td>int</td><td>3</td><td>再分解最大反復回数（0-10）</td></tr>
+      <tr><td>fermi_sub_decomposition_confidence_threshold</td><td>float</td><td>0.65</td><td>再分解を行う信頼度閾値</td></tr>
+      <tr><td>fermi_sub_decomposition_min_sensitivity_pct</td><td>float</td><td>10.0</td><td>再分解対象の最小感度パーセント</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <!-- 2.8 Report -->
+  <h3>2.8 レポート設定</h3>
+  <div class="param-table-wrapper">
+  <table>
+    <thead><tr><th>パラメータ</th><th>型</th><th>デフォルト</th><th>説明</th></tr></thead>
+    <tbody>
+      <tr><td>output_format</td><td>str</td><td>"markdown"</td><td>出力形式: markdown / docx / pdf / html</td></tr>
+      <tr><td>output_dir</td><td>str</td><td>"./output"</td><td>出力ディレクトリ</td></tr>
+      <tr><td>target_pages</td><td>int</td><td>None</td><td>目標ページ数（拡張合成の動的文字数制限に影響）</td></tr>
+      <tr><td>target_characters</td><td>int</td><td>None</td><td>目標文字数</td></tr>
+      <tr><td>strict_format</td><td>bool</td><td>False</td><td>厳密フォーマット準拠</td></tr>
+      <tr><td>report_generator_version</td><td>str</td><td>"v1"</td><td>レポート生成器: v1 / v2 / v3</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <!-- 2.9 V2/V3 -->
+  <h3>2.9 V2 / V3 レポート固有設定</h3>
+  <div class="param-table-wrapper">
+  <table>
+    <thead><tr><th>パラメータ</th><th>型</th><th>デフォルト</th><th>説明</th></tr></thead>
+    <tbody>
+      <tr><td>v2_writing_style</td><td>str</td><td>"business"</td><td>文体: formal / business / technical / executive / casual</td></tr>
+      <tr><td>v2_target_audience</td><td>str</td><td>"business"</td><td>対象読者: expert / business / engineer / general / student</td></tr>
+      <tr><td>v2_technical_level</td><td>int</td><td>3</td><td>技術レベル（1〜5、5=最高）</td></tr>
+      <tr><td>v2_enable_consistency_check</td><td>bool</td><td>True</td><td>章間一貫性チェック</td></tr>
+      <tr><td>v2_enable_two_phase</td><td>bool</td><td>True</td><td>ドラフト→推敲の2段階生成</td></tr>
+      <tr><td>v2_include_glossary</td><td>bool</td><td>True</td><td>用語集を含む</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <!-- 2.10 Auto Figures -->
+  <h3>2.10 自動図表生成</h3>
+  <div class="param-table-wrapper">
+  <table>
+    <thead><tr><th>パラメータ</th><th>型</th><th>デフォルト</th><th>説明</th></tr></thead>
+    <tbody>
+      <tr><td>auto_figures</td><td>bool</td><td>False</td><td><span class="tag tag-toggle">トグル</span> 自動図表生成を有効化</td></tr>
+      <tr><td>auto_figures_include_images</td><td>bool</td><td>True</td><td>Web画像を含む</td></tr>
+      <tr><td>auto_figures_include_tables</td><td>bool</td><td>True</td><td>抽出テーブルを含む</td></tr>
+      <tr><td>auto_figures_include_charts</td><td>bool</td><td>True</td><td>生成チャートを含む</td></tr>
+      <tr><td>auto_figures_max_images</td><td>int</td><td>2</td><td>セクションあたり最大画像数</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <!-- 2.11 Verification -->
+  <h3>2.11 検証設定</h3>
+  <div class="param-table-wrapper">
+  <table>
+    <thead><tr><th>パラメータ</th><th>型</th><th>デフォルト</th><th>説明</th></tr></thead>
+    <tbody>
+      <tr><td>enable_verification</td><td>bool</td><td>True</td><td>検証を実行</td></tr>
+      <tr><td>verification_strictness</td><td>str</td><td>"medium"</td><td>厳格度: low / medium / high</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+  <h2>3. レポート生成器比較（V1 / V2 / V3）</h2>
+  <div class="param-table-wrapper">
+  <table class="compare-table">
+    <thead>
+      <tr><th>機能</th><th>V1</th><th>V2</th><th>V3</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>中間形式</td><td>Markdown</td><td>Markdown</td><td>なし（直接DOCX）</td></tr>
+      <tr><td>章間一貫性管理</td><td class="cross">✗</td><td class="check">✓</td><td class="check">✓（継承）</td></tr>
+      <tr><td>用語集管理</td><td class="cross">✗</td><td class="check">✓</td><td class="check">✓（継承）</td></tr>
+      <tr><td>文体制御（WritingStyle）</td><td class="cross">✗</td><td class="check">✓</td><td class="check">✓（継承）</td></tr>
+      <tr><td>2段階生成（Draft→Refine）</td><td class="cross">✗</td><td class="check">✓ オプション</td><td class="check">✓ オプション（継承）</td></tr>
+      <tr><td>インライン図表挿入</td><td class="cross">✗</td><td class="cross">✗</td><td class="check">✓</td></tr>
+      <tr><td>対応出力形式</td><td>MD / DOCX / PDF / HTML</td><td>MD / DOCX / PDF / HTML</td><td>DOCXのみ</td></tr>
+      <tr><td>原文+要約参照</td><td class="cross">✗</td><td class="check">✓</td><td class="check">✓（継承）</td></tr>
+      <tr><td>散文スタイル指示</td><td class="check">✓</td><td class="check">✓</td><td class="check">✓（継承）</td></tr>
+      <tr><td>python-docx直接API</td><td class="cross">✗</td><td class="cross">✗</td><td class="check">✓</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+  <h2>4. オプション機能の適用タイミング</h2>
+  <div class="timing-grid">
+    <div class="timing-label">リサーチ中</div>
+    <div class="timing-items">
+      <span class="timing-chip">multilingual</span>
+      <span class="timing-chip">extended_mode</span>
+      <span class="timing-chip">crawl_mode</span>
+      <span class="timing-chip">content_filter_mode</span>
+      <span class="timing-chip">use_enhanced_synthesis</span>
+      <span class="timing-chip">target_pages / target_characters</span>
+    </div>
+
+    <div class="timing-label">リサーチ後</div>
+    <div class="timing-items">
+      <span class="timing-chip">deep_think</span>
+    </div>
+
+    <div class="timing-label">レポート生成時</div>
+    <div class="timing-items">
+      <span class="timing-chip">report_generator_version</span>
+      <span class="timing-chip">v2_writing_style</span>
+      <span class="timing-chip">v2_target_audience</span>
+      <span class="timing-chip">v2_technical_level</span>
+      <span class="timing-chip">v2_enable_two_phase</span>
+      <span class="timing-chip">auto_figures</span>
+    </div>
+
+    <div class="timing-label">レポート後</div>
+    <div class="timing-items">
+      <span class="timing-chip">enable_verification</span>
+      <span class="timing-chip">fermi_estimation</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+  <h2>5. パラメータフロー図</h2>
+
+  <h3>5.1 target_pages の流れ</h3>
+  <div style="background: var(--surface); border-radius: 8px; padding: 1.25rem; font-family: monospace; font-size: 0.88rem; line-height: 2; border: 1px solid var(--border);">
+    <span style="color:var(--accent)">run_research(target_pages=N)</span><br>
+    &nbsp;&nbsp;→ <span style="color:var(--text-muted)">Config.report.target_pages = N</span><br>
+    &nbsp;&nbsp;→ <span style="color:var(--yellow)">Researcher.__init__(target_pages=N)</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;→ <span style="color:var(--text-muted)">self._target_pages = N</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;→ <span style="color:var(--text-muted)">target_chars = N × 1600</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;→ <span style="color:var(--text-muted)">target_per_section = target_chars ÷ セクション数</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;→ <span style="color:var(--green)">ContentExtractor.target_chars_per_section = target_per_section</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ <span style="color:var(--pink)">_calc_target_per_point(num_points)</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ <span style="color:var(--text-muted)">raw = section_target ÷ num_points</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ <span style="color:var(--orange)">clamp(500, raw, 3000)</span>
+  </div>
+
+  <h3>5.2 extended_mode の流れ</h3>
+  <div style="background: var(--surface); border-radius: 8px; padding: 1.25rem; font-family: monospace; font-size: 0.88rem; line-height: 2; border: 1px solid var(--border);">
+    <span style="color:var(--accent)">run_research(extended_mode=True)</span><br>
+    &nbsp;&nbsp;→ <span style="color:var(--yellow)">Researcher(extended_mode=True, crawl_max_pages, crawl_max_depth, crawl_max_sites)</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;→ <span style="color:var(--text-muted)">検索結果取得後</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;→ <span style="color:var(--green)">SiteCrawler(max_pages, max_depth)</span> で各サイトを深層クロール<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;→ <span style="color:var(--text-muted)">crawl_relevance_threshold で関連ページをフィルタ</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;→ <span style="color:var(--pink)">ContentExtractor</span> で各ページからコンテンツ抽出
+  </div>
+
+  <h3>5.3 deep_think の流れ</h3>
+  <div style="background: var(--surface); border-radius: 8px; padding: 1.25rem; font-family: monospace; font-size: 0.88rem; line-height: 2; border: 1px solid var(--border);">
+    <span style="color:var(--accent)">run_research(deep_think=True, deep_think_level=0.7)</span><br>
+    &nbsp;&nbsp;→ <span style="color:var(--yellow)">DeepThinkProcessor(config)</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;→ <span style="color:var(--text-muted)">リサーチ完了後、全セクションに対して実行</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;→ <span style="color:var(--green)">Tree of Thought推論</span> × reasoning_iterations 回<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;→ <span style="color:var(--pink)">consistency check</span>（threshold超過時に mode に応じて対応）<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├─ <span style="color:var(--text-muted)">warn: 警告のみ</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├─ <span style="color:var(--text-muted)">revise: 自動修正</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└─ <span style="color:var(--text-muted)">strict: 修正+再検証</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;→ <span style="color:var(--orange)">fidelity check</span>（ソース忠実度検証）
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+  <h2>6. 返却値</h2>
+  <div class="param-table-wrapper">
+  <table>
+    <thead><tr><th>キー</th><th>型</th><th>説明</th></tr></thead>
+    <tbody>
+      <tr><td>session_id</td><td>str</td><td>セッション一意識別子</td></tr>
+      <tr><td>report_path</td><td>str</td><td>生成レポートのパス</td></tr>
+      <tr><td>evidence_json</td><td>str?</td><td>エビデンスJSONのパス</td></tr>
+      <tr><td>evidence_csv</td><td>str?</td><td>エビデンスCSVのパス</td></tr>
+      <tr><td>verification_html</td><td>str?</td><td>検証レポートHTMLのパス</td></tr>
+      <tr><td>session</td><td>ResearchSession</td><td>リサーチセッション全体</td></tr>
+      <tr><td>evidence_locker</td><td>EvidenceLocker</td><td>収集した全エビデンス</td></tr>
+      <tr><td>verification_result</td><td>VerificationResult?</td><td>検証結果</td></tr>
+      <tr><td>deep_think_results</td><td>DeepThinkResult?</td><td>DeepThink推論結果</td></tr>
+      <tr><td>fermi_results</td><td>Dict?</td><td>フェルミ推定結果</td></tr>
+      <tr><td>token_usage</td><td>Dict[str,int]</td><td>トークン使用量統計</td></tr>
+      <tr><td>warning_count</td><td>int</td><td>フォールバック警告数</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<footer>
+  Deep Research Tool パイプラインリファレンス — Generated 2026-02-19 — claudecode/deep_research_tool
+</footer>
+
+</div>
+</body>
+</html>
