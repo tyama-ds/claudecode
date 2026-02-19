@@ -23,6 +23,7 @@ AIを活用した自動リサーチツール。OpenAI/Anthropic APIとWeb検索�
 - **データサルベージ**: エラー時のデータ復旧とCSVエクスポート（日本語エンコーディング対応）
 - **高速クロールモード**: 並列フェッチとバッチ/並列LLM評価で情報収集を高速化
 - **レポート生成V2**: 章間の一貫性を保証する用語統一・コンテキスト引き継ぎ・自動修正機能
+- **フェルミ推定**: 分解木ベースの定量推定。エビデンス自動照合、感度分析、モンテカルロシミュレーション、低信頼度リーフの再帰的サブ分解に対応
 
 ## インストール
 
@@ -2048,6 +2049,237 @@ for issue in report.issues:
 
 ---
 
+## 追加機能10：フェルミ推定（Fermi Estimation）
+
+### 概要
+
+直接的なデータが得られない定量指標（市場規模、需要量、コスト等）を、分解木（Decomposition Tree）ベースで推定する機能です。収集済みの数値データを自動的に照合し、エビデンスがないパラメータはLLMで推定します。さらに、低信頼度のリーフノードを自動的に再分解（サブ分解）して、より細かい統計データから組み立て直すことで推定精度を向上させます。
+
+### ワークフロー全体像
+
+```
+NumericalDataStore ──┐
+                     ├─→ Step 1: データ要約
+LLM Client ──────────┤
+                     ├─→ Step 2: 問題分解（Decompose）──→ DecompositionTree
+                     │
+                     ├─→ Step 3: 仮定の解決（Resolve）──→ Assumption[]
+                     │       エビデンス検索 → LLMフォールバック
+                     │
+                     ├─→ Step 4: 3シナリオ計算 ──→ base / pessimistic / optimistic
+                     ├─→ Step 5: 感度分析 ──→ SensitivityAnalysis
+                     │
+                     ├─→ Step 5b: サブ分解ループ（低信頼度リーフの再分解）
+                     │       Decomposer.sub_decompose()
+                     │       AssumptionManager.resolve_leaf_node()
+                     │       → 信頼度未改善時はロールバック
+                     │
+                     ├─→ Step 6: モンテカルロシミュレーション ──→ {mean, p5, p95, ...}
+                     └─→ Step 7: 検証（Validate）──→ ValidationResult
+                                                          │
+                                                          v
+                                               FermiEstimationResult
+                                                   ├─→ .to_dict()  (JSON)
+                                                   └─→ .to_summary()  (Markdown → レポート追記)
+```
+
+### 各ステップの詳細
+
+#### Step 1: データ要約
+
+`NumericalDataStore` 内の信頼度上位20件を `"- メトリック名 (主題): 値 [日付]"` 形式のテキストにまとめ、以降のLLMプロンプトに渡します。
+
+#### Step 2: 問題分解（Decompose）
+
+LLMに `DECOMPOSITION_PROMPT` を送信し、ターゲット指標を推定可能なサブコンポーネントに分解します。
+
+```
+例: 「日本のペットフード市場規模」
+    └─→ [MULTIPLY]
+        ├── 日本の世帯数
+        ├── ペット飼育率
+        ├── 1世帯あたりペット数
+        └── 年間フード費用/匹
+```
+
+各ノードは `TreeNode` オブジェクトとして管理され、`multiply` / `add` / `subtract` / `divide` の演算で親ノードの値を構成します。分解の深さは2〜4階層が推奨です。
+
+#### Step 3: 仮定の解決（Resolve Assumptions）
+
+各リーフノードに対して以下の優先順位で値を決定します：
+
+1. **エビデンス検索**: `NumericalDataStore` からキーワードマッチング（スコア >= 0.3）で数値データを検索。見つかった場合は `EVIDENCE_DIRECT` として採用し、レンジは ±20%
+2. **LLM推定**: エビデンスが見つからない場合、`ESTIMATION_PROMPT` でLLMに3シナリオ（base/low/high）+ 信頼度を推定させる
+
+#### Step 4: 3シナリオ計算
+
+分解木を再帰的に評価し、base（ベースケース）、pessimistic（悲観）、optimistic（楽観）の3シナリオで最終値を計算します。
+
+#### Step 5: 感度分析
+
+各リーフの値を一つずつ low/high に置き換えて再計算し、最終結果への影響度（%）を算出します。最も感度の高いパラメータが推定精度のボトルネックです。
+
+#### Step 5b: サブ分解ループ（再帰的リーフ分解）
+
+低信頼度かつ高感度のリーフノードを自動的に検出し、さらに細かいサブコンポーネントに分解します。
+
+**候補選定の3条件**（すべてAND）：
+1. `confidence < sub_decomposition_confidence_threshold`（デフォルト: 0.65）
+2. `sensitivity_pct >= sub_decomposition_min_sensitivity_pct`（デフォルト: 10.0%）
+3. ツリー内の深さ < `max_tree_depth - 1`（子ノードの余地がある）
+
+**サブ分解の流れ**：
+1. 元のノード状態を保存（ロールバック用）
+2. LLMにサブ分解プロンプトを送信し、新しいサブツリーを取得
+3. 新しいリーフノードの値をエビデンス/LLMで解決
+4. 新リーフの平均信頼度が元より高ければ採用、**低ければロールバック**
+
+```
+サブ分解の例:
+Before: 1世帯あたりペット数 = 1.3 (LLM推定, confidence=0.60)
+
+After:  1世帯あたりペット数 = [ADD]
+        ├── 犬の寄与 = [MULTIPLY]
+        │   ├── 犬飼育世帯の比率: 0.55 (Evidence, confidence=0.85)
+        │   └── 犬の平均飼育頭数: 1.24 (Evidence, confidence=0.90)
+        └── 猫の寄与 = [MULTIPLY]
+            ├── 猫飼育世帯の比率: 0.45 (Evidence, confidence=0.85)
+            └── 猫の平均飼育頭数: 1.74 (Evidence, confidence=0.90)
+
+結果: 0.55×1.24 + 0.45×1.74 = 1.465 (エビデンス裏付け、高信頼度)
+```
+
+このループは最大 `sub_decomposition_max_iterations` 回（デフォルト: 3）繰り返されます。
+
+#### Step 6: モンテカルロシミュレーション
+
+各リーフに三角分布（low, base, high）でランダムサンプリングし、デフォルト1000回反復で信頼区間を算出します。出力統計量: mean, median, std, min, max, p5, p25, p75, p95
+
+#### Step 7: 検証（Validate）
+
+3段階の検証を実施します：
+1. **サニティチェック**: low ≤ base ≤ high、有限値、レンジ幅の妥当性
+2. **クロスチェック**: DataStore内の既知データとオーダー（桁数）比較
+3. **LLM検証**: 推定結果全体の妥当性をLLMに問う
+
+最終的な `overall_confidence` = 仮定平均信頼度 × 0.6 + 検証信頼度 × 0.4
+
+#### Step 8: レポート出力
+
+`run_research` パイプライン経由の場合、推定結果がMarkdown形式でレポートファイルに自動追記されます（推定結果テーブル、分解構造、前提条件、感度分析、検証結果）。
+
+### `run_research` での使用
+
+```python
+from deep_research_tool import run_research
+
+result = run_research(
+    query="日本のペットフード市場規模を推定",
+    provider="anthropic",
+    api_key="sk-ant-xxx",
+
+    # フェルミ推定を有効化
+    fermi_estimation=True,
+
+    # 推定対象の指定（省略時はLLMが自動検出）
+    fermi_target_metrics=["日本のペットフード市場規模（年間、円）"],
+
+    # サブ分解の設定
+    fermi_enable_sub_decomposition=True,
+    fermi_sub_decomposition_max_iterations=3,
+    fermi_sub_decomposition_confidence_threshold=0.65,
+    fermi_sub_decomposition_min_sensitivity_pct=10.0,
+)
+```
+
+### 独立実行（`run_research` 不要）
+
+フェルミ推定モジュールは単体でも利用可能です。
+
+```python
+from deep_research_tool.estimation.fermi_estimator import FermiEstimator, FermiEstimationConfig
+from deep_research_tool.evidence.numerical_extractor import NumericalDataStore
+
+# 1. 設定
+config = FermiEstimationConfig(
+    enabled=True,
+    max_tree_depth=4,
+    monte_carlo_iterations=1000,
+    include_sensitivity=True,
+    enable_sub_decomposition=True,
+    sub_decomposition_max_iterations=3,
+    sub_decomposition_confidence_threshold=0.65,
+)
+
+# 2. LLMクライアントとデータストアを準備
+llm_client = ...  # OpenAI/Anthropicクライアント
+data_store = NumericalDataStore(research_topic="ペットフード市場")
+
+# （任意）既知の数値データをデータストアに追加
+# data_store.add(NumericalDataPoint(value=5340, unit="万世帯", ...))
+
+# 3. 推定実行
+estimator = FermiEstimator(llm_client=llm_client, config=config, language="ja")
+result = estimator.estimate(
+    target_metric="日本のペットフード市場規模（年間、円）",
+    data_store=data_store,
+    context="2024年時点の日本国内市場",
+)
+
+# 4. 結果の利用
+print(f"ベースケース: {result.base_estimate:,.0f} {result.unit}")
+print(f"悲観〜楽観: {result.low_estimate:,.0f} 〜 {result.high_estimate:,.0f}")
+print(f"信頼度: {result.overall_confidence:.0%}")
+print(f"エビデンス率: {result.evidence_backed_ratio:.0%}")
+
+# Markdownサマリー
+print(result.to_summary(language="ja"))
+
+# JSON出力
+import json
+print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+```
+
+### フェルミ推定パラメータ
+
+| パラメータ | 説明 | デフォルト |
+|-----------|------|----------|
+| `fermi_estimation` | フェルミ推定の有効化 | `False` |
+| `fermi_target_metrics` | 推定対象の指標リスト（空の場合はLLMが自動検出） | `[]` |
+| `fermi_auto_detect_targets` | LLMによる推定対象の自動検出 | `True` |
+| `fermi_max_tree_depth` | 分解木の最大深さ（1〜6） | `4` |
+| `fermi_max_leaf_nodes` | リーフノードの最大数（2〜20） | `10` |
+| `fermi_monte_carlo_iterations` | モンテカルロの反復回数 | `1000` |
+| `fermi_validate_with_llm` | LLMによる検証 | `True` |
+| `fermi_min_confidence_threshold` | 最低信頼度閾値 | `0.3` |
+| `fermi_include_sensitivity` | 感度分析の実施 | `True` |
+| `fermi_enable_sub_decomposition` | サブ分解の有効化 | `True` |
+| `fermi_sub_decomposition_confidence_threshold` | サブ分解対象の信頼度閾値 | `0.65` |
+| `fermi_sub_decomposition_max_iterations` | サブ分解の最大反復回数（0〜10） | `3` |
+| `fermi_sub_decomposition_min_sensitivity_pct` | サブ分解対象の最小感度（%） | `10.0` |
+
+### モジュール構成
+
+```
+estimation/
+├── __init__.py
+├── decomposer.py          # 問題分解（DecompositionTree, TreeNode, Decomposer）
+├── assumptions.py          # 仮定管理（AssumptionManager, Assumption）
+├── calculator.py           # 計算エンジン（3シナリオ評価、感度分析、モンテカルロ）
+├── validator.py            # 結果検証（サニティ、クロスチェック、LLM検証）
+└── fermi_estimator.py      # オーケストレーター（FermiEstimator, FermiEstimationConfig）
+```
+
+### 注意事項
+
+- **APIコスト**: 分解 + 各リーフの推定 + サブ分解 + 検証で複数回のLLM呼び出しが発生します。リーフ数が多いほどコストが増加します
+- **サブ分解の深さ**: `max_tree_depth` を超えるサブ分解は行われません。深すぎる分解は推定精度の低下を招く場合があります
+- **ロールバック**: サブ分解で信頼度が改善しない場合は自動的に元の状態に戻ります
+- **データストアの品質**: エビデンスの質が推定精度に直結します。事前に高品質な数値データをデータストアに格納しておくことを推奨します
+- **独立実行時**: `run_research` を経由せずに使用する場合、LLMクライアントと `NumericalDataStore` を自前で用意する必要があります
+
+---
+
 ## 全機能フルカスタマイズ例（Maximum Customized run_research）
 
 `run_research()` の全パラメータを使いこなした最大構成の例です。V2レポート生成、DeepThink推論、多言語検索、高速クロール、自動図表生成、数値データ抽出、単位変換など、全機能を有効にしています。
@@ -2132,6 +2364,18 @@ result = run_research(
     # === ファクト検証 ===
     enable_verification=True,                # ハルシネーション検証
     use_enhanced_synthesis=True,             # Multi-Pass Synthesis
+
+    # === フェルミ推定 ===
+    fermi_estimation=True,                                    # フェルミ推定有効化
+    fermi_target_metrics=["世界の半導体材料市場規模（年間、USD）"],  # 推定対象（空なら自動検出）
+    fermi_auto_detect_targets=True,                           # LLMによる指標自動検出
+    fermi_max_tree_depth=4,                                   # 分解木の最大深さ
+    fermi_monte_carlo_iterations=1000,                        # モンテカルロ反復回数
+    fermi_include_sensitivity=True,                           # 感度分析の実施
+    fermi_enable_sub_decomposition=True,                      # サブ分解（再帰的リーフ分解）
+    fermi_sub_decomposition_max_iterations=3,                 # サブ分解の最大回数
+    fermi_sub_decomposition_confidence_threshold=0.65,        # サブ分解対象の信頼度閾値
+    fermi_sub_decomposition_min_sensitivity_pct=10.0,         # サブ分解対象の最小感度(%)
 )
 
 # === 結果の取得 ===
@@ -2157,6 +2401,7 @@ print(f"トークン使用量: {result['token_usage']}")
 | **数値抽出** | `numerical_extraction=True`, `intelligent_charts` | データ抽出・可視化 |
 | **単位変換** | `enable_unit_conversion=True` | SI単位正規化・変換 |
 | **検証** | `enable_verification=True` | ファクトチェック |
+| **フェルミ推定** | `fermi_estimation=True`, `fermi_enable_sub_decomposition` | 定量推定・サブ分解 |
 
 ### 注意事項
 
@@ -2462,6 +2707,16 @@ print(f"トークン使用量: {result['token_usage']}")
 | `crawl_mode` | 高速クロールモード (standard/fast_batch/fast_parallel) | standard |
 | `fast_crawl_workers` | 並列HTTPフェッチのワーカー数 | 10 |
 | `fast_crawl_batch_size` | バッチ評価時の1バッチあたりページ数 | 5 |
+| `fermi_estimation` | フェルミ推定の有効化 | False |
+| `fermi_target_metrics` | 推定対象の指標リスト | [] |
+| `fermi_auto_detect_targets` | LLMによる推定対象の自動検出 | True |
+| `fermi_max_tree_depth` | 分解木の最大深さ (1-6) | 4 |
+| `fermi_max_leaf_nodes` | リーフノードの最大数 (2-20) | 10 |
+| `fermi_monte_carlo_iterations` | モンテカルロシミュレーション反復回数 | 1000 |
+| `fermi_enable_sub_decomposition` | 低信頼度リーフの再帰的サブ分解 | True |
+| `fermi_sub_decomposition_max_iterations` | サブ分解の最大反復回数 (0-10) | 3 |
+| `fermi_sub_decomposition_confidence_threshold` | サブ分解対象の信頼度閾値 | 0.65 |
+| `fermi_sub_decomposition_min_sensitivity_pct` | サブ分解対象の最小感度(%) | 10.0 |
 
 ---
 
@@ -2566,6 +2821,12 @@ deep_research_tool/
 │   └── fast_crawler.py  # 高速クロールモード用並列クローラー
 ├── verification/        # ハルシネーション検証
 │   └── verifier.py
+├── estimation/          # フェルミ推定エンジン
+│   ├── decomposer.py          # 問題分解（分解木構築）
+│   ├── assumptions.py          # 仮定管理（エビデンス照合・LLM推定）
+│   ├── calculator.py           # 計算エンジン（3シナリオ・感度・モンテカルロ）
+│   ├── validator.py            # 結果検証
+│   └── fermi_estimator.py      # オーケストレーター
 ├── evidence/            # Evidence Locker
 │   ├── locker.py
 │   └── quality_evaluator.py
