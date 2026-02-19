@@ -352,11 +352,14 @@ class TestHTMLReportGeneration:
 
         assert output_path.exists()
         assert "Test Report" in html
-        assert "Hallucination Check Report" in html
+        assert ("Hallucination Check Report" in html
+                or "ハルシネーションチェックレポート" in html)
         assert "claim_1" in html
         assert "claim_2" in html
-        assert "Critical Issues" in html
-        assert "Recommendations" in html
+        assert ("Critical Issues" in html
+                or "重大な問題" in html)
+        assert ("Recommendations" in html
+                or "推奨事項" in html)
 
 
 class TestVerifierCompatibility:
