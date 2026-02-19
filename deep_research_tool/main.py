@@ -459,6 +459,7 @@ class DeepResearchTool:
             final_doc = generator.generate_final_document(
                 result,
                 include_glossary=self.config.report.v2_include_glossary,
+                evidence_locker=evidence_locker,
             )
             # Save to file in the configured format
             output_dir = self.config.report.output_dir / "reports"
@@ -1967,6 +1968,7 @@ def run_manual_research(
         final_doc = generator.generate_final_document(
             result,
             include_glossary=config.report.v2_include_glossary,
+            evidence_locker=evidence_locker,
         )
         # Save to file in the configured format
         output_dir = config.report.output_dir / "reports"

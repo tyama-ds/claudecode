@@ -652,7 +652,9 @@ class FigureTableGenerator:
                 if not src:
                     continue
 
-                src = urljoin(url, src)
+                # Don't urljoin data URIs (base64-encoded inline images)
+                if not src.startswith('data:'):
+                    src = urljoin(url, src)
 
                 # Skip small icons and tracking pixels
                 width = img.get('width')
@@ -703,7 +705,11 @@ class FigureTableGenerator:
         self,
         url: str,
     ) -> Tuple[Optional[Path], Optional[bytes]]:
-        """Download an image from URL."""
+        """Download an image from URL or decode a base64 data URI."""
+        # Handle base64 data URIs (data:image/png;base64,...)
+        if url.startswith('data:'):
+            return self._decode_data_uri(url)
+
         try:
             response = requests.get(
                 url,
@@ -758,6 +764,55 @@ class FigureTableGenerator:
 
         except Exception as e:
             print(f"[FigureTableGenerator] Error downloading image {url}: {e}")
+            return None, None
+
+    def _decode_data_uri(
+        self,
+        data_uri: str,
+    ) -> Tuple[Optional[Path], Optional[bytes]]:
+        """Decode a base64 data URI and save as image file.
+
+        Handles URIs like: data:image/png;base64,iVBORw0KGgo...
+        """
+        try:
+            # Parse: data:[<mediatype>][;base64],<data>
+            if ',' not in data_uri:
+                return None, None
+
+            header, encoded = data_uri.split(',', 1)
+
+            # Determine extension from MIME type
+            ext = '.png'  # default
+            mime_to_ext = {
+                'image/png': '.png',
+                'image/jpeg': '.jpg',
+                'image/gif': '.gif',
+                'image/webp': '.webp',
+                'image/svg+xml': '.svg',
+            }
+            for mime, extension in mime_to_ext.items():
+                if mime in header:
+                    ext = extension
+                    break
+
+            if ';base64' not in header:
+                return None, None
+
+            content = base64.b64decode(encoded)
+            if len(content) < 8:
+                return None, None
+
+            url_hash = hashlib.md5(encoded[:64].encode()).hexdigest()[:12]
+            filename = f"img_{url_hash}{ext}"
+            filepath = self.output_dir / filename
+
+            with open(filepath, 'wb') as f:
+                f.write(content)
+
+            return filepath, content
+
+        except Exception as e:
+            print(f"[FigureTableGenerator] Error decoding data URI: {e}")
             return None, None
 
     def _get_extension_from_url(self, url: str) -> Optional[str]:
