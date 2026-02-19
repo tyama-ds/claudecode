@@ -835,6 +835,17 @@ class Researcher:
                 "sources": [ec.source_url for ec in section_content_parts],
                 "images": [img for ec in section_content_parts for img in ec.images][:5],
                 "gaps": synthesized.get("information_gaps", []),
+                "extracted_content": [
+                    {
+                        "title": ec.source_title,
+                        "url": ec.source_url,
+                        "content": ec.processed_content,
+                        "raw_content": ec.raw_content,
+                        "key_points": ec.key_points,
+                        "relevance_score": ec.relevance_score,
+                    }
+                    for ec in section_content_parts
+                ],
             }
 
             section.content = content

@@ -333,17 +333,33 @@ class ReportGeneratorV2:
         # Build the prompt with full context
         context_prompt = context.get_full_context_prompt()
 
-        # Format content data
+        # Format content data — include both summary and raw content per source
         if isinstance(content_data, dict):
             sources = content_data.get("sources", [])
             extracted = content_data.get("extracted_content", [])
-            content_summary = "\n".join([
-                f"- [SOURCE {i+1}] {e.get('title', 'N/A')}: {e.get('content', '')[:500]}"
-                for i, e in enumerate(extracted[:10])
-            ]) if extracted else "情報なし"
+            if extracted:
+                source_blocks = []
+                for i, e in enumerate(extracted[:10]):
+                    title = e.get("title", "N/A")
+                    summary = e.get("content", "")
+                    raw = e.get("raw_content", "")
+                    key_pts = e.get("key_points", [])
+                    block = f"[SOURCE {i+1}] {title}\n"
+                    if summary:
+                        block += f"【要約】\n{summary}\n"
+                    if key_pts:
+                        block += f"【要点】{', '.join(key_pts[:5])}\n"
+                    if raw:
+                        block += f"【原文】\n{raw}\n"
+                    source_blocks.append(block)
+                content_summary = "\n---\n".join(source_blocks)
+            else:
+                # Fallback: use pre-synthesized content
+                fallback = content_data.get("content", "")
+                content_summary = fallback if fallback else "情報なし"
         else:
             sources = []
-            content_summary = str(content_data)[:2000] if content_data else "情報なし"
+            content_summary = str(content_data) if content_data else "情報なし"
 
         length_instruction_ja = ""
         length_instruction_en = ""
