@@ -6,9 +6,120 @@ import json
 import logging
 import re
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+
+# ---------------------------------------------------------------------------
+# ResearchWarnings – thread-safe collector for fallback / degradation notices
+# ---------------------------------------------------------------------------
+
+class ResearchWarnings:
+    """Collect warnings emitted when fallback mechanisms trigger.
+
+    Warnings are categorised by severity so that they can be filtered and
+    rendered in the final report.
+
+    Severity levels:
+        CRITICAL – silent data loss; output likely incorrect or incomplete
+        HIGH     – an entire optional feature was skipped
+        MEDIUM   – partial data loss within a feature
+        LOW      – cosmetic / formatting degradation
+    """
+
+    CRITICAL = "CRITICAL"
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+
+    _instance: Optional["ResearchWarnings"] = None
+    _lock = threading.Lock()
+
+    def __init__(self) -> None:
+        self._warnings: List[Dict[str, str]] = []
+        self._lock_inst = threading.Lock()
+
+    # --- singleton access (so every module can record warnings) ---
+    @classmethod
+    def get_instance(cls) -> "ResearchWarnings":
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = cls()
+            return cls._instance
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reset the singleton (call at the start of each run)."""
+        with cls._lock:
+            cls._instance = cls()
+
+    # --- recording ---
+    def add(self, severity: str, source: str, message: str) -> None:
+        """Add a warning.
+
+        Args:
+            severity: One of CRITICAL / HIGH / MEDIUM / LOW
+            source: Short component identifier, e.g. "ReportGeneratorV2"
+            message: Human-readable description of what happened
+        """
+        entry = {
+            "severity": severity,
+            "source": source,
+            "message": message,
+            "timestamp": datetime.now().isoformat(),
+        }
+        with self._lock_inst:
+            self._warnings.append(entry)
+        # Also emit to console for immediate visibility
+        print(f"[WARNING:{severity}] [{source}] {message}")
+
+    # --- querying ---
+    def get_all(self) -> List[Dict[str, str]]:
+        with self._lock_inst:
+            return list(self._warnings)
+
+    def has_warnings(self) -> bool:
+        with self._lock_inst:
+            return len(self._warnings) > 0
+
+    def count(self, min_severity: str = None) -> int:
+        if min_severity is None:
+            return len(self._warnings)
+        order = {self.CRITICAL: 0, self.HIGH: 1, self.MEDIUM: 2, self.LOW: 3}
+        threshold = order.get(min_severity, 3)
+        with self._lock_inst:
+            return sum(1 for w in self._warnings
+                       if order.get(w["severity"], 3) <= threshold)
+
+    # --- rendering for report footer ---
+    def to_report_section(self, language: str = "ja") -> str:
+        """Render a markdown section suitable for appending to a report."""
+        with self._lock_inst:
+            if not self._warnings:
+                return ""
+
+        order = {self.CRITICAL: 0, self.HIGH: 1, self.MEDIUM: 2, self.LOW: 3}
+        sorted_warnings = sorted(self._warnings,
+                                 key=lambda w: order.get(w["severity"], 3))
+
+        if language == "ja":
+            lines = ["\n\n---\n", "## 処理中の警告・注意事項\n",
+                     "以下のフォールバックが発生しました。出力品質に影響がある可能性があります。\n"]
+        else:
+            lines = ["\n\n---\n", "## Processing Warnings\n",
+                     "The following fallbacks occurred during processing. "
+                     "Output quality may be affected.\n"]
+
+        for w in sorted_warnings:
+            lines.append(f"- **[{w['severity']}]** `{w['source']}`: {w['message']}")
+
+        lines.append("")
+        return "\n".join(lines)
+
+    def to_dict_list(self) -> List[Dict[str, str]]:
+        return self.get_all()
 
 
 def setup_logging(

@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
+from ..utils.helpers import ResearchWarnings
+
 
 @dataclass
 class ExtractedContent:
@@ -136,8 +138,14 @@ Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
                     relevance_score=float(data.get("relevance_score", 0.5)),
                     extraction_notes=data.get("extraction_notes", ""),
                 )
-        except (json.JSONDecodeError, ValueError):
-            pass
+        except (json.JSONDecodeError, ValueError) as _parse_err:
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.CRITICAL,
+                "ContentExtractor",
+                f"JSON parse failed for '{source_title[:60]}' ({source_url[:80]}). "
+                f"Key points / quotes / relevance scoring lost; using raw text. "
+                f"Error: {_parse_err}",
+            )
 
         # Fallback: return basic extraction
         return ExtractedContent(
@@ -243,8 +251,15 @@ Return as JSON:
                         result["summary"] = "Content compiled from multiple sources"
 
                 return result
-        except (json.JSONDecodeError, ValueError):
-            pass
+        except (json.JSONDecodeError, ValueError) as _parse_err:
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.CRITICAL,
+                "ContentExtractor",
+                f"Section synthesis JSON parse failed for '{section_title}'. "
+                f"Using concatenated raw content (confidence=low). "
+                f"Analysis points and structured source references lost. "
+                f"Error: {_parse_err}",
+            )
 
         # Fallback
         return {

@@ -14,6 +14,7 @@ import json
 import re
 import logging
 import time
+from ...utils.helpers import ResearchWarnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Optional, Any, Callable, Tuple
@@ -420,12 +421,22 @@ Output only JSON:"""
 
             # Guard against None/empty response (OpenAI API can return content=None)
             if not response or not response.content:
-                print(f"[ReportGeneratorV2] WARNING: Empty response for section {section_number} '{section_title}'")
+                _msg = (f"LLM returned empty response for section {section_number} "
+                        f"'{section_title}'. This chapter has placeholder content only.")
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.CRITICAL, "ReportGeneratorV2", _msg)
+                if self.language == "ja":
+                    placeholder = (f"## {section_number}. {section_title}\n\n"
+                                   f"**[警告]** このセクションの内容を生成できませんでした"
+                                   f"（LLM応答が空でした）。")
+                else:
+                    placeholder = (f"## {section_number}. {section_title}\n\n"
+                                   f"**[WARNING]** Content generation failed for this section "
+                                   f"(LLM returned empty response).")
                 return ChapterContent(
                     section_number=section_number,
                     section_title=section_title,
-                    content=f"## {section_number}. {section_title}\n\n"
-                            f"このセクションの内容を生成できませんでした（LLM応答が空でした）。",
+                    content=placeholder,
                     word_count=0,
                     is_draft=True,
                 )
@@ -458,6 +469,12 @@ Output only JSON:"""
 
         except json.JSONDecodeError as e:
             print(f"[ReportGeneratorV2] JSON parse failed for section {section_number}: {e}")
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.HIGH,
+                "ReportGeneratorV2",
+                f"JSON parse failed for section {section_number} '{section_title}'. "
+                f"key_points / terms_used / facts_stated metadata lost. Error: {e}",
+            )
             # If the response looks like direct markdown (not JSON), use it as-is
             raw = response.content.strip() if response and response.content else ""
             if raw and not raw.startswith("{"):
@@ -572,6 +589,13 @@ Output only the revised content (no JSON):"""
 
             except Exception as e:
                 print(f"[ReportGeneratorV2] Refinement failed for {section_num}: {e}")
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.MEDIUM,
+                    "ReportGeneratorV2",
+                    f"Consistency refinement failed for section {section_num}. "
+                    f"Chapter remains as draft with potential consistency issues. "
+                    f"Error: {e}",
+                )
 
         return chapters
 
@@ -772,7 +796,13 @@ Output only the revised content (no JSON):"""
         elif format_lower == "pdf":
             # PDF: save as markdown with note (PDF generation requires additional setup)
             md_path = self._save_as_markdown(markdown_content, output_dir, filename)
-            print("[ReportGeneratorV2] PDF format is not yet supported in V2. Saved as markdown.")
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.CRITICAL,
+                "ReportGeneratorV2",
+                "PDF format requested but not supported in V2 generator. "
+                "Report saved as markdown (.md) instead. "
+                "Use report_generator_version='v1' for PDF support.",
+            )
             return md_path
         else:
             return self._save_as_markdown(markdown_content, output_dir, filename)
@@ -821,6 +851,13 @@ Output only the revised content (no JSON):"""
                     "Install with: pip install python-docx"
                 )
             logger.error("[ReportGeneratorV2] python-docx not installed. Falling back to markdown.")
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.CRITICAL,
+                "ReportGeneratorV2",
+                "DOCX format requested but python-docx is not installed. "
+                "Report saved as markdown (.md) instead. "
+                "Install with: pip install python-docx",
+            )
             return self._save_as_markdown(markdown_content, output_dir, filename)
 
         # Layer 1: Pre-sanitize the entire markdown content

@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable
 
+from .utils.helpers import ResearchWarnings
 from .config import Config, LLMProvider, SearchMethod, ReportFormat, ReportGeneratorVersion
 from .api import get_client
 from .api.base import get_token_stats, reset_token_stats
@@ -326,7 +327,9 @@ class DeepResearchTool:
             - session: ResearchSession object
             - evidence_locker: EvidenceLocker object
         """
-        # Process additional documents
+        # Reset warning collector for this run
+        ResearchWarnings.reset()
+
         # Log informational note when both enhanced_synthesis and V2 two_phase are active
         if (self.config.research.use_enhanced_synthesis
                 and self.config.report.generator_version == ReportGeneratorVersion.V2
@@ -517,11 +520,23 @@ class DeepResearchTool:
             except Exception as e:
                 print(f"[AutoFigures] Failed with error: {e}. "
                       f"Continuing with original report.")
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.MEDIUM,
+                    "AutoFigures",
+                    f"Figure/table generation failed entirely. "
+                    f"Report will not contain auto-generated figures or tables. Error: {e}",
+                )
                 figures_report_path = None
 
             if figures_report_path and not Path(figures_report_path).exists():
                 print(f"[AutoFigures] Output file not found: {figures_report_path}. "
                       f"Falling back to original report.")
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.MEDIUM,
+                    "AutoFigures",
+                    f"Figure-enhanced report file not found on disk. "
+                    f"Falling back to original report without figures.",
+                )
                 figures_report_path = None
 
         # Determine the active report path for subsequent steps
@@ -545,6 +560,12 @@ class DeepResearchTool:
         if hasattr(self.search_client, 'close'):
             self.search_client.close()
 
+        # Append warnings section to the report if any fallbacks occurred
+        warnings_collector = ResearchWarnings.get_instance()
+        if warnings_collector.has_warnings():
+            self._append_warnings_to_report(
+                active_report_path, warnings_collector)
+
         # Get token usage statistics
         token_stats = get_token_stats()
 
@@ -562,6 +583,8 @@ class DeepResearchTool:
             "deep_think_results": deep_think_results,
             "fermi_estimation_results": fermi_results,
             "token_usage": token_stats.to_dict(),
+            "warnings": warnings_collector.to_dict_list(),
+            "warning_count": warnings_collector.count(),
         }
 
     def _apply_fermi_estimation(
@@ -668,6 +691,12 @@ class DeepResearchTool:
         except Exception as e:
             print(f"[FermiEstimation] Failed: {e}")
             traceback.print_exc()
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.MEDIUM,
+                "FermiEstimation",
+                f"Fermi estimation failed entirely. "
+                f"No quantitative estimation section will be added to the report. Error: {e}",
+            )
             return None
 
     def _append_fermi_to_report(
@@ -721,6 +750,57 @@ class DeepResearchTool:
 
         except Exception as e:
             print(f"[FermiEstimation] Failed to append to report: {e}")
+
+    def _append_warnings_to_report(
+        self,
+        report_path: Path,
+        warnings_collector: ResearchWarnings,
+    ) -> None:
+        """Append a warnings section to the end of the report file.
+
+        Only appends to markdown (.md) files. For other formats the warnings
+        are still available via the ``warnings`` key in the result dict.
+        """
+        try:
+            if not report_path.exists():
+                return
+            suffix = report_path.suffix.lower()
+            if suffix != ".md":
+                # For non-markdown formats, skip file modification but
+                # warnings are still in the result dict.
+                return
+
+            language = getattr(self.config.research, "language", "en")
+            section_text = warnings_collector.to_report_section(language)
+            if not section_text:
+                return
+
+            import os
+            import tempfile
+
+            content = report_path.read_text(encoding="utf-8")
+            content += section_text
+
+            fd, tmp_path = tempfile.mkstemp(
+                dir=report_path.parent,
+                suffix=report_path.suffix,
+                prefix=".warnings_tmp_",
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                os.replace(tmp_path, str(report_path))
+            except BaseException:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+
+            print(f"[Warnings] Appended {warnings_collector.count()} warning(s) to report")
+
+        except Exception as e:
+            print(f"[Warnings] Failed to append warnings to report: {e}")
 
     def _get_content_for_verification(self, session: ResearchSession) -> str:
         """Extract content from session for verification."""
@@ -1135,6 +1215,13 @@ Output only the text (no JSON, no heading):"""
             except Exception as e:
                 print(f"[AutoFigures] Numerical data extraction/analysis failed: {e}")
                 traceback.print_exc()
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.MEDIUM,
+                    "AutoFigures",
+                    f"Numerical data extraction/analysis failed. "
+                    f"Intelligent charts will not be generated; "
+                    f"only basic figure/table extraction may still work. Error: {e}",
+                )
                 # Continue without numerical data — figure/table extraction can still work
 
         # Step 4: Create figure generator
@@ -1169,6 +1256,12 @@ Output only the text (no JSON, no heading):"""
         except Exception as e:
             print(f"[AutoFigures] Figure/table generation failed: {e}")
             traceback.print_exc()
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.MEDIUM,
+                "AutoFigures",
+                f"Figure/table/chart generation failed. "
+                f"Report will not contain any auto-generated visual elements. Error: {e}",
+            )
             return None
 
         # Report extraction results
@@ -1844,6 +1937,17 @@ def run_research(
         token_stats = get_token_stats()
         language = config.research.language if hasattr(config.research, 'language') else "en"
         print("\n" + token_stats.get_summary(language))
+
+    # Display warning summary
+    warning_count = result.get("warning_count", 0)
+    if warning_count > 0:
+        language = config.research.language if hasattr(config.research, 'language') else "en"
+        if language == "ja":
+            print(f"\n[注意] 処理中に {warning_count} 件のフォールバック警告が発生しました。"
+                  f"レポート末尾の「処理中の警告・注意事項」セクションを確認してください。")
+        else:
+            print(f"\n[NOTICE] {warning_count} fallback warning(s) occurred during processing. "
+                  f"Check the 'Processing Warnings' section at the end of the report.")
 
     return result
 
