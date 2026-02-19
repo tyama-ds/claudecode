@@ -567,7 +567,8 @@ class FigureTableGenerator:
             if not src:
                 continue
 
-            image_path, image_data = self._download_image(src)
+            page_url = img_data.get("page_url", "")
+            image_path, image_data = self._download_image(src, referer=page_url or None)
 
             if image_path or image_data:
                 figure = Figure(
@@ -633,8 +634,12 @@ class FigureTableGenerator:
 
             response = requests.get(
                 url,
-                timeout=self.download_timeout,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; ResearchBot/1.0)"},
+                timeout=(5, 20),
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
+                },
                 proxies=self.proxies,
                 verify=self.verify_ssl,
             )
@@ -676,7 +681,7 @@ class FigureTableGenerator:
                 if any(skip in src.lower() for skip in skip_keywords):
                     continue
 
-                image_path, image_data = self._download_image(src)
+                image_path, image_data = self._download_image(src, referer=url)
 
                 if image_path or image_data:
                     alt_text = img.get('alt', '')
@@ -704,21 +709,74 @@ class FigureTableGenerator:
     def _download_image(
         self,
         url: str,
+        referer: str = None,
     ) -> Tuple[Optional[Path], Optional[bytes]]:
         """Download an image from URL or decode a base64 data URI."""
         # Handle base64 data URIs (data:image/png;base64,...)
         if url.startswith('data:'):
             return self._decode_data_uri(url)
 
+        import time
+        from urllib.parse import urlparse
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
+        }
+        if referer:
+            headers["Referer"] = referer
+        else:
+            parsed = urlparse(url)
+            headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
+
+        max_retries = 3
+        last_exception = None
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(
+                    url,
+                    timeout=(5, 20),
+                    headers=headers,
+                    proxies=self.proxies,
+                    verify=self.verify_ssl,
+                )
+                if response.status_code in (429, 503) and attempt < max_retries - 1:
+                    wait = 2 ** attempt
+                    print(f"[FigureTableGenerator] HTTP {response.status_code} for {url}, retrying in {wait}s...")
+                    time.sleep(wait)
+                    continue
+                response.raise_for_status()
+                break
+            except requests.exceptions.ConnectionError as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt
+                    print(f"[FigureTableGenerator] Connection error for {url}, retrying in {wait}s...")
+                    time.sleep(wait)
+                    continue
+                print(f"[FigureTableGenerator] Error downloading image {url}: {e}")
+                return None, None
+            except requests.exceptions.Timeout as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt
+                    print(f"[FigureTableGenerator] Timeout for {url}, retrying in {wait}s...")
+                    time.sleep(wait)
+                    continue
+                print(f"[FigureTableGenerator] Error downloading image {url}: {e}")
+                return None, None
+            except requests.exceptions.HTTPError as e:
+                print(f"[FigureTableGenerator] HTTP error downloading image {url}: {e}")
+                return None, None
+            except Exception as e:
+                print(f"[FigureTableGenerator] Error downloading image {url}: {e}")
+                return None, None
+        else:
+            print(f"[FigureTableGenerator] Failed to download image after {max_retries} retries: {url}: {last_exception}")
+            return None, None
+
         try:
-            response = requests.get(
-                url,
-                timeout=self.download_timeout,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; ResearchBot/1.0)"},
-                proxies=self.proxies,
-                verify=self.verify_ssl,
-            )
-            response.raise_for_status()
 
             content_type = response.headers.get('content-type', '').lower()
 
@@ -1804,6 +1862,70 @@ Example: line"""
     # Markdown Integration
     # ========================================================================
 
+    def _insert_section_figures(
+        self,
+        result_lines: list,
+        section_id: str,
+        collection: 'FigureTableCollection',
+        inserted_sections: set,
+    ) -> None:
+        """Insert figures, tables, and charts for a section into result_lines."""
+        if section_id in inserted_sections:
+            return
+        inserted_sections.add(section_id)
+
+        # Add figures for this section
+        section_figures = collection.get_figures_for_section(section_id)
+        for fig in section_figures:
+            result_lines.append('')
+            if fig.image_path:
+                image_path = Path(fig.image_path) if not isinstance(fig.image_path, Path) else fig.image_path
+                if image_path.exists():
+                    result_lines.append(f'![{fig.title}]({fig.image_path})')
+                else:
+                    result_lines.append(f'<!-- Image not found: {fig.image_path} -->')
+            result_lines.append(f'*{fig.caption}*')
+            if fig.source_url:
+                result_lines.append(f'Source: [{fig.source_title or fig.source_url}]({fig.source_url})')
+            result_lines.append('')
+
+        # Add tables for this section
+        section_tables = collection.get_tables_for_section(section_id)
+        for table in section_tables:
+            result_lines.append('')
+            result_lines.append(f'**{table.title}**')
+            result_lines.append('')
+
+            header_line = '| ' + ' | '.join(str(h) for h in table.headers) + ' |'
+            separator = '|' + '|'.join(['---'] * len(table.headers)) + '|'
+            result_lines.append(header_line)
+            result_lines.append(separator)
+
+            for row in table.rows:
+                row_line = '| ' + ' | '.join(str(cell) for cell in row) + ' |'
+                result_lines.append(row_line)
+
+            result_lines.append('')
+            # Caption (distinct from title)
+            if table.caption and table.caption != table.title:
+                result_lines.append(f'*{table.caption}*')
+            if table.source_url:
+                result_lines.append(f'*Source: [{table.source_title or "Link"}]({table.source_url})*')
+            result_lines.append('')
+
+        # Add charts for this section
+        section_charts = collection.get_charts_for_section(section_id)
+        for chart in section_charts:
+            result_lines.append('')
+            if chart.image_path:
+                image_path = Path(chart.image_path) if not isinstance(chart.image_path, Path) else chart.image_path
+                if image_path.exists():
+                    result_lines.append(f'![{chart.title}]({chart.image_path})')
+                else:
+                    result_lines.append(f'<!-- Chart not found: {chart.image_path} -->')
+            result_lines.append(f'*{chart.caption}*')
+            result_lines.append('')
+
     def add_figures_to_markdown(
         self,
         markdown_content: str,
@@ -1813,59 +1935,63 @@ Example: line"""
         lines = markdown_content.split('\n')
         result_lines = []
         current_section = None
+        inserted_sections = set()
 
         for line in lines:
-            result_lines.append(line)
-
-            # Detect section headers
+            # When a new section header is found, flush figures for previous section first
             if line.startswith('## ') or line.startswith('### '):
-                match = re.match(r'^##+ (\d+(?:\.\d+)?)\. ', line)
+                match = re.match(r'^##+ (\d+(?:\.\d+)?)[.\s]', line)
                 if match:
+                    # Flush previous section before starting new one
+                    if current_section:
+                        self._insert_section_figures(result_lines, current_section, collection, inserted_sections)
                     current_section = match.group(1)
+
+            result_lines.append(line)
 
             # After section content, add figures and tables
             if current_section and (line.strip() == '' or line.startswith('---')):
-                # Add figures for this section
-                section_figures = collection.get_figures_for_section(current_section)
-                for fig in section_figures:
-                    result_lines.append('')
-                    if fig.image_path:
-                        result_lines.append(f'![{fig.title}]({fig.image_path})')
-                    result_lines.append(f'*{fig.caption}*')
-                    if fig.source_url:
-                        result_lines.append(f'Source: [{fig.source_title or fig.source_url}]({fig.source_url})')
-                    result_lines.append('')
-
-                # Add tables for this section
-                section_tables = collection.get_tables_for_section(current_section)
-                for table in section_tables:
-                    result_lines.append('')
-                    result_lines.append(f'**{table.title}**')
-                    result_lines.append('')
-
-                    header_line = '| ' + ' | '.join(str(h) for h in table.headers) + ' |'
-                    separator = '|' + '|'.join(['---'] * len(table.headers)) + '|'
-                    result_lines.append(header_line)
-                    result_lines.append(separator)
-
-                    for row in table.rows:
-                        row_line = '| ' + ' | '.join(str(cell) for cell in row) + ' |'
-                        result_lines.append(row_line)
-
-                    if table.source_url:
-                        result_lines.append(f'*Source: [{table.source_title or "Link"}]({table.source_url})*')
-                    result_lines.append('')
-
-                # Add charts for this section
-                section_charts = collection.get_charts_for_section(current_section)
-                for chart in section_charts:
-                    result_lines.append('')
-                    if chart.image_path:
-                        result_lines.append(f'![{chart.title}]({chart.image_path})')
-                    result_lines.append(f'*{chart.caption}*')
-                    result_lines.append('')
-
+                self._insert_section_figures(result_lines, current_section, collection, inserted_sections)
                 current_section = None
+
+        # Flush figures for the last section (if document ends without blank line)
+        if current_section:
+            self._insert_section_figures(result_lines, current_section, collection, inserted_sections)
+
+        # Append orphaned figures (section_id="" or unmatched) at the end
+        orphan_figures = [f for f in collection.figures if f.section_id not in inserted_sections]
+        orphan_charts = [c for c in collection.charts if c.section_id not in inserted_sections]
+        orphan_tables = [t for t in collection.tables if t.section_id not in inserted_sections]
+
+        if orphan_figures or orphan_charts or orphan_tables:
+            result_lines.append('')
+            result_lines.append('---')
+            result_lines.append('')
+            for fig in orphan_figures:
+                if fig.image_path:
+                    image_path = Path(fig.image_path) if not isinstance(fig.image_path, Path) else fig.image_path
+                    if image_path.exists():
+                        result_lines.append(f'![{fig.title}]({fig.image_path})')
+                        result_lines.append(f'*{fig.caption}*')
+                        result_lines.append('')
+            for chart in orphan_charts:
+                if chart.image_path:
+                    image_path = Path(chart.image_path) if not isinstance(chart.image_path, Path) else chart.image_path
+                    if image_path.exists():
+                        result_lines.append(f'![{chart.title}]({chart.image_path})')
+                        result_lines.append(f'*{chart.caption}*')
+                        result_lines.append('')
+            for table in orphan_tables:
+                result_lines.append(f'**{table.title}**')
+                result_lines.append('')
+                header_line = '| ' + ' | '.join(str(h) for h in table.headers) + ' |'
+                separator = '|' + '|'.join(['---'] * len(table.headers)) + '|'
+                result_lines.append(header_line)
+                result_lines.append(separator)
+                for row in table.rows:
+                    row_line = '| ' + ' | '.join(str(cell) for cell in row) + ' |'
+                    result_lines.append(row_line)
+                result_lines.append('')
 
         return '\n'.join(result_lines)
 
@@ -1905,12 +2031,13 @@ Example: line"""
             # Track which section we're in
             current_section = None
             insert_after = []
+            matched_sections = set()
 
             for i, paragraph in enumerate(doc.paragraphs):
                 text = paragraph.text.strip()
 
-                # Detect section headers
-                match = re.match(r'^(\d+(?:\.\d+)?)\. ', text)
+                # Detect section headers (match "1. " or "1.2. " format)
+                match = re.match(r'^(\d+(?:\.\d+)?)[.\s]', text)
                 if match and paragraph.style.name.startswith('Heading'):
                     if current_section:
                         insert_after.append((i, current_section))
@@ -1920,8 +2047,16 @@ Example: line"""
             if current_section:
                 insert_after.append((len(doc.paragraphs), current_section))
 
+            def _image_exists(img_path) -> bool:
+                """Check if image path exists on disk."""
+                if not img_path:
+                    return False
+                p = Path(img_path) if not isinstance(img_path, Path) else img_path
+                return p.exists()
+
             # Insert in reverse order to maintain indices
             for insert_idx, section_id in reversed(insert_after):
+                matched_sections.add(section_id)
                 section_tables = collection.get_tables_for_section(section_id)
                 section_charts = collection.get_charts_for_section(section_id)
                 section_figures = collection.get_figures_for_section(section_id)
@@ -1930,7 +2065,7 @@ Example: line"""
 
                 # Add charts
                 for chart in reversed(section_charts):
-                    if chart.image_path and chart.image_path.exists():
+                    if _image_exists(chart.image_path):
                         elements.append(('image', chart))
 
                 # Add tables
@@ -1939,7 +2074,7 @@ Example: line"""
 
                 # Add figures
                 for fig in reversed(section_figures):
-                    if fig.image_path and fig.image_path.exists():
+                    if _image_exists(fig.image_path):
                         elements.append(('image', fig))
 
                 for elem_type, elem in elements:
@@ -1985,9 +2120,53 @@ Example: line"""
                                 if col_idx < len(elem.headers):
                                     docx_table.rows[row_idx + 1].cells[col_idx].text = str(cell)
 
-                        # Move title and table to correct position
+                        # Add caption below the table
+                        caption_p = None
+                        if elem.caption and elem.caption != elem.title:
+                            caption_p = doc.add_paragraph()
+                            caption_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            caption_run = caption_p.add_run(elem.caption)
+                            caption_run.font.size = Pt(9)
+                            caption_run.italic = True
+
+                        # Move title, table, and caption to correct position
                         self._move_paragraph_after(doc, title_p, insert_idx)
                         self._move_table_after(doc, docx_table, insert_idx + 1)
+                        if caption_p:
+                            self._move_paragraph_after(doc, caption_p, insert_idx + 2)
+
+            # Append orphaned figures (section_id="" or unmatched) at end of document
+            orphan_figures = [f for f in collection.figures if f.section_id not in matched_sections]
+            orphan_charts = [c for c in collection.charts if c.section_id not in matched_sections]
+            has_orphans = any(
+                _image_exists(item.image_path)
+                for item in orphan_figures + orphan_charts
+            )
+            if has_orphans:
+                for fig in orphan_figures:
+                    if _image_exists(fig.image_path):
+                        p = doc.add_paragraph()
+                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        run = p.add_run()
+                        img_path = Path(fig.image_path) if not isinstance(fig.image_path, Path) else fig.image_path
+                        run.add_picture(str(img_path), width=Inches(5.5))
+                        caption_p = doc.add_paragraph()
+                        caption_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        caption_run = caption_p.add_run(fig.caption)
+                        caption_run.font.size = Pt(9)
+                        caption_run.italic = True
+                for chart in orphan_charts:
+                    if _image_exists(chart.image_path):
+                        p = doc.add_paragraph()
+                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        run = p.add_run()
+                        img_path = Path(chart.image_path) if not isinstance(chart.image_path, Path) else chart.image_path
+                        run.add_picture(str(img_path), width=Inches(5.5))
+                        caption_p = doc.add_paragraph()
+                        caption_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        caption_run = caption_p.add_run(chart.caption)
+                        caption_run.font.size = Pt(9)
+                        caption_run.italic = True
 
             doc.save(output_path)
             return output_path
