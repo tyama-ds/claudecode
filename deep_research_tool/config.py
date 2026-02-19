@@ -307,6 +307,39 @@ class DeepThinkConfig:
     _deviation_weights: tuple = (0.4, 0.4, 0.2)  # semantic, logical, contradiction
 
 
+@dataclass
+class FermiEstimationConfig:
+    """Configuration for Fermi estimation module."""
+
+    # Main toggle
+    enabled: bool = False
+
+    # Target metrics (empty = auto-detect)
+    target_metrics: List[str] = field(default_factory=list)
+    auto_detect_targets: bool = True
+
+    # Decomposition settings
+    max_tree_depth: int = 4
+    max_leaf_nodes: int = 10
+
+    # Calculation settings
+    monte_carlo_iterations: int = 1000
+
+    # Validation settings
+    validate_with_llm: bool = True
+    min_confidence_threshold: float = 0.3
+
+    # Output settings
+    write_to_data_store: bool = True
+    include_sensitivity: bool = True
+
+    # Sub-decomposition settings
+    enable_sub_decomposition: bool = True
+    sub_decomposition_confidence_threshold: float = 0.65
+    sub_decomposition_max_iterations: int = 3
+    sub_decomposition_min_sensitivity_pct: float = 10.0
+
+
 class ContentFilterMode(str, Enum):
     """Content filter strictness modes."""
     STRICT = "strict"      # Aggressive filtering (removes most ads/spam)
@@ -434,6 +467,7 @@ class Config:
     report: ReportConfig = field(default_factory=ReportConfig)
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
     deep_think: DeepThinkConfig = field(default_factory=DeepThinkConfig)
+    fermi_estimation: FermiEstimationConfig = field(default_factory=FermiEstimationConfig)
     multilingual: MultilingualSearchConfig = field(default_factory=MultilingualSearchConfig)
 
     # Additional document settings
@@ -588,6 +622,18 @@ def create_config(
     chart_max_per_section: int = 3,
     # Format strictness
     strict_format: bool = False,
+    # Fermi estimation parameters
+    fermi_estimation: bool = False,
+    fermi_target_metrics: Optional[List[str]] = None,
+    fermi_auto_detect: bool = True,
+    fermi_max_tree_depth: int = 4,
+    fermi_monte_carlo: int = 1000,
+    fermi_validate: bool = True,
+    fermi_include_sensitivity: bool = True,
+    fermi_enable_sub_decomposition: bool = True,
+    fermi_sub_decomposition_max_iterations: int = 3,
+    fermi_sub_decomposition_confidence_threshold: float = 0.65,
+    fermi_sub_decomposition_min_sensitivity_pct: float = 10.0,
     **kwargs
 ) -> Config:
     """
@@ -777,6 +823,20 @@ def create_config(
     if additional_documents:
         docs = [Path(doc) for doc in additional_documents]
 
+    fermi_config = FermiEstimationConfig(
+        enabled=fermi_estimation,
+        target_metrics=fermi_target_metrics or [],
+        auto_detect_targets=fermi_auto_detect,
+        max_tree_depth=fermi_max_tree_depth,
+        monte_carlo_iterations=fermi_monte_carlo,
+        validate_with_llm=fermi_validate,
+        include_sensitivity=fermi_include_sensitivity,
+        enable_sub_decomposition=fermi_enable_sub_decomposition,
+        sub_decomposition_max_iterations=fermi_sub_decomposition_max_iterations,
+        sub_decomposition_confidence_threshold=fermi_sub_decomposition_confidence_threshold,
+        sub_decomposition_min_sensitivity_pct=fermi_sub_decomposition_min_sensitivity_pct,
+    )
+
     return Config(
         api=api_config,
         search=search_config,
@@ -784,6 +844,7 @@ def create_config(
         report=report_config,
         proxy=proxy_config,
         deep_think=deep_think_config,
+        fermi_estimation=fermi_config,
         multilingual=multilingual_config,
         additional_documents=docs,
         process_additional_documents=bool(additional_documents),

@@ -322,8 +322,8 @@ class ReportGeneratorV2:
             sources = content_data.get("sources", [])
             extracted = content_data.get("extracted_content", [])
             content_summary = "\n".join([
-                f"- {e.get('title', 'N/A')}: {e.get('content', '')[:500]}"
-                for e in extracted[:10]
+                f"- [SOURCE {i+1}] {e.get('title', 'N/A')}: {e.get('content', '')[:500]}"
+                for i, e in enumerate(extracted[:10])
             ]) if extracted else "情報なし"
         else:
             sources = []
@@ -349,10 +349,11 @@ class ReportGeneratorV2:
 3. 文体・スタイル指示に従う
 4. 事実に基づいた記述を行い、推測は明示する
 5. 必要に応じて前章を参照・引用する
+6. 情報の出典を示すため、該当箇所に [SOURCE N] の形式で引用番号を付与する（Nは上記情報のSOURCE番号）
 
 出力形式（JSON）:
 {{
-    "content": "本文（マークダウン形式）",
+    "content": "本文（マークダウン形式、引用番号 [SOURCE N] を含む）",
     "key_points": ["要点1", "要点2", "要点3"],
     "terms_used": ["使用した専門用語1", "専門用語2"],
     "facts_stated": ["記述した事実1", "事実2"],
@@ -380,10 +381,11 @@ Important notes:
 3. Follow style instructions
 4. Base writing on facts; clearly mark speculation
 5. Reference previous chapters when appropriate
+6. Include citation markers [SOURCE N] in the text where information from sources is used (N corresponds to the SOURCE number above)
 
 Output format (JSON):
 {{
-    "content": "main text (markdown format)",
+    "content": "main text (markdown format, including [SOURCE N] citation markers)",
     "key_points": ["point1", "point2", "point3"],
     "terms_used": ["technical term1", "term2"],
     "facts_stated": ["fact1", "fact2"],
@@ -429,6 +431,7 @@ Output only JSON:"""
                 key_points=data.get("key_points", []),
                 terms_used=data.get("terms_used", []),
                 facts_stated=data.get("facts_stated", []),
+                citations=sources,
                 is_draft=True,
             )
 
@@ -587,6 +590,7 @@ Output only the revised content (no JSON):"""
         result: GenerationResult,
         include_glossary: bool = True,
         include_consistency_summary: bool = False,
+        evidence_locker=None,
     ) -> str:
         """
         Generate the final document from generation result.
@@ -595,10 +599,19 @@ Output only the revised content (no JSON):"""
             result: GenerationResult from generate_report
             include_glossary: Include glossary section
             include_consistency_summary: Include consistency check summary
+            evidence_locker: EvidenceLocker for generating references section
 
         Returns:
             Complete document as markdown string
         """
+        # Build URL-to-reference mapping for citation renumbering
+        evidence_list = []
+        url_to_ref = {}
+        if evidence_locker is not None:
+            evidence_list = evidence_locker.get_all_evidence()
+            for i, evidence in enumerate(evidence_list, 1):
+                url_to_ref[evidence.url] = i
+
         lines = []
 
         # Title
@@ -616,7 +629,11 @@ Output only the revised content (no JSON):"""
 
         # Chapters (use natural sort: 1, 1.1, 2, 2.1, ... 10, 10.1)
         for section_num, chapter in sorted(result.chapters.items(), key=_section_sort_key):
-            lines.append(chapter.content)
+            content = chapter.content
+            # Renumber [SOURCE N] citations to final reference numbers
+            if url_to_ref and chapter.citations:
+                content = self._renumber_citations(content, chapter.citations, url_to_ref)
+            lines.append(content)
             lines.append("")
 
         # Glossary
@@ -636,7 +653,66 @@ Output only the revised content (no JSON):"""
             summary = self.consistency_checker.generate_summary(result.consistency_report)
             lines.append(summary)
 
+        # References section
+        if evidence_list:
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+            lines.append("## 参考文献" if self.language == "ja" else "## References")
+            lines.append("")
+            for i, evidence in enumerate(evidence_list, 1):
+                quality_badge = self._get_quality_badge(evidence.quality_category)
+                lines.append(f"{i}. {quality_badge} {evidence.citation_text}")
+            lines.append("")
+
         return "\n".join(lines)
+
+    @staticmethod
+    def _get_quality_badge(quality) -> str:
+        """Get quality badge string for a citation."""
+        # Import here to avoid circular imports
+        try:
+            from ...evidence.locker import QualityCategory
+            badges = {
+                QualityCategory.AUTHORITATIVE: "[A]",
+                QualityCategory.HIGH: "[H]",
+                QualityCategory.MEDIUM: "[M]",
+                QualityCategory.LOW: "[L]",
+                QualityCategory.UNVERIFIED: "[?]",
+            }
+            return badges.get(quality, "")
+        except (ImportError, AttributeError):
+            return ""
+
+    @staticmethod
+    def _renumber_citations(
+        content: str,
+        section_sources: List[str],
+        url_to_ref: Dict[str, int],
+    ) -> str:
+        """Renumber [SOURCE N] citations to final reference numbers [N].
+
+        Args:
+            content: Chapter content with [SOURCE N] markers
+            section_sources: List of source URLs used for this chapter
+            url_to_ref: Mapping from URL to final reference number
+
+        Returns:
+            Content with renumbered citation markers
+        """
+        if not content or not section_sources:
+            return content
+
+        def replace_citation(match):
+            original_num = int(match.group(1))
+            source_index = original_num - 1
+            if 0 <= source_index < len(section_sources):
+                source_url = section_sources[source_index]
+                if source_url in url_to_ref:
+                    return f"[{url_to_ref[source_url]}]"
+            return f"[?{original_num}]"
+
+        return re.sub(r'\[SOURCE:?\s*(\d+)\]', replace_citation, content)
 
     def save_report(
         self,
