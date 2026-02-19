@@ -465,7 +465,8 @@ class Researcher:
         if not queries:
             # Generate queries if none available
             queries = self.query_generator.generate_follow_up_queries(
-                section, "", []
+                section, "", [],
+                research_topic=self.session.query,
             )
 
         print(f"[FastCrawler] Processing section {section.section} with {len(queries)} queries")
@@ -563,7 +564,8 @@ class Researcher:
                 )
                 iter_record.gaps_identified = gaps
                 queries = self.query_generator.generate_follow_up_queries(
-                    section, current_content, gaps
+                    section, current_content, gaps,
+                    research_topic=self.session.query,
                 )
 
             if not queries:
@@ -1175,7 +1177,8 @@ Return as JSON:
                 # Generate queries focusing on gaps or expanding content
                 if focus_on_gaps and gaps:
                     queries = self.query_generator.generate_follow_up_queries(
-                        section, existing_text, gaps
+                        section, existing_text, gaps,
+                        research_topic=self.session.query,
                     )
                     iter_record.gaps_identified = gaps
                 else:
@@ -1312,8 +1315,16 @@ Return as JSON:
         Returns:
             List of expansion queries
         """
-        prompt = f"""Based on this section and its existing content, generate search queries to find additional detailed information.
+        research_topic = self.session.query
 
+        topic_anchor = ""
+        if research_topic:
+            topic_anchor = f"""
+Original Research Topic: {research_topic}
+IMPORTANT: All queries must stay within the context of this research topic. Do not generate generic queries."""
+
+        prompt = f"""Based on this section and its existing content, generate search queries to find additional detailed information.
+{topic_anchor}
 Section: {section.section}. {section.title}
 Description: {section.description}
 

@@ -303,6 +303,7 @@ CRITICAL RULES FOR SEARCH QUERIES:
         section: TableOfContentsItem,
         gathered_info: str,
         gaps: List[str] = None,
+        research_topic: str = "",
     ) -> List[str]:
         """
         Generate follow-up queries for a section.
@@ -311,6 +312,7 @@ CRITICAL RULES FOR SEARCH QUERIES:
             section: The section to generate queries for
             gathered_info: Summary of information already gathered
             gaps: Identified information gaps
+            research_topic: Original research topic/query to keep queries on-topic
 
         Returns:
             List of follow-up search queries
@@ -322,9 +324,33 @@ CRITICAL RULES FOR SEARCH QUERIES:
 
         gaps_text = "\n".join(f"- {gap}" for gap in gaps) if gaps else "Not yet identified"
 
+        # Build topic anchoring instruction
+        topic_anchor = ""
+        if research_topic:
+            if self.language == "ja":
+                topic_anchor = f"""
+【重要：調査テーマの文脈を維持すること】
+元の調査テーマ: {research_topic}
+検索クエリは必ずこの調査テーマの文脈内で生成してください。
+セクションタイトルだけを見て一般論的なクエリを生成してはいけません。
+例：調査テーマが「炭素繊維の市場・技術調査」でセクションが「インタビュー・現地調査」の場合
+  ✗ 悪い例: "リモートインタビューと対面調査の比較"（一般論）
+  ○ 良い例: "炭素繊維メーカー 工場視察 調査手法"（テーマに紐づく）
+"""
+            else:
+                topic_anchor = f"""
+CRITICAL: Keep queries anchored to the original research topic.
+Original Research Topic: {research_topic}
+All queries MUST be generated within the context of this topic.
+Do NOT generate generic queries based only on the section title.
+Example: If the topic is "Carbon fiber market research" and the section is "Interview methodology":
+  ✗ Bad: "remote interview vs in-person survey comparison" (too generic)
+  ○ Good: "carbon fiber manufacturer site visit methodology" (topic-anchored)
+"""
+
         prompt = f"""Section: {section.section}. {section.title}
 Description: {section.description}
-
+{topic_anchor}
 Information Already Gathered:
 {gathered_info[:2000] if gathered_info else "Initial research phase"}
 
@@ -343,6 +369,7 @@ IMPORTANT query rules:
 - Each query must focus on ONE specific topic (one-query-one-topic)
 - Keep each query under 40 characters
 - Do NOT combine multiple items with ・ 、 / in a single query
+- Every query MUST relate to the original research topic
 
 Return as a JSON array of strings only:
 ["query1", "query2", ...]"""
@@ -355,7 +382,8 @@ Return as a JSON array of strings only:
             end = content.rfind("]") + 1
             if start != -1 and end > start:
                 queries = json.loads(content[start:end])
-                return self.split_complex_queries(queries)
+                queries = self.split_complex_queries(queries)
+                return self._anchor_queries_to_topic(queries, research_topic)
         except (json.JSONDecodeError, ValueError):
             pass
 
@@ -363,7 +391,55 @@ Return as a JSON array of strings only:
         import re
         queries = re.findall(r'"([^"]+)"', response.content)
         queries = queries[:8] if queries else [f"{section.title} detailed information"]
-        return self.split_complex_queries(queries)
+        queries = self.split_complex_queries(queries)
+        return self._anchor_queries_to_topic(queries, research_topic)
+
+    @staticmethod
+    def _anchor_queries_to_topic(
+        queries: List[str],
+        research_topic: str,
+    ) -> List[str]:
+        """
+        Ensure generated queries contain at least one keyword from the research topic.
+
+        Uses simple character-based overlap check. If a query has no overlap
+        with topic keywords, prepend a primary keyword to anchor it.
+
+        Args:
+            queries: Generated search queries
+            research_topic: Original research topic
+
+        Returns:
+            Queries with topic-anchoring applied where needed
+        """
+        if not research_topic:
+            return queries
+
+        import re as _re
+        # Extract meaningful words (2+ chars, no particles)
+        topic_words = set(
+            w for w in _re.findall(r'[\w]{2,}', research_topic)
+            if len(w) >= 2
+        )
+        if not topic_words:
+            return queries
+
+        # Pick the most representative keyword (longest word)
+        primary_keyword = max(topic_words, key=len)
+
+        anchored = []
+        for q in queries:
+            q_words = set(_re.findall(r'[\w]{2,}', q))
+            if q_words & topic_words:
+                anchored.append(q)
+            else:
+                new_q = f"{primary_keyword} {q}"
+                if len(new_q) > 50:
+                    new_q = new_q[:50]
+                anchored.append(new_q)
+                print(f"[QueryGenerator] Anchored drifting query: '{q}' → '{new_q}'")
+
+        return anchored
 
     def identify_gaps(
         self,
