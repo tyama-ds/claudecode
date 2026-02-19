@@ -20,6 +20,7 @@ from .verification.verifier import Verifier
 from .report.generator import ReportGenerator
 from .report.length_controller import ContentLengthController, LengthTarget
 from .report.v2 import ReportGeneratorV2, ReportFormatError, ReportContext, WritingStyle, TargetAudience
+from .report.v3 import DocxReportGeneratorV3
 from .report.figure_table_generator import FigureTableGenerator, add_figures_to_report
 from .evidence.numerical_extractor import (
     NumericalDataExtractor,
@@ -60,11 +61,36 @@ def _create_report_generator(
     Create appropriate report generator based on config.
 
     Returns:
-        Tuple of (generator, is_v2)
+        Tuple of (generator, version_tag)
+        version_tag: "v1", "v2", or "v3"
     """
     output_dir = output_dir or config.report.output_dir / "reports"
 
-    if config.report.generator_version == ReportGeneratorVersion.V2:
+    if config.report.generator_version == ReportGeneratorVersion.V3:
+        # Create V3 generator (DOCX-native)
+        writing_style = _STYLE_MAP.get(
+            config.report.v2_writing_style,
+            WritingStyle.BUSINESS
+        )
+        target_audience = _AUDIENCE_MAP.get(
+            config.report.v2_target_audience,
+            TargetAudience.BUSINESS
+        )
+
+        generator = DocxReportGeneratorV3(
+            llm_client=llm_client,
+            writing_style=writing_style,
+            target_audience=target_audience,
+            technical_level=config.report.v2_technical_level,
+            enable_consistency_check=config.report.v2_enable_consistency_check,
+            enable_two_phase=config.report.v2_enable_two_phase,
+            language=config.research.language,
+            target_pages=config.report.target_pages,
+            target_characters=config.report.target_characters,
+        )
+        return generator, "v3"
+
+    elif config.report.generator_version == ReportGeneratorVersion.V2:
         # Create V2 generator
         writing_style = _STYLE_MAP.get(
             config.report.v2_writing_style,
@@ -86,7 +112,7 @@ def _create_report_generator(
             target_pages=config.report.target_pages,
             target_characters=config.report.target_characters,
         )
-        return generator, True
+        return generator, "v2"
     else:
         # Create V1 generator
         generator = ReportGenerator(
@@ -96,7 +122,7 @@ def _create_report_generator(
             include_images=config.report.include_images,
             language=config.research.language,
         )
-        return generator, False
+        return generator, "v1"
 
 
 class DeepResearchTool:
@@ -465,7 +491,7 @@ class DeepResearchTool:
         if progress_callback:
             progress_callback("Generating report...", 95)
 
-        generator, is_v2 = _create_report_generator(
+        generator, version_tag = _create_report_generator(
             config=self.config,
             llm_client=self.llm_client,
             output_dir=self.config.report.output_dir / "reports",
@@ -488,7 +514,61 @@ class DeepResearchTool:
                 pre_deep_think_content=_pre_deep_think_content,
             )
 
-        if is_v2:
+        if version_tag == "v3":
+            # V3: DOCX-native generation flow
+            result = generator.generate_report(
+                research_topic=query,
+                research_plan=session.research_plan,
+                section_contents=session.section_contents,
+            )
+
+            # Pre-generate figures if auto_figures is enabled
+            figure_collection = None
+            if self.config.report.auto_figures:
+                if progress_callback:
+                    progress_callback("Generating figures and tables...", 97)
+                try:
+                    fig_generator = FigureTableGenerator(
+                        llm_client=self.llm_client,
+                        output_dir=self.config.report.output_dir / "reports" / "figures",
+                        language=self.config.research.language,
+                        proxies=self.config.proxy.get_proxies_dict(),
+                        verify_ssl=self.config.proxy.verify_ssl,
+                    )
+                    figure_collection = fig_generator.generate_figures_and_tables(
+                        session=session,
+                        evidence_locker=evidence_locker,
+                    )
+                except Exception as e:
+                    print(f"[V3/AutoFigures] Failed: {e}. Continuing without figures.")
+                    ResearchWarnings.get_instance().add(
+                        ResearchWarnings.MEDIUM,
+                        "V3/AutoFigures",
+                        f"Figure/table generation failed. Report will not contain "
+                        f"auto-generated figures or tables. Error: {e}",
+                    )
+
+            # Build warnings text
+            warnings_text = ""
+            warnings_collector = ResearchWarnings.get_instance()
+            if warnings_collector.has_warnings():
+                language = getattr(self.config.research, "language", "en")
+                warnings_text = warnings_collector.to_report_section(language)
+
+            # Build DOCX directly via python-docx API
+            output_dir = self.config.report.output_dir / "reports"
+            report_path = generator.generate_and_save(
+                result=result,
+                output_dir=output_dir,
+                filename=f"report_{session.session_id}",
+                evidence_locker=evidence_locker,
+                figure_collection=figure_collection,
+                include_glossary=self.config.report.v2_include_glossary,
+                fermi_markdown=fermi_markdown,
+                warnings_text=warnings_text,
+            )
+
+        elif version_tag == "v2":
             # V2: Use new generation flow
             result = generator.generate_report(
                 research_topic=query,
@@ -538,8 +618,9 @@ class DeepResearchTool:
                 self._append_text_to_file(Path(report_path), fermi_markdown)
 
         # Auto figure/table generation (if enabled)
+        # V3 handles figures inline via generate_and_save(), so skip post-hoc insertion
         figures_report_path = None
-        if self.config.report.auto_figures:
+        if self.config.report.auto_figures and version_tag != "v3":
             if progress_callback:
                 progress_callback("Generating figures and tables...", 97)
 
@@ -579,10 +660,10 @@ class DeepResearchTool:
             self.search_client.close()
 
         # Append warnings section to the report if any fallbacks occurred
-        # (V2 already has warnings in markdown before format conversion;
+        # (V2/V3 already handle warnings before/during format conversion;
         #  V1 needs post-save appending for markdown files)
         warnings_collector = ResearchWarnings.get_instance()
-        if not is_v2 and warnings_collector.has_warnings():
+        if version_tag == "v1" and warnings_collector.has_warnings():
             self._append_warnings_to_report(
                 active_report_path, warnings_collector)
 
@@ -2493,13 +2574,28 @@ def run_manual_research(
         verifier.generate_verification_report_html(verification_result, verification_html)
 
     # Generate report
-    generator, is_v2 = _create_report_generator(
+    generator, version_tag = _create_report_generator(
         config=config,
         llm_client=llm_client,
         output_dir=config.report.output_dir / "reports",
     )
 
-    if is_v2:
+    if version_tag == "v3":
+        # V3: DOCX-native generation flow
+        result = generator.generate_report(
+            research_topic=topic,
+            research_plan=session.research_plan,
+            section_contents=session.section_contents,
+        )
+        output_dir = config.report.output_dir / "reports"
+        report_path = generator.generate_and_save(
+            result=result,
+            output_dir=output_dir,
+            filename=f"report_{session.session_id}",
+            evidence_locker=evidence_locker,
+            include_glossary=config.report.v2_include_glossary,
+        )
+    elif version_tag == "v2":
         # V2: Use new generation flow with consistency features
         result = generator.generate_report(
             research_topic=topic,
