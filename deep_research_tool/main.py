@@ -29,6 +29,7 @@ from .report.chart_analyzer import ChartAnalyzer, ChartRecommendation
 from .utils.document_reader import DocumentReader, auto_detect_additional_documents
 from .thinking import DeepThinkProcessor, DeepThinkConfig as ThinkingConfig
 from .thinking.reasoning_chain import ConsistencyMode
+from .estimation import FermiEstimator, FermiEstimationConfig as EstimationConfig
 
 
 # Style/Audience mapping for V2
@@ -493,6 +494,19 @@ class DeepResearchTool:
                 evidence_locker=evidence_locker,
             )
 
+        # Fermi estimation (if enabled)
+        fermi_results = None
+        if self.config.fermi_estimation.enabled:
+            if progress_callback:
+                progress_callback("Running Fermi estimation...", 98)
+
+            fermi_results = self._apply_fermi_estimation(
+                session=session,
+                evidence_locker=evidence_locker,
+                query=query,
+                report_path=Path(figures_report_path or report_path),
+            )
+
         # Clean up search client if selenium
         if hasattr(self.search_client, 'close'):
             self.search_client.close()
@@ -512,8 +526,124 @@ class DeepResearchTool:
             "evidence_locker": evidence_locker,
             "verification_result": verification_result,
             "deep_think_results": deep_think_results,
+            "fermi_estimation_results": fermi_results,
             "token_usage": token_stats.to_dict(),
         }
+
+    def _apply_fermi_estimation(
+        self,
+        session: ResearchSession,
+        evidence_locker: EvidenceLocker,
+        query: str,
+        report_path: Path,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        Run Fermi estimation and append results to the report.
+
+        Args:
+            session: Research session
+            evidence_locker: Evidence locker with sources
+            query: Original research query
+            report_path: Path to the generated report file
+
+        Returns:
+            List of estimation result dicts, or None if failed
+        """
+        import traceback
+
+        try:
+            config = EstimationConfig(
+                enabled=True,
+                target_metrics=self.config.fermi_estimation.target_metrics,
+                auto_detect_targets=self.config.fermi_estimation.auto_detect_targets,
+                max_tree_depth=self.config.fermi_estimation.max_tree_depth,
+                max_leaf_nodes=self.config.fermi_estimation.max_leaf_nodes,
+                monte_carlo_iterations=self.config.fermi_estimation.monte_carlo_iterations,
+                validate_with_llm=self.config.fermi_estimation.validate_with_llm,
+                min_confidence_threshold=self.config.fermi_estimation.min_confidence_threshold,
+                write_to_data_store=self.config.fermi_estimation.write_to_data_store,
+                include_sensitivity=self.config.fermi_estimation.include_sensitivity,
+            )
+
+            estimator = FermiEstimator(
+                llm_client=self.llm_client,
+                config=config,
+                language=self.config.research.language,
+            )
+
+            # Extract numerical data for the estimator
+            data_store = NumericalDataStore(research_topic=query)
+            extractor = NumericalDataExtractor(
+                llm_client=self.llm_client,
+                language=self.config.research.language,
+            )
+            for evidence in evidence_locker.get_all_evidence():
+                content = evidence.content_excerpt or ""
+                if content:
+                    points = extractor.extract_from_content(
+                        content=content[:3000],
+                        source_url=evidence.url,
+                        source_title=evidence.title,
+                        evidence_id=evidence.id,
+                    )
+                    data_store.add_many(points)
+
+            # Determine target metrics
+            target_metrics = config.target_metrics
+            if not target_metrics and config.auto_detect_targets:
+                detected = estimator.detect_target_metrics(query, data_store)
+                target_metrics = [d["metric"] for d in detected[:3]]
+                print(f"[FermiEstimation] Auto-detected targets: {target_metrics}")
+
+            if not target_metrics:
+                print("[FermiEstimation] No target metrics found. Skipping.")
+                return None
+
+            # Run estimations
+            context = self._get_content_for_verification(session)[:5000]
+            results = estimator.estimate_multiple(
+                target_metrics=target_metrics,
+                data_store=data_store,
+                evidence_locker=evidence_locker,
+                context=context,
+            )
+
+            # Append Fermi estimation section to report
+            if results and report_path.exists():
+                self._append_fermi_to_report(results, report_path)
+
+            return [r.to_dict() for r in results]
+
+        except Exception as e:
+            print(f"[FermiEstimation] Failed: {e}")
+            traceback.print_exc()
+            return None
+
+    def _append_fermi_to_report(
+        self,
+        results: list,
+        report_path: Path,
+    ) -> None:
+        """Append Fermi estimation section to the report file."""
+        try:
+            content = report_path.read_text(encoding="utf-8")
+
+            section_lines = ["\n\n---\n"]
+            if self.config.research.language == "ja":
+                section_lines.append("## フェルミ推定\n")
+            else:
+                section_lines.append("## Fermi Estimation\n")
+
+            for result in results:
+                section_lines.append(result.to_summary(self.config.research.language))
+                section_lines.append("")
+
+            content += "\n".join(section_lines)
+            report_path.write_text(content, encoding="utf-8")
+            print(f"[FermiEstimation] Appended estimation section to {report_path}")
+
+        except Exception as e:
+            print(f"[FermiEstimation] Failed to append to report: {e}")
 
     def _get_content_for_verification(self, session: ResearchSession) -> str:
         """Extract content from session for verification."""
