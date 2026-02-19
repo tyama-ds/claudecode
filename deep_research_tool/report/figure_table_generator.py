@@ -2047,6 +2047,13 @@ Example: line"""
             if current_section:
                 insert_after.append((len(doc.paragraphs), current_section))
 
+            def _image_exists(img_path) -> bool:
+                """Check if image path exists on disk."""
+                if not img_path:
+                    return False
+                p = Path(img_path) if not isinstance(img_path, Path) else img_path
+                return p.exists()
+
             # Insert in reverse order to maintain indices
             for insert_idx, section_id in reversed(insert_after):
                 matched_sections.add(section_id)
@@ -2055,13 +2062,6 @@ Example: line"""
                 section_figures = collection.get_figures_for_section(section_id)
 
                 elements = []
-
-                def _image_exists(img_path) -> bool:
-                    """Check if image path exists on disk."""
-                    if not img_path:
-                        return False
-                    p = Path(img_path) if not isinstance(img_path, Path) else img_path
-                    return p.exists()
 
                 # Add charts
                 for chart in reversed(section_charts):
