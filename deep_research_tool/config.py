@@ -64,6 +64,7 @@ class ReportGeneratorVersion(str, Enum):
     """Report generator version selection."""
     V1 = "v1"  # Original report generator
     V2 = "v2"  # Enhanced with consistency features
+    V3 = "v3"  # DOCX-native generator (python-docx direct API)
 
 
 @dataclass
