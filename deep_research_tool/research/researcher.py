@@ -160,6 +160,8 @@ class Researcher:
         fast_crawl_batch_size: int = 5,
         multilingual_config: MultilingualSearchConfig = None,
         max_content_length: int = 50000,
+        target_pages: int = None,
+        target_characters: int = None,
     ):
         """
         Initialize Researcher.
@@ -187,6 +189,8 @@ class Researcher:
             fast_crawl_batch_size: Pages per batch in batch evaluation mode
             multilingual_config: Multilingual search configuration (None to disable)
             max_content_length: Maximum content length for extraction truncation
+            target_pages: Target output page count (used for dynamic content sizing)
+            target_characters: Target output character count (overrides target_pages)
         """
         self.llm = llm_client
         self.search = search_client
@@ -199,8 +203,14 @@ class Researcher:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.query_generator = QueryGenerator(llm_client, language)
-        self.content_extractor = ContentExtractor(llm_client, language)
         self.max_content_length = max_content_length
+
+        # Store target length info (used to calculate per-section target after plan is created)
+        self._target_pages = target_pages
+        self._target_characters = target_characters
+        # ContentExtractor is created without per-section target initially;
+        # it will be updated in _execute_research_loop once we know the section count.
+        self.content_extractor = ContentExtractor(llm_client, language)
 
         # Use enhanced multi-pass content generation for better quality
         self.use_enhanced_synthesis = use_enhanced_synthesis
@@ -383,6 +393,18 @@ class Researcher:
         if total_sections == 0:
             print("[ERROR] No sections found in table of contents!")
             return
+
+        # Calculate per-section character target and propagate to ContentExtractor
+        if total_sections > 0 and (self._target_pages or self._target_characters):
+            if self._target_characters:
+                total_target = self._target_characters
+            else:
+                chars_per_page = 1500 if self.language == "ja" else 2500
+                total_target = self._target_pages * chars_per_page
+            target_per_section = total_target // total_sections
+            self.content_extractor.target_chars_per_section = target_per_section
+            print(f"[DEBUG] Dynamic content sizing: {total_target:,} total chars / "
+                  f"{total_sections} sections = {target_per_section:,} chars/section")
 
         # Initial queries from plan
         available_queries = list(self.session.research_plan.search_queries)

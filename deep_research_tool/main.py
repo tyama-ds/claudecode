@@ -403,6 +403,8 @@ class DeepResearchTool:
             fast_crawl_batch_size=self.config.research.fast_crawl_batch_size,
             multilingual_config=self.config.multilingual if self.config.multilingual.enabled else None,
             max_content_length=self.config.research.max_content_length,
+            target_pages=self.config.report.target_pages,
+            target_characters=self.config.report.target_characters,
         )
 
         # Conduct research
