@@ -298,6 +298,7 @@ class ManualEvidenceLoader:
                 url=evidence.url,
                 title=evidence.title,
                 content_excerpt=evidence.content_excerpt,
+                extracted_text=evidence.extracted_text,
                 evidence_type=evidence.evidence_type,
                 section_reference=evidence.section_reference,
                 author=evidence.author,

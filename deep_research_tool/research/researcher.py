@@ -311,10 +311,12 @@ class Researcher:
                 doc_summaries = []
                 for doc in additional_documents:
                     # Add to evidence locker as user-provided
+                    full_content = doc.get("content", "")
                     self.evidence_locker.add_evidence(
                         url=doc.get("path", ""),
                         title=doc.get("title", Path(doc.get("path", "")).name),
-                        content_excerpt=doc.get("content", "")[:1000],
+                        content_excerpt=full_content[:1000],
+                        extracted_text=full_content,
                         evidence_type=EvidenceType.USER_PROVIDED,
                     )
                     doc_summaries.append(
@@ -496,10 +498,12 @@ class Researcher:
             section_content_parts.append(extracted)
 
             # Add to evidence locker
+            full_text = page.content or page.processed_content or ""
             self.evidence_locker.add_evidence(
                 url=page.url,
                 title=page.title,
                 content_excerpt=page.processed_content[:500] if page.processed_content else page.snippet,
+                extracted_text=full_text,
                 evidence_type=EvidenceType.WEB_PAGE,
                 search_query=page.metadata.get("query", ""),
                 section_reference=section.section,
@@ -682,6 +686,7 @@ class Researcher:
                                                     url=doc_url,
                                                     title=doc_link.get("text", "") or doc_page.title,
                                                     content_excerpt=doc_extracted.processed_content[:500],
+                                                    extracted_text=doc_page.text_content or doc_extracted.processed_content,
                                                     evidence_type=ev_type,
                                                     search_query=query,
                                                     section_reference=section.section,
@@ -710,6 +715,7 @@ class Researcher:
                                     "url": result.url,
                                     "title": result.title,
                                     "content_excerpt": extracted.processed_content[:500],
+                                    "extracted_text": raw_content,
                                     "evidence_type": EvidenceType.WEB_PAGE,
                                     "search_query": query,
                                     "section_reference": section.section,
@@ -990,6 +996,7 @@ Return JSON:
                             url=crawled_page.url,
                             title=crawled_page.title,
                             content_excerpt=extracted.processed_content[:500],
+                            extracted_text=crawled_page.content,
                             evidence_type=EvidenceType.WEB_PAGE,
                             search_query=f"crawled from {crawl_result.root_domain}",
                             section_reference=section.section,
@@ -1247,6 +1254,7 @@ Return as JSON:
                                         url=result.url,
                                         title=result.title,
                                         content_excerpt=extracted.processed_content[:500],
+                                        extracted_text=raw_content,
                                         evidence_type=EvidenceType.WEB_PAGE,
                                         search_query=query,
                                         section_reference=section_id,

@@ -1852,6 +1852,10 @@ Example: line"""
                         row_line = '| ' + ' | '.join(str(cell) for cell in row) + ' |'
                         result_lines.append(row_line)
 
+                    result_lines.append('')
+                    # Caption (distinct from title)
+                    if table.caption and table.caption != table.title:
+                        result_lines.append(f'*{table.caption}*')
                     if table.source_url:
                         result_lines.append(f'*Source: [{table.source_title or "Link"}]({table.source_url})*')
                     result_lines.append('')
@@ -1985,9 +1989,20 @@ Example: line"""
                                 if col_idx < len(elem.headers):
                                     docx_table.rows[row_idx + 1].cells[col_idx].text = str(cell)
 
-                        # Move title and table to correct position
+                        # Add caption below the table
+                        caption_p = None
+                        if elem.caption and elem.caption != elem.title:
+                            caption_p = doc.add_paragraph()
+                            caption_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            caption_run = caption_p.add_run(elem.caption)
+                            caption_run.font.size = Pt(9)
+                            caption_run.italic = True
+
+                        # Move title, table, and caption to correct position
                         self._move_paragraph_after(doc, title_p, insert_idx)
                         self._move_table_after(doc, docx_table, insert_idx + 1)
+                        if caption_p:
+                            self._move_paragraph_after(doc, caption_p, insert_idx + 2)
 
             doc.save(output_path)
             return output_path
