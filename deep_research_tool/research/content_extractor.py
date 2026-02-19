@@ -341,7 +341,7 @@ Available Sources:
 
 {lang_instruction}
 
-Synthesize the information from these sources into well-written section content.
+Synthesize the information from these sources into well-written section content using continuous prose paragraphs. Avoid bullet points except for comparisons, specifications, or steps where enumeration is inherently appropriate.
 
 IMPORTANT:
 1. Clearly distinguish between:
@@ -583,6 +583,7 @@ IMPORTANT:
 2. Cite sources as [SOURCE N] where appropriate
 3. Be specific and informative
 4. Do not include a title or heading, just the content paragraph(s)
+5. Write in prose paragraphs, not bullet points
 
 Write the content directly (no JSON):"""
 
@@ -631,6 +632,7 @@ Requirements:
 3. Remove any redundancy
 4. Keep the section well-organized with clear flow
 5. Do not add information not present in the original parts
+6. Write in continuous prose paragraphs. Use bullet lists or tables only for comparisons, specifications, or steps where enumeration is inherently appropriate
 
 Write the integrated content directly (no JSON, no section title):"""
 
