@@ -2,10 +2,14 @@
 Validation for Fermi estimation results.
 
 Cross-checks estimates against evidence and performs sanity checks.
+Includes a 4-layer domain prior system that establishes expected order-of-magnitude
+ranges before validating estimates.
 """
 
 import json
 import logging
+import math
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -38,6 +42,7 @@ class ValidationResult:
     cross_check_results: List[Dict[str, Any]] = field(default_factory=list)
     sanity_checks_passed: int = 0
     sanity_checks_total: int = 0
+    domain_prior: Optional["DomainPrior"] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -47,7 +52,445 @@ class ValidationResult:
             "cross_check_results": self.cross_check_results,
             "sanity_checks_passed": self.sanity_checks_passed,
             "sanity_checks_total": self.sanity_checks_total,
+            "domain_prior": self.domain_prior.to_dict() if self.domain_prior else None,
         }
+
+
+@dataclass
+class DomainPrior:
+    """Expected order-of-magnitude range for a target metric."""
+    expected_order_low: int = 0
+    expected_order_high: int = 20
+    reference_points: List[Dict[str, Any]] = field(default_factory=list)
+    reasoning: str = ""
+    source: str = ""  # "evidence", "static_rule", "llm", "unit_fallback"
+    evidence_count: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "expected_order_low": self.expected_order_low,
+            "expected_order_high": self.expected_order_high,
+            "reference_points": self.reference_points,
+            "reasoning": self.reasoning,
+            "source": self.source,
+            "evidence_count": self.evidence_count,
+        }
+
+    @property
+    def margin(self) -> float:
+        """Tolerance margin (in orders of magnitude) based on source quality."""
+        if self.source == "evidence" and self.evidence_count >= 3:
+            return 0.5
+        if self.source == "evidence":
+            return 1.0
+        if self.source == "static_rule":
+            return 1.0
+        if self.source == "llm":
+            return 1.5
+        return 3.0
+
+
+class DomainPriorProvider:
+    """
+    4-layer domain prior system for establishing expected order-of-magnitude ranges.
+
+    Layer 0: Collected evidence (data_store + evidence_locker) — highest priority
+    Layer 1: Static rule table
+    Layer 2: LLM query
+    Layer 3: Unit-based fallback
+    """
+
+    # Layer 1: Static rules mapping keyword patterns to expected order ranges
+    STATIC_RULES = [
+        # (keywords, unit_patterns, order_low, order_high, description)
+        (["日本", "人口"], None, 7, 9, "Japan population"),
+        (["世界", "人口"], None, 9, 11, "World population"),
+        (["日本", "gdp"], ["円", "yen"], 14, 15, "Japan GDP in JPY"),
+        (["日本", "gdp"], ["ドル", "usd", "$"], 12, 13, "Japan GDP in USD"),
+        (["世界", "gdp"], ["ドル", "usd", "$"], 13, 14, "World GDP in USD"),
+        (["市場規模", "日本"], ["円", "yen"], 9, 14, "Japan domestic market in JPY"),
+        (["market", "size", "japan"], ["usd", "$", "ドル"], 8, 12, "Japan market in USD"),
+        (["市場規模", "世界"], ["ドル", "usd", "$"], 10, 14, "Global market in USD"),
+        (["市場規模", "世界"], ["円", "yen"], 12, 16, "Global market in JPY"),
+        (["世帯数", "日本"], None, 7, 8, "Japan households"),
+        (["企業数", "日本"], None, 5, 7, "Japan companies"),
+        (["売上", "年間"], ["円", "yen"], 6, 14, "Annual revenue in JPY"),
+    ]
+
+    # Layer 3: Unit-based fallback ranges
+    UNIT_FALLBACK = {
+        "人": (0, 11),       # 1 person to world population
+        "people": (0, 11),
+        "世帯": (0, 8),
+        "households": (0, 8),
+        "円": (0, 16),       # 1 yen to Japan GDP
+        "yen": (0, 16),
+        "jpy": (0, 16),
+        "ドル": (0, 14),     # 1 USD to world GDP
+        "usd": (0, 14),
+        "$": (0, 14),
+        "%": (-2, 2),        # 0.01% to 100%
+        "ratio": (-3, 1),
+        "kg": (-6, 12),
+        "m": (-9, 8),
+        "l": (-3, 12),
+    }
+
+    # Scale multipliers for extracting numbers from evidence text
+    _SCALE_MAP = {
+        "兆": 1e12, "trillion": 1e12,
+        "億": 1e8, "billion": 1e9,
+        "万": 1e4, "million": 1e6,
+        "千": 1e3, "thousand": 1e3,
+    }
+
+    def __init__(self, llm_client=None, language: str = "ja"):
+        self.llm_client = llm_client
+        self.language = language
+
+    def get_domain_prior(
+        self,
+        target_metric: str,
+        unit: str,
+        data_store=None,
+        evidence_locker=None,
+    ) -> DomainPrior:
+        """
+        Get domain prior through 4-layer fallback chain.
+
+        Layer 0: Collected evidence (highest priority, zero token cost)
+        Layer 1: Static rules
+        Layer 2: LLM query
+        Layer 3: Unit-based fallback
+        """
+        # Layer 0: Collected evidence
+        prior = self._prior_from_evidence(target_metric, unit, data_store, evidence_locker)
+        if prior:
+            logger.info(
+                f"Domain prior from evidence ({prior.evidence_count} data points): "
+                f"10^{prior.expected_order_low}..10^{prior.expected_order_high}"
+            )
+            return prior
+
+        # Layer 1: Static rules
+        prior = self._prior_from_static_rules(target_metric, unit)
+        if prior:
+            logger.info(
+                f"Domain prior from static rule: "
+                f"10^{prior.expected_order_low}..10^{prior.expected_order_high}"
+            )
+            return prior
+
+        # Layer 2: LLM query
+        if self.llm_client:
+            prior = self._prior_from_llm(target_metric, unit)
+            if prior:
+                logger.info(
+                    f"Domain prior from LLM: "
+                    f"10^{prior.expected_order_low}..10^{prior.expected_order_high}"
+                )
+                return prior
+
+        # Layer 3: Unit-based fallback
+        prior = self._prior_from_unit_fallback(target_metric, unit)
+        logger.info(
+            f"Domain prior from unit fallback: "
+            f"10^{prior.expected_order_low}..10^{prior.expected_order_high}"
+        )
+        return prior
+
+    def _prior_from_evidence(
+        self,
+        target_metric: str,
+        unit: str,
+        data_store,
+        evidence_locker,
+    ) -> Optional[DomainPrior]:
+        """Layer 0: Derive domain prior from collected research data."""
+        related_values = []
+
+        # A. Search NumericalDataStore
+        if data_store and hasattr(data_store, "data_points") and data_store.data_points:
+            related_values.extend(
+                self._search_data_store(target_metric, unit, data_store)
+            )
+
+        # B. Search EvidenceLocker if data_store didn't yield enough
+        if len(related_values) < 2 and evidence_locker:
+            related_values.extend(
+                self._search_evidence_locker(target_metric, unit, evidence_locker)
+            )
+
+        if not related_values:
+            return None
+
+        return self._compute_prior_from_values(related_values)
+
+    def _search_data_store(
+        self, target_metric: str, unit: str, data_store,
+    ) -> List[Dict[str, Any]]:
+        """Search NumericalDataStore for related numerical data points."""
+        metric_lower = target_metric.lower()
+        results = []
+
+        for dp in data_store.data_points:
+            dp_text = f"{dp.metric_name} {dp.subject} {dp.raw_text}".lower()
+
+            # Score relevance by keyword overlap
+            score = 0
+            for word in metric_lower.split():
+                if len(word) > 1 and word in dp_text:
+                    score += 1
+
+            # Bonus for unit match
+            if dp.unit and unit:
+                dp_unit = dp.unit.lower()
+                target_unit = unit.lower()
+                if dp_unit in target_unit or target_unit in dp_unit:
+                    score += 2
+
+            ref_value = dp.normalized_value or dp.value
+            if score >= 2 and ref_value and ref_value > 0:
+                results.append({
+                    "value": ref_value,
+                    "confidence": dp.combined_confidence or 0.5,
+                    "source": f"{dp.metric_name}: {dp.raw_text}",
+                    "score": score,
+                })
+
+        return results
+
+    def _search_evidence_locker(
+        self, target_metric: str, unit: str, evidence_locker,
+    ) -> List[Dict[str, Any]]:
+        """Search EvidenceLocker text content for numerical hints."""
+        results = []
+        metric_lower = target_metric.lower()
+
+        try:
+            all_evidence = evidence_locker.get_all_evidence()
+        except (AttributeError, TypeError):
+            return results
+
+        for evidence in all_evidence:
+            text = (
+                getattr(evidence, "content_excerpt", "") or
+                getattr(evidence, "extracted_text", "") or
+                ""
+            ).lower()
+
+            # Check relevance
+            overlap = sum(
+                1 for word in metric_lower.split()
+                if len(word) > 1 and word in text
+            )
+            if overlap < 2:
+                continue
+
+            # Extract numbers with scale suffixes from text
+            pattern = r'([\d,]+\.?\d*)\s*(兆|億|万|千|trillion|billion|million|thousand)?'
+            for match in re.finditer(pattern, text):
+                num_str, scale = match.group(1), match.group(2)
+                try:
+                    val = float(num_str.replace(",", ""))
+                    multiplier = self._SCALE_MAP.get(scale, 1) if scale else 1
+                    final_val = val * multiplier
+                    if final_val > 0:
+                        confidence = getattr(evidence, "reliability_score", 0.4) or 0.4
+                        results.append({
+                            "value": final_val,
+                            "confidence": confidence,
+                            "source": getattr(evidence, "title", "") or "evidence",
+                            "score": overlap,
+                        })
+                except ValueError:
+                    continue
+
+        return results
+
+    def _compute_prior_from_values(
+        self, related_values: List[Dict[str, Any]],
+    ) -> Optional[DomainPrior]:
+        """Compute expected order-of-magnitude range from collected values."""
+        # Sort by relevance (score * confidence)
+        weighted = sorted(
+            related_values,
+            key=lambda x: x["confidence"] * x["score"],
+            reverse=True,
+        )
+        top_n = weighted[:10]
+
+        orders = []
+        for v in top_n:
+            if v["value"] > 0:
+                orders.append(math.log10(v["value"]))
+
+        if not orders:
+            return None
+
+        reference_points = [
+            {"name": v["source"], "value": v["value"]}
+            for v in top_n[:3]
+        ]
+
+        if len(orders) == 1:
+            center = orders[0]
+            return DomainPrior(
+                expected_order_low=int(center - 2),
+                expected_order_high=int(center + 2),
+                reference_points=reference_points,
+                reasoning=f"Based on {len(top_n)} collected data point(s) "
+                          f"near 10^{center:.1f}",
+                source="evidence",
+                evidence_count=len(top_n),
+            )
+
+        order_min = min(orders)
+        order_max = max(orders)
+        order_median = sorted(orders)[len(orders) // 2]
+
+        return DomainPrior(
+            expected_order_low=int(order_min - 1),
+            expected_order_high=int(order_max + 1),
+            reference_points=reference_points,
+            reasoning=f"Based on {len(top_n)} collected data points: "
+                      f"range 10^{order_min:.1f}..10^{order_max:.1f}, "
+                      f"median 10^{order_median:.1f}",
+            source="evidence",
+            evidence_count=len(top_n),
+        )
+
+    def _prior_from_static_rules(
+        self, target_metric: str, unit: str,
+    ) -> Optional[DomainPrior]:
+        """Layer 1: Match against static rule table."""
+        metric_lower = target_metric.lower()
+        unit_lower = (unit or "").lower()
+
+        best_match = None
+        best_score = 0
+
+        for keywords, unit_patterns, order_low, order_high, desc in self.STATIC_RULES:
+            # Check keyword match
+            keyword_hits = sum(1 for kw in keywords if kw.lower() in metric_lower)
+            if keyword_hits < 2:
+                continue
+
+            # Check unit match (if unit_patterns specified)
+            if unit_patterns:
+                unit_hit = any(up.lower() in unit_lower for up in unit_patterns)
+                if not unit_hit:
+                    continue
+
+            score = keyword_hits + (1 if unit_patterns else 0)
+            if score > best_score:
+                best_score = score
+                best_match = (order_low, order_high, desc)
+
+        if best_match:
+            order_low, order_high, desc = best_match
+            return DomainPrior(
+                expected_order_low=order_low,
+                expected_order_high=order_high,
+                reasoning=f"Static rule: {desc}",
+                source="static_rule",
+            )
+
+        return None
+
+    def _prior_from_llm(
+        self, target_metric: str, unit: str,
+    ) -> Optional[DomainPrior]:
+        """Layer 2: Ask LLM for expected order of magnitude."""
+        if self.language == "ja":
+            prompt = (
+                f"「{target_metric}」（単位: {unit}）の妥当な桁数範囲を教えてください。\n"
+                f"JSONのみ出力: {{\"order_low\": N, \"order_high\": M, \"reasoning\": \"...\"}}\n"
+                f"order_low/order_highは10のべき乗の指数（例: 10^9なら9）。"
+            )
+        else:
+            prompt = (
+                f"What is the expected order of magnitude range for "
+                f"\"{target_metric}\" (unit: {unit})?\n"
+                f"Output JSON only: {{\"order_low\": N, \"order_high\": M, \"reasoning\": \"...\"}}\n"
+                f"order_low/order_high are exponents of 10 (e.g., 9 for 10^9)."
+            )
+
+        try:
+            response = self.llm_client.generate(prompt)
+            if not response or not response.content:
+                return None
+
+            data = self._parse_json(response.content)
+            if not data:
+                return None
+
+            order_low = int(data.get("order_low", 0))
+            order_high = int(data.get("order_high", 20))
+            reasoning = data.get("reasoning", "")
+
+            if order_low > order_high:
+                order_low, order_high = order_high, order_low
+
+            return DomainPrior(
+                expected_order_low=order_low,
+                expected_order_high=order_high,
+                reasoning=f"LLM estimate: {reasoning}",
+                source="llm",
+            )
+
+        except Exception as e:
+            logger.error(f"LLM domain prior query failed: {e}")
+            return None
+
+    def _prior_from_unit_fallback(
+        self, target_metric: str, unit: str,
+    ) -> DomainPrior:
+        """Layer 3: Fallback based on unit alone."""
+        unit_lower = (unit or "").lower()
+
+        for unit_key, (order_low, order_high) in self.UNIT_FALLBACK.items():
+            if unit_key in unit_lower:
+                return DomainPrior(
+                    expected_order_low=order_low,
+                    expected_order_high=order_high,
+                    reasoning=f"Unit-based fallback for '{unit}'",
+                    source="unit_fallback",
+                )
+
+        # Ultimate fallback: extremely wide range
+        return DomainPrior(
+            expected_order_low=0,
+            expected_order_high=20,
+            reasoning="No matching rule; using universal fallback",
+            source="unit_fallback",
+        )
+
+    @staticmethod
+    def _parse_json(content: str) -> Optional[Dict]:
+        """Parse JSON from LLM response."""
+        content = content.strip()
+        if "```" in content:
+            parts = content.split("```")
+            for part in parts[1:]:
+                cleaned = part.strip()
+                if cleaned.startswith("json"):
+                    cleaned = cleaned[4:]
+                cleaned = cleaned.strip()
+                if cleaned.startswith("{"):
+                    content = cleaned
+                    break
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            if start >= 0 and end > start:
+                try:
+                    return json.loads(content[start:end])
+                except json.JSONDecodeError:
+                    return None
+        return None
 
 
 class Validator:
@@ -56,8 +499,9 @@ class Validator:
 
     Performs:
     1. Sanity checks (positive values, low <= base <= high, etc.)
-    2. Cross-checks against NumericalDataStore data
-    3. LLM-based reasonableness check (optional)
+    2. Domain prior check (order-of-magnitude range from evidence/rules/LLM)
+    3. Cross-checks against NumericalDataStore data
+    4. LLM-based reasonableness check (optional)
     """
 
     VALIDATION_PROMPT_JA = """以下のフェルミ推定結果を検証してください。
@@ -157,13 +601,25 @@ Output only JSON:"""
         all_issues = []
         cross_checks = []
 
-        # Sanity checks
+        # 1. Sanity checks
         sanity_issues = self._sanity_checks(base_value, low_value, high_value)
         all_issues.extend(sanity_issues)
-        sanity_passed = len([i for i in sanity_issues if i.severity != "error"])
-        sanity_total = 4  # number of sanity checks
+        sanity_total = 5  # 4 basic sanity checks + 1 domain prior check
 
-        # Cross-check with evidence
+        # 2. Domain prior check (order-of-magnitude range validation)
+        prior_provider = DomainPriorProvider(
+            llm_client=self.llm_client, language=self.language,
+        )
+        domain_prior = prior_provider.get_domain_prior(
+            target_metric=target_metric,
+            unit=unit,
+            data_store=self.data_store,
+            evidence_locker=self.evidence_locker,
+        )
+        prior_issues = self._check_against_prior(base_value, domain_prior)
+        all_issues.extend(prior_issues)
+
+        # 3. Cross-check with evidence
         if self.data_store:
             cc_results = self._cross_check_with_evidence(target_metric, base_value, unit)
             cross_checks.extend(cc_results)
@@ -176,7 +632,7 @@ Output only JSON:"""
                         suggestion=cc.get("suggestion", "Review the estimation"),
                     ))
 
-        # LLM validation
+        # 4. LLM validation
         confidence = 0.5
         if self.llm_client:
             llm_issues, llm_confidence = self._llm_validation(
@@ -187,14 +643,20 @@ Output only JSON:"""
             confidence = llm_confidence
 
         has_errors = any(i.severity == "error" for i in all_issues)
+        sanity_errors = len(
+            [i for i in sanity_issues if i.severity == "error"]
+        ) + len(
+            [i for i in prior_issues if i.severity == "error"]
+        )
 
         return ValidationResult(
             is_valid=not has_errors,
             overall_confidence=confidence,
             issues=all_issues,
             cross_check_results=cross_checks,
-            sanity_checks_passed=sanity_total - len([i for i in sanity_issues if i.severity == "error"]),
+            sanity_checks_passed=sanity_total - sanity_errors,
             sanity_checks_total=sanity_total,
+            domain_prior=domain_prior,
         )
 
     def _sanity_checks(
@@ -239,6 +701,55 @@ Output only JSON:"""
                     description=f"Very wide estimate range: high/low ratio = {ratio:.1f}x",
                     suggestion="Consider narrowing assumptions for more precise estimate",
                 ))
+
+        return issues
+
+    def _check_against_prior(
+        self, base_value: float, prior: DomainPrior,
+    ) -> List[ValidationIssue]:
+        """Check estimate against domain prior expected range."""
+        issues = []
+
+        if not base_value or base_value <= 0:
+            return issues
+
+        actual_order = math.log10(base_value)
+        margin = prior.margin
+        low_bound = prior.expected_order_low - margin
+        high_bound = prior.expected_order_high + margin
+
+        if actual_order < low_bound:
+            deviation = low_bound - actual_order
+            severity = "error" if deviation > 2 else "warning"
+            issues.append(ValidationIssue(
+                severity=severity,
+                category="domain_prior",
+                description=(
+                    f"Estimate 10^{actual_order:.1f} is below expected range "
+                    f"10^{prior.expected_order_low}..10^{prior.expected_order_high} "
+                    f"(margin ±{margin})"
+                ),
+                suggestion=(
+                    f"Value appears {10**deviation:.0f}x too small. "
+                    f"Prior source: {prior.source} ({prior.reasoning})"
+                ),
+            ))
+        elif actual_order > high_bound:
+            deviation = actual_order - high_bound
+            severity = "error" if deviation > 2 else "warning"
+            issues.append(ValidationIssue(
+                severity=severity,
+                category="domain_prior",
+                description=(
+                    f"Estimate 10^{actual_order:.1f} is above expected range "
+                    f"10^{prior.expected_order_low}..10^{prior.expected_order_high} "
+                    f"(margin ±{margin})"
+                ),
+                suggestion=(
+                    f"Value appears {10**deviation:.0f}x too large. "
+                    f"Prior source: {prior.source} ({prior.reasoning})"
+                ),
+            ))
 
         return issues
 

@@ -22,6 +22,8 @@ from deep_research_tool.estimation.validator import (
     Validator,
     ValidationResult,
     ValidationIssue,
+    DomainPrior,
+    DomainPriorProvider,
 )
 from deep_research_tool.estimation.fermi_estimator import (
     FermiEstimator,
@@ -828,3 +830,329 @@ class TestFermiEstimationConfigSubDecomp:
         assert c.sub_decomposition_confidence_threshold == 1.0
         assert c.sub_decomposition_max_iterations == 10
         assert c.sub_decomposition_min_sensitivity_pct == 0.0
+
+
+# ========================================================================
+# DomainPrior / DomainPriorProvider Tests
+# ========================================================================
+
+
+class TestDomainPrior:
+    def test_to_dict(self):
+        prior = DomainPrior(
+            expected_order_low=10,
+            expected_order_high=13,
+            source="evidence",
+            evidence_count=5,
+            reasoning="test",
+        )
+        d = prior.to_dict()
+        assert d["expected_order_low"] == 10
+        assert d["expected_order_high"] == 13
+        assert d["source"] == "evidence"
+
+    def test_margin_evidence_many(self):
+        prior = DomainPrior(source="evidence", evidence_count=5)
+        assert prior.margin == 0.5
+
+    def test_margin_evidence_few(self):
+        prior = DomainPrior(source="evidence", evidence_count=1)
+        assert prior.margin == 1.0
+
+    def test_margin_static_rule(self):
+        prior = DomainPrior(source="static_rule")
+        assert prior.margin == 1.0
+
+    def test_margin_llm(self):
+        prior = DomainPrior(source="llm")
+        assert prior.margin == 1.5
+
+    def test_margin_fallback(self):
+        prior = DomainPrior(source="unit_fallback")
+        assert prior.margin == 3.0
+
+
+class TestDomainPriorProviderLayer0:
+    """Tests for Layer 0: Evidence-based prior."""
+
+    def _make_data_store_with_points(self, points):
+        """Helper to create a data store with given data points."""
+        from deep_research_tool.evidence.numerical_extractor import (
+            NumericalDataStore, NumericalDataPoint,
+        )
+        store = NumericalDataStore(research_topic="test")
+        for p in points:
+            store.add(NumericalDataPoint(**p))
+        return store
+
+    def test_prior_from_single_data_point(self):
+        store = self._make_data_store_with_points([{
+            "value": 2_500_000_000_000,  # 2.5 trillion
+            "normalized_value": 2_500_000_000_000,
+            "metric_name": "アプリ市場規模",
+            "subject": "日本 スマホアプリ",
+            "unit": "円",
+            "raw_text": "約2.5兆円",
+            "extraction_confidence": 0.8,
+            "source_reliability": 0.9,
+        }])
+        provider = DomainPriorProvider()
+        prior = provider.get_domain_prior(
+            "日本のスマホアプリ市場の年間売上", "円", data_store=store,
+        )
+        assert prior.source == "evidence"
+        assert prior.evidence_count == 1
+        # 2.5 trillion = ~10^12.4, expected range ~10^10..10^14
+        assert prior.expected_order_low <= 12
+        assert prior.expected_order_high >= 12
+
+    def test_prior_from_multiple_data_points(self):
+        store = self._make_data_store_with_points([
+            {
+                "value": 2_500_000_000_000,
+                "normalized_value": 2_500_000_000_000,
+                "metric_name": "アプリ市場規模",
+                "subject": "日本 アプリ市場",
+                "unit": "円",
+                "raw_text": "約2.5兆円",
+                "extraction_confidence": 0.8,
+                "source_reliability": 0.9,
+            },
+            {
+                "value": 1_200_000_000_000,
+                "normalized_value": 1_200_000_000_000,
+                "metric_name": "モバイルゲーム市場",
+                "subject": "日本 アプリ ゲーム",
+                "unit": "円",
+                "raw_text": "1.2兆円",
+                "extraction_confidence": 0.7,
+                "source_reliability": 0.8,
+            },
+            {
+                "value": 800_000_000_000,
+                "normalized_value": 800_000_000_000,
+                "metric_name": "Google Play 売上",
+                "subject": "日本 アプリ",
+                "unit": "円",
+                "raw_text": "8000億円",
+                "extraction_confidence": 0.6,
+                "source_reliability": 0.7,
+            },
+        ])
+        provider = DomainPriorProvider()
+        prior = provider.get_domain_prior(
+            "日本のアプリ市場の年間売上", "円", data_store=store,
+        )
+        assert prior.source == "evidence"
+        assert prior.evidence_count == 3
+        # All values in 10^11..10^12 range
+        assert prior.expected_order_low <= 11
+        assert prior.expected_order_high >= 12
+
+    def test_no_match_returns_none(self):
+        store = self._make_data_store_with_points([{
+            "value": 100,
+            "metric_name": "unrelated metric",
+            "subject": "something else",
+            "unit": "kg",
+            "raw_text": "100kg",
+            "extraction_confidence": 0.9,
+            "source_reliability": 0.9,
+        }])
+        provider = DomainPriorProvider()
+        # This should fall through to static/fallback (not evidence)
+        prior = provider.get_domain_prior(
+            "日本の人口", "人", data_store=store,
+        )
+        # Should NOT be from evidence since there's no keyword match
+        assert prior.source != "evidence"
+
+    def test_empty_data_store_falls_through(self):
+        from deep_research_tool.evidence.numerical_extractor import NumericalDataStore
+        store = NumericalDataStore()
+        provider = DomainPriorProvider()
+        prior = provider.get_domain_prior(
+            "some metric", "USD", data_store=store,
+        )
+        assert prior.source != "evidence"
+
+
+class TestDomainPriorProviderLayer1:
+    """Tests for Layer 1: Static rules."""
+
+    def test_japan_population_match(self):
+        provider = DomainPriorProvider()
+        prior = provider._prior_from_static_rules("日本の人口", "人")
+        assert prior is not None
+        assert prior.source == "static_rule"
+        assert prior.expected_order_low == 7
+        assert prior.expected_order_high == 9
+
+    def test_japan_gdp_yen(self):
+        provider = DomainPriorProvider()
+        prior = provider._prior_from_static_rules("日本のGDP", "円")
+        assert prior is not None
+        assert prior.expected_order_low == 14
+
+    def test_no_match(self):
+        provider = DomainPriorProvider()
+        prior = provider._prior_from_static_rules("something random xyz", "abc")
+        assert prior is None
+
+
+class TestDomainPriorProviderLayer3:
+    """Tests for Layer 3: Unit-based fallback."""
+
+    def test_yen_fallback(self):
+        provider = DomainPriorProvider()
+        prior = provider._prior_from_unit_fallback("unknown metric", "円")
+        assert prior.source == "unit_fallback"
+        assert prior.expected_order_low == 0
+        assert prior.expected_order_high == 16
+
+    def test_usd_fallback(self):
+        provider = DomainPriorProvider()
+        prior = provider._prior_from_unit_fallback("unknown metric", "USD")
+        assert prior.source == "unit_fallback"
+        assert prior.expected_order_high == 14
+
+    def test_percentage_fallback(self):
+        provider = DomainPriorProvider()
+        prior = provider._prior_from_unit_fallback("some rate", "%")
+        assert prior.expected_order_low == -2
+        assert prior.expected_order_high == 2
+
+    def test_universal_fallback(self):
+        provider = DomainPriorProvider()
+        prior = provider._prior_from_unit_fallback("metric", "unknown_unit_xyz")
+        assert prior.expected_order_low == 0
+        assert prior.expected_order_high == 20
+
+
+class TestDomainPriorProviderFullChain:
+    """Tests for the full 4-layer fallback chain."""
+
+    def _make_data_store(self, points=None):
+        from deep_research_tool.evidence.numerical_extractor import (
+            NumericalDataStore, NumericalDataPoint,
+        )
+        store = NumericalDataStore(research_topic="test")
+        for p in (points or []):
+            store.add(NumericalDataPoint(**p))
+        return store
+
+    def test_evidence_takes_priority_over_static(self):
+        """When evidence exists, it should be used instead of static rules."""
+        store = self._make_data_store([{
+            "value": 125_000_000,
+            "normalized_value": 125_000_000,
+            "metric_name": "日本の人口",
+            "subject": "日本 人口",
+            "unit": "人",
+            "raw_text": "1億2500万人",
+            "extraction_confidence": 0.9,
+            "source_reliability": 0.95,
+        }])
+        provider = DomainPriorProvider()
+        prior = provider.get_domain_prior("日本の人口", "人", data_store=store)
+        # Should use evidence, not static rule
+        assert prior.source == "evidence"
+
+    def test_static_rule_when_no_evidence(self):
+        """Falls back to static rule when evidence doesn't match."""
+        from deep_research_tool.evidence.numerical_extractor import NumericalDataStore
+        store = NumericalDataStore()
+        provider = DomainPriorProvider()
+        prior = provider.get_domain_prior("日本の人口", "人", data_store=store)
+        assert prior.source == "static_rule"
+
+    def test_unit_fallback_when_nothing_matches(self):
+        """Falls all the way to unit fallback."""
+        from deep_research_tool.evidence.numerical_extractor import NumericalDataStore
+        store = NumericalDataStore()
+        provider = DomainPriorProvider()
+        prior = provider.get_domain_prior("obscure metric xyz", "円", data_store=store)
+        assert prior.source == "unit_fallback"
+
+
+class TestValidatorDomainPriorIntegration:
+    """Tests for domain prior integration in Validator."""
+
+    def _make_data_store(self, points=None):
+        from deep_research_tool.evidence.numerical_extractor import (
+            NumericalDataStore, NumericalDataPoint,
+        )
+        store = NumericalDataStore(research_topic="test")
+        for p in (points or []):
+            store.add(NumericalDataPoint(**p))
+        return store
+
+    def test_valid_estimate_passes_prior(self):
+        """Estimate within expected range should pass."""
+        store = self._make_data_store([{
+            "value": 2_500_000_000_000,
+            "normalized_value": 2_500_000_000_000,
+            "metric_name": "アプリ市場規模",
+            "subject": "日本 アプリ 市場",
+            "unit": "円",
+            "raw_text": "約2.5兆円",
+            "extraction_confidence": 0.8,
+            "source_reliability": 0.9,
+        }])
+        v = Validator(data_store=store)
+        result = v.validate(
+            target_metric="日本のアプリ市場の年間売上",
+            base_value=3_000_000_000_000,  # 3 trillion, close to reference
+            low_value=2_000_000_000_000,
+            high_value=4_000_000_000_000,
+            unit="円",
+        )
+        prior_issues = [i for i in result.issues if i.category == "domain_prior"]
+        assert len(prior_issues) == 0
+        assert result.domain_prior is not None
+        assert result.domain_prior.source == "evidence"
+
+    def test_wildly_wrong_estimate_flagged(self):
+        """Estimate way outside expected range should produce error."""
+        store = self._make_data_store([{
+            "value": 2_500_000_000_000,
+            "normalized_value": 2_500_000_000_000,
+            "metric_name": "アプリ市場規模",
+            "subject": "日本 アプリ 市場",
+            "unit": "円",
+            "raw_text": "約2.5兆円",
+            "extraction_confidence": 0.8,
+            "source_reliability": 0.9,
+        }])
+        v = Validator(data_store=store)
+        result = v.validate(
+            target_metric="日本のアプリ市場の年間売上",
+            base_value=1e20,  # Absurdly large
+            low_value=5e19,
+            high_value=2e20,
+            unit="円",
+        )
+        prior_issues = [i for i in result.issues if i.category == "domain_prior"]
+        assert len(prior_issues) >= 1
+        # 10^20 vs expected ~10^12 = 8 orders off, well beyond any margin
+        assert any(i.severity == "error" for i in prior_issues)
+
+    def test_domain_prior_in_validation_result(self):
+        """ValidationResult should include domain_prior field."""
+        v = Validator()
+        result = v.validate(
+            target_metric="some metric", base_value=100,
+            low_value=80, high_value=120, unit="USD",
+        )
+        assert result.domain_prior is not None
+        d = result.to_dict()
+        assert "domain_prior" in d
+
+    def test_sanity_checks_total_includes_prior(self):
+        """sanity_checks_total should include domain prior check."""
+        v = Validator()
+        result = v.validate(
+            target_metric="test", base_value=100,
+            low_value=80, high_value=120, unit="USD",
+        )
+        assert result.sanity_checks_total == 5

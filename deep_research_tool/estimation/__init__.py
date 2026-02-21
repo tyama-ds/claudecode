@@ -9,7 +9,7 @@ from .fermi_estimator import FermiEstimator, FermiEstimationConfig, FermiEstimat
 from .decomposer import Decomposer, DecompositionTree, TreeNode, NodeOperation
 from .assumptions import AssumptionManager, Assumption, AssumptionSource
 from .calculator import Calculator, ScenarioResult, SensitivityAnalysis
-from .validator import Validator, ValidationResult
+from .validator import Validator, ValidationResult, DomainPrior, DomainPriorProvider
 
 __all__ = [
     "FermiEstimator",
@@ -27,4 +27,6 @@ __all__ = [
     "SensitivityAnalysis",
     "Validator",
     "ValidationResult",
+    "DomainPrior",
+    "DomainPriorProvider",
 ]
