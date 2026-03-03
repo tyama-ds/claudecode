@@ -28,6 +28,7 @@ AIを活用した自動リサーチツール。OpenAI/Anthropic APIとWeb検索�
 - **検索クエリ最適化**: 複合クエリの自動分割（Split）とフォローアップクエリのテーマアンカリング（Anchor）で後半セクションの検索精度を向上
 - **ResearchWarnings**: パイプライン実行中のフォールバックやエラーを重要度別に収集し、レポート末尾に透過的に表示
 - **情報収集付きマルチエージェント議論**: Web検索機能を持つ`ResearchParticipantAgent`で、根拠に基づいた議論を実現
+- **リサーチャーV2**: Think Tool（メタ認知的振り返り）、事前確認フロー、セクション並行調査を備えた次世代リサーチエンジン
 
 ## インストール
 
@@ -2510,9 +2511,158 @@ estimation/
 
 ---
 
+## 追加機能14：リサーチャーV2（Researcher V2）
+
+### 概要
+
+langchain-ai/open_deep_research の設計思想を取り入れた次世代リサーチエンジンです。V1の全機能を継承しつつ、以下の3つの機能を追加しています。
+
+| 機能 | 説明 | 対応するopen_deep_research機能 |
+|------|------|-------------------------------|
+| **Think Tool** | 各セクションの調査ループ中にメタ認知的振り返りを行い、網羅性・品質を評価して戦略を動的に調整 | `think_tool`（meta-cognitive reflection） |
+| **事前確認フロー** | 調査開始前にクエリを分析し、スコープの曖昧さや不足情報を特定して確認を促す | `clarify_with_user()` |
+| **セクション並行調査** | 独立したセクション（同一親の兄弟セクション）を`asyncio`で並行処理し、調査時間を短縮 | 最大5 Researchers並列実行 |
+
+### 使用イメージ
+
+```
+ユーザー: 「再生可能エネルギーの現状と将来」
+    ↓
+[事前確認フロー]（v2_enable_clarification=True の場合）
+    Clarifier: 「以下の点を確認させてください：
+      Q1: 対象地域は日本？グローバル？
+      Q2: 太陽光・風力・水力のどれを重視？」
+    → 回答を requirements に自動マージ
+    ↓
+[調査フェーズ]（researcher_version="v2"）
+    セクション1.1「太陽光発電」 ──┐
+    セクション1.2「風力発電」   ──┤ 並行処理（v2_enable_parallel=True）
+    セクション1.3「蓄電技術」   ──┘
+      各セクション内:
+        反復1: 検索→情報抽出
+        反復2: 検索→情報抽出 → [Think Tool] 「網羅性0.6、市場規模データ不足」
+        反復3: 検索→情報抽出 → [Think Tool] 「網羅性0.85、品質0.8 → 調査完了」
+    ↓
+[全体振り返り]
+    Reflector: 「セクション間のギャップなし、全体品質0.82」
+    ↓
+レポート生成
+```
+
+### Pythonでの使用
+
+```python
+from deep_research_tool import run_research
+
+# V2リサーチャーの基本使用
+result = run_research(
+    query="日本のEV市場の現状と将来展望",
+    requirements="主要メーカーの戦略と充電インフラの整備状況を含めること",
+    provider="anthropic",
+    model="claude-sonnet-4-20250514",
+    iterations=5,
+    output_format="docx",
+
+    # ★ リサーチャーV2を有効化
+    researcher_version="v2",
+)
+```
+
+```python
+# V2の全機能を有効化
+result = run_research(
+    query="量子コンピューティングの実用化動向",
+    requirements="IBM、Google、日本企業の取り組みを比較",
+    provider="anthropic",
+    model="claude-sonnet-4-20250514",
+    iterations=5,
+    output_format="docx",
+
+    # ★ V2リサーチャー設定
+    researcher_version="v2",                         # V2有効化（必須）
+    researcher_v2_enable_think_tool=True,             # Think Tool有効化（デフォルトTrue）
+    researcher_v2_think_tool_start_iteration=2,       # 2回目の反復から振り返り開始
+    researcher_v2_enable_parallel=True,               # セクション並行調査
+    researcher_v2_max_concurrent_sections=3,          # 最大同時処理セクション数
+    researcher_v2_enable_clarification=True,          # 事前確認フロー
+
+    # V2 + レポートV2/V3の組み合わせも可能
+    report_generator_version="v3",
+)
+```
+
+### create_config()での使用
+
+```python
+from deep_research_tool import DeepResearchTool, create_config
+
+config = create_config(
+    provider="anthropic",
+    model="claude-sonnet-4-20250514",
+    research_iterations=5,
+    output_format="docx",
+
+    # リサーチャーV2設定
+    researcher_version="v2",
+    researcher_v2_enable_think_tool=True,
+    researcher_v2_think_tool_start_iteration=2,
+    researcher_v2_enable_parallel=True,
+    researcher_v2_max_concurrent_sections=3,
+    researcher_v2_enable_clarification=True,
+)
+
+tool = DeepResearchTool(config)
+result = tool.run(
+    query="生成AIのビジネス活用動向",
+    requirements="ROI事例とリスク管理を含めること",
+)
+```
+
+### リサーチャーV2 パラメータ
+
+| パラメータ | 説明 | デフォルト |
+|-----------|------|----------|
+| `researcher_version` | リサーチャーバージョン (`"v1"` / `"v2"`) | `"v1"` |
+| `researcher_v2_enable_think_tool` | Think Toolの有効化 | `True` |
+| `researcher_v2_think_tool_start_iteration` | Think Toolを開始する反復回数 | `2` |
+| `researcher_v2_enable_parallel` | セクション並行調査の有効化 | `False` |
+| `researcher_v2_max_concurrent_sections` | 最大同時処理セクション数 | `3` |
+| `researcher_v2_enable_clarification` | 事前確認フローの有効化 | `False` |
+
+### Think Tool の動作詳細
+
+Think Toolは各セクションの調査ループ内で、指定した反復回数（デフォルト: 2回目）から振り返りを実行します。
+
+- **網羅性スコア** (coverage_score): 0.0〜1.0。セクション要件のカバー率
+- **品質スコア** (quality_score): 0.0〜1.0。情報の信頼性・数値データの有無
+- **判断基準**: coverage >= 0.8 かつ quality >= 0.7 で調査完了を推奨
+- **方向転換**: 重大な見落としがある場合、新しいクエリを推奨して検索方向を修正
+- **全体振り返り**: 全セクション完了後にセクション間のギャップ・重複を検出
+
+### モジュール構成
+
+```
+research/v2/
+├── __init__.py              # パッケージエクスポート
+├── researcher.py            # ResearcherV2（V1を継承、3機能を統合）
+├── reflector.py             # ResearchReflector（Think Tool）
+├── clarifier.py             # ResearchClarifier（事前確認フロー）
+└── async_orchestrator.py    # AsyncResearchOrchestrator（並行調査）
+```
+
+### 注意事項
+
+- **V1との互換性**: V2はV1を継承しており、`researcher_version="v1"`（デフォルト）では従来通りの動作です
+- **APIコスト**: Think Tool有効時は各セクションの反復ごとに追加のLLM呼び出しが発生します（反復あたり1回）
+- **並行調査**: `v2_enable_parallel=True` は独立セクション（兄弟セクション）のみを並行処理します。親子関係のあるセクションは順次処理されます
+- **事前確認フロー**: 現在はコンソール出力のみ。対話的な質問応答はUIレイヤーでの実装が必要です
+- **組み合わせ**: レポートV2/V3、DeepThink、多言語検索など他の全機能と組み合わせて使用できます
+
+---
+
 ## 全機能フルカスタマイズ例（Maximum Customized run_research）
 
-`run_research()` の全パラメータを使いこなした最大構成の例です。V2レポート生成、DeepThink推論、多言語検索、高速クロール、自動図表生成、数値データ抽出、単位変換など、全機能を有効にしています。
+`run_research()` の全パラメータを使いこなした最大構成の例です。リサーチャーV2、V3レポート生成、DeepThink推論、多言語検索、高速クロール、自動図表生成、数値データ抽出、単位変換など、全機能を有効にしています。
 
 ```python
 from deep_research_tool import run_research
@@ -2530,12 +2680,20 @@ result = run_research(
     requirements="SiC、GaN、Ga2O3の3材料を中心に比較分析。日本企業の動向を重視",
     verbose=True,
 
+    # === リサーチャーV2 ===
+    researcher_version="v2",                     # ★ V2有効化（必須）
+    researcher_v2_enable_think_tool=True,         # Think Tool（メタ認知的振り返り）
+    researcher_v2_think_tool_start_iteration=2,   # 2回目の反復から振り返り開始
+    researcher_v2_enable_parallel=True,           # セクション並行調査
+    researcher_v2_max_concurrent_sections=3,      # 最大同時処理セクション数
+    researcher_v2_enable_clarification=True,      # 事前確認フロー
+
     # === レポート長 ===
     target_pages=30,                         # 目標ページ数（概算）
     # target_characters=50000,               # 文字数指定も可能（target_pagesと排他）
 
-    # === V2 レポート生成 ===
-    report_generator_version="v2",           # ★ V2有効化（必須）
+    # === V3 レポート生成（DOCX-Native） ===
+    report_generator_version="v3",           # ★ V3有効化（v1/v2/v3）
     v2_writing_style="technical",            # formal / business / technical / executive / casual
     v2_target_audience="engineer",           # expert / business / engineer / general / student
     v2_technical_level=4,                    # 1-5（5が最も専門的）
@@ -2625,6 +2783,7 @@ print(f"トークン使用量: {result['token_usage']}")
 | **出力** | `output_format`, `target_pages` | レポート形式・長さ |
 | **V2レポート** | `report_generator_version="v2"`, `v2_*` | 一貫性保証、用語統一 |
 | **V3レポート** | `report_generator_version="v3"` | DOCX-Native出力 |
+| **リサーチャーV2** | `researcher_version="v2"`, `researcher_v2_*` | Think Tool、並行調査、事前確認 |
 | **DeepThink** | `deep_think=True`, `deep_think_level` | 推論品質の強化 |
 | **多言語** | `multilingual=True`, `search_languages` | 複数言語で情報収集 |
 | **クロール** | `crawl_mode`, `extended_mode` | 深層・高速情報収集 |
@@ -2637,9 +2796,10 @@ print(f"トークン使用量: {result['token_usage']}")
 ### 注意事項
 
 - **APIコスト**: 全機能有効時はトークン消費量が大幅に増加します（V1の3-5倍程度）
-- **実行時間**: DeepThink + V2 + 多言語 + 深層クロールの組み合わせでは数十分〜1時間以上かかる場合があります
+- **実行時間**: リサーチャーV2 + DeepThink + レポートV3 + 多言語 + 深層クロールの組み合わせでは数十分〜1時間以上かかる場合があります
 - **段階的な有効化**: まず基本設定で動作確認し、必要に応じて機能を追加していくことを推奨します
-- **最小V2設定**: V2だけ試す場合は `report_generator_version="v2"` を追加するだけでOKです（他のv2_*パラメータはデフォルトで適切な値）
+- **最小リサーチャーV2設定**: `researcher_version="v2"` を追加するだけでOKです（Think Toolがデフォルト有効、他はデフォルトで適切な値）
+- **最小レポートV2設定**: `report_generator_version="v2"` を追加するだけでOKです（他のv2_*パラメータはデフォルトで適切な値）
 
 ---
 
@@ -2938,6 +3098,12 @@ print(f"トークン使用量: {result['token_usage']}")
 | `crawl_mode` | 高速クロールモード (standard/fast_batch/fast_parallel) | standard |
 | `fast_crawl_workers` | 並列HTTPフェッチのワーカー数 | 10 |
 | `fast_crawl_batch_size` | バッチ評価時の1バッチあたりページ数 | 5 |
+| `researcher_version` | リサーチャーバージョン (v1/v2) | v1 |
+| `researcher_v2_enable_think_tool` | Think Toolの有効化 | True |
+| `researcher_v2_think_tool_start_iteration` | Think Toolを開始する反復回数 | 2 |
+| `researcher_v2_enable_parallel` | セクション並行調査の有効化 | False |
+| `researcher_v2_max_concurrent_sections` | 最大同時処理セクション数 | 3 |
+| `researcher_v2_enable_clarification` | 事前確認フローの有効化 | False |
 | `fermi_estimation` | フェルミ推定の有効化 | False |
 | `fermi_target_metrics` | 推定対象の指標リスト | [] |
 | `fermi_auto_detect_targets` | LLMによる推定対象の自動検出 | True |
@@ -3084,6 +3250,12 @@ deep_research_tool/
 ---
 
 ## 更新履歴
+
+### 2026-03-03
+
+- リサーチャーV2（`ResearcherV2`）を追加: Think Tool、事前確認フロー、セクション並行調査
+- `create_config()` に `researcher_version`, `researcher_v2_*` パラメータを追加
+- open_deep_research との比較分析レポート（`docs/comparison_open_deep_research.md`）を追加
 
 ### 2026-02-20
 

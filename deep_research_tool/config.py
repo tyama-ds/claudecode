@@ -736,6 +736,12 @@ def create_config(
         intelligent_charts: Use ChartAnalyzer for smart chart recommendations
         chart_insights: Generate insights and messages for charts
         chart_max_per_section: Maximum charts per section
+        researcher_version: Researcher version ('v1' or 'v2')
+        researcher_v2_enable_think_tool: Enable Think Tool reflection in V2 researcher
+        researcher_v2_think_tool_start_iteration: Start Think Tool from this iteration (default: 2)
+        researcher_v2_enable_parallel: Enable parallel section processing in V2
+        researcher_v2_max_concurrent_sections: Max concurrent sections for parallel processing
+        researcher_v2_enable_clarification: Enable pre-research clarification flow in V2
         **kwargs: Additional keyword arguments
 
     Returns:
