@@ -9,12 +9,13 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable
 
 from .utils.helpers import ResearchWarnings
-from .config import Config, LLMProvider, SearchMethod, ReportFormat, ReportGeneratorVersion
+from .config import Config, LLMProvider, SearchMethod, ReportFormat, ReportGeneratorVersion, ResearcherVersion
 from .api import get_client
 from .api.base import get_token_stats, reset_token_stats
 from .search import get_search_client
 from .research.researcher import Researcher, ResearchSession
 from .research.manual_researcher import ManualResearcher, ManualTableOfContents
+from .research.v2 import ResearcherV2, ResearchClarifier
 from .evidence.locker import EvidenceLocker
 from .verification.verifier import Verifier
 from .report.generator import ReportGenerator
@@ -324,6 +325,55 @@ class DeepResearchTool:
 
         return content_filter
 
+    def _create_researcher(
+        self,
+        content_filter=None,
+        progress_callback=None,
+    ):
+        """
+        Create appropriate researcher based on config.
+
+        Returns V1 Researcher or V2 ResearcherV2 depending on
+        config.research.researcher_version.
+        """
+        common_kwargs = dict(
+            llm_client=self.llm_client,
+            search_client=self.search_client,
+            min_iterations=self.config.research.min_iterations,
+            max_iterations=self.config.research.max_iterations,
+            max_queries_per_iteration=self.config.research.max_queries_per_iteration,
+            max_pages_per_query=self.config.research.max_pages_per_query,
+            language=self.config.research.language,
+            output_dir=self.config.report.output_dir,
+            progress_callback=progress_callback,
+            extended_mode=self.config.research.extended_mode,
+            crawl_max_pages=self.config.research.crawl_max_pages,
+            crawl_max_depth=self.config.research.crawl_max_depth,
+            crawl_max_sites=self.config.research.crawl_max_sites,
+            crawl_relevance_threshold=self.config.research.crawl_relevance_threshold,
+            use_enhanced_synthesis=self.config.research.use_enhanced_synthesis,
+            content_filter=content_filter,
+            filter_mode=self.config.research.content_filter_mode.value,
+            crawl_mode=self.config.research.crawl_mode,
+            fast_crawl_workers=self.config.research.fast_crawl_workers,
+            fast_crawl_batch_size=self.config.research.fast_crawl_batch_size,
+            multilingual_config=self.config.multilingual if self.config.multilingual.enabled else None,
+            max_content_length=self.config.research.max_content_length,
+            target_pages=self.config.report.target_pages,
+            target_characters=self.config.report.target_characters,
+        )
+
+        if self.config.research.researcher_version == ResearcherVersion.V2:
+            return ResearcherV2(
+                **common_kwargs,
+                enable_think_tool=self.config.research.v2_enable_think_tool,
+                think_tool_start_iteration=self.config.research.v2_think_tool_start_iteration,
+                enable_parallel=self.config.research.v2_enable_parallel,
+                max_concurrent_sections=self.config.research.v2_max_concurrent_sections,
+            )
+        else:
+            return Researcher(**common_kwargs)
+
     def run(
         self,
         query: str,
@@ -377,34 +427,27 @@ class DeepResearchTool:
                         "content": doc.content,
                     })
 
+        # Pre-research clarification (V2 only)
+        if (self.config.research.researcher_version == ResearcherVersion.V2
+                and self.config.research.v2_enable_clarification
+                and progress_callback):
+            clarifier = ResearchClarifier(self.llm_client, self.config.research.language)
+            clarification = clarifier.analyze_query(query, requirements)
+            if clarification.needs_clarification:
+                print(f"[Clarifier] Scope: {clarification.interpreted_scope}")
+                for q in clarification.questions:
+                    print(f"[Clarifier] Q: {q}")
+                # Merge suggested requirements if no interactive callback available
+                if clarification.suggested_requirements:
+                    requirements = clarifier.merge_clarification(
+                        requirements, {"suggested": clarification.suggested_requirements}
+                    )
+
         # Initialize researcher with content filter
         content_filter = self._create_content_filter()
-
-        self.researcher = Researcher(
-            llm_client=self.llm_client,
-            search_client=self.search_client,
-            min_iterations=self.config.research.min_iterations,
-            max_iterations=self.config.research.max_iterations,
-            max_queries_per_iteration=self.config.research.max_queries_per_iteration,
-            max_pages_per_query=self.config.research.max_pages_per_query,
-            language=self.config.research.language,
-            output_dir=self.config.report.output_dir,
-            progress_callback=progress_callback,
-            extended_mode=self.config.research.extended_mode,
-            crawl_max_pages=self.config.research.crawl_max_pages,
-            crawl_max_depth=self.config.research.crawl_max_depth,
-            crawl_max_sites=self.config.research.crawl_max_sites,
-            crawl_relevance_threshold=self.config.research.crawl_relevance_threshold,
-            use_enhanced_synthesis=self.config.research.use_enhanced_synthesis,
+        self.researcher = self._create_researcher(
             content_filter=content_filter,
-            filter_mode=self.config.research.content_filter_mode.value,
-            crawl_mode=self.config.research.crawl_mode,
-            fast_crawl_workers=self.config.research.fast_crawl_workers,
-            fast_crawl_batch_size=self.config.research.fast_crawl_batch_size,
-            multilingual_config=self.config.multilingual if self.config.multilingual.enabled else None,
-            max_content_length=self.config.research.max_content_length,
-            target_pages=self.config.report.target_pages,
-            target_characters=self.config.report.target_characters,
+            progress_callback=progress_callback,
         )
 
         # Conduct research

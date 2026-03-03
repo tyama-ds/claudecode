@@ -67,6 +67,12 @@ class ReportGeneratorVersion(str, Enum):
     V3 = "v3"  # DOCX-native generator (python-docx direct API)
 
 
+class ResearcherVersion(str, Enum):
+    """Researcher version selection."""
+    V1 = "v1"  # Original researcher
+    V2 = "v2"  # Enhanced with Think Tool, clarification, parallel sections
+
+
 @dataclass
 class ProxyConfig:
     """Configuration for HTTP proxy settings."""
@@ -396,6 +402,16 @@ class ResearchConfig:
     fast_crawl_workers: int = 10   # Max parallel workers for fetching
     fast_crawl_batch_size: int = 5  # Pages per batch in batch evaluation mode
 
+    # Researcher version selection
+    researcher_version: ResearcherVersion = ResearcherVersion.V1
+
+    # V2-specific settings (Think Tool, clarification, parallel)
+    v2_enable_think_tool: bool = True        # Enable strategic reflection
+    v2_think_tool_start_iteration: int = 2   # Start Think Tool from this iteration
+    v2_enable_parallel: bool = False         # Enable parallel section processing
+    v2_max_concurrent_sections: int = 3      # Max concurrent sections
+    v2_enable_clarification: bool = False    # Enable pre-research clarification
+
 
 @dataclass
 class ReportConfig:
@@ -593,6 +609,13 @@ def create_config(
     crawl_mode: str = "standard",
     fast_crawl_workers: int = 10,
     fast_crawl_batch_size: int = 5,
+    # Researcher version parameters
+    researcher_version: str = "v1",
+    researcher_v2_enable_think_tool: bool = True,
+    researcher_v2_think_tool_start_iteration: int = 2,
+    researcher_v2_enable_parallel: bool = False,
+    researcher_v2_max_concurrent_sections: int = 3,
+    researcher_v2_enable_clarification: bool = False,
     # Report generator version parameters
     report_generator_version: str = "v1",
     v2_writing_style: str = "business",
@@ -759,6 +782,12 @@ def create_config(
         crawl_mode=CrawlMode(crawl_mode),
         fast_crawl_workers=fast_crawl_workers,
         fast_crawl_batch_size=fast_crawl_batch_size,
+        researcher_version=ResearcherVersion(researcher_version),
+        v2_enable_think_tool=researcher_v2_enable_think_tool,
+        v2_think_tool_start_iteration=researcher_v2_think_tool_start_iteration,
+        v2_enable_parallel=researcher_v2_enable_parallel,
+        v2_max_concurrent_sections=researcher_v2_max_concurrent_sections,
+        v2_enable_clarification=researcher_v2_enable_clarification,
     )
 
     report_config = ReportConfig(
