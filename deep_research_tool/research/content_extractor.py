@@ -53,6 +53,8 @@ class ContentExtractor:
         llm_client,
         language: str = "ja",
         target_chars_per_section: Optional[int] = None,
+        sanitizer=None,
+        prompt_guard=None,
     ):
         """
         Initialize ContentExtractor.
@@ -61,10 +63,14 @@ class ContentExtractor:
             llm_client: LLM API client instance
             language: Target language for processing
             target_chars_per_section: Target characters per section (for dynamic output sizing)
+            sanitizer: ContentSanitizer instance for PI defense
+            prompt_guard: PromptGuard instance for trust boundary markers
         """
         self.llm = llm_client
         self.language = language
         self.target_chars_per_section = target_chars_per_section
+        self._sanitizer = sanitizer
+        self._prompt_guard = prompt_guard
 
     def _split_into_chunks(self, text: str) -> List[str]:
         """Split text into overlapping chunks, merging runt tails."""
@@ -97,15 +103,37 @@ class ContentExtractor:
         chunk_label: str = "",
     ) -> Optional[Dict[str, Any]]:
         """Extract relevant information from a single chunk of content."""
-        prompt = f"""Source URL: {source_url}
-Source Title: {source_title}
-{chunk_label}
+        # Security: sanitize external content before LLM processing
+        if self._sanitizer:
+            chunk_text = self._sanitizer.sanitize(chunk_text, source_url)
+            source_title = self._sanitizer.sanitize(source_title, source_url)
+
+        # Security: wrap external content with trust boundary markers
+        if self._prompt_guard:
+            external_block = (
+                f"Source URL: {source_url}\n"
+                f"Source Title: {source_title}\n"
+                f"{chunk_label}\n"
+                f"Source Content:\n{chunk_text}"
+            )
+            defense = self._prompt_guard.get_defense_instruction()
+            wrapped_content = self._prompt_guard.wrap_untrusted(external_block)
+        else:
+            defense = ""
+            wrapped_content = (
+                f"Source URL: {source_url}\n"
+                f"Source Title: {source_title}\n"
+                f"{chunk_label}\n"
+                f"Source Content:\n{chunk_text}"
+            )
+
+        prompt = f"""{defense}
+
 Research Context:
 - Query: {research_query}
 - Section: {section_context}
 
-Source Content:
-{chunk_text}
+{wrapped_content}
 
 {lang_instruction}
 
@@ -331,7 +359,16 @@ Key Points:
 
         sources_text = "\n---\n".join(source_summaries)
 
-        prompt = f"""Section: {section_title}
+        # Security: wrap all external source content with trust boundary
+        if self._prompt_guard:
+            defense = self._prompt_guard.get_defense_instruction()
+            sources_text = self._prompt_guard.wrap_untrusted(sources_text)
+        else:
+            defense = ""
+
+        prompt = f"""{defense}
+
+Section: {section_title}
 Description: {section_description}
 
 Research Requirements: {requirements if requirements else "Comprehensive analysis"}

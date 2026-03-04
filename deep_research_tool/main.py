@@ -23,6 +23,7 @@ from .report.length_controller import ContentLengthController, LengthTarget
 from .report.v2 import ReportGeneratorV2, ReportFormatError, ReportContext, WritingStyle, TargetAudience
 from .report.v3 import DocxReportGeneratorV3
 from .report.figure_table_generator import FigureTableGenerator, add_figures_to_report
+from .security import ContentSanitizer, PromptGuard, OutputValidator, ExfilGuard, SecurityMonitor
 from .evidence.numerical_extractor import (
     NumericalDataExtractor,
     NumericalDataStore,
@@ -179,6 +180,16 @@ class DeepResearchTool:
         self.config = config or Config()
         self._validate_config()
         self._setup_logging()
+
+        # Initialize security layers
+        self.sanitizer = ContentSanitizer(self.config.security)
+        self.prompt_guard = PromptGuard(
+            self.config.security,
+            language=self.config.research.language,
+        )
+        self.output_validator = OutputValidator(self.config.security)
+        self.exfil_guard = ExfilGuard(self.config.security)
+        self.security_monitor = SecurityMonitor(self.config.security)
 
         # Initialize components
         self.llm_client = self._create_llm_client()
@@ -361,6 +372,9 @@ class DeepResearchTool:
             max_content_length=self.config.research.max_content_length,
             target_pages=self.config.report.target_pages,
             target_characters=self.config.report.target_characters,
+            sanitizer=self.sanitizer,
+            prompt_guard=self.prompt_guard,
+            output_validator=self.output_validator,
         )
 
         if self.config.research.researcher_version == ResearcherVersion.V2:
@@ -403,8 +417,16 @@ class DeepResearchTool:
             - session: ResearchSession object
             - evidence_locker: EvidenceLocker object
         """
-        # Reset warning collector for this run
+        # Reset warning collector and security monitor for this run
         ResearchWarnings.reset()
+        self.sanitizer.reset_detections()
+        self.output_validator.reset_violations()
+        self.exfil_guard.reset()
+        self.security_monitor.reset()
+
+        # Update exfil guard with context tokens from user query
+        query_tokens = [t for t in query.split() if len(t) >= 4]
+        self.exfil_guard.update_context_tokens(query_tokens)
 
         # Log informational note when both enhanced_synthesis and V2 two_phase are active
         if (self.config.research.use_enhanced_synthesis
@@ -715,6 +737,16 @@ class DeepResearchTool:
         # Get token usage statistics
         token_stats = get_token_stats()
 
+        # Collect security warnings into ResearchWarnings
+        for sw in self.security_monitor.get_warnings_for_report():
+            ResearchWarnings.add(sw, severity="high")
+
+        # Log PI detections
+        pi_detections = self.sanitizer.get_pi_detections()
+        if pi_detections:
+            print(f"[Security] {len(pi_detections)} prompt injection pattern(s) "
+                  f"detected and neutralized in external content.")
+
         return {
             "session_id": session.session_id,
             "report_path": str(active_report_path),
@@ -731,6 +763,8 @@ class DeepResearchTool:
             "token_usage": token_stats.to_dict(),
             "warnings": warnings_collector.to_dict_list(),
             "warning_count": warnings_collector.count(),
+            "security_summary": self.security_monitor.get_summary(),
+            "security_pi_detections": pi_detections,
         }
 
     def _run_fermi_estimation(

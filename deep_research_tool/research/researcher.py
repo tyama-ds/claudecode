@@ -162,6 +162,9 @@ class Researcher:
         max_content_length: int = 50000,
         target_pages: int = None,
         target_characters: int = None,
+        sanitizer=None,
+        prompt_guard=None,
+        output_validator=None,
     ):
         """
         Initialize Researcher.
@@ -191,6 +194,9 @@ class Researcher:
             max_content_length: Maximum content length for extraction truncation
             target_pages: Target output page count (used for dynamic content sizing)
             target_characters: Target output character count (overrides target_pages)
+            sanitizer: ContentSanitizer instance for PI defense
+            prompt_guard: PromptGuard instance for trust boundary markers
+            output_validator: OutputValidator instance for LLM output validation
         """
         self.llm = llm_client
         self.search = search_client
@@ -210,7 +216,13 @@ class Researcher:
         self._target_characters = target_characters
         # ContentExtractor is created without per-section target initially;
         # it will be updated in _execute_research_loop once we know the section count.
-        self.content_extractor = ContentExtractor(llm_client, language)
+        self._sanitizer = sanitizer
+        self._prompt_guard = prompt_guard
+        self._output_validator = output_validator
+        self.content_extractor = ContentExtractor(
+            llm_client, language,
+            sanitizer=sanitizer, prompt_guard=prompt_guard,
+        )
 
         # Use enhanced multi-pass content generation for better quality
         self.use_enhanced_synthesis = use_enhanced_synthesis
@@ -276,6 +288,8 @@ class Researcher:
                 max_workers=fast_crawl_workers,
                 batch_size=fast_crawl_batch_size,
                 language=language,
+                sanitizer=sanitizer,
+                prompt_guard=prompt_guard,
             )
 
     def _report_progress(self, message: str, percentage: float) -> None:

@@ -487,6 +487,9 @@ class Config:
     fermi_estimation: FermiEstimationConfig = field(default_factory=FermiEstimationConfig)
     multilingual: MultilingualSearchConfig = field(default_factory=MultilingualSearchConfig)
 
+    # Security settings (prompt injection defense)
+    security: "SecurityConfig" = None  # Lazy import to avoid circular dependency
+
     # Additional document settings
     additional_documents: List[Path] = field(default_factory=list)
     process_additional_documents: bool = False
@@ -500,8 +503,11 @@ class Config:
     log_file: Optional[Path] = None
 
     def __post_init__(self):
-        """Ensure output directory exists."""
+        """Ensure output directory exists and security config is set."""
         self.report.output_dir.mkdir(parents=True, exist_ok=True)
+        if self.security is None:
+            from .security.config import SecurityConfig
+            self.security = SecurityConfig()
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -659,6 +665,16 @@ def create_config(
     fermi_sub_decomposition_max_iterations: int = 3,
     fermi_sub_decomposition_confidence_threshold: float = 0.65,
     fermi_sub_decomposition_min_sensitivity_pct: float = 10.0,
+    # Security parameters (prompt injection defense)
+    security_level: str = "standard",
+    sanitize_external_content: bool = True,
+    prompt_boundary_markers: bool = True,
+    validate_llm_output: bool = True,
+    exfil_guard: bool = False,
+    enable_security_monitor: bool = False,
+    block_on_pi_detection: bool = False,
+    max_urls_per_session: int = 500,
+    security_log_file: Optional[str] = None,
     **kwargs
 ) -> Config:
     """
@@ -742,6 +758,15 @@ def create_config(
         researcher_v2_enable_parallel: Enable parallel section processing in V2
         researcher_v2_max_concurrent_sections: Max concurrent sections for parallel processing
         researcher_v2_enable_clarification: Enable pre-research clarification flow in V2
+        security_level: Security level preset ('standard', 'strict', 'paranoid')
+        sanitize_external_content: Sanitize external content before LLM processing
+        prompt_boundary_markers: Add trust boundary markers to LLM prompts
+        validate_llm_output: Validate LLM-generated queries and URLs
+        exfil_guard: Enable data exfiltration detection
+        enable_security_monitor: Enable runtime security monitoring
+        block_on_pi_detection: Block processing when PI is detected
+        max_urls_per_session: Maximum URLs to access per session
+        security_log_file: Path to security log file
         **kwargs: Additional keyword arguments
 
     Returns:
@@ -891,6 +916,19 @@ def create_config(
         sub_decomposition_min_sensitivity_pct=fermi_sub_decomposition_min_sensitivity_pct,
     )
 
+    from .security.config import SecurityConfig as _SecurityConfig, SecurityLevel as _SecurityLevel
+    security_config = _SecurityConfig(
+        level=_SecurityLevel(security_level),
+        sanitize_external_content=sanitize_external_content,
+        prompt_boundary_markers=prompt_boundary_markers,
+        validate_llm_output=validate_llm_output,
+        exfil_guard=exfil_guard,
+        enable_monitor=enable_security_monitor,
+        block_on_pi_detection=block_on_pi_detection,
+        max_urls_per_session=max_urls_per_session,
+        security_log_file=Path(security_log_file) if security_log_file else None,
+    )
+
     return Config(
         api=api_config,
         search=search_config,
@@ -900,6 +938,7 @@ def create_config(
         deep_think=deep_think_config,
         fermi_estimation=fermi_config,
         multilingual=multilingual_config,
+        security=security_config,
         additional_documents=docs,
         process_additional_documents=bool(additional_documents),
         enable_verification=enable_verification,

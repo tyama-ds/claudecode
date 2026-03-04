@@ -88,6 +88,8 @@ class FastCrawler:
         fetch_timeout: int = 15,
         batch_size: int = 5,
         language: str = "ja",
+        sanitizer=None,
+        prompt_guard=None,
     ):
         """
         Initialize FastCrawler.
@@ -101,6 +103,8 @@ class FastCrawler:
             fetch_timeout: Timeout for page fetching (seconds)
             batch_size: Pages per batch in batch evaluation mode
             language: Language for evaluation prompts
+            sanitizer: ContentSanitizer instance for PI defense
+            prompt_guard: PromptGuard instance for trust boundary markers
         """
         self.search = search_client
         self.llm = llm_client
@@ -110,6 +114,8 @@ class FastCrawler:
         self.fetch_timeout = fetch_timeout
         self.batch_size = batch_size
         self.language = language
+        self._sanitizer = sanitizer
+        self._prompt_guard = prompt_guard
 
     def _extract_research_context(self, research_topic: str) -> dict:
         """
@@ -485,10 +491,16 @@ Output only JSON:"""
         pages_text = []
         for i, page in enumerate(pages, 1):
             content_preview = page.content[:1500] if page.content else page.snippet
+            # Security: sanitize external content
+            if self._sanitizer:
+                content_preview = self._sanitizer.sanitize(content_preview, page.url)
+                page_title = self._sanitizer.sanitize(page.title, page.url)
+            else:
+                page_title = page.title
             pages_text.append(f"""
 === PAGE {i} ===
 URL: {page.url}
-Title: {page.title}
+Title: {page_title}
 Content Preview:
 {content_preview}
 """)
@@ -698,6 +710,10 @@ Output only the JSON array:"""
         """
         research_context = research_context or {"topic": "", "keywords": [], "focus_areas": ""}
         content_preview = page.content[:2000] if page.content else page.snippet
+
+        # Security: sanitize external content
+        if self._sanitizer:
+            content_preview = self._sanitizer.sanitize(content_preview, page.url)
 
         # Build enhanced context
         research_topic = research_context.get("topic", "")
