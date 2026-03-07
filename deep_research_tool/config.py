@@ -412,6 +412,11 @@ class ResearchConfig:
     v2_max_concurrent_sections: int = 3      # Max concurrent sections
     v2_enable_clarification: bool = False    # Enable pre-research clarification
 
+    # Target site crawling (direct URL specification)
+    target_sites: List[str] = field(default_factory=list)  # URLs to crawl directly
+    target_site_max_pages: int = 20     # Max pages per target site
+    target_site_max_depth: int = 3      # Max depth for target site crawling
+
 
 @dataclass
 class ReportConfig:
@@ -665,6 +670,10 @@ def create_config(
     fermi_sub_decomposition_max_iterations: int = 3,
     fermi_sub_decomposition_confidence_threshold: float = 0.65,
     fermi_sub_decomposition_min_sensitivity_pct: float = 10.0,
+    # Target site crawling parameters
+    target_sites: Optional[List[str]] = None,
+    target_site_max_pages: int = 20,
+    target_site_max_depth: int = 3,
     # Security parameters (prompt injection defense)
     security_level: str = "standard",
     sanitize_external_content: bool = True,
@@ -758,6 +767,9 @@ def create_config(
         researcher_v2_enable_parallel: Enable parallel section processing in V2
         researcher_v2_max_concurrent_sections: Max concurrent sections for parallel processing
         researcher_v2_enable_clarification: Enable pre-research clarification flow in V2
+        target_sites: List of target site URLs to crawl directly (independent of search)
+        target_site_max_pages: Max pages per target site (default: 20)
+        target_site_max_depth: Max crawl depth for target sites (default: 3)
         security_level: Security level preset ('standard', 'strict', 'paranoid')
         sanitize_external_content: Sanitize external content before LLM processing
         prompt_boundary_markers: Add trust boundary markers to LLM prompts
@@ -819,6 +831,9 @@ def create_config(
         v2_enable_parallel=researcher_v2_enable_parallel,
         v2_max_concurrent_sections=researcher_v2_max_concurrent_sections,
         v2_enable_clarification=researcher_v2_enable_clarification,
+        target_sites=target_sites or [],
+        target_site_max_pages=target_site_max_pages,
+        target_site_max_depth=target_site_max_depth,
     )
 
     report_config = ReportConfig(

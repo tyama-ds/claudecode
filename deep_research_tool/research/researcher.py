@@ -165,6 +165,9 @@ class Researcher:
         sanitizer=None,
         prompt_guard=None,
         output_validator=None,
+        target_sites: List[str] = None,
+        target_site_max_pages: int = 20,
+        target_site_max_depth: int = 3,
     ):
         """
         Initialize Researcher.
@@ -242,6 +245,11 @@ class Researcher:
                 progress_callback=progress_callback,
             )
             print(f"[Researcher] Multilingual search enabled: languages={multilingual_config.search_languages}")
+
+        # Target site crawling settings
+        self._target_sites = target_sites or []
+        self._target_site_max_pages = target_site_max_pages
+        self._target_site_max_depth = target_site_max_depth
 
         # Extended mode settings
         self.extended_mode = extended_mode
@@ -360,6 +368,10 @@ class Researcher:
                 10
             )
 
+            # Phase 1.5: Target Site Crawling
+            if self._target_sites:
+                self._crawl_target_sites(query)
+
             # Phase 2: Research Loop
             self.session.state = ResearchState.RESEARCHING
             self._conduct_research_loop()
@@ -389,6 +401,77 @@ class Researcher:
             raise
 
         return self.session
+
+    def _crawl_target_sites(self, query: str) -> None:
+        """
+        Crawl user-specified target sites (Phase 1.5).
+
+        Fetches pages from target URLs using SiteCrawler and registers
+        results in the evidence locker. This runs before the main
+        research loop so that target site content is available during
+        section synthesis.
+        """
+        self._report_progress(
+            f"Crawling {len(self._target_sites)} target site(s)...", 12
+        )
+
+        # Initialize SiteCrawler if not already created (extended_mode may have created one)
+        if not self.site_crawler:
+            self.site_crawler = SiteCrawler(
+                search_client=self.search,
+                llm_client=self.llm,
+                max_pages=self._target_site_max_pages,
+                max_depth=self._target_site_max_depth,
+                relevance_threshold=0.1,  # Low threshold: user explicitly chose these sites
+                language=self.language,
+            )
+
+        # Extract keywords from query for relevance scoring
+        keywords = extract_keywords_from_topic(query)
+
+        try:
+            results = self.site_crawler.crawl_multiple_sites(
+                seed_urls=self._target_sites,
+                topic=query,
+                keywords=keywords,
+                max_pages_per_site=self._target_site_max_pages,
+                max_depth=self._target_site_max_depth,
+            )
+
+            # Register crawled pages as evidence
+            pages_added = 0
+            for result in results:
+                if result.relevant_pages:
+                    for page in result.relevant_pages:
+                        self.evidence_locker.add_evidence(
+                            url=page.url,
+                            title=page.title or "",
+                            content_excerpt=page.content[:500] if page.content else "",
+                            extracted_text=page.content or "",
+                            evidence_type=EvidenceType.WEB_PAGE,
+                        )
+                        pages_added += 1
+
+            # Add target site domains to content filter whitelist
+            if self.content_filter:
+                from urllib.parse import urlparse
+                for url in self._target_sites:
+                    try:
+                        domain = urlparse(url).netloc
+                        if domain:
+                            self.content_filter.add_whitelisted_domain(domain)
+                    except Exception:
+                        pass
+
+            self._report_progress(
+                f"Target site crawling complete: {pages_added} pages collected", 14
+            )
+
+        except Exception as e:
+            self._report_progress(
+                f"Target site crawling error: {e}", -1
+            )
+            print(f"[WARNING] Target site crawling failed: {e}")
 
     def _conduct_research_loop(self) -> None:
         """Execute the main research loop."""

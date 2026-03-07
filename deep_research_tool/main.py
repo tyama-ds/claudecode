@@ -375,6 +375,9 @@ class DeepResearchTool:
             sanitizer=self.sanitizer,
             prompt_guard=self.prompt_guard,
             output_validator=self.output_validator,
+            target_sites=self.config.research.target_sites,
+            target_site_max_pages=self.config.research.target_site_max_pages,
+            target_site_max_depth=self.config.research.target_site_max_depth,
         )
 
         if self.config.research.researcher_version == ResearcherVersion.V2:
@@ -2041,6 +2044,10 @@ def run_research(
     fermi_sub_decomposition_max_iterations: int = 3,
     fermi_sub_decomposition_confidence_threshold: float = 0.65,
     fermi_sub_decomposition_min_sensitivity_pct: float = 10.0,
+    # Target site crawling parameters
+    target_sites: List[str] = None,
+    target_site_max_pages: int = 20,
+    target_site_max_depth: int = 3,
     # V2 report generation parameters
     report_generator_version: str = "v1",
     v2_writing_style: str = "business",
@@ -2117,6 +2124,9 @@ def run_research(
         fermi_sub_decomposition_max_iterations: Max sub-decomposition iterations (0-10)
         fermi_sub_decomposition_confidence_threshold: Confidence threshold for sub-decomposition
         fermi_sub_decomposition_min_sensitivity_pct: Min sensitivity % to trigger sub-decomposition
+        target_sites: List of target site URLs to crawl directly (independent of search)
+        target_site_max_pages: Max pages per target site (default: 20)
+        target_site_max_depth: Max crawl depth for target sites (default: 3)
         report_generator_version: Report generator version ('v1' or 'v2')
         v2_writing_style: V2 writing style ('formal', 'business', 'technical', 'executive', 'casual')
         v2_target_audience: V2 target audience ('expert', 'business', 'engineer', 'general', 'student')
@@ -2234,6 +2244,9 @@ def run_research(
         fermi_sub_decomposition_max_iterations=fermi_sub_decomposition_max_iterations,
         fermi_sub_decomposition_confidence_threshold=fermi_sub_decomposition_confidence_threshold,
         fermi_sub_decomposition_min_sensitivity_pct=fermi_sub_decomposition_min_sensitivity_pct,
+        target_sites=target_sites,
+        target_site_max_pages=target_site_max_pages,
+        target_site_max_depth=target_site_max_depth,
         report_generator_version=report_generator_version,
         v2_writing_style=v2_writing_style,
         v2_target_audience=v2_target_audience,

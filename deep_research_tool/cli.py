@@ -150,6 +150,23 @@ def cli():
     help="Max sites to crawl per search in extended mode (default: 3)"
 )
 @click.option(
+    "--target-site", "-t",
+    multiple=True,
+    help="Target site URL to crawl directly (repeatable, e.g. -t https://example.com)"
+)
+@click.option(
+    "--target-site-max-pages",
+    type=int,
+    default=20,
+    help="Max pages to crawl per target site (default: 20)"
+)
+@click.option(
+    "--target-site-max-depth",
+    type=int,
+    default=3,
+    help="Max crawl depth for target sites (default: 3)"
+)
+@click.option(
     "--auto-figures/--no-auto-figures",
     default=False,
     help="Auto-generate figures/tables and embed in report"
@@ -186,6 +203,9 @@ def research(
     crawl_max_pages: int,
     crawl_max_depth: int,
     crawl_max_sites: int,
+    target_site: tuple,
+    target_site_max_pages: int,
+    target_site_max_depth: int,
     auto_figures: bool,
     verbose: bool,
     openai_key: Optional[str],
@@ -221,6 +241,9 @@ def research(
         crawl_max_pages=crawl_max_pages,
         crawl_max_depth=crawl_max_depth,
         crawl_max_sites=crawl_max_sites,
+        target_sites=list(target_site) if target_site else None,
+        target_site_max_pages=target_site_max_pages,
+        target_site_max_depth=target_site_max_depth,
         auto_figures=auto_figures,
     )
 
