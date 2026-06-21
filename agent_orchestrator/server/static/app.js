@@ -5,7 +5,8 @@ const state = {
   strategies: [],    // strategy metadata
   es: null,          // active EventSource
   sessionId: null,
-  cards: {},         // role-round -> DOM node (for thinking -> filled)
+  cards: {},         // role-round -> DOM node (thinking -> filled)
+  connState: "idle",
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -14,7 +15,9 @@ const $ = (sel) => document.querySelector(sel);
 function accentFor(role) {
   if (["implementer", "agent_a", "planner"].includes(role)) return "acc-a";
   if (["reviewer", "agent_b", "executor"].includes(role)) return "acc-b";
-  return "acc-c"; // synthesizer / anything else
+  const m = /^agent_(\d+)$/.exec(role); // custom participants agent_1, agent_2, …
+  if (m) return ["acc-a", "acc-b", "acc-c"][(parseInt(m[1], 10) - 1) % 3];
+  return "acc-c"; // synthesizer / judge / anything else
 }
 
 // Preference order for auto-selecting a backend per role bucket.
@@ -29,6 +32,14 @@ function defaultAgentFor(role) {
   return "mock";
 }
 
+// Monogram for an agent avatar, e.g. "Claude Code" -> "CC", "Codex" -> "CX".
+function initials(name) {
+  const words = (name || "?").replace(/[()]/g, "").trim().split(/\s+/);
+  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
+  const w = words[0] || "?";
+  return (w.length > 1 ? w[0] + w[1] : w[0]).toUpperCase();
+}
+
 // -- minimal, safe markdown rendering --------------------------------------
 function escapeHtml(s) {
   return s.replace(/[&<>"']/g, (c) => (
@@ -37,12 +48,9 @@ function escapeHtml(s) {
 }
 function renderMarkdown(text) {
   let s = escapeHtml(text || "");
-  // fenced code blocks
   s = s.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
     `<pre><code>${code.replace(/\n$/, "")}</code></pre>`);
-  // inline code
   s = s.replace(/`([^`\n]+)`/g, "<code>$1</code>");
-  // paragraphs / line breaks for the non-code parts
   const parts = s.split(/(<pre>[\s\S]*?<\/pre>)/g);
   return parts.map((p) => {
     if (p.startsWith("<pre>")) return p;
@@ -82,42 +90,135 @@ function renderRoles() {
 
   const wrap = $("#roles");
   wrap.innerHTML = "";
-  st.roles.forEach((role) => {
-    const box = document.createElement("div");
-    box.className = "role " + (accentFor(role.key) === "acc-b" ? "b" : "");
-    const name = document.createElement("div");
-    name.className = "role-name";
-    name.textContent = role.label;
-    const select = document.createElement("select");
-    select.dataset.role = role.key;
-    const preferred = defaultAgentFor(role.key);
-    for (const ag of state.agents) {
-      const opt = document.createElement("option");
-      opt.value = ag.id;
-      opt.textContent = ag.available ? ag.label : `${ag.label} — ${ag.reason}`;
-      opt.disabled = !ag.available;
-      if (ag.id === preferred) opt.selected = true;
-      select.appendChild(opt);
-    }
-    box.appendChild(name);
-    box.appendChild(select);
-    wrap.appendChild(box);
+  if (st.custom) { renderCustomBuilder(wrap); return; }
+  st.roles.forEach((role) => wrap.appendChild(roleCard(role.key, role.label, role.system || "", false)));
+}
+
+// Build one role card: backend picker + optional model + editable persona.
+function roleCard(key, label, defaultSystem, removable) {
+  const bucket = accentFor(key);
+  const box = document.createElement("div");
+  box.className = "role " + (bucket === "acc-b" ? "b" : bucket === "acc-c" ? "c" : "");
+
+  const name = document.createElement("div");
+  name.className = "role-name";
+  name.appendChild(document.createTextNode(label));
+  if (removable) {
+    const rm = document.createElement("button");
+    rm.type = "button"; rm.className = "role-remove"; rm.textContent = "×"; rm.title = "Remove";
+    rm.addEventListener("click", () => { const h = box.parentElement; box.remove(); relabelParticipants(h); });
+    name.appendChild(rm);
+  }
+  box.appendChild(name);
+
+  const sw = document.createElement("div");
+  sw.className = "select-wrap";
+  const select = document.createElement("select");
+  select.dataset.role = key;
+  const preferred = defaultAgentFor(key);
+  for (const ag of state.agents) {
+    const opt = document.createElement("option");
+    opt.value = ag.id;
+    opt.textContent = ag.available ? ag.label : `${ag.label} — ${ag.reason}`;
+    opt.disabled = !ag.available;
+    if (ag.id === preferred) opt.selected = true;
+    select.appendChild(opt);
+  }
+  sw.appendChild(select);
+  box.appendChild(sw);
+
+  const model = document.createElement("input");
+  model.type = "text"; model.className = "model-in";
+  model.placeholder = "model (optional — uses default)";
+  box.appendChild(model);
+
+  const det = document.createElement("details");
+  det.className = "persona";
+  const sum = document.createElement("summary");
+  sum.textContent = "Persona";
+  det.appendChild(sum);
+  const ta = document.createElement("textarea");
+  ta.className = "persona-in"; ta.rows = 3;
+  ta.placeholder = defaultSystem
+    ? "Leave blank to use the default persona below"
+    : "Describe this participant's role / character (optional)";
+  det.appendChild(ta);
+  if (defaultSystem) {
+    const hint = document.createElement("div");
+    hint.className = "persona-default";
+    hint.textContent = "Default: " + defaultSystem;
+    det.appendChild(hint);
+  }
+  box.appendChild(det);
+  return box;
+}
+
+// Custom strategy: a builder for 2–5 freely-defined participants.
+function renderCustomBuilder(wrap) {
+  const holder = document.createElement("div");
+  holder.id = "participants"; holder.className = "roles";
+  wrap.appendChild(holder);
+  const add = document.createElement("button");
+  add.type = "button"; add.className = "btn ghost add-participant";
+  add.textContent = "+ Add participant";
+  add.addEventListener("click", () => addParticipant(holder));
+  wrap.appendChild(add);
+  addParticipant(holder);
+  addParticipant(holder);
+}
+
+function addParticipant(holder) {
+  if (holder.children.length >= 5) return;
+  const i = holder.children.length;
+  holder.appendChild(roleCard("agent_" + (i + 1), "Participant " + (i + 1), "", true));
+  relabelParticipants(holder);
+}
+
+function relabelParticipants(holder) {
+  Array.from(holder.children).forEach((card, i) => {
+    const key = "agent_" + (i + 1);
+    const bucket = accentFor(key);
+    card.className = "role " + (bucket === "acc-b" ? "b" : bucket === "acc-c" ? "c" : "");
+    card.querySelector(".role-name").childNodes[0].nodeValue = "Participant " + (i + 1);
+    card.querySelector("select").dataset.role = key;
   });
+  const add = document.querySelector(".add-participant");
+  if (add) add.disabled = holder.children.length >= 5;
+}
+
+function collectRole(card) {
+  const out = { id: card.querySelector("select").value };
+  const m = card.querySelector(".model-in");
+  if (m && m.value.trim()) out.model = m.value.trim();
+  const s = card.querySelector(".persona-in");
+  if (s && s.value.trim()) out.system = s.value.trim();
+  return out;
 }
 
 function rolesPayload() {
+  const st = currentStrategy();
   const roles = {};
-  document.querySelectorAll("#roles select").forEach((s) => {
-    roles[s.dataset.role] = { id: s.value };
+  if (st && st.custom) {
+    const order = [];
+    document.querySelectorAll("#participants > .role").forEach((card, i) => {
+      const key = "agent_" + (i + 1);
+      order.push(key);
+      roles[key] = collectRole(card);
+    });
+    return { roles, role_order: order };
+  }
+  document.querySelectorAll("#roles > .role").forEach((card) => {
+    roles[card.querySelector("select").dataset.role] = collectRole(card);
   });
-  return roles;
+  return { roles };
 }
 
 // -- run / stream ----------------------------------------------------------
 function setConn(label, cls) {
+  state.connState = cls;
   const el = $("#conn");
-  el.textContent = label;
   el.className = "conn " + cls;
+  el.querySelector(".conn-label").textContent = label;
 }
 function setStatus(msg, isErr) {
   const el = $("#status");
@@ -129,12 +230,14 @@ async function run() {
   const task = $("#task").value.trim();
   if (!task) { setStatus("Please enter a task.", true); return; }
 
+  const rp = rolesPayload();
   const payload = {
     task,
     strategy: $("#strategy").value,
     rounds: parseInt($("#rounds").value, 10) || 2,
-    roles: rolesPayload(),
+    roles: rp.roles,
   };
+  if (rp.role_order) payload.role_order = rp.role_order;
 
   setStatus("Starting…");
   $("#run").disabled = true;
@@ -162,6 +265,8 @@ async function run() {
   state.sessionId = data.session_id;
   state.cards = {};
   $("#stream").innerHTML = "";
+  $("#sp-list").innerHTML = "";
+  $("#scratchpad").hidden = true;
   $("#stop").disabled = false;
   openStream(data.session_id);
 }
@@ -176,8 +281,7 @@ function openStream(id) {
     handleEvent(evt);
   };
   es.onerror = () => {
-    // Stream ended or dropped; if the session already finished we ignore it.
-    if ($("#conn").textContent === "running") setConn("disconnected", "error");
+    if (state.connState === "running") setConn("disconnected", "error");
   };
 }
 
@@ -201,6 +305,8 @@ function handleEvent(evt) {
     fillCard(data);
   } else if (type === "status") {
     addNote(data.message);
+  } else if (type === "scratchpad") {
+    renderScratchpad(data.notes);
   } else if (type === "result") {
     addResult(data.content);
   } else if (type === "error") {
@@ -218,12 +324,14 @@ function addThinkingCard(d) {
   node.className = `turn thinking ${accentFor(d.role)}`;
   node.innerHTML = `
     <div class="turn-head">
-      <span class="dot"></span>
-      <span class="agent">${escapeHtml(d.agent)}</span>
-      <span class="role-tag">${escapeHtml(d.role)}</span>
+      <span class="avatar">${escapeHtml(initials(d.agent))}</span>
+      <span class="who">
+        <span class="agent">${escapeHtml(d.agent)}</span>
+        <span class="role-tag">${escapeHtml(d.role)}</span>
+      </span>
       <span class="round">round ${d.round}</span>
     </div>
-    <div class="turn-body">thinking…</div>`;
+    <div class="turn-body">thinking</div>`;
   $("#stream").appendChild(node);
   state.cards[cardKey(d)] = node;
   node.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -233,8 +341,12 @@ function fillCard(d) {
   const node = state.cards[cardKey(d)] || (() => { addThinkingCard(d); return state.cards[cardKey(d)]; })();
   node.classList.remove("thinking");
   if (!d.ok) node.classList.add("failed");
-  const dur = d.duration != null ? `<span class="dur">${d.duration}s</span>` : "";
-  node.querySelector(".turn-head").insertAdjacentHTML("beforeend", dur);
+  if (d.duration != null) {
+    const dur = document.createElement("span");
+    dur.className = "dur";
+    dur.textContent = `${d.duration}s`;
+    node.querySelector(".turn-head").appendChild(dur);
+  }
   node.querySelector(".turn-body").innerHTML = d.ok ? renderMarkdown(d.content) : escapeHtml(d.content);
   node.scrollIntoView({ behavior: "smooth", block: "end" });
 }
@@ -244,6 +356,17 @@ function addNote(msg) {
   el.className = "note";
   el.textContent = msg;
   $("#stream").appendChild(el);
+}
+
+function renderScratchpad(notes) {
+  const list = $("#sp-list");
+  list.innerHTML = "";
+  (notes || []).forEach((n) => {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="sp-author">${escapeHtml(n.author)}</span>${escapeHtml(n.text)}`;
+    list.appendChild(li);
+  });
+  $("#scratchpad").hidden = !(notes && notes.length);
 }
 
 function addResult(content) {
@@ -263,7 +386,23 @@ function finish(status) {
   else { setConn("error", "error"); }
 }
 
+// -- theme (light / dark) --------------------------------------------------
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  const btn = $("#theme-toggle");
+  if (btn) btn.textContent = t === "light" ? "☀" : "☾";
+}
+function initTheme() {
+  applyTheme(localStorage.getItem("ao-theme") || "dark");
+  $("#theme-toggle").addEventListener("click", () => {
+    const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+    localStorage.setItem("ao-theme", next);
+    applyTheme(next);
+  });
+}
+
 // -- boot ------------------------------------------------------------------
+initTheme();
 $("#run").addEventListener("click", run);
 $("#stop").addEventListener("click", stop);
 loadCatalog().catch((e) => setStatus("Failed to load catalog: " + e, true));

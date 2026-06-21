@@ -14,7 +14,7 @@ Three strategies ship today:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .session import Session, Turn
 
@@ -25,6 +25,21 @@ class StopRequested(Exception):
 
 class AgentTurnError(Exception):
     """Raised when an agent turn fails, aborting the collaboration."""
+
+
+def _scratchpad_system(session: Session, system: str) -> str:
+    """Append the shared-scratchpad protocol + current contents to a system prompt.
+
+    Every agent, in every strategy, can read the team blackboard and contribute
+    to it by writing ``NOTE:`` lines — giving the collaboration a shared memory.
+    """
+    return (
+        f"{system}\n\n"
+        "SHARED SCRATCHPAD — a team blackboard visible to every agent. To record a "
+        "durable fact, decision, or open question for the others, add a line beginning "
+        "with 'NOTE:' anywhere in your reply.\n"
+        f"Current scratchpad:\n{session.render_scratchpad()}"
+    )
 
 
 def _run_turn(session: Session, role: str, system: str, prompt: str, rnd: int) -> str:
@@ -38,7 +53,9 @@ def _run_turn(session: Session, role: str, system: str, prompt: str, rnd: int) -
 
     adapter = session.agents[role]
     session.emit("turn_start", agent=adapter.display_name, role=role, round=rnd)
-    result = adapter.generate(prompt, system=system)
+    # A per-role persona override from the UI wins over the strategy's default.
+    system = session.personas.get(role) or system
+    result = adapter.generate(prompt, system=_scratchpad_system(session, system))
 
     turn = Turn(
         agent=adapter.display_name,
@@ -62,6 +79,10 @@ def _run_turn(session: Session, role: str, system: str, prompt: str, rnd: int) -
     )
     if not result.ok:
         raise AgentTurnError(f"{adapter.display_name} ({role}) failed: {result.error}")
+
+    # Pull any NOTE: lines onto the shared blackboard and notify the UI.
+    if session.absorb_notes(adapter.display_name, result.text):
+        session.emit("scratchpad", notes=session.scratchpad_view())
     return result.text
 
 
@@ -70,6 +91,10 @@ class Strategy(ABC):
     description: str = ""
     #: (role_key, human_label) pairs the UI renders one backend-picker for.
     roles: List[Tuple[str, str]] = []
+    #: Default system prompt per role key (shown in the UI, overridable).
+    personas: Dict[str, str] = {}
+    #: True for the user-defined strategy whose roles come from the request.
+    custom: bool = False
     default_rounds: int = 2
 
     @abstractmethod
@@ -98,6 +123,7 @@ class ImplementerReviewer(Strategy):
         "tests. Be specific and actionable. End with a clear verdict: APPROVE or "
         "REQUEST CHANGES."
     )
+    personas = {"implementer": IMPL_SYS, "reviewer": REVIEW_SYS}
 
     def run(self, session: Session) -> str:
         impl = ""
@@ -138,6 +164,7 @@ class DebateConsensus(Strategy):
         "final answer: state the best-supported conclusion and briefly note the key "
         "trade-offs that decided it."
     )
+    personas = {"agent_a": A_SYS, "agent_b": B_SYS}
 
     def run(self, session: Session) -> str:
         a = _run_turn(session, "agent_a", self.A_SYS, f"Task:\n{session.task}\n\nOpening argument.", 1)
@@ -180,6 +207,7 @@ class PlannerExecutor(Strategy):
         "You are the EXECUTOR. Carry out the planner's plan as concretely as possible, "
         "producing real artifacts/code. Report what you completed and anything blocking."
     )
+    personas = {"planner": PLAN_SYS, "executor": EXEC_SYS}
 
     def run(self, session: Session) -> str:
         plan = _run_turn(session, "planner", self.PLAN_SYS, f"Task:\n{session.task}", 1)
@@ -205,9 +233,209 @@ class PlannerExecutor(Strategy):
 
 # -- registry --------------------------------------------------------------
 
+class RoundRobin(Strategy):
+    name = "round_robin"
+    description = (
+        "Several agents discuss the task in an open round-table — each sees the whole "
+        "conversation and addresses the others — then close with a shared conclusion."
+    )
+    roles = [("agent_a", "Agent A"), ("agent_b", "Agent B"), ("agent_c", "Agent C")]
+    default_rounds = 2
+
+    CLOSE_SYS = (
+        "You are the FACILITATOR closing an open discussion among several AI agents. "
+        "Summarise the conclusion the group reached and the concrete next steps, fairly "
+        "reflecting the different contributions."
+    )
+    _ROUND_PERSONA = (
+        "You are one of several AI agents in an open round-table discussion. Read the "
+        "conversation so far and add your next contribution: build on others' points, "
+        "agree or push back with reasons, ask a pointed question, or propose concrete "
+        "progress. Address the others directly and keep your message focused."
+    )
+    personas = {"agent_a": _ROUND_PERSONA, "agent_b": _ROUND_PERSONA, "agent_c": _ROUND_PERSONA}
+
+    def _sys(self, me: str, others: str) -> str:
+        return (
+            f"You are {me}, one of several AI agents in an open round-table discussion. "
+            f"The other participants are: {others}. Read the conversation so far and add your "
+            f"next contribution: build on what others said, agree or push back with reasons, "
+            f"ask a pointed question, or propose concrete progress. Address the others directly "
+            f"and keep your message focused — don't restate the whole thread. Collaborate toward "
+            f"a useful outcome."
+        )
+
+    def run(self, session: Session) -> str:
+        order = [key for key, _ in self.roles]
+        names = {r: session.agents[r].display_name for r in order}
+        convo: List[str] = []
+
+        for rnd in range(1, session.rounds + 1):
+            for role in order:
+                me = names[role]
+                others = ", ".join(n for r, n in names.items() if r != role)
+                if convo:
+                    prompt = (
+                        f"Topic:\n{session.task}\n\nConversation so far:\n"
+                        + "\n\n".join(convo)
+                        + f"\n\nYou are {me}. Add your next contribution."
+                    )
+                else:
+                    prompt = (
+                        f"Topic:\n{session.task}\n\nYou are {me} and you are opening the "
+                        f"discussion. Share your initial take to get the group started."
+                    )
+                text = _run_turn(session, role, self._sys(me, others), prompt, rnd)
+                convo.append(f"{me}: {text}")
+
+        # Closing synthesis. The facilitator reuses the first agent's backend but
+        # runs under a distinct role so the UI tags it as a synthesis (violet).
+        session.agents["closer"] = session.agents[order[0]]
+        closing = _run_turn(
+            session, "closer", self.CLOSE_SYS,
+            f"Topic:\n{session.task}\n\nFull discussion:\n" + "\n\n".join(convo)
+            + "\n\nClose the discussion: state the group's conclusion and next steps.",
+            session.rounds,
+        )
+        return self.finish(session, closing)
+
+
+class PanelJudge(Strategy):
+    name = "panel_judge"
+    description = (
+        "Three agents present competing positions on the task; a fourth agent acts as "
+        "an impartial judge, evaluates them, and delivers the verdict."
+    )
+    roles = [
+        ("agent_a", "Contender A"),
+        ("agent_b", "Contender B"),
+        ("agent_c", "Contender C"),
+        ("judge", "Judge"),
+    ]
+    default_rounds = 1
+
+    JUDGE_SYS = (
+        "You are an impartial JUDGE. Evaluate each contender's position against the task "
+        "on correctness, completeness, and risk. Then deliver a clear verdict: name the "
+        "strongest approach (or a synthesis of the best parts), justify it concisely, and "
+        "state the recommended next step."
+    )
+    _PANEL_PERSONA = (
+        "You are presenting your own position or solution to a panel that a judge will "
+        "evaluate. Make the strongest concrete case for your approach; where useful, point "
+        "out weaknesses in the others' positions. Be specific — the judge rewards substance."
+    )
+    personas = {
+        "agent_a": _PANEL_PERSONA, "agent_b": _PANEL_PERSONA, "agent_c": _PANEL_PERSONA,
+        "judge": JUDGE_SYS,
+    }
+
+    def _sys(self, me: str, others: str) -> str:
+        return (
+            f"You are {me}, presenting your own position or solution to a panel that a "
+            f"judge will evaluate. The other contenders are: {others}. Make the strongest "
+            f"concrete case for your approach; where useful, point out weaknesses in the "
+            f"others' positions. Be specific — the judge rewards substance over rhetoric."
+        )
+
+    def run(self, session: Session) -> str:
+        order = ["agent_a", "agent_b", "agent_c"]
+        names = {r: session.agents[r].display_name for r in order}
+        convo: List[str] = []
+
+        for rnd in range(1, session.rounds + 1):
+            for role in order:
+                me = names[role]
+                others = ", ".join(n for r, n in names.items() if r != role)
+                if convo:
+                    prompt = (
+                        f"Task:\n{session.task}\n\nPositions so far:\n" + "\n\n".join(convo)
+                        + f"\n\nYou are {me}. Sharpen or defend your position."
+                    )
+                else:
+                    prompt = (
+                        f"Task:\n{session.task}\n\nYou are {me}. Present your position."
+                    )
+                text = _run_turn(session, role, self._sys(me, others), prompt, rnd)
+                convo.append(f"{me}: {text}")
+
+        verdict = _run_turn(
+            session, "judge", self.JUDGE_SYS,
+            f"Task:\n{session.task}\n\nContenders' positions:\n" + "\n\n".join(convo)
+            + "\n\nEvaluate each and deliver your verdict.",
+            session.rounds,
+        )
+        return self.finish(session, verdict)
+
+
+class CustomStrategy(Strategy):
+    name = "custom"
+    description = (
+        "Build your own panel — choose a backend, model, and persona for each "
+        "participant. They discuss the task in an open round-table, then close with a "
+        "shared conclusion."
+    )
+    roles = []          # supplied per run via the request (session.role_order)
+    custom = True
+    default_rounds = 2
+
+    CLOSE_SYS = (
+        "You are the FACILITATOR closing the discussion. Summarise the conclusion the "
+        "participants reached and the concrete next steps, fairly reflecting their input."
+    )
+
+    def _fallback_sys(self, me: str, others: str) -> str:
+        return (
+            f"You are {me}, a participant in a collaborative discussion. The others are: "
+            f"{others}. Read the conversation so far and add a focused, useful contribution."
+        )
+
+    def run(self, session: Session) -> str:
+        order = session.role_order or [k for k, _ in self.roles]
+        if not order:
+            raise AgentTurnError("custom strategy needs at least one participant")
+        names = {r: session.agents[r].display_name for r in order}
+        convo: List[str] = []
+
+        for rnd in range(1, session.rounds + 1):
+            for role in order:
+                me = names[role]
+                others = ", ".join(n for r, n in names.items() if r != role) or "(none)"
+                if convo:
+                    prompt = (
+                        f"Topic:\n{session.task}\n\nConversation so far:\n" + "\n\n".join(convo)
+                        + f"\n\nYou are {me}. Add your next contribution."
+                    )
+                else:
+                    prompt = (
+                        f"Topic:\n{session.task}\n\nYou are {me}. Open the discussion with "
+                        f"your initial take."
+                    )
+                # _run_turn applies the user's persona override (session.personas) when set;
+                # otherwise this generic fallback is used.
+                text = _run_turn(session, role, self._fallback_sys(me, others), prompt, rnd)
+                convo.append(f"{me}: {text}")
+
+        session.agents["closer"] = session.agents[order[0]]
+        closing = _run_turn(
+            session, "closer", self.CLOSE_SYS,
+            f"Topic:\n{session.task}\n\nFull discussion:\n" + "\n\n".join(convo)
+            + "\n\nClose the discussion: state the conclusion and the next steps.",
+            session.rounds,
+        )
+        return self.finish(session, closing)
+
+
 STRATEGIES = {
     s.name: s
-    for s in (ImplementerReviewer(), DebateConsensus(), PlannerExecutor())
+    for s in (
+        ImplementerReviewer(),
+        DebateConsensus(),
+        PlannerExecutor(),
+        RoundRobin(),
+        PanelJudge(),
+        CustomStrategy(),
+    )
 }
 
 
@@ -223,8 +451,12 @@ def strategy_metadata() -> List[dict]:
         {
             "name": s.name,
             "description": s.description,
-            "roles": [{"key": k, "label": label} for k, label in s.roles],
+            "roles": [
+                {"key": k, "label": label, "system": s.personas.get(k, "")}
+                for k, label in s.roles
+            ],
             "default_rounds": s.default_rounds,
+            "custom": s.custom,
         }
         for s in STRATEGIES.values()
     ]

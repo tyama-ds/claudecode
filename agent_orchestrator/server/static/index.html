@@ -5,31 +5,47 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Agent Orchestrator — Codex × Claude Code</title>
   <link rel="stylesheet" href="/static/style.css" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="logo">⛓</span>
-      <div>
-        <h1>Agent Orchestrator</h1>
-        <p class="tagline">Make <strong>Codex</strong> and <strong>Claude Code</strong> collaborate — extensible to local LLMs.</p>
+      <span class="mark" aria-hidden="true">
+        <span class="node a"></span>
+        <span class="node b"></span>
+      </span>
+      <div class="brand-text">
+        <span class="wordmark">agent<span class="slash">//</span>orchestrator</span>
+        <span class="sub">Codex&nbsp;×&nbsp;Claude&nbsp;Code · live collaboration</span>
       </div>
     </div>
-    <div id="conn" class="conn idle">idle</div>
+    <div class="topbar-right">
+      <button id="theme-toggle" class="theme-toggle" type="button"
+        title="Toggle light / dark" aria-label="Toggle light or dark theme">☾</button>
+      <div id="conn" class="conn idle" role="status" aria-live="polite">
+        <span class="conn-dot"></span>
+        <span class="conn-label">idle</span>
+      </div>
+    </div>
   </header>
 
-  <main class="layout">
-    <!-- Control panel -->
-    <section class="panel config" aria-label="Configuration">
+  <main class="console">
+    <!-- Compose rail -->
+    <section class="panel rail" aria-label="Compose">
+      <div class="panel-head">
+        <span class="eyebrow">Compose</span>
+      </div>
+
       <label class="field">
         <span class="field-label">Task</span>
-        <textarea id="task" rows="5" placeholder="Describe the task for the agents to collaborate on…"></textarea>
+        <textarea id="task" rows="5"
+          placeholder="Describe the task for the agents to collaborate on…"></textarea>
       </label>
 
       <label class="field">
-        <span class="field-label">Collaboration strategy</span>
-        <select id="strategy"></select>
+        <span class="field-label">Strategy</span>
+        <div class="select-wrap">
+          <select id="strategy"></select>
+        </div>
         <span id="strategy-desc" class="hint"></span>
       </label>
 
@@ -41,23 +57,44 @@
       </label>
 
       <div class="actions">
-        <button id="run" class="btn primary">Run collaboration</button>
+        <button id="run" class="btn primary">
+          <span class="btn-label">Run collaboration</span>
+        </button>
         <button id="stop" class="btn ghost" disabled>Stop</button>
       </div>
-      <div id="status" class="status"></div>
+      <div id="status" class="status" role="status" aria-live="polite"></div>
     </section>
 
-    <!-- Transcript -->
-    <section class="panel transcript" aria-label="Transcript">
-      <div class="transcript-head">
-        <h2>Transcript</h2>
+    <!-- Live transcript -->
+    <section class="panel feed" aria-label="Live transcript">
+      <div class="panel-head feed-head">
+        <span class="eyebrow">Live transcript</span>
         <div id="meta" class="meta"></div>
       </div>
+      <div id="scratchpad" class="scratchpad" hidden>
+        <div class="sp-head"><span class="sp-dot"></span>Shared scratchpad</div>
+        <ul id="sp-list" class="sp-list"></ul>
+      </div>
       <div id="stream" class="stream">
-        <div class="empty">No run yet. Configure agents on the left and press <em>Run collaboration</em>.</div>
+        <div class="empty">
+          <div class="empty-motif" aria-hidden="true">
+            <span class="chip a">A</span>
+            <span class="link-line"></span>
+            <span class="chip b">B</span>
+          </div>
+          <h2 class="empty-title">Two agents, one task.</h2>
+          <p class="empty-copy">
+            Configure the collaboration on the left and press
+            <em>Run</em>. Each agent's turn streams in here as it happens.
+          </p>
+        </div>
       </div>
     </section>
   </main>
+
+  <footer class="foot">
+    Runs on the Python standard library — no installs, no telemetry.
+  </footer>
 
   <script src="/static/app.js"></script>
 </body>

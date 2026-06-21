@@ -1,11 +1,13 @@
-# The orchestration core and the web UI use only the Python standard library —
-# nothing here is required to run the MVP (mock adapter + the local `claude`/
-# `codex` CLIs work out of the box).
+# No third-party dependencies are required.
 #
-# Install these ONLY for the corresponding API-backed adapters:
-
-# Claude (API) adapter — "anthropic" backend
-anthropic>=0.40.0
-
-# GPT (API) adapter and Local LLM adapter (OpenAI-compatible endpoints) — "openai" / "local"
-openai>=1.40.0
+# The orchestration core, the web UI, AND the LLM API adapters all run on the
+# Python standard library only (the API adapters call the providers' REST
+# endpoints directly via urllib — no SDKs, no compiled wheels). This keeps the
+# tool friendly to locked-down / audited environments: nothing to pip-install,
+# no native binaries, no .exe.
+#
+# To use the API backends you only need the relevant API key set in the
+# environment (see .env.example):
+#   - Claude (API)   -> ANTHROPIC_API_KEY
+#   - GPT (API)      -> OPENAI_API_KEY
+#   - Local LLM      -> a running OpenAI-compatible server (e.g. Ollama)
