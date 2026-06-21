@@ -51,6 +51,8 @@ class Session:
     status: str = "pending"  # pending | running | done | error | stopped
     transcript: List[Turn] = field(default_factory=list)
     scratchpad: List[Note] = field(default_factory=list)  # shared blackboard
+    personas: Dict[str, str] = field(default_factory=dict)  # per-role system-prompt overrides
+    role_order: List[str] = field(default_factory=list)     # ordered roles (used by custom strategy)
     stop_requested: bool = False
 
     # -- helpers used by the engine/strategies ----------------------------

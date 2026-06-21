@@ -15,7 +15,9 @@ const $ = (sel) => document.querySelector(sel);
 function accentFor(role) {
   if (["implementer", "agent_a", "planner"].includes(role)) return "acc-a";
   if (["reviewer", "agent_b", "executor"].includes(role)) return "acc-b";
-  return "acc-c"; // synthesizer / anything else
+  const m = /^agent_(\d+)$/.exec(role); // custom participants agent_1, agent_2, …
+  if (m) return ["acc-a", "acc-b", "acc-c"][(parseInt(m[1], 10) - 1) % 3];
+  return "acc-c"; // synthesizer / judge / anything else
 }
 
 // Preference order for auto-selecting a backend per role bucket.
@@ -88,39 +90,127 @@ function renderRoles() {
 
   const wrap = $("#roles");
   wrap.innerHTML = "";
-  st.roles.forEach((role) => {
-    const box = document.createElement("div");
-    const bucket = accentFor(role.key);
-    box.className = "role " + (bucket === "acc-b" ? "b" : bucket === "acc-c" ? "c" : "");
-    const name = document.createElement("div");
-    name.className = "role-name";
-    name.textContent = role.label;
-    const wrapSel = document.createElement("div");
-    wrapSel.className = "select-wrap";
-    const select = document.createElement("select");
-    select.dataset.role = role.key;
-    const preferred = defaultAgentFor(role.key);
-    for (const ag of state.agents) {
-      const opt = document.createElement("option");
-      opt.value = ag.id;
-      opt.textContent = ag.available ? ag.label : `${ag.label} — ${ag.reason}`;
-      opt.disabled = !ag.available;
-      if (ag.id === preferred) opt.selected = true;
-      select.appendChild(opt);
-    }
-    wrapSel.appendChild(select);
-    box.appendChild(name);
-    box.appendChild(wrapSel);
-    wrap.appendChild(box);
+  if (st.custom) { renderCustomBuilder(wrap); return; }
+  st.roles.forEach((role) => wrap.appendChild(roleCard(role.key, role.label, role.system || "", false)));
+}
+
+// Build one role card: backend picker + optional model + editable persona.
+function roleCard(key, label, defaultSystem, removable) {
+  const bucket = accentFor(key);
+  const box = document.createElement("div");
+  box.className = "role " + (bucket === "acc-b" ? "b" : bucket === "acc-c" ? "c" : "");
+
+  const name = document.createElement("div");
+  name.className = "role-name";
+  name.appendChild(document.createTextNode(label));
+  if (removable) {
+    const rm = document.createElement("button");
+    rm.type = "button"; rm.className = "role-remove"; rm.textContent = "×"; rm.title = "Remove";
+    rm.addEventListener("click", () => { const h = box.parentElement; box.remove(); relabelParticipants(h); });
+    name.appendChild(rm);
+  }
+  box.appendChild(name);
+
+  const sw = document.createElement("div");
+  sw.className = "select-wrap";
+  const select = document.createElement("select");
+  select.dataset.role = key;
+  const preferred = defaultAgentFor(key);
+  for (const ag of state.agents) {
+    const opt = document.createElement("option");
+    opt.value = ag.id;
+    opt.textContent = ag.available ? ag.label : `${ag.label} — ${ag.reason}`;
+    opt.disabled = !ag.available;
+    if (ag.id === preferred) opt.selected = true;
+    select.appendChild(opt);
+  }
+  sw.appendChild(select);
+  box.appendChild(sw);
+
+  const model = document.createElement("input");
+  model.type = "text"; model.className = "model-in";
+  model.placeholder = "model (optional — uses default)";
+  box.appendChild(model);
+
+  const det = document.createElement("details");
+  det.className = "persona";
+  const sum = document.createElement("summary");
+  sum.textContent = "Persona";
+  det.appendChild(sum);
+  const ta = document.createElement("textarea");
+  ta.className = "persona-in"; ta.rows = 3;
+  ta.placeholder = defaultSystem
+    ? "Leave blank to use the default persona below"
+    : "Describe this participant's role / character (optional)";
+  det.appendChild(ta);
+  if (defaultSystem) {
+    const hint = document.createElement("div");
+    hint.className = "persona-default";
+    hint.textContent = "Default: " + defaultSystem;
+    det.appendChild(hint);
+  }
+  box.appendChild(det);
+  return box;
+}
+
+// Custom strategy: a builder for 2–5 freely-defined participants.
+function renderCustomBuilder(wrap) {
+  const holder = document.createElement("div");
+  holder.id = "participants"; holder.className = "roles";
+  wrap.appendChild(holder);
+  const add = document.createElement("button");
+  add.type = "button"; add.className = "btn ghost add-participant";
+  add.textContent = "+ Add participant";
+  add.addEventListener("click", () => addParticipant(holder));
+  wrap.appendChild(add);
+  addParticipant(holder);
+  addParticipant(holder);
+}
+
+function addParticipant(holder) {
+  if (holder.children.length >= 5) return;
+  const i = holder.children.length;
+  holder.appendChild(roleCard("agent_" + (i + 1), "Participant " + (i + 1), "", true));
+  relabelParticipants(holder);
+}
+
+function relabelParticipants(holder) {
+  Array.from(holder.children).forEach((card, i) => {
+    const key = "agent_" + (i + 1);
+    const bucket = accentFor(key);
+    card.className = "role " + (bucket === "acc-b" ? "b" : bucket === "acc-c" ? "c" : "");
+    card.querySelector(".role-name").childNodes[0].nodeValue = "Participant " + (i + 1);
+    card.querySelector("select").dataset.role = key;
   });
+  const add = document.querySelector(".add-participant");
+  if (add) add.disabled = holder.children.length >= 5;
+}
+
+function collectRole(card) {
+  const out = { id: card.querySelector("select").value };
+  const m = card.querySelector(".model-in");
+  if (m && m.value.trim()) out.model = m.value.trim();
+  const s = card.querySelector(".persona-in");
+  if (s && s.value.trim()) out.system = s.value.trim();
+  return out;
 }
 
 function rolesPayload() {
+  const st = currentStrategy();
   const roles = {};
-  document.querySelectorAll("#roles select").forEach((s) => {
-    roles[s.dataset.role] = { id: s.value };
+  if (st && st.custom) {
+    const order = [];
+    document.querySelectorAll("#participants > .role").forEach((card, i) => {
+      const key = "agent_" + (i + 1);
+      order.push(key);
+      roles[key] = collectRole(card);
+    });
+    return { roles, role_order: order };
+  }
+  document.querySelectorAll("#roles > .role").forEach((card) => {
+    roles[card.querySelector("select").dataset.role] = collectRole(card);
   });
-  return roles;
+  return { roles };
 }
 
 // -- run / stream ----------------------------------------------------------
@@ -140,12 +230,14 @@ async function run() {
   const task = $("#task").value.trim();
   if (!task) { setStatus("Please enter a task.", true); return; }
 
+  const rp = rolesPayload();
   const payload = {
     task,
     strategy: $("#strategy").value,
     rounds: parseInt($("#rounds").value, 10) || 2,
-    roles: rolesPayload(),
+    roles: rp.roles,
   };
+  if (rp.role_order) payload.role_order = rp.role_order;
 
   setStatus("Starting…");
   $("#run").disabled = true;

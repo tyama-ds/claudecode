@@ -14,7 +14,7 @@ Three strategies ship today:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .session import Session, Turn
 
@@ -53,6 +53,8 @@ def _run_turn(session: Session, role: str, system: str, prompt: str, rnd: int) -
 
     adapter = session.agents[role]
     session.emit("turn_start", agent=adapter.display_name, role=role, round=rnd)
+    # A per-role persona override from the UI wins over the strategy's default.
+    system = session.personas.get(role) or system
     result = adapter.generate(prompt, system=_scratchpad_system(session, system))
 
     turn = Turn(
@@ -89,6 +91,10 @@ class Strategy(ABC):
     description: str = ""
     #: (role_key, human_label) pairs the UI renders one backend-picker for.
     roles: List[Tuple[str, str]] = []
+    #: Default system prompt per role key (shown in the UI, overridable).
+    personas: Dict[str, str] = {}
+    #: True for the user-defined strategy whose roles come from the request.
+    custom: bool = False
     default_rounds: int = 2
 
     @abstractmethod
@@ -117,6 +123,7 @@ class ImplementerReviewer(Strategy):
         "tests. Be specific and actionable. End with a clear verdict: APPROVE or "
         "REQUEST CHANGES."
     )
+    personas = {"implementer": IMPL_SYS, "reviewer": REVIEW_SYS}
 
     def run(self, session: Session) -> str:
         impl = ""
@@ -157,6 +164,7 @@ class DebateConsensus(Strategy):
         "final answer: state the best-supported conclusion and briefly note the key "
         "trade-offs that decided it."
     )
+    personas = {"agent_a": A_SYS, "agent_b": B_SYS}
 
     def run(self, session: Session) -> str:
         a = _run_turn(session, "agent_a", self.A_SYS, f"Task:\n{session.task}\n\nOpening argument.", 1)
@@ -199,6 +207,7 @@ class PlannerExecutor(Strategy):
         "You are the EXECUTOR. Carry out the planner's plan as concretely as possible, "
         "producing real artifacts/code. Report what you completed and anything blocking."
     )
+    personas = {"planner": PLAN_SYS, "executor": EXEC_SYS}
 
     def run(self, session: Session) -> str:
         plan = _run_turn(session, "planner", self.PLAN_SYS, f"Task:\n{session.task}", 1)
@@ -238,6 +247,13 @@ class RoundRobin(Strategy):
         "Summarise the conclusion the group reached and the concrete next steps, fairly "
         "reflecting the different contributions."
     )
+    _ROUND_PERSONA = (
+        "You are one of several AI agents in an open round-table discussion. Read the "
+        "conversation so far and add your next contribution: build on others' points, "
+        "agree or push back with reasons, ask a pointed question, or propose concrete "
+        "progress. Address the others directly and keep your message focused."
+    )
+    personas = {"agent_a": _ROUND_PERSONA, "agent_b": _ROUND_PERSONA, "agent_c": _ROUND_PERSONA}
 
     def _sys(self, me: str, others: str) -> str:
         return (
@@ -304,6 +320,15 @@ class PanelJudge(Strategy):
         "strongest approach (or a synthesis of the best parts), justify it concisely, and "
         "state the recommended next step."
     )
+    _PANEL_PERSONA = (
+        "You are presenting your own position or solution to a panel that a judge will "
+        "evaluate. Make the strongest concrete case for your approach; where useful, point "
+        "out weaknesses in the others' positions. Be specific — the judge rewards substance."
+    )
+    personas = {
+        "agent_a": _PANEL_PERSONA, "agent_b": _PANEL_PERSONA, "agent_c": _PANEL_PERSONA,
+        "judge": JUDGE_SYS,
+    }
 
     def _sys(self, me: str, others: str) -> str:
         return (
@@ -343,6 +368,64 @@ class PanelJudge(Strategy):
         return self.finish(session, verdict)
 
 
+class CustomStrategy(Strategy):
+    name = "custom"
+    description = (
+        "Build your own panel — choose a backend, model, and persona for each "
+        "participant. They discuss the task in an open round-table, then close with a "
+        "shared conclusion."
+    )
+    roles = []          # supplied per run via the request (session.role_order)
+    custom = True
+    default_rounds = 2
+
+    CLOSE_SYS = (
+        "You are the FACILITATOR closing the discussion. Summarise the conclusion the "
+        "participants reached and the concrete next steps, fairly reflecting their input."
+    )
+
+    def _fallback_sys(self, me: str, others: str) -> str:
+        return (
+            f"You are {me}, a participant in a collaborative discussion. The others are: "
+            f"{others}. Read the conversation so far and add a focused, useful contribution."
+        )
+
+    def run(self, session: Session) -> str:
+        order = session.role_order or [k for k, _ in self.roles]
+        if not order:
+            raise AgentTurnError("custom strategy needs at least one participant")
+        names = {r: session.agents[r].display_name for r in order}
+        convo: List[str] = []
+
+        for rnd in range(1, session.rounds + 1):
+            for role in order:
+                me = names[role]
+                others = ", ".join(n for r, n in names.items() if r != role) or "(none)"
+                if convo:
+                    prompt = (
+                        f"Topic:\n{session.task}\n\nConversation so far:\n" + "\n\n".join(convo)
+                        + f"\n\nYou are {me}. Add your next contribution."
+                    )
+                else:
+                    prompt = (
+                        f"Topic:\n{session.task}\n\nYou are {me}. Open the discussion with "
+                        f"your initial take."
+                    )
+                # _run_turn applies the user's persona override (session.personas) when set;
+                # otherwise this generic fallback is used.
+                text = _run_turn(session, role, self._fallback_sys(me, others), prompt, rnd)
+                convo.append(f"{me}: {text}")
+
+        session.agents["closer"] = session.agents[order[0]]
+        closing = _run_turn(
+            session, "closer", self.CLOSE_SYS,
+            f"Topic:\n{session.task}\n\nFull discussion:\n" + "\n\n".join(convo)
+            + "\n\nClose the discussion: state the conclusion and the next steps.",
+            session.rounds,
+        )
+        return self.finish(session, closing)
+
+
 STRATEGIES = {
     s.name: s
     for s in (
@@ -351,6 +434,7 @@ STRATEGIES = {
         PlannerExecutor(),
         RoundRobin(),
         PanelJudge(),
+        CustomStrategy(),
     )
 }
 
@@ -367,8 +451,12 @@ def strategy_metadata() -> List[dict]:
         {
             "name": s.name,
             "description": s.description,
-            "roles": [{"key": k, "label": label} for k, label in s.roles],
+            "roles": [
+                {"key": k, "label": label, "system": s.personas.get(k, "")}
+                for k, label in s.roles
+            ],
             "default_rounds": s.default_rounds,
+            "custom": s.custom,
         }
         for s in STRATEGIES.values()
     ]

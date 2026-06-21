@@ -122,16 +122,34 @@ class Handler(BaseHTTPRequestHandler):
 
         rounds = max(1, min(rounds, 8))
 
-        # Build one adapter per role the strategy requires; default to mock.
+        # Roles are fixed by the strategy, except for the user-defined "custom"
+        # strategy whose participants come from the request.
+        if strategy.custom:
+            order = body.get("role_order") or list(roles_spec.keys())
+            role_list = [(k, k) for k in order]
+            if len(role_list) < 2:
+                self._send_json(
+                    {"error": "custom strategy needs at least 2 participants"}, status=400
+                )
+                return
+        else:
+            role_list = strategy.roles
+
+        # Build one adapter per role; capture per-role model + persona overrides.
         agents = {}
+        personas = {}
         unavailable = []
-        for role_key, _label in strategy.roles:
+        for role_key, _label in role_list:
             spec = roles_spec.get(role_key) or {"id": "mock"}
-            spec = {"id": spec.get("id", "mock"), "name": role_key, "model": spec.get("model")}
-            adapter = build_adapter(spec)
+            adapter = build_adapter(
+                {"id": spec.get("id", "mock"), "name": role_key, "model": spec.get("model")}
+            )
+            sys_override = (spec.get("system") or "").strip()
+            if sys_override:
+                personas[role_key] = sys_override
             ok, reason = adapter.available()
             if not ok:
-                unavailable.append({"role": role_key, "id": spec["id"], "reason": reason})
+                unavailable.append({"role": role_key, "id": spec.get("id", "mock"), "reason": reason})
             agents[role_key] = adapter
 
         if unavailable:
@@ -142,6 +160,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         session = MANAGER.create(task, strategy_name, rounds, agents)
+        session.personas = personas
+        session.role_order = [k for k, _ in role_list]
         start_session(session)
         self._send_json({"session_id": session.id})
 

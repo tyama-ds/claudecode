@@ -56,6 +56,11 @@ press **Run collaboration**. Turns stream into the transcript as they happen.
 | **Planner + Executor** | planner, executor | One plans, the other executes; the planner adjusts each round. |
 | **Round-robin (free dialogue)** | agent A, B, C | Several agents discuss openly — each sees the whole thread and addresses the others — then close with a shared conclusion. |
 | **Panel + Judge** | contender A, B, C, judge | Three agents argue competing positions; an impartial judge evaluates them and delivers the verdict. |
+| **Custom** | your own (2–5) | Define each participant from scratch — backend, model, and persona — then they discuss and close with a conclusion. |
+
+For **every role** you can independently choose the **backend, model, and
+persona** (system prompt) right in the UI — mix Claude Code, Codex, GPT, and
+local models in a single run, and override any role's instructions.
 
 All strategies share a **scratchpad** — a team blackboard any agent can write to
 by adding `NOTE:` lines. It appears pinned above the transcript so the shared

@@ -201,9 +201,38 @@ select option { background: #0c111b; color: var(--text); }
 .role.b::before { background: var(--b); }
 .role.c::before { background: var(--c); }
 .role .role-name {
+  display: flex; align-items: center; justify-content: space-between;
   font-family: var(--mono); font-size: 11px; letter-spacing: 0.5px;
   text-transform: uppercase; color: var(--text-dim); margin-bottom: 7px;
 }
+.role-remove {
+  background: none; border: none; color: var(--text-faint);
+  font-size: 16px; line-height: 1; cursor: pointer; padding: 0 2px;
+}
+.role-remove:hover { color: var(--bad); }
+.model-in {
+  width: 100%; margin-top: 8px;
+  background: rgba(8, 11, 18, 0.7); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  padding: 8px 11px; font-family: var(--mono); font-size: 12px; outline: none;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+.model-in:focus { border-color: rgba(43, 212, 192, 0.6); box-shadow: 0 0 0 3px rgba(43, 212, 192, 0.14); }
+.persona { margin-top: 8px; }
+.persona summary {
+  cursor: pointer; list-style: none;
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.6px;
+  text-transform: uppercase; color: var(--text-dim);
+}
+.persona summary::-webkit-details-marker { display: none; }
+.persona summary::before { content: "▸ "; color: var(--text-faint); }
+.persona[open] summary::before { content: "▾ "; }
+.persona-in { margin-top: 7px; font-size: 12px; }
+.persona-default {
+  margin-top: 6px; font-size: 11px; color: var(--text-faint);
+  line-height: 1.42; max-height: 84px; overflow: auto;
+}
+.add-participant { width: 100%; margin-bottom: 18px; }
 
 /* ---- Buttons ---------------------------------------------------------- */
 .actions { display: flex; gap: 10px; margin-top: 4px; }
@@ -398,6 +427,7 @@ html[data-theme="light"] .mark { background: rgba(0, 0, 0, 0.02); }
 html[data-theme="light"] textarea,
 html[data-theme="light"] select,
 html[data-theme="light"] input[type="number"] { background: rgba(255, 255, 255, 0.92); }
+html[data-theme="light"] .model-in { background: rgba(255, 255, 255, 0.92); }
 html[data-theme="light"] select option { background: #ffffff; color: var(--text); }
 html[data-theme="light"] .turn-head { background: rgba(20, 30, 55, 0.025); }
 html[data-theme="light"] .turn-body pre { background: #f1f3f9; }
