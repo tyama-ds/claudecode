@@ -363,6 +363,50 @@ select option { background: #0c111b; color: var(--text); }
   font-family: var(--mono); padding: 18px 0 26px;
 }
 
+/* ---- Theme toggle ----------------------------------------------------- */
+.topbar-right { display: flex; align-items: center; gap: 12px; }
+.theme-toggle {
+  width: 34px; height: 34px; flex: none;
+  border-radius: 9px; border: 1px solid var(--border-strong);
+  background: rgba(255, 255, 255, 0.03); color: var(--text-dim);
+  cursor: pointer; font-size: 15px; line-height: 1;
+  display: grid; place-items: center;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.theme-toggle:hover { color: var(--text); border-color: var(--border-strong); }
+
+/* ---- Light theme ------------------------------------------------------ */
+html[data-theme="light"] {
+  --ground: #eef1f7;
+  --surface: rgba(255, 255, 255, 0.8);
+  --surface-2: rgba(255, 255, 255, 0.62);
+  --border: rgba(20, 30, 55, 0.12);
+  --border-strong: rgba(20, 30, 55, 0.2);
+  --text: #141a28;
+  --text-dim: #48556b;
+  --text-faint: #7b8aa0;
+  --a: #cf8526; --b: #0e9aa0; --c: #7a5bf0; --good: #1aa06a; --bad: #e0556b;
+}
+html[data-theme="light"] body::before {
+  background:
+    radial-gradient(620px 420px at 12% -8%, rgba(207, 133, 38, 0.1), transparent 60%),
+    radial-gradient(680px 460px at 100% 110%, rgba(14, 154, 160, 0.1), transparent 60%),
+    radial-gradient(900px 600px at 70% 0%, rgba(122, 91, 240, 0.05), transparent 70%);
+}
+html[data-theme="light"] .topbar { background: rgba(238, 241, 247, 0.72); }
+html[data-theme="light"] .mark { background: rgba(0, 0, 0, 0.02); }
+html[data-theme="light"] textarea,
+html[data-theme="light"] select,
+html[data-theme="light"] input[type="number"] { background: rgba(255, 255, 255, 0.92); }
+html[data-theme="light"] select option { background: #ffffff; color: var(--text); }
+html[data-theme="light"] .turn-head { background: rgba(20, 30, 55, 0.025); }
+html[data-theme="light"] .turn-body pre { background: #f1f3f9; }
+html[data-theme="light"] .turn-body code { background: rgba(20, 30, 55, 0.07); }
+html[data-theme="light"] .turn-body pre code { background: none; }
+html[data-theme="light"] .btn.primary { color: #fff; }
+html[data-theme="light"] .empty-motif .chip,
+html[data-theme="light"] .avatar { color: #fff; }
+
 /* ---- Motion ----------------------------------------------------------- */
 @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }

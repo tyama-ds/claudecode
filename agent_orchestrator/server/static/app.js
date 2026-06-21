@@ -294,7 +294,23 @@ function finish(status) {
   else { setConn("error", "error"); }
 }
 
+// -- theme (light / dark) --------------------------------------------------
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  const btn = $("#theme-toggle");
+  if (btn) btn.textContent = t === "light" ? "☀" : "☾";
+}
+function initTheme() {
+  applyTheme(localStorage.getItem("ao-theme") || "dark");
+  $("#theme-toggle").addEventListener("click", () => {
+    const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+    localStorage.setItem("ao-theme", next);
+    applyTheme(next);
+  });
+}
+
 // -- boot ------------------------------------------------------------------
+initTheme();
 $("#run").addEventListener("click", run);
 $("#stop").addEventListener("click", stop);
 loadCatalog().catch((e) => setStatus("Failed to load catalog: " + e, true));
