@@ -52,6 +52,7 @@ python -m agent_orchestrator serve
 | **Implementer + Reviewer** | implementer, reviewer | 一方が実装、他方がレビュー。承認またはラウンド上限まで反復。 |
 | **Debate / Consensus** | debater A, debater B | 双方が異なる立場で議論し、最後に統合ターンで結論へ収束。 |
 | **Planner + Executor** | planner, executor | 一方が計画、他方が実行。各ラウンドで計画を調整。 |
+| **Round-robin（自由対話）** | agent A, B, C | 複数エージェントが全会話を共有しつつ自由に議論し、最後に結論を統合。 |
 
 ## バックエンド（アダプタ）
 

@@ -51,6 +51,7 @@ press **Run collaboration**. Turns stream into the transcript as they happen.
 | **Implementer + Reviewer** | implementer, reviewer | One builds, the other reviews; repeats until approval or rounds run out. |
 | **Debate / Consensus** | debater A, debater B | Both argue distinct positions, then a synthesis turn converges on a final answer. |
 | **Planner + Executor** | planner, executor | One plans, the other executes; the planner adjusts each round. |
+| **Round-robin (free dialogue)** | agent A, B, C | Several agents discuss openly — each sees the whole thread and addresses the others — then close with a shared conclusion. |
 
 ## Backends (adapters)
 

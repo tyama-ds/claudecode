@@ -205,9 +205,69 @@ class PlannerExecutor(Strategy):
 
 # -- registry --------------------------------------------------------------
 
+class RoundRobin(Strategy):
+    name = "round_robin"
+    description = (
+        "Several agents discuss the task in an open round-table — each sees the whole "
+        "conversation and addresses the others — then close with a shared conclusion."
+    )
+    roles = [("agent_a", "Agent A"), ("agent_b", "Agent B"), ("agent_c", "Agent C")]
+    default_rounds = 2
+
+    CLOSE_SYS = (
+        "You are the FACILITATOR closing an open discussion among several AI agents. "
+        "Summarise the conclusion the group reached and the concrete next steps, fairly "
+        "reflecting the different contributions."
+    )
+
+    def _sys(self, me: str, others: str) -> str:
+        return (
+            f"You are {me}, one of several AI agents in an open round-table discussion. "
+            f"The other participants are: {others}. Read the conversation so far and add your "
+            f"next contribution: build on what others said, agree or push back with reasons, "
+            f"ask a pointed question, or propose concrete progress. Address the others directly "
+            f"and keep your message focused — don't restate the whole thread. Collaborate toward "
+            f"a useful outcome."
+        )
+
+    def run(self, session: Session) -> str:
+        order = [key for key, _ in self.roles]
+        names = {r: session.agents[r].display_name for r in order}
+        convo: List[str] = []
+
+        for rnd in range(1, session.rounds + 1):
+            for role in order:
+                me = names[role]
+                others = ", ".join(n for r, n in names.items() if r != role)
+                if convo:
+                    prompt = (
+                        f"Topic:\n{session.task}\n\nConversation so far:\n"
+                        + "\n\n".join(convo)
+                        + f"\n\nYou are {me}. Add your next contribution."
+                    )
+                else:
+                    prompt = (
+                        f"Topic:\n{session.task}\n\nYou are {me} and you are opening the "
+                        f"discussion. Share your initial take to get the group started."
+                    )
+                text = _run_turn(session, role, self._sys(me, others), prompt, rnd)
+                convo.append(f"{me}: {text}")
+
+        # Closing synthesis. The facilitator reuses the first agent's backend but
+        # runs under a distinct role so the UI tags it as a synthesis (violet).
+        session.agents["closer"] = session.agents[order[0]]
+        closing = _run_turn(
+            session, "closer", self.CLOSE_SYS,
+            f"Topic:\n{session.task}\n\nFull discussion:\n" + "\n\n".join(convo)
+            + "\n\nClose the discussion: state the group's conclusion and next steps.",
+            session.rounds,
+        )
+        return self.finish(session, closing)
+
+
 STRATEGIES = {
     s.name: s
-    for s in (ImplementerReviewer(), DebateConsensus(), PlannerExecutor())
+    for s in (ImplementerReviewer(), DebateConsensus(), PlannerExecutor(), RoundRobin())
 }
 
 

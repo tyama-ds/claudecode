@@ -199,6 +199,7 @@ select option { background: #0c111b; color: var(--text); }
   background: var(--a);
 }
 .role.b::before { background: var(--b); }
+.role.c::before { background: var(--c); }
 .role .role-name {
   font-family: var(--mono); font-size: 11px; letter-spacing: 0.5px;
   text-transform: uppercase; color: var(--text-dim); margin-bottom: 7px;

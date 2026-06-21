@@ -90,7 +90,8 @@ function renderRoles() {
   wrap.innerHTML = "";
   st.roles.forEach((role) => {
     const box = document.createElement("div");
-    box.className = "role " + (accentFor(role.key) === "acc-b" ? "b" : "");
+    const bucket = accentFor(role.key);
+    box.className = "role " + (bucket === "acc-b" ? "b" : bucket === "acc-c" ? "c" : "");
     const name = document.createElement("div");
     name.className = "role-name";
     name.textContent = role.label;

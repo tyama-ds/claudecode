@@ -23,7 +23,7 @@ class TestStrategies(unittest.TestCase):
     def test_all_strategies_registered(self):
         self.assertEqual(
             set(STRATEGIES),
-            {"implementer_reviewer", "debate_consensus", "planner_executor"},
+            {"implementer_reviewer", "debate_consensus", "planner_executor", "round_robin"},
         )
 
     def test_each_strategy_produces_transcript_and_result(self):
