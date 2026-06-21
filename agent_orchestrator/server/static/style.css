@@ -237,6 +237,25 @@ select option { background: #0c111b; color: var(--text); }
 
 .stream { display: flex; flex-direction: column; gap: 14px; }
 
+/* Shared scratchpad (blackboard) — pinned above the transcript. */
+.scratchpad {
+  border: 1px solid rgba(169, 139, 255, 0.32);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgba(169, 139, 255, 0.09), rgba(169, 139, 255, 0.02));
+  padding: 12px 15px;
+  margin-bottom: 14px;
+  animation: rise 0.28s ease both;
+}
+.sp-head {
+  display: flex; align-items: center; gap: 8px;
+  font-family: var(--mono); font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1.8px; color: var(--c); margin-bottom: 9px;
+}
+.sp-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--c); box-shadow: 0 0 10px var(--c); }
+.sp-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+.sp-list li { font-size: 13px; color: var(--text); line-height: 1.45; }
+.sp-author { font-family: var(--mono); font-size: 10.5px; color: var(--c); margin-right: 8px; opacity: 0.95; }
+
 /* Empty-state hero: the two-agent duality */
 .empty { text-align: center; padding: 54px 18px; }
 .empty-motif { display: flex; align-items: center; justify-content: center; gap: 0; margin-bottom: 22px; }

@@ -24,8 +24,11 @@ hosted **Claude / GPT APIs**.
 The orchestration core **and** the web server use only the Python standard
 library — no framework, no build step, no native binary (so nothing for an
 antivirus to flag, and no `pip install` to get started). Open it in a browser
-and go. The hosted-API adapters use the official `anthropic` / `openai` SDKs and
-are imported lazily, so they are only needed if you actually pick them.
+and go. Even the hosted-API adapters are SDK-free — they call the providers'
+REST endpoints directly via the standard library (`urllib`), so there are no
+compiled dependencies anywhere and nothing to install: for the API backends,
+an API key is all you need. This keeps the whole tool friendly to locked-down
+or audited machines (no `.exe`, no installer, no compiled wheels).
 
 Requires **Python 3.10+**.
 
@@ -52,6 +55,11 @@ press **Run collaboration**. Turns stream into the transcript as they happen.
 | **Debate / Consensus** | debater A, debater B | Both argue distinct positions, then a synthesis turn converges on a final answer. |
 | **Planner + Executor** | planner, executor | One plans, the other executes; the planner adjusts each round. |
 | **Round-robin (free dialogue)** | agent A, B, C | Several agents discuss openly — each sees the whole thread and addresses the others — then close with a shared conclusion. |
+| **Panel + Judge** | contender A, B, C, judge | Three agents argue competing positions; an impartial judge evaluates them and delivers the verdict. |
+
+All strategies share a **scratchpad** — a team blackboard any agent can write to
+by adding `NOTE:` lines. It appears pinned above the transcript so the shared
+state of the collaboration is always visible.
 
 ## Backends (adapters)
 
@@ -60,15 +68,12 @@ press **Run collaboration**. Turns stream into the transcript as they happen.
 | Mock (offline) | nothing — deterministic, for demos/tests |
 | Claude Code (CLI) | the `claude` CLI on PATH |
 | Codex (CLI) | the `codex` CLI on PATH |
-| Claude (API) | `pip install anthropic` + `ANTHROPIC_API_KEY` |
-| GPT (API) | `pip install openai` + `OPENAI_API_KEY` |
-| Local LLM | `pip install openai` + a local OpenAI-compatible server (e.g. Ollama) |
+| Claude (API) | `ANTHROPIC_API_KEY` — no install (stdlib HTTP) |
+| GPT (API) | `OPENAI_API_KEY` — no install (stdlib HTTP) |
+| Local LLM | a local OpenAI-compatible server (e.g. Ollama) — no install |
 
-Optional config goes in a `.env` file (see `.env.example`).
-
-```bash
-pip install -r agent_orchestrator/requirements.txt   # only for the API backends
-```
+Optional config goes in a `.env` file (see `.env.example`). There are **no
+packages to install** — only an API key for each hosted backend you want.
 
 ## Headless usage
 

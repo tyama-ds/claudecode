@@ -173,6 +173,8 @@ async function run() {
   state.sessionId = data.session_id;
   state.cards = {};
   $("#stream").innerHTML = "";
+  $("#sp-list").innerHTML = "";
+  $("#scratchpad").hidden = true;
   $("#stop").disabled = false;
   openStream(data.session_id);
 }
@@ -211,6 +213,8 @@ function handleEvent(evt) {
     fillCard(data);
   } else if (type === "status") {
     addNote(data.message);
+  } else if (type === "scratchpad") {
+    renderScratchpad(data.notes);
   } else if (type === "result") {
     addResult(data.content);
   } else if (type === "error") {
@@ -260,6 +264,17 @@ function addNote(msg) {
   el.className = "note";
   el.textContent = msg;
   $("#stream").appendChild(el);
+}
+
+function renderScratchpad(notes) {
+  const list = $("#sp-list");
+  list.innerHTML = "";
+  (notes || []).forEach((n) => {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="sp-author">${escapeHtml(n.author)}</span>${escapeHtml(n.text)}`;
+    list.appendChild(li);
+  });
+  $("#scratchpad").hidden = !(notes && notes.length);
 }
 
 function addResult(content) {

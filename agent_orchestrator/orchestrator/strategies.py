@@ -27,6 +27,21 @@ class AgentTurnError(Exception):
     """Raised when an agent turn fails, aborting the collaboration."""
 
 
+def _scratchpad_system(session: Session, system: str) -> str:
+    """Append the shared-scratchpad protocol + current contents to a system prompt.
+
+    Every agent, in every strategy, can read the team blackboard and contribute
+    to it by writing ``NOTE:`` lines — giving the collaboration a shared memory.
+    """
+    return (
+        f"{system}\n\n"
+        "SHARED SCRATCHPAD — a team blackboard visible to every agent. To record a "
+        "durable fact, decision, or open question for the others, add a line beginning "
+        "with 'NOTE:' anywhere in your reply.\n"
+        f"Current scratchpad:\n{session.render_scratchpad()}"
+    )
+
+
 def _run_turn(session: Session, role: str, system: str, prompt: str, rnd: int) -> str:
     """Execute one agent turn: emit events, record it, return its text.
 
@@ -38,7 +53,7 @@ def _run_turn(session: Session, role: str, system: str, prompt: str, rnd: int) -
 
     adapter = session.agents[role]
     session.emit("turn_start", agent=adapter.display_name, role=role, round=rnd)
-    result = adapter.generate(prompt, system=system)
+    result = adapter.generate(prompt, system=_scratchpad_system(session, system))
 
     turn = Turn(
         agent=adapter.display_name,
@@ -62,6 +77,10 @@ def _run_turn(session: Session, role: str, system: str, prompt: str, rnd: int) -
     )
     if not result.ok:
         raise AgentTurnError(f"{adapter.display_name} ({role}) failed: {result.error}")
+
+    # Pull any NOTE: lines onto the shared blackboard and notify the UI.
+    if session.absorb_notes(adapter.display_name, result.text):
+        session.emit("scratchpad", notes=session.scratchpad_view())
     return result.text
 
 
@@ -265,9 +284,74 @@ class RoundRobin(Strategy):
         return self.finish(session, closing)
 
 
+class PanelJudge(Strategy):
+    name = "panel_judge"
+    description = (
+        "Three agents present competing positions on the task; a fourth agent acts as "
+        "an impartial judge, evaluates them, and delivers the verdict."
+    )
+    roles = [
+        ("agent_a", "Contender A"),
+        ("agent_b", "Contender B"),
+        ("agent_c", "Contender C"),
+        ("judge", "Judge"),
+    ]
+    default_rounds = 1
+
+    JUDGE_SYS = (
+        "You are an impartial JUDGE. Evaluate each contender's position against the task "
+        "on correctness, completeness, and risk. Then deliver a clear verdict: name the "
+        "strongest approach (or a synthesis of the best parts), justify it concisely, and "
+        "state the recommended next step."
+    )
+
+    def _sys(self, me: str, others: str) -> str:
+        return (
+            f"You are {me}, presenting your own position or solution to a panel that a "
+            f"judge will evaluate. The other contenders are: {others}. Make the strongest "
+            f"concrete case for your approach; where useful, point out weaknesses in the "
+            f"others' positions. Be specific — the judge rewards substance over rhetoric."
+        )
+
+    def run(self, session: Session) -> str:
+        order = ["agent_a", "agent_b", "agent_c"]
+        names = {r: session.agents[r].display_name for r in order}
+        convo: List[str] = []
+
+        for rnd in range(1, session.rounds + 1):
+            for role in order:
+                me = names[role]
+                others = ", ".join(n for r, n in names.items() if r != role)
+                if convo:
+                    prompt = (
+                        f"Task:\n{session.task}\n\nPositions so far:\n" + "\n\n".join(convo)
+                        + f"\n\nYou are {me}. Sharpen or defend your position."
+                    )
+                else:
+                    prompt = (
+                        f"Task:\n{session.task}\n\nYou are {me}. Present your position."
+                    )
+                text = _run_turn(session, role, self._sys(me, others), prompt, rnd)
+                convo.append(f"{me}: {text}")
+
+        verdict = _run_turn(
+            session, "judge", self.JUDGE_SYS,
+            f"Task:\n{session.task}\n\nContenders' positions:\n" + "\n\n".join(convo)
+            + "\n\nEvaluate each and deliver your verdict.",
+            session.rounds,
+        )
+        return self.finish(session, verdict)
+
+
 STRATEGIES = {
     s.name: s
-    for s in (ImplementerReviewer(), DebateConsensus(), PlannerExecutor(), RoundRobin())
+    for s in (
+        ImplementerReviewer(),
+        DebateConsensus(),
+        PlannerExecutor(),
+        RoundRobin(),
+        PanelJudge(),
+    )
 }
 
 

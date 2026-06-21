@@ -23,8 +23,23 @@ class TestStrategies(unittest.TestCase):
     def test_all_strategies_registered(self):
         self.assertEqual(
             set(STRATEGIES),
-            {"implementer_reviewer", "debate_consensus", "planner_executor", "round_robin"},
+            {"implementer_reviewer", "debate_consensus", "planner_executor",
+             "round_robin", "panel_judge"},
         )
+
+    def test_scratchpad_absorbs_note_lines(self):
+        s = _session("round_robin", rounds=1)
+        added = s.absorb_notes(
+            "Agent A",
+            "Here is my take.\nNOTE: use a set for O(1) membership.\n"
+            "- NOTE: open question — persist sessions to disk?",
+        )
+        self.assertEqual(added, 2)
+        view = s.scratchpad_view()
+        self.assertEqual(view[0]["author"], "Agent A")
+        self.assertIn("set", view[0]["text"])
+        # Re-stating an identical note does not duplicate it.
+        self.assertEqual(s.absorb_notes("Agent B", "NOTE: use a set for O(1) membership."), 0)
 
     def test_each_strategy_produces_transcript_and_result(self):
         for name in STRATEGIES:

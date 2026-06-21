@@ -24,8 +24,10 @@
 オーケストレーターのコア **と** Web サーバは **Python 標準ライブラリのみ**で実装しています
 （フレームワーク不要・ビルド不要・ネイティブバイナリ無し）。そのため `pip install` 無しで
 すぐ起動でき、アンチウイルスに引っかかる実行ファイルもありません。ブラウザで開くだけです。
-ホスト型 API のアダプタは公式 SDK（`anthropic` / `openai`）を**遅延 import** するので、
-実際に選んだときだけ必要になります。
+ホスト型 API のアダプタも **SDK 不使用**で、標準ライブラリ（`urllib`）でプロバイダの REST API を
+直接呼びます。よって**コンパイル済み依存は一切なく、インストールも不要** — API バックエンドに
+必要なのは API キーだけです。`.exe`・インストーラ・コンパイル済み wheel が無いため、
+**監査の厳しい／ロックダウンされた端末でも扱いやすい**設計です。
 
 **Python 3.10 以上**が必要です。
 
@@ -53,6 +55,11 @@ python -m agent_orchestrator serve
 | **Debate / Consensus** | debater A, debater B | 双方が異なる立場で議論し、最後に統合ターンで結論へ収束。 |
 | **Planner + Executor** | planner, executor | 一方が計画、他方が実行。各ラウンドで計画を調整。 |
 | **Round-robin（自由対話）** | agent A, B, C | 複数エージェントが全会話を共有しつつ自由に議論し、最後に結論を統合。 |
+| **Panel + Judge（3者＋審判）** | contender A, B, C, judge | 3体が異なる主張を提示し、公平な審判が評価して裁定を下す。 |
+
+すべてのストラテジーは**スクラッチパッド**（チーム共有の黒板）を持ち、各エージェントは
+`NOTE:` 行を書くことで共有メモを残せます。トランスクリプト上部に固定表示され、協調の
+共有状態が常に見えます。
 
 ## バックエンド（アダプタ）
 
@@ -61,15 +68,12 @@ python -m agent_orchestrator serve
 | Mock（オフライン） | なし — 決定的な出力。デモ・テスト用 |
 | Claude Code (CLI) | `claude` CLI が PATH 上にあること |
 | Codex (CLI) | `codex` CLI が PATH 上にあること |
-| Claude (API) | `pip install anthropic` ＋ `ANTHROPIC_API_KEY` |
-| GPT (API) | `pip install openai` ＋ `OPENAI_API_KEY` |
-| ローカルLLM | `pip install openai` ＋ OpenAI 互換のローカルサーバ（例: Ollama） |
+| Claude (API) | `ANTHROPIC_API_KEY`（インストール不要・標準ライブラリHTTP） |
+| GPT (API) | `OPENAI_API_KEY`（インストール不要・標準ライブラリHTTP） |
+| ローカルLLM | OpenAI 互換のローカルサーバ（例: Ollama）（インストール不要） |
 
-任意の設定は `.env` に書けます（[.env.example](.env.example) 参照）。
-
-```bash
-pip install -r agent_orchestrator/requirements.txt   # API バックエンドを使う場合のみ
-```
+任意の設定は `.env` に書けます（[.env.example](.env.example) 参照）。**インストールするパッケージは
+ありません** — 使うホスト型バックエンドの API キーだけ用意してください。
 
 ## ヘッドレス（ターミナル）での実行
 

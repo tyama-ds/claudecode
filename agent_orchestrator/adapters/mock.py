@@ -88,5 +88,6 @@ class MockAdapter(AgentAdapter):
             f"    \"\"\"A first cut at the requested behaviour.\"\"\"\n"
             f"    return sorted(data)\n"
             f"```\n"
-            f"This handles the main case; happy to refine after review."
+            f"This handles the main case; happy to refine after review.\n"
+            f"NOTE: ({tag}) assume input is a list of comparable items."
         )

@@ -1,36 +1,60 @@
-"""Adapters that talk to LLM APIs through their official SDKs.
+"""LLM API adapters using only the Python standard library (``urllib``).
 
-- :class:`AnthropicAPIAdapter` uses the official ``anthropic`` SDK.
-- :class:`OpenAIAPIAdapter` uses the official ``openai`` SDK, and — by pointing
-  ``base_url`` at a local OpenAI-compatible server (Ollama, LM Studio, vLLM) —
-  also powers local-LLM participants.
+Deliberately SDK-free: on a locked-down / audited machine this needs no
+``pip install`` and pulls in no compiled native extensions — it is plain text
+Python calling the providers' REST endpoints directly. The only requirement is
+an API key (and, for local models, a running OpenAI-compatible server).
 
-The SDKs are imported lazily inside the methods, so the rest of the package
-(and the mock / CLI adapters) work even when they are not installed.
+- :class:`AnthropicAPIAdapter` → Claude Messages API.
+- :class:`OpenAIAPIAdapter` → OpenAI (or any OpenAI-compatible) chat endpoint;
+  point ``base_url`` at a local server (Ollama / LM Studio) for local LLMs.
 """
 
 from __future__ import annotations
 
+import json
+import urllib.error
+import urllib.request
 from typing import List, Optional
 
 from ..config import get_settings
 from .base import AgentAdapter, Message
 
+_API_TIMEOUT = 300  # seconds
 
-def _to_role_dicts(system: Optional[str], history: List[Message], prompt: str) -> list:
-    """Build an OpenAI-style ``messages`` list (system handled separately for Anthropic)."""
-    msgs: list = []
-    for m in history:
-        role = m.role if m.role in ("user", "assistant") else "user"
-        msgs.append({"role": role, "content": m.content})
+
+def _post_json(url: str, headers: dict, payload: dict) -> dict:
+    """POST JSON and return the parsed JSON response, with readable errors."""
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={**headers, "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_API_TIMEOUT) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:500]
+        raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"connection failed: {exc.reason}") from exc
+
+
+def _chat_messages(history: List[Message], prompt: str) -> list:
+    msgs = [
+        {"role": m.role if m.role in ("user", "assistant") else "user", "content": m.content}
+        for m in history
+    ]
     msgs.append({"role": "user", "content": prompt})
     return msgs
 
 
 class AnthropicAPIAdapter(AgentAdapter):
-    """Claude via ``anthropic`` SDK (``client.messages``)."""
+    """Claude via the Messages REST API (``POST /v1/messages``)."""
 
     kind = "anthropic"
+    URL = "https://api.anthropic.com/v1/messages"
+    VERSION = "2023-06-01"
 
     def __init__(self, name: str = "claude_api", display_name: Optional[str] = None,
                  model: Optional[str] = None):
@@ -38,36 +62,36 @@ class AnthropicAPIAdapter(AgentAdapter):
         self.model = model or get_settings().anthropic_model
 
     def available(self) -> "tuple[bool, str]":
-        try:
-            import anthropic  # noqa: F401
-        except ImportError:
-            return False, "anthropic SDK not installed (pip install anthropic)"
         if not get_settings().anthropic_api_key:
             return False, "ANTHROPIC_API_KEY not set"
         return True, ""
 
     def _generate(self, prompt: str, system: Optional[str], history: List[Message]) -> str:
-        import anthropic
-
-        client = anthropic.Anthropic()
-        messages = _to_role_dicts(None, history, prompt)
         settings = get_settings()
-        # Stream and collect the final message: this is the SDK-recommended way
-        # to avoid HTTP timeouts on longer generations.
-        with client.messages.stream(
-            model=self.model,
-            max_tokens=settings.max_tokens,
-            system=system or "",
-            messages=messages,
-        ) as stream:
-            final = stream.get_final_message()
-        return "".join(b.text for b in final.content if getattr(b, "type", None) == "text")
+        payload = {
+            "model": self.model,
+            "max_tokens": settings.max_tokens,
+            "messages": _chat_messages(history, prompt),
+        }
+        if system:
+            payload["system"] = system
+        headers = {
+            "x-api-key": settings.anthropic_api_key,
+            "anthropic-version": self.VERSION,
+        }
+        data = _post_json(self.URL, headers, payload)
+        blocks = data.get("content", [])
+        text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        if not text:
+            raise RuntimeError(f"no text in response (stop_reason={data.get('stop_reason')})")
+        return text
 
 
 class OpenAIAPIAdapter(AgentAdapter):
-    """GPT (or any OpenAI-compatible endpoint) via the ``openai`` SDK.
+    """OpenAI-compatible chat completions (``POST /v1/chat/completions``).
 
-    Set ``base_url`` to a local server to use this for local LLMs.
+    With ``local=True`` this targets a local server (default: Ollama), which is
+    how local-LLM participants are powered — same wire format, different host.
     """
 
     kind = "openai"
@@ -84,38 +108,25 @@ class OpenAIAPIAdapter(AgentAdapter):
         settings = get_settings()
         super().__init__(name, display_name or ("Local LLM" if local else "GPT (API)"))
         self.model = model or (settings.local_model if local else settings.openai_model)
-        self.base_url = base_url or (settings.local_base_url if local else None)
+        base = base_url or (settings.local_base_url if local else "https://api.openai.com/v1")
+        self.url = base.rstrip("/") + "/chat/completions"
 
     def available(self) -> "tuple[bool, str]":
-        try:
-            import openai  # noqa: F401
-        except ImportError:
-            return False, "openai SDK not installed (pip install openai)"
         if not self.local and not get_settings().openai_api_key:
             return False, "OPENAI_API_KEY not set"
-        # For local endpoints we cannot cheaply verify reachability here; the
-        # call itself will surface a clear error if the server is down.
         return True, ""
 
     def _generate(self, prompt: str, system: Optional[str], history: List[Message]) -> str:
-        from openai import OpenAI
-
-        kwargs = {}
-        if self.base_url:
-            kwargs["base_url"] = self.base_url
-        if self.local:
-            # Local servers usually ignore the key but the SDK requires one.
-            kwargs["api_key"] = "local"
-        client = OpenAI(**kwargs)
-
+        settings = get_settings()
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
-        messages.extend(_to_role_dicts(None, history, prompt))
-
-        resp = client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            max_tokens=get_settings().max_tokens,
-        )
-        return resp.choices[0].message.content or ""
+        messages.extend(_chat_messages(history, prompt))
+        payload = {"model": self.model, "messages": messages, "max_tokens": settings.max_tokens}
+        # Local servers usually ignore the key; OpenAI requires it.
+        key = "local" if self.local else settings.openai_api_key
+        data = _post_json(self.url, {"Authorization": f"Bearer {key}"}, payload)
+        choices = data.get("choices") or []
+        if not choices:
+            raise RuntimeError(f"no choices in response: {json.dumps(data)[:300]}")
+        return choices[0].get("message", {}).get("content", "") or ""
