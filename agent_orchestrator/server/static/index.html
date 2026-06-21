@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agent Orchestrator — Codex × Claude Code</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">⛓</span>
+      <div>
+        <h1>Agent Orchestrator</h1>
+        <p class="tagline">Make <strong>Codex</strong> and <strong>Claude Code</strong> collaborate — extensible to local LLMs.</p>
+      </div>
+    </div>
+    <div id="conn" class="conn idle">idle</div>
+  </header>
+
+  <main class="layout">
+    <!-- Control panel -->
+    <section class="panel config" aria-label="Configuration">
+      <label class="field">
+        <span class="field-label">Task</span>
+        <textarea id="task" rows="5" placeholder="Describe the task for the agents to collaborate on…"></textarea>
+      </label>
+
+      <label class="field">
+        <span class="field-label">Collaboration strategy</span>
+        <select id="strategy"></select>
+        <span id="strategy-desc" class="hint"></span>
+      </label>
+
+      <div id="roles" class="roles"></div>
+
+      <label class="field rounds">
+        <span class="field-label">Rounds</span>
+        <input id="rounds" type="number" min="1" max="8" value="2" />
+      </label>
+
+      <div class="actions">
+        <button id="run" class="btn primary">Run collaboration</button>
+        <button id="stop" class="btn ghost" disabled>Stop</button>
+      </div>
+      <div id="status" class="status"></div>
+    </section>
+
+    <!-- Transcript -->
+    <section class="panel transcript" aria-label="Transcript">
+      <div class="transcript-head">
+        <h2>Transcript</h2>
+        <div id="meta" class="meta"></div>
+      </div>
+      <div id="stream" class="stream">
+        <div class="empty">No run yet. Configure agents on the left and press <em>Run collaboration</em>.</div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
