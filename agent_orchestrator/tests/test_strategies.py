@@ -2,9 +2,32 @@
 
 import unittest
 
+from agent_orchestrator.adapters.base import AgentAdapter
 from agent_orchestrator.adapters.mock import MockAdapter
 from agent_orchestrator.orchestrator.session import Session
 from agent_orchestrator.orchestrator.strategies import STRATEGIES, get_strategy
+
+
+class _CapturingAdapter(AgentAdapter):
+    """Records the prompt + history each turn received, for assertions."""
+
+    kind = "capture"
+
+    def __init__(self, name, supports_history):
+        super().__init__(name, display_name=name)
+        self.supports_history = supports_history
+        self.calls = []
+
+    def _generate(self, prompt, system, history):
+        self.calls.append((prompt, history))
+        return f"{self.display_name} contributes."
+
+
+def _custom_session(a, b):
+    s = Session(id="h", task="Topic.", strategy="custom", rounds=1,
+                agents={"agent_1": a, "agent_2": b})
+    s.role_order = ["agent_1", "agent_2"]
+    return s
 
 
 def _session(strategy_name, rounds=2):
@@ -57,6 +80,25 @@ class TestStrategies(unittest.TestCase):
         # The persona override routed agent_1 into the mock's reviewer behaviour.
         first = next(t for t in session.transcript if t.role == "agent_1")
         self.assertIn("APPROVE", first.content.upper())
+
+    def test_history_passed_when_supported(self):
+        a = _CapturingAdapter("A", supports_history=True)
+        b = _CapturingAdapter("B", supports_history=True)
+        get_strategy("custom").run(_custom_session(a, b))
+        # B speaks after A, so B's turn must receive a structured history.
+        prompt_b, hist_b = b.calls[0]
+        self.assertIsInstance(hist_b, list)
+        self.assertTrue(hist_b, "expected a non-empty history")
+        self.assertTrue(any("A [agent_1]" in m.content for m in hist_b))
+        self.assertNotIn("Conversation so far", prompt_b)  # lean prompt
+
+    def test_history_falls_back_when_unsupported(self):
+        a = _CapturingAdapter("A", supports_history=False)
+        b = _CapturingAdapter("B", supports_history=False)
+        get_strategy("custom").run(_custom_session(a, b))
+        prompt_b, hist_b = b.calls[0]
+        self.assertFalse(hist_b)  # no native history (empty)
+        self.assertIn("Conversation so far", prompt_b)  # transcript embedded instead
 
     def test_each_strategy_produces_transcript_and_result(self):
         for name in (n for n in STRATEGIES if n != "custom"):  # custom needs runtime roles

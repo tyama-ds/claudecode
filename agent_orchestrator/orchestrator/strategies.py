@@ -4,11 +4,14 @@ A strategy choreographs how the agents take turns. Each declares the *roles* it
 needs (which the UI maps to a backend each) and implements :meth:`run`, driving
 the session turn by turn and emitting events as it goes.
 
-Three strategies ship today:
+Conversation context is shared two ways, chosen per backend:
 
-- :class:`ImplementerReviewer` — one builds, the other reviews, repeat.
-- :class:`DebateConsensus` — both argue, then converge on a synthesis.
-- :class:`PlannerExecutor` — one plans, the other executes, the planner adjusts.
+- **Native history** — backends that set ``supports_history`` (CLI / API) receive
+  the running conversation as a structured ``history`` (a list of messages), with
+  each agent's own turns as ``assistant`` and the others' as ``user``.
+- **Text fallback** — backends that can't use history (e.g. the mock) instead get
+  the transcript embedded as text in the prompt. The orchestrator picks
+  automatically, so strategies only ever build a short per-turn *instruction*.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple
 
+from ..adapters.base import Message
 from .session import Session, Turn
 
 
@@ -28,11 +32,7 @@ class AgentTurnError(Exception):
 
 
 def _scratchpad_system(session: Session, system: str) -> str:
-    """Append the shared-scratchpad protocol + current contents to a system prompt.
-
-    Every agent, in every strategy, can read the team blackboard and contribute
-    to it by writing ``NOTE:`` lines — giving the collaboration a shared memory.
-    """
+    """Append the shared-scratchpad protocol + current contents to a system prompt."""
     return (
         f"{system}\n\n"
         "SHARED SCRATCHPAD — a team blackboard visible to every agent. To record a "
@@ -42,20 +42,65 @@ def _scratchpad_system(session: Session, system: str) -> str:
     )
 
 
-def _run_turn(session: Session, role: str, system: str, prompt: str, rnd: int) -> str:
+def _build_history(session: Session, role: str) -> List[Message]:
+    """Build a structured conversation history for ``role`` from the transcript.
+
+    The first message is the task (a ``user`` turn, which also satisfies APIs that
+    require the conversation to open with a user message). The agent's own prior
+    turns are ``assistant``; everyone else's are ``user``, prefixed with who spoke.
+    Returns ``[]`` before any turn has happened.
+    """
+    prior = [t for t in session.transcript if t.ok]
+    if not prior:
+        return []
+    msgs = [Message(role="user", content=f"Discussion topic / task:\n{session.task}")]
+    for t in prior:
+        if t.role == role:
+            msgs.append(Message(role="assistant", content=t.content))
+        else:
+            msgs.append(Message(role="user", content=f"{t.agent} [{t.role}]: {t.content}"))
+    return msgs
+
+
+def _render_transcript(session: Session) -> str:
+    """Render the transcript as plain text (used for the no-history fallback)."""
+    return "\n\n".join(
+        f"{t.agent} [{t.role}]: {t.content}" for t in session.transcript if t.ok
+    )
+
+
+def _run_turn(session: Session, role: str, system: str, instruction: str, rnd: int) -> str:
     """Execute one agent turn: emit events, record it, return its text.
 
-    Raises :class:`StopRequested` if a stop was requested, and
-    :class:`AgentTurnError` if the agent backend failed.
+    ``instruction`` is the short per-turn directive; the conversation context is
+    supplied automatically — as ``history`` when the backend supports it, or
+    embedded in the prompt as a fallback when it doesn't.
+
+    Raises :class:`StopRequested` on a stop request and :class:`AgentTurnError`
+    if the backend fails.
     """
     if session.should_stop():
         raise StopRequested()
 
     adapter = session.agents[role]
     session.emit("turn_start", agent=adapter.display_name, role=role, round=rnd)
+
     # A per-role persona override from the UI wins over the strategy's default.
     system = session.personas.get(role) or system
-    result = adapter.generate(prompt, system=_scratchpad_system(session, system))
+
+    history = _build_history(session, role)
+    use_history = bool(history) and getattr(adapter, "supports_history", True)
+    if use_history:
+        prompt = instruction
+        hist: Optional[List[Message]] = history
+    else:
+        rendered = _render_transcript(session)
+        prompt = f"Conversation so far:\n{rendered}\n\n{instruction}" if rendered else instruction
+        hist = None
+
+    result = adapter.generate(
+        prompt, system=_scratchpad_system(session, system), history=hist
+    )
 
     turn = Turn(
         agent=adapter.display_name,
@@ -76,6 +121,7 @@ def _run_turn(session: Session, role: str, system: str, prompt: str, rnd: int) -
         ok=result.ok,
         error=result.error,
         duration=round(result.duration, 2),
+        via=("history" if use_history else "prompt"),
     )
     if not result.ok:
         raise AgentTurnError(f"{adapter.display_name} ({role}) failed: {result.error}")
@@ -113,8 +159,8 @@ class ImplementerReviewer(Strategy):
 
     IMPL_SYS = (
         "You are the IMPLEMENTER in a two-agent coding collaboration. "
-        "Produce a concrete, working implementation for the task. If you are given "
-        "review feedback, revise your implementation to address every point. "
+        "Produce a concrete, working implementation for the task. If the conversation "
+        "contains review feedback, revise your implementation to address every point. "
         "Return the full updated solution, with code where appropriate."
     )
     REVIEW_SYS = (
@@ -127,19 +173,19 @@ class ImplementerReviewer(Strategy):
 
     def run(self, session: Session) -> str:
         impl = ""
-        review = ""
         for rnd in range(1, session.rounds + 1):
-            impl_prompt = f"Task:\n{session.task}"
-            if review:
-                impl_prompt += f"\n\nReviewer feedback to address:\n{review}"
-            impl = _run_turn(session, "implementer", self.IMPL_SYS, impl_prompt, rnd)
-
-            review_prompt = (
-                f"Task:\n{session.task}\n\nImplementer's current solution:\n{impl}\n\n"
-                f"Review it."
+            impl = _run_turn(
+                session, "implementer", self.IMPL_SYS,
+                f"Task:\n{session.task}\n\nProvide a complete implementation. If there is "
+                f"review feedback in the conversation, revise to address every point.",
+                rnd,
             )
-            review = _run_turn(session, "reviewer", self.REVIEW_SYS, review_prompt, rnd)
-
+            review = _run_turn(
+                session, "reviewer", self.REVIEW_SYS,
+                f"Task:\n{session.task}\n\nReview the implementer's latest solution and end "
+                f"with a verdict (APPROVE or REQUEST CHANGES).",
+                rnd,
+            )
             if "APPROVE" in review.upper() and "REQUEST CHANGES" not in review.upper():
                 session.emit("status", message=f"Reviewer approved in round {rnd}.")
                 break
@@ -167,29 +213,24 @@ class DebateConsensus(Strategy):
     personas = {"agent_a": A_SYS, "agent_b": B_SYS}
 
     def run(self, session: Session) -> str:
-        a = _run_turn(session, "agent_a", self.A_SYS, f"Task:\n{session.task}\n\nOpening argument.", 1)
-        b = _run_turn(session, "agent_b", self.B_SYS,
-                      f"Task:\n{session.task}\n\nDebater A said:\n{a}\n\nOpening rebuttal.", 1)
-
+        _run_turn(session, "agent_a", self.A_SYS,
+                  f"Task:\n{session.task}\n\nOpen with your position.", 1)
+        _run_turn(session, "agent_b", self.B_SYS,
+                  f"Task:\n{session.task}\n\nRespond to Debater A with your opposing position.", 1)
         for rnd in range(2, session.rounds + 1):
-            a = _run_turn(
-                session, "agent_a", self.A_SYS,
-                f"Task:\n{session.task}\n\nOpponent's last point:\n{b}\n\nRebut and refine.",
-                rnd,
-            )
-            b = _run_turn(
-                session, "agent_b", self.B_SYS,
-                f"Task:\n{session.task}\n\nOpponent's last point:\n{a}\n\nRebut and refine.",
-                rnd,
-            )
+            _run_turn(session, "agent_a", self.A_SYS,
+                      f"Task:\n{session.task}\n\nRebut the latest opposing point and refine "
+                      f"your position.", rnd)
+            _run_turn(session, "agent_b", self.B_SYS,
+                      f"Task:\n{session.task}\n\nRebut the latest point and refine your "
+                      f"position.", rnd)
 
-        synth_prompt = (
-            f"Task:\n{session.task}\n\nDebater A's final position:\n{a}\n\n"
-            f"Debater B's final position:\n{b}\n\nSynthesize the final answer."
-        )
-        # The synthesizer reuses agent_a's backend in the synthesizer role.
         session.agents["synthesizer"] = session.agents["agent_a"]
-        result = _run_turn(session, "synthesizer", self.SYNTH_SYS, synth_prompt, session.rounds)
+        result = _run_turn(
+            session, "synthesizer", self.SYNTH_SYS,
+            f"Task:\n{session.task}\n\nSynthesize the final answer from the debate above.",
+            session.rounds,
+        )
         return self.finish(session, result)
 
 
@@ -210,19 +251,21 @@ class PlannerExecutor(Strategy):
     personas = {"planner": PLAN_SYS, "executor": EXEC_SYS}
 
     def run(self, session: Session) -> str:
-        plan = _run_turn(session, "planner", self.PLAN_SYS, f"Task:\n{session.task}", 1)
+        _run_turn(session, "planner", self.PLAN_SYS,
+                  f"Task:\n{session.task}\n\nProduce a concise, ordered, actionable plan.", 1)
         execution = ""
         for rnd in range(1, session.rounds + 1):
-            exec_prompt = f"Task:\n{session.task}\n\nPlan to execute:\n{plan}"
-            if execution:
-                exec_prompt += f"\n\nYour previous execution:\n{execution}"
-            execution = _run_turn(session, "executor", self.EXEC_SYS, exec_prompt, rnd)
-
+            execution = _run_turn(
+                session, "executor", self.EXEC_SYS,
+                f"Task:\n{session.task}\n\nExecute the current plan; report what you "
+                f"completed and any blockers.",
+                rnd,
+            )
             if rnd < session.rounds:
                 plan = _run_turn(
                     session, "planner", self.PLAN_SYS,
-                    f"Task:\n{session.task}\n\nExecution report:\n{execution}\n\n"
-                    f"Assess and adjust the plan.",
+                    f"Task:\n{session.task}\n\nAssess the latest execution report and give "
+                    f"targeted adjustments — or reply COMPLETE if the work is done.",
                     rnd + 1,
                 )
                 if "COMPLETE" in plan.upper():
@@ -230,8 +273,6 @@ class PlannerExecutor(Strategy):
                     break
         return self.finish(session, execution)
 
-
-# -- registry --------------------------------------------------------------
 
 class RoundRobin(Strategy):
     name = "round_robin"
@@ -258,43 +299,30 @@ class RoundRobin(Strategy):
     def _sys(self, me: str, others: str) -> str:
         return (
             f"You are {me}, one of several AI agents in an open round-table discussion. "
-            f"The other participants are: {others}. Read the conversation so far and add your "
-            f"next contribution: build on what others said, agree or push back with reasons, "
-            f"ask a pointed question, or propose concrete progress. Address the others directly "
-            f"and keep your message focused — don't restate the whole thread. Collaborate toward "
-            f"a useful outcome."
+            f"The other participants are: {others}. Add your next contribution: build on "
+            f"what others said, agree or push back with reasons, ask a pointed question, "
+            f"or propose concrete progress. Keep it focused — don't restate the thread."
         )
 
     def run(self, session: Session) -> str:
         order = [key for key, _ in self.roles]
         names = {r: session.agents[r].display_name for r in order}
-        convo: List[str] = []
-
+        opened = False
         for rnd in range(1, session.rounds + 1):
             for role in order:
                 me = names[role]
                 others = ", ".join(n for r, n in names.items() if r != role)
-                if convo:
-                    prompt = (
-                        f"Topic:\n{session.task}\n\nConversation so far:\n"
-                        + "\n\n".join(convo)
-                        + f"\n\nYou are {me}. Add your next contribution."
-                    )
-                else:
-                    prompt = (
-                        f"Topic:\n{session.task}\n\nYou are {me} and you are opening the "
-                        f"discussion. Share your initial take to get the group started."
-                    )
-                text = _run_turn(session, role, self._sys(me, others), prompt, rnd)
-                convo.append(f"{me}: {text}")
+                directive = ("Open the discussion with your initial take." if not opened
+                             else "Add your next contribution to the discussion.")
+                _run_turn(session, role, self._sys(me, others),
+                          f"Topic:\n{session.task}\n\nYou are {me}. {directive}", rnd)
+                opened = True
 
-        # Closing synthesis. The facilitator reuses the first agent's backend but
-        # runs under a distinct role so the UI tags it as a synthesis (violet).
         session.agents["closer"] = session.agents[order[0]]
         closing = _run_turn(
             session, "closer", self.CLOSE_SYS,
-            f"Topic:\n{session.task}\n\nFull discussion:\n" + "\n\n".join(convo)
-            + "\n\nClose the discussion: state the group's conclusion and next steps.",
+            f"Topic:\n{session.task}\n\nClose the discussion: state the group's conclusion "
+            f"and the next steps.",
             session.rounds,
         )
         return self.finish(session, closing)
@@ -341,28 +369,21 @@ class PanelJudge(Strategy):
     def run(self, session: Session) -> str:
         order = ["agent_a", "agent_b", "agent_c"]
         names = {r: session.agents[r].display_name for r in order}
-        convo: List[str] = []
-
+        opened = False
         for rnd in range(1, session.rounds + 1):
             for role in order:
                 me = names[role]
                 others = ", ".join(n for r, n in names.items() if r != role)
-                if convo:
-                    prompt = (
-                        f"Task:\n{session.task}\n\nPositions so far:\n" + "\n\n".join(convo)
-                        + f"\n\nYou are {me}. Sharpen or defend your position."
-                    )
-                else:
-                    prompt = (
-                        f"Task:\n{session.task}\n\nYou are {me}. Present your position."
-                    )
-                text = _run_turn(session, role, self._sys(me, others), prompt, rnd)
-                convo.append(f"{me}: {text}")
+                directive = ("Present your position." if not opened
+                             else "Sharpen or defend your position against the others.")
+                _run_turn(session, role, self._sys(me, others),
+                          f"Task:\n{session.task}\n\nYou are {me}. {directive}", rnd)
+                opened = True
 
         verdict = _run_turn(
             session, "judge", self.JUDGE_SYS,
-            f"Task:\n{session.task}\n\nContenders' positions:\n" + "\n\n".join(convo)
-            + "\n\nEvaluate each and deliver your verdict.",
+            f"Task:\n{session.task}\n\nEvaluate the contenders' positions above and deliver "
+            f"your verdict.",
             session.rounds,
         )
         return self.finish(session, verdict)
@@ -395,32 +416,22 @@ class CustomStrategy(Strategy):
         if not order:
             raise AgentTurnError("custom strategy needs at least one participant")
         names = {r: session.agents[r].display_name for r in order}
-        convo: List[str] = []
-
+        opened = False
         for rnd in range(1, session.rounds + 1):
             for role in order:
                 me = names[role]
                 others = ", ".join(n for r, n in names.items() if r != role) or "(none)"
-                if convo:
-                    prompt = (
-                        f"Topic:\n{session.task}\n\nConversation so far:\n" + "\n\n".join(convo)
-                        + f"\n\nYou are {me}. Add your next contribution."
-                    )
-                else:
-                    prompt = (
-                        f"Topic:\n{session.task}\n\nYou are {me}. Open the discussion with "
-                        f"your initial take."
-                    )
-                # _run_turn applies the user's persona override (session.personas) when set;
-                # otherwise this generic fallback is used.
-                text = _run_turn(session, role, self._fallback_sys(me, others), prompt, rnd)
-                convo.append(f"{me}: {text}")
+                directive = ("Open the discussion with your initial take." if not opened
+                             else "Add your next contribution.")
+                _run_turn(session, role, self._fallback_sys(me, others),
+                          f"Topic:\n{session.task}\n\nYou are {me}. {directive}", rnd)
+                opened = True
 
         session.agents["closer"] = session.agents[order[0]]
         closing = _run_turn(
             session, "closer", self.CLOSE_SYS,
-            f"Topic:\n{session.task}\n\nFull discussion:\n" + "\n\n".join(convo)
-            + "\n\nClose the discussion: state the conclusion and the next steps.",
+            f"Topic:\n{session.task}\n\nClose the discussion: state the conclusion and the "
+            f"next steps.",
             session.rounds,
         )
         return self.finish(session, closing)
@@ -446,7 +457,7 @@ def get_strategy(name: str) -> Strategy:
 
 
 def strategy_metadata() -> List[dict]:
-    """Describe strategies for the UI (roles to fill, default rounds)."""
+    """Describe strategies for the UI (roles to fill, default personas, rounds)."""
     return [
         {
             "name": s.name,

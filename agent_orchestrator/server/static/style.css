@@ -339,6 +339,12 @@ select option { background: #0c111b; color: var(--text); }
 }
 .turn .round { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--text-faint); }
 .turn .dur { font-family: var(--mono); font-size: 11px; color: var(--text-faint); padding-left: 10px; }
+.turn .via {
+  margin-left: 8px; font-family: var(--mono); font-size: 10px;
+  color: var(--text-faint); border: 1px solid var(--border);
+  border-radius: 999px; padding: 1px 7px;
+}
+.turn .via-history { color: var(--b); border-color: rgba(43, 212, 192, 0.4); }
 .turn-body { padding: 15px; font-size: 14px; }
 .turn-body p { margin: 0 0 10px; }
 .turn-body p:last-child { margin-bottom: 0; }

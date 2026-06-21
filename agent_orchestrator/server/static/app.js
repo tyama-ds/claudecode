@@ -347,6 +347,15 @@ function fillCard(d) {
     dur.textContent = `${d.duration}s`;
     node.querySelector(".turn-head").appendChild(dur);
   }
+  if (d.via) {
+    const tag = document.createElement("span");
+    tag.className = "via via-" + d.via;
+    tag.textContent = "ctx: " + d.via;
+    tag.title = d.via === "history"
+      ? "Context shared as structured message history"
+      : "Context embedded in the prompt (fallback)";
+    node.querySelector(".turn-head").appendChild(tag);
+  }
   node.querySelector(".turn-body").innerHTML = d.ok ? renderMarkdown(d.content) : escapeHtml(d.content);
   node.scrollIntoView({ behavior: "smooth", block: "end" });
 }

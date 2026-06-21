@@ -22,6 +22,7 @@ class MockAdapter(AgentAdapter):
     """Generates canned but context-aware text based on the agent's persona."""
 
     kind = "mock"
+    supports_history = False  # ignores history -> orchestrator uses the text fallback
 
     def __init__(self, name: str = "mock", display_name: Optional[str] = None,
                  persona: str = "assistant"):

@@ -66,6 +66,13 @@ All strategies share a **scratchpad** — a team blackboard any agent can write 
 by adding `NOTE:` lines. It appears pinned above the transcript so the shared
 state of the collaboration is always visible.
 
+**Conversation context** is shared natively where possible: backends that
+support it (the CLI and API adapters) receive the running conversation as a
+structured message **history** — each agent's own turns as `assistant`, the
+others' as `user`. Backends that can't use history fall back automatically to
+the transcript embedded in the prompt. Each turn is tagged `ctx: history` or
+`ctx: prompt` so you can see which path was used.
+
 ## Backends (adapters)
 
 | Backend | Needs |
