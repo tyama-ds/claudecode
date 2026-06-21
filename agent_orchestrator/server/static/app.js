@@ -5,7 +5,8 @@ const state = {
   strategies: [],    // strategy metadata
   es: null,          // active EventSource
   sessionId: null,
-  cards: {},         // role-round -> DOM node (for thinking -> filled)
+  cards: {},         // role-round -> DOM node (thinking -> filled)
+  connState: "idle",
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -29,6 +30,14 @@ function defaultAgentFor(role) {
   return "mock";
 }
 
+// Monogram for an agent avatar, e.g. "Claude Code" -> "CC", "Codex" -> "CX".
+function initials(name) {
+  const words = (name || "?").replace(/[()]/g, "").trim().split(/\s+/);
+  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
+  const w = words[0] || "?";
+  return (w.length > 1 ? w[0] + w[1] : w[0]).toUpperCase();
+}
+
 // -- minimal, safe markdown rendering --------------------------------------
 function escapeHtml(s) {
   return s.replace(/[&<>"']/g, (c) => (
@@ -37,12 +46,9 @@ function escapeHtml(s) {
 }
 function renderMarkdown(text) {
   let s = escapeHtml(text || "");
-  // fenced code blocks
   s = s.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
     `<pre><code>${code.replace(/\n$/, "")}</code></pre>`);
-  // inline code
   s = s.replace(/`([^`\n]+)`/g, "<code>$1</code>");
-  // paragraphs / line breaks for the non-code parts
   const parts = s.split(/(<pre>[\s\S]*?<\/pre>)/g);
   return parts.map((p) => {
     if (p.startsWith("<pre>")) return p;
@@ -88,6 +94,8 @@ function renderRoles() {
     const name = document.createElement("div");
     name.className = "role-name";
     name.textContent = role.label;
+    const wrapSel = document.createElement("div");
+    wrapSel.className = "select-wrap";
     const select = document.createElement("select");
     select.dataset.role = role.key;
     const preferred = defaultAgentFor(role.key);
@@ -99,8 +107,9 @@ function renderRoles() {
       if (ag.id === preferred) opt.selected = true;
       select.appendChild(opt);
     }
+    wrapSel.appendChild(select);
     box.appendChild(name);
-    box.appendChild(select);
+    box.appendChild(wrapSel);
     wrap.appendChild(box);
   });
 }
@@ -115,9 +124,10 @@ function rolesPayload() {
 
 // -- run / stream ----------------------------------------------------------
 function setConn(label, cls) {
+  state.connState = cls;
   const el = $("#conn");
-  el.textContent = label;
   el.className = "conn " + cls;
+  el.querySelector(".conn-label").textContent = label;
 }
 function setStatus(msg, isErr) {
   const el = $("#status");
@@ -176,8 +186,7 @@ function openStream(id) {
     handleEvent(evt);
   };
   es.onerror = () => {
-    // Stream ended or dropped; if the session already finished we ignore it.
-    if ($("#conn").textContent === "running") setConn("disconnected", "error");
+    if (state.connState === "running") setConn("disconnected", "error");
   };
 }
 
@@ -218,12 +227,14 @@ function addThinkingCard(d) {
   node.className = `turn thinking ${accentFor(d.role)}`;
   node.innerHTML = `
     <div class="turn-head">
-      <span class="dot"></span>
-      <span class="agent">${escapeHtml(d.agent)}</span>
-      <span class="role-tag">${escapeHtml(d.role)}</span>
+      <span class="avatar">${escapeHtml(initials(d.agent))}</span>
+      <span class="who">
+        <span class="agent">${escapeHtml(d.agent)}</span>
+        <span class="role-tag">${escapeHtml(d.role)}</span>
+      </span>
       <span class="round">round ${d.round}</span>
     </div>
-    <div class="turn-body">thinking…</div>`;
+    <div class="turn-body">thinking</div>`;
   $("#stream").appendChild(node);
   state.cards[cardKey(d)] = node;
   node.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -233,8 +244,12 @@ function fillCard(d) {
   const node = state.cards[cardKey(d)] || (() => { addThinkingCard(d); return state.cards[cardKey(d)]; })();
   node.classList.remove("thinking");
   if (!d.ok) node.classList.add("failed");
-  const dur = d.duration != null ? `<span class="dur">${d.duration}s</span>` : "";
-  node.querySelector(".turn-head").insertAdjacentHTML("beforeend", dur);
+  if (d.duration != null) {
+    const dur = document.createElement("span");
+    dur.className = "dur";
+    dur.textContent = `${d.duration}s`;
+    node.querySelector(".turn-head").appendChild(dur);
+  }
   node.querySelector(".turn-body").innerHTML = d.ok ? renderMarkdown(d.content) : escapeHtml(d.content);
   node.scrollIntoView({ behavior: "smooth", block: "end" });
 }

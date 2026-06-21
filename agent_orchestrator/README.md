@@ -1,5 +1,7 @@
 # Agent Orchestrator
 
+> 🇯🇵 日本語の使い方ガイド: [README.ja.md](README.ja.md)
+
 Make two coding agents — **Codex** (OpenAI `codex` CLI) and **Claude Code**
 (Anthropic `claude` CLI) — collaborate on a task, watch it happen live in a
 browser, and extend the cast with **local LLMs** (Ollama / LM Studio) or the
