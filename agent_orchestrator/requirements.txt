@@ -1,0 +1,11 @@
+# The orchestration core and the web UI use only the Python standard library —
+# nothing here is required to run the MVP (mock adapter + the local `claude`/
+# `codex` CLIs work out of the box).
+#
+# Install these ONLY for the corresponding API-backed adapters:
+
+# Claude (API) adapter — "anthropic" backend
+anthropic>=0.40.0
+
+# GPT (API) adapter and Local LLM adapter (OpenAI-compatible endpoints) — "openai" / "local"
+openai>=1.40.0
