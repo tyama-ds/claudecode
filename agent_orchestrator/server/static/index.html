@@ -73,6 +73,25 @@
         <span class="eyebrow">Live transcript</span>
         <div id="meta" class="meta"></div>
       </div>
+      <div id="artifact" class="artifact-panel" hidden>
+        <div class="artifact-head">
+          <span class="eyebrow">Artifact</span>
+          <span id="artifact-meta" class="meta"></span>
+        </div>
+        <div class="artifact-actions">
+          <button id="artifact-view-preview" class="seg active" type="button">Preview</button>
+          <button id="artifact-view-diff" class="seg" type="button">Diff</button>
+          <span class="seg-spacer"></span>
+          <select id="artifact-ext" title="File type" aria-label="File type">
+            <option>.md</option><option>.txt</option><option>.py</option>
+            <option>.js</option><option>.ts</option><option>.json</option>
+            <option>.html</option><option>.css</option><option>.sh</option>
+          </select>
+          <button id="artifact-copy" class="copy-btn" type="button">Copy</button>
+          <button id="artifact-download" class="copy-btn" type="button">Download</button>
+        </div>
+        <div id="artifact-body" class="artifact-body"></div>
+      </div>
       <div id="scratchpad" class="scratchpad" hidden>
         <div class="sp-head"><span class="sp-dot"></span>Shared scratchpad</div>
         <ul id="sp-list" class="sp-list"></ul>

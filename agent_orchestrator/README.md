@@ -56,7 +56,15 @@ press **Run collaboration**. Turns stream into the transcript as they happen.
 | **Planner + Executor** | planner, executor | One plans, the other executes; the planner adjusts each round. |
 | **Round-robin (free dialogue)** | agent A, B, C | Several agents discuss openly — each sees the whole thread and addresses the others — then close with a shared conclusion. |
 | **Panel + Judge** | contender A, B, C, judge | Three agents argue competing positions; an impartial judge evaluates them and delivers the verdict. |
+| **Doc authoring** | writer, editor | Co-write a document: the writer drafts/revises a shared **artifact**, the editor critiques each version, until approved. |
+| **Code authoring** | implementer, reviewer | Co-build code: the implementer writes/revises a single code **artifact**, the reviewer critiques each version, until approved. |
 | **Custom** | your own (2–5) | Define each participant from scratch — backend, model, and persona — then they discuss and close with a conclusion. |
+
+The authoring strategies build a shared **Artifact** — one evolving document or
+code file, shown in a dedicated panel above the transcript with **version
+history, a Preview/Diff toggle, Copy, and Download**. Editing agents output the
+full updated artifact in `<ARTIFACT>…</ARTIFACT>` tags; reviewers give feedback
+only.
 
 For **every role** you can independently choose the **backend, model, and
 persona** (system prompt) right in the UI — mix Claude Code, Codex, GPT, and

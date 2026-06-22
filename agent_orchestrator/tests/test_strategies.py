@@ -47,8 +47,24 @@ class TestStrategies(unittest.TestCase):
         self.assertEqual(
             set(STRATEGIES),
             {"implementer_reviewer", "debate_consensus", "planner_executor",
-             "round_robin", "panel_judge", "custom"},
+             "round_robin", "panel_judge", "custom", "doc_authoring", "code_authoring"},
         )
+
+    def test_extract_artifact(self):
+        from agent_orchestrator.orchestrator.strategies import _extract_artifact
+        self.assertEqual(_extract_artifact("pre <ARTIFACT>\nhello\n</ARTIFACT> post"), "hello")
+        self.assertEqual(_extract_artifact("```python\nprint(1)\n```"), "print(1)")
+        self.assertIsNone(_extract_artifact("just prose, no block"))
+
+    def test_authoring_builds_artifact(self):
+        for name in ("doc_authoring", "code_authoring"):
+            with self.subTest(strategy=name):
+                session = _session(name, rounds=1)
+                result = get_strategy(name).run(session)
+                self.assertTrue(session.artifact, "expected a non-empty artifact")
+                self.assertEqual(result, session.artifact)  # deliverable is the artifact
+                self.assertTrue(session.artifact_versions)
+                self.assertIn("artifact", [e.type for e in session.bus.history])
 
     def test_scratchpad_absorbs_note_lines(self):
         s = _session("round_robin", rounds=1)

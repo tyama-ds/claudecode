@@ -7,6 +7,7 @@ const state = {
   sessionId: null,
   cards: {},         // role-round -> DOM node (thinking -> filled)
   connState: "idle",
+  artifact: { versions: [], view: "preview" },
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -264,9 +265,12 @@ async function run() {
 
   state.sessionId = data.session_id;
   state.cards = {};
+  state.artifact = { versions: [], view: "preview" };
   $("#stream").innerHTML = "";
   $("#sp-list").innerHTML = "";
   $("#scratchpad").hidden = true;
+  $("#artifact").hidden = true;
+  $("#artifact-body").innerHTML = "";
   $("#stop").disabled = false;
   openStream(data.session_id);
 }
@@ -299,6 +303,9 @@ function handleEvent(evt) {
     setStatus("Collaboration running…");
     const agents = Object.entries(data.agents).map(([r, n]) => `${r}=${n}`).join("  ·  ");
     $("#meta").textContent = `${data.strategy} · ${data.rounds} rounds · ${agents}`;
+    $("#artifact-ext").value = data.strategy === "code_authoring" ? ".py" : ".md";
+  } else if (type === "artifact") {
+    handleArtifact(data);
   } else if (type === "turn_start") {
     addThinkingCard(data);
   } else if (type === "turn_end") {
@@ -412,6 +419,73 @@ function renderScratchpad(notes) {
     list.appendChild(li);
   });
   $("#scratchpad").hidden = !(notes && notes.length);
+}
+
+// -- artifact (shared evolving document / code) ----------------------------
+function handleArtifact(d) {
+  const a = state.artifact;
+  a.versions.push(d);
+  a.content = d.content;
+  a.prev = a.versions.length > 1 ? a.versions[a.versions.length - 2].content : "";
+  $("#artifact").hidden = false;
+  renderArtifact();
+}
+
+function setSeg(which) {
+  $("#artifact-view-preview").classList.toggle("active", which === "preview");
+  $("#artifact-view-diff").classList.toggle("active", which === "diff");
+}
+
+function renderArtifact() {
+  const a = state.artifact;
+  if (!a.versions.length) return;
+  const v = a.versions[a.versions.length - 1];
+  $("#artifact-meta").textContent = `v${v.version} · ${v.author} [${v.role}] · round ${v.round}`;
+  const body = $("#artifact-body");
+  if (a.view === "diff") {
+    body.className = "artifact-body diff";
+    body.innerHTML = renderDiff(a.prev || "", a.content || "");
+  } else {
+    body.className = "artifact-body";
+    const ext = $("#artifact-ext").value;
+    body.innerHTML = (ext === ".md" || ext === ".txt")
+      ? renderMarkdown(a.content || "")
+      : `<pre><code>${escapeHtml(a.content || "")}</code></pre>`;
+  }
+}
+
+// Minimal LCS line diff for the Diff view.
+function renderDiff(oldText, newText) {
+  const a = oldText.split("\n"), b = newText.split("\n");
+  const n = a.length, m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const rows = [];
+  const push = (cls, sign, line) =>
+    rows.push(`<div class="dline ${cls}">${escapeHtml(sign + " " + line)}</div>`);
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { push("d-ctx", " ", a[i]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { push("d-del", "-", a[i]); i++; }
+    else { push("d-add", "+", b[j]); j++; }
+  }
+  while (i < n) push("d-del", "-", a[i++]);
+  while (j < m) push("d-add", "+", b[j++]);
+  return rows.join("") || '<div class="dline d-ctx">(no changes)</div>';
+}
+
+function downloadArtifact() {
+  const blob = new Blob([state.artifact.content || ""], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "artifact" + $("#artifact-ext").value;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 function addResult(content) {
@@ -533,6 +607,11 @@ $("#settings-save").addEventListener("click", saveSettings);
 $("#settings-overlay").addEventListener("click", (e) => {
   if (e.target.id === "settings-overlay") closeSettings();
 });
+$("#artifact-view-preview").addEventListener("click", () => { state.artifact.view = "preview"; setSeg("preview"); renderArtifact(); });
+$("#artifact-view-diff").addEventListener("click", () => { state.artifact.view = "diff"; setSeg("diff"); renderArtifact(); });
+$("#artifact-ext").addEventListener("change", renderArtifact);
+$("#artifact-copy").addEventListener("click", (e) => copyText(state.artifact.content || "", e.currentTarget));
+$("#artifact-download").addEventListener("click", downloadArtifact);
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !$("#settings-overlay").hidden) closeSettings();
 });

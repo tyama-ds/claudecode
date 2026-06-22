@@ -16,6 +16,7 @@ Conversation context is shared two ways, chosen per backend:
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple
 
@@ -67,6 +68,36 @@ def _render_transcript(session: Session) -> str:
     return "\n\n".join(
         f"{t.agent} [{t.role}]: {t.content}" for t in session.transcript if t.ok
     )
+
+
+_ARTIFACT_RE = re.compile(r"<ARTIFACT>\s*(.*?)\s*</ARTIFACT>", re.DOTALL | re.IGNORECASE)
+_FENCE_RE = re.compile(r"```[\w.+-]*\n(.*?)```", re.DOTALL)
+
+
+def _extract_artifact(text: str) -> Optional[str]:
+    """Pull the artifact body out of an editing turn.
+
+    Prefers an explicit ``<ARTIFACT>…</ARTIFACT>`` block; falls back to the first
+    fenced code block. Returns ``None`` if neither is present.
+    """
+    m = _ARTIFACT_RE.search(text)
+    if m:
+        return m.group(1).strip()
+    fm = _FENCE_RE.search(text)
+    if fm:
+        return fm.group(1).strip()
+    return None
+
+
+def _update_artifact(session: Session, role: str, rnd: int, text: str) -> None:
+    """Save a new artifact version from an editing turn and notify the UI."""
+    art = _extract_artifact(text)
+    if art is None:  # editing roles should always produce content
+        art = text.strip()
+    name = session.agents[role].display_name
+    version = session.set_artifact(art, name, role, rnd)
+    session.emit("artifact", content=art, version=version,
+                 author=name, role=role, round=rnd)
 
 
 def _run_turn(session: Session, role: str, system: str, instruction: str, rnd: int) -> str:
@@ -437,6 +468,90 @@ class CustomStrategy(Strategy):
         return self.finish(session, closing)
 
 
+class DocAuthoring(Strategy):
+    name = "doc_authoring"
+    description = (
+        "Co-write a document: a writer drafts and revises a shared artifact while an "
+        "editor critiques each version, until it's approved."
+    )
+    roles = [("writer", "Writer"), ("editor", "Editor")]
+
+    WRITER_SYS = (
+        "You are the WRITER. Produce and iteratively improve a single document for the "
+        "task. When you write or revise it, output the COMPLETE current version wrapped in "
+        "<ARTIFACT> and </ARTIFACT> tags (put nothing else inside the tags). Address the "
+        "editor's feedback in each revision."
+    )
+    EDITOR_SYS = (
+        "You are the EDITOR. Critique the writer's latest document for structure, clarity, "
+        "accuracy, and completeness — be specific and actionable. Do NOT rewrite it or "
+        "output an <ARTIFACT> block; give feedback only. End with APPROVE or REQUEST CHANGES."
+    )
+    personas = {"writer": WRITER_SYS, "editor": EDITOR_SYS}
+
+    def run(self, session: Session) -> str:
+        for rnd in range(1, session.rounds + 1):
+            text = _run_turn(
+                session, "writer", self.WRITER_SYS,
+                f"Task:\n{session.task}\n\nWrite or revise the document, addressing any "
+                f"editor feedback. Output the full document inside <ARTIFACT> tags.",
+                rnd,
+            )
+            _update_artifact(session, "writer", rnd, text)
+            review = _run_turn(
+                session, "editor", self.EDITOR_SYS,
+                f"Task:\n{session.task}\n\nReview the writer's latest document and end with "
+                f"APPROVE or REQUEST CHANGES.",
+                rnd,
+            )
+            if "APPROVE" in review.upper() and "REQUEST CHANGES" not in review.upper():
+                session.emit("status", message=f"Editor approved in round {rnd}.")
+                break
+        return self.finish(session, session.artifact)
+
+
+class CodeAuthoring(Strategy):
+    name = "code_authoring"
+    description = (
+        "Co-build code: an implementer writes and revises a single code artifact while a "
+        "reviewer critiques each version, until it's approved."
+    )
+    roles = [("implementer", "Implementer"), ("reviewer", "Reviewer")]
+
+    IMPL_SYS = (
+        "You are the IMPLEMENTER. Build and iteratively improve a single code file for the "
+        "task. When you write or revise it, output the COMPLETE current file wrapped in "
+        "<ARTIFACT> and </ARTIFACT> tags (put nothing else inside the tags). Address the "
+        "reviewer's feedback in each revision."
+    )
+    REVIEW_SYS = (
+        "You are the REVIEWER. Review the implementer's latest code for correctness, edge "
+        "cases, tests, and clarity — be specific. Do NOT output an <ARTIFACT> block; give "
+        "feedback only. End with APPROVE or REQUEST CHANGES."
+    )
+    personas = {"implementer": IMPL_SYS, "reviewer": REVIEW_SYS}
+
+    def run(self, session: Session) -> str:
+        for rnd in range(1, session.rounds + 1):
+            text = _run_turn(
+                session, "implementer", self.IMPL_SYS,
+                f"Task:\n{session.task}\n\nWrite or revise the code, addressing any reviewer "
+                f"feedback. Output the full file inside <ARTIFACT> tags.",
+                rnd,
+            )
+            _update_artifact(session, "implementer", rnd, text)
+            review = _run_turn(
+                session, "reviewer", self.REVIEW_SYS,
+                f"Task:\n{session.task}\n\nReview the implementer's latest code and end with "
+                f"APPROVE or REQUEST CHANGES.",
+                rnd,
+            )
+            if "APPROVE" in review.upper() and "REQUEST CHANGES" not in review.upper():
+                session.emit("status", message=f"Reviewer approved in round {rnd}.")
+                break
+        return self.finish(session, session.artifact)
+
+
 STRATEGIES = {
     s.name: s
     for s in (
@@ -445,6 +560,8 @@ STRATEGIES = {
         PlannerExecutor(),
         RoundRobin(),
         PanelJudge(),
+        DocAuthoring(),
+        CodeAuthoring(),
         CustomStrategy(),
     )
 }

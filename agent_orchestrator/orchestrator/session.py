@@ -39,6 +39,16 @@ class Note:
 
 
 @dataclass
+class ArtifactVersion:
+    """One saved version of the shared artifact (the document/code being built)."""
+
+    author: str
+    role: str
+    round: int
+    content: str
+
+
+@dataclass
 class Session:
     """A single collaboration run."""
 
@@ -51,6 +61,8 @@ class Session:
     status: str = "pending"  # pending | running | done | error | stopped
     transcript: List[Turn] = field(default_factory=list)
     scratchpad: List[Note] = field(default_factory=list)  # shared blackboard
+    artifact: str = ""                                     # the document/code being built
+    artifact_versions: List[ArtifactVersion] = field(default_factory=list)
     personas: Dict[str, str] = field(default_factory=dict)  # per-role system-prompt overrides
     role_order: List[str] = field(default_factory=list)     # ordered roles (used by custom strategy)
     stop_requested: bool = False
@@ -95,6 +107,16 @@ class Session:
 
     def scratchpad_view(self) -> List[dict]:
         return [{"author": n.author, "text": n.text} for n in self.scratchpad]
+
+    # -- shared artifact (the evolving document / code) -------------------
+
+    def set_artifact(self, content: str, author: str, role: str, rnd: int) -> int:
+        """Record a new version of the artifact; returns the new version number."""
+        self.artifact = content
+        self.artifact_versions.append(
+            ArtifactVersion(author=author, role=role, round=rnd, content=content)
+        )
+        return len(self.artifact_versions)
 
 
 class SessionManager:

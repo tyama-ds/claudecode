@@ -56,7 +56,13 @@ python -m agent_orchestrator serve
 | **Planner + Executor** | planner, executor | 一方が計画、他方が実行。各ラウンドで計画を調整。 |
 | **Round-robin（自由対話）** | agent A, B, C | 複数エージェントが全会話を共有しつつ自由に議論し、最後に結論を統合。 |
 | **Panel + Judge（3者＋審判）** | contender A, B, C, judge | 3体が異なる主張を提示し、公平な審判が評価して裁定を下す。 |
+| **Doc authoring（文章共同制作）** | writer, editor | 共有**Artifact**（文書）を writer が起草・改稿し、editor が各版を批評。承認まで反復。 |
+| **Code authoring（コード共同制作）** | implementer, reviewer | 単一の**Artifact**（コード）を implementer が編集し、reviewer が各版を批評。承認まで反復。 |
 | **Custom（自由定義）** | 自分で定義 (2〜5体) | 参加者ごとにバックエンド・モデル・人格を自由に設定し、議論して結論を統合。 |
+
+authoring 系は共有**Artifact**（1つの育つドキュメント/コード）を作ります。トランスクリプト上部の
+専用パネルに表示され、**版管理・Preview/Diff 切替・コピー・ダウンロード**が可能です。編集役は
+更新後の全文を `<ARTIFACT>…</ARTIFACT>` タグで出力し、レビュー役は指摘のみを返します。
 
 **各ロールごとに**「バックエンド・モデル・人格(system prompt)」を個別に指定できます
 （UI上で編集可）。1回の実行で Claude Code・Codex・GPT・ローカルモデルを**混在**させたり、
