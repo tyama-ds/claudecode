@@ -58,11 +58,20 @@ python -m agent_orchestrator serve
 | **Panel + Judge（3者＋審判）** | contender A, B, C, judge | 3体が異なる主張を提示し、公平な審判が評価して裁定を下す。 |
 | **Doc authoring（文章共同制作）** | writer, editor | 共有**Artifact**（文書）を writer が起草・改稿し、editor が各版を批評。承認まで反復。 |
 | **Code authoring（コード共同制作）** | implementer, reviewer | 単一の**Artifact**（コード）を implementer が編集し、reviewer が各版を批評。承認まで反復。 |
+| **Workspace build（実ファイル開発）** | implementer, reviewer | **実ディレクトリ**上で implementer がファイルを作成/編集し、reviewer が差分を批評。承認まで反復。 |
 | **Custom（自由定義）** | 自分で定義 (2〜5体) | 参加者ごとにバックエンド・モデル・人格を自由に設定し、議論して結論を統合。 |
 
 authoring 系は共有**Artifact**（1つの育つドキュメント/コード）を作ります。トランスクリプト上部の
 専用パネルに表示され、**版管理・Preview/Diff 切替・コピー・ダウンロード**が可能です。編集役は
 更新後の全文を `<ARTIFACT>…</ARTIFACT>` タグで出力し、レビュー役は指摘のみを返します。
+
+**Workspace build** はさらに一歩進み、**ディスク上の実ディレクトリ**へ書き込みます。実装役は
+変更ファイルを `<FILE path="…">…全文…</FILE>` で出力し、オーケストレーターがワークスペース
+直下に限定して書き込み（`..` や絶対パスは拒否）、ファイルごとの unified diff を計算して
+Workspace パネル（ファイル一覧＋色付き差分）に表示します。変更は作業ツリーに残し、ステージ／
+コミットは行いません（レビューと commit はユーザーが実施）。ワークスペースは既定でサーバ起動
+ディレクトリ、実行ごとに上書き指定可能です。（これはバックエンド非依存の Phase 2。CLI 自身に
+よる実ファイル編集は今後の予定です。）
 
 **各ロールごとに**「バックエンド・モデル・人格(system prompt)」を個別に指定できます
 （UI上で編集可）。1回の実行で Claude Code・Codex・GPT・ローカルモデルを**混在**させたり、

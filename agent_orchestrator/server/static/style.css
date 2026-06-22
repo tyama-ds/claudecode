@@ -321,6 +321,24 @@ select option { background: #0c111b; color: var(--text); }
 html[data-theme="light"] .artifact-body pre { background: #f1f3f9; }
 html[data-theme="light"] .d-add { color: #0f7a4f; }
 html[data-theme="light"] .d-del { color: #b03048; }
+.d-hunk { color: #6aa6ff; }
+.d-meta { color: var(--faint); }
+
+/* Workspace panel — files edited on disk + their diffs. */
+.ws-grid { display: grid; grid-template-columns: 220px 1fr; gap: 12px; }
+.ws-files { list-style: none; margin: 0; padding: 0; max-height: 420px; overflow: auto;
+  border-right: 1px solid var(--border); }
+.ws-file { display: flex; align-items: center; gap: 7px; padding: 6px 10px 6px 4px;
+  border-radius: 7px; cursor: pointer; font-size: 12px; }
+.ws-file:hover { background: rgba(255, 255, 255, 0.04); }
+.ws-file.active { background: rgba(255, 255, 255, 0.07); }
+.ws-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.ws-dot.created { background: var(--b); }
+.ws-dot.modified { background: var(--a); }
+.ws-name { font-family: var(--mono); color: var(--text); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; flex: 1; }
+.ws-stat { font-family: var(--mono); font-size: 10.5px; white-space: nowrap; }
+#ws-diff { max-height: 420px; }
 
 /* Empty-state hero: the two-agent duality */
 .empty { text-align: center; padding: 54px 18px; }

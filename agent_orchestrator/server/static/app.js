@@ -8,6 +8,7 @@ const state = {
   cards: {},         // role-round -> DOM node (thinking -> filled)
   connState: "idle",
   artifact: { versions: [], view: "preview" },
+  workspace: { files: {}, order: [], selected: null },
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -266,11 +267,15 @@ async function run() {
   state.sessionId = data.session_id;
   state.cards = {};
   state.artifact = { versions: [], view: "preview" };
+  state.workspace = { files: {}, order: [], selected: null };
   $("#stream").innerHTML = "";
   $("#sp-list").innerHTML = "";
   $("#scratchpad").hidden = true;
   $("#artifact").hidden = true;
   $("#artifact-body").innerHTML = "";
+  $("#workspace").hidden = true;
+  $("#ws-files").innerHTML = "";
+  $("#ws-diff").innerHTML = "";
   $("#stop").disabled = false;
   openStream(data.session_id);
 }
@@ -304,8 +309,11 @@ function handleEvent(evt) {
     const agents = Object.entries(data.agents).map(([r, n]) => `${r}=${n}`).join("  ·  ");
     $("#meta").textContent = `${data.strategy} · ${data.rounds} rounds · ${agents}`;
     $("#artifact-ext").value = data.strategy === "code_authoring" ? ".py" : ".md";
+    if (data.workspace) $("#workspace-path").textContent = data.workspace;
   } else if (type === "artifact") {
     handleArtifact(data);
+  } else if (type === "workspace_edit") {
+    handleWorkspaceEdit(data);
   } else if (type === "turn_start") {
     addThinkingCard(data);
   } else if (type === "turn_end") {
@@ -486,6 +494,49 @@ function downloadArtifact() {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+// -- workspace (real files edited on disk) ---------------------------------
+function handleWorkspaceEdit(d) {
+  const w = state.workspace;
+  if (!(d.path in w.files)) w.order.push(d.path);
+  w.files[d.path] = d;
+  if (!w.selected || w.selected === d.path) w.selected = d.path;
+  $("#workspace").hidden = false;
+  renderWorkspace();
+}
+
+function renderWorkspace() {
+  const w = state.workspace;
+  const list = $("#ws-files");
+  list.innerHTML = "";
+  w.order.forEach((path) => {
+    const f = w.files[path];
+    const li = document.createElement("li");
+    li.className = "ws-file" + (path === w.selected ? " active" : "");
+    li.innerHTML =
+      `<span class="ws-dot ${f.status}"></span>` +
+      `<span class="ws-name">${escapeHtml(path)}</span>` +
+      `<span class="ws-stat"><span class="d-add">+${f.additions}</span> ` +
+      `<span class="d-del">-${f.deletions}</span></span>`;
+    li.addEventListener("click", () => { w.selected = path; renderWorkspace(); });
+    list.appendChild(li);
+  });
+  const sel = w.files[w.selected];
+  $("#ws-diff").innerHTML = sel ? renderUnifiedDiff(sel.diff) : "";
+}
+
+// Colorize a unified diff produced by difflib.
+function renderUnifiedDiff(diff) {
+  if (!diff) return '<div class="dline d-ctx">(no textual changes)</div>';
+  return diff.split("\n").map((ln) => {
+    let cls = "d-ctx";
+    if (ln.startsWith("+") && !ln.startsWith("+++")) cls = "d-add";
+    else if (ln.startsWith("-") && !ln.startsWith("---")) cls = "d-del";
+    else if (ln.startsWith("@@")) cls = "d-hunk";
+    else if (ln.startsWith("+++") || ln.startsWith("---")) cls = "d-meta";
+    return `<div class="dline ${cls}">${escapeHtml(ln)}</div>`;
+  }).join("");
 }
 
 function addResult(content) {

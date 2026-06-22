@@ -197,6 +197,11 @@ class Handler(BaseHTTPRequestHandler):
         session = MANAGER.create(task, strategy_name, rounds, agents)
         session.personas = personas
         session.role_order = [k for k, _ in role_list]
+        if strategy_name == "workspace_build":
+            # Default to the directory the server was launched from; a request may
+            # override it. Edits are confined to this root (see _safe_join).
+            ws = (body.get("workspace") or "").strip() or os.getcwd()
+            session.workspace = os.path.realpath(ws)
         start_session(session)
         self._send_json({"session_id": session.id})
 

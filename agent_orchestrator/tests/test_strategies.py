@@ -1,11 +1,31 @@
 """Tests for the collaboration strategies (run against mock agents)."""
 
+import os
+import tempfile
 import unittest
 
 from agent_orchestrator.adapters.base import AgentAdapter
 from agent_orchestrator.adapters.mock import MockAdapter
 from agent_orchestrator.orchestrator.session import Session
-from agent_orchestrator.orchestrator.strategies import STRATEGIES, get_strategy
+from agent_orchestrator.orchestrator.strategies import (
+    STRATEGIES,
+    AgentTurnError,
+    get_strategy,
+)
+
+
+class _FixedAdapter(AgentAdapter):
+    """Returns a fixed body each turn (used to feed <FILE> blocks)."""
+
+    kind = "fixed"
+
+    def __init__(self, name, body):
+        super().__init__(name, display_name=name)
+        self.supports_history = False
+        self._body = body
+
+    def _generate(self, prompt, system, history):
+        return self._body
 
 
 class _CapturingAdapter(AgentAdapter):
@@ -33,13 +53,16 @@ def _custom_session(a, b):
 def _session(strategy_name, rounds=2):
     strategy = get_strategy(strategy_name)
     agents = {key: MockAdapter(name=key, display_name=key) for key, _ in strategy.roles}
-    return Session(
+    session = Session(
         id="test",
         task="Write a function that sorts a list.",
         strategy=strategy_name,
         rounds=rounds,
         agents=agents,
     )
+    if strategy_name == "workspace_build":
+        session.workspace = tempfile.mkdtemp()
+    return session
 
 
 class TestStrategies(unittest.TestCase):
@@ -47,8 +70,43 @@ class TestStrategies(unittest.TestCase):
         self.assertEqual(
             set(STRATEGIES),
             {"implementer_reviewer", "debate_consensus", "planner_executor",
-             "round_robin", "panel_judge", "custom", "doc_authoring", "code_authoring"},
+             "round_robin", "panel_judge", "custom", "doc_authoring", "code_authoring",
+             "workspace_build"},
         )
+
+    def test_extract_files(self):
+        from agent_orchestrator.orchestrator.strategies import _extract_files
+        files = _extract_files('x <FILE path="a/b.py">\nprint(1)\n</FILE> y')
+        self.assertEqual(files, [("a/b.py", "print(1)\n")])
+
+    def test_workspace_build_writes_files(self):
+        d = tempfile.mkdtemp()
+        impl = _FixedAdapter("impl", '<FILE path="hello.py">\nprint("hi")\n</FILE>')
+        rev = _FixedAdapter("rev", "Looks good. APPROVE")
+        session = Session(id="w", task="say hi", strategy="workspace_build", rounds=1,
+                          agents={"implementer": impl, "reviewer": rev}, workspace=d)
+        result = get_strategy("workspace_build").run(session)
+        self.assertTrue(os.path.isfile(os.path.join(d, "hello.py")))
+        self.assertEqual(session.workspace_files["hello.py"].status, "created")
+        self.assertIn("workspace_edit", [e.type for e in session.bus.history])
+        self.assertIn("hello.py", result)
+
+    def test_workspace_build_requires_workspace(self):
+        impl = _FixedAdapter("i", "")
+        session = Session(id="w", task="t", strategy="workspace_build", rounds=1,
+                          agents={"implementer": impl, "reviewer": impl})
+        with self.assertRaises(AgentTurnError):
+            get_strategy("workspace_build").run(session)
+
+    def test_workspace_rejects_path_escape(self):
+        from agent_orchestrator.orchestrator.strategies import _apply_workspace_edits
+        d = tempfile.mkdtemp()
+        impl = _FixedAdapter("i", "")
+        session = Session(id="w", task="t", strategy="workspace_build", rounds=1,
+                          agents={"implementer": impl, "reviewer": impl}, workspace=d)
+        with self.assertRaises(AgentTurnError):
+            _apply_workspace_edits(session, "implementer", 1, '<FILE path="../evil.py">x</FILE>')
+        self.assertFalse(os.path.exists(os.path.join(os.path.dirname(d), "evil.py")))
 
     def test_extract_artifact(self):
         from agent_orchestrator.orchestrator.strategies import _extract_artifact

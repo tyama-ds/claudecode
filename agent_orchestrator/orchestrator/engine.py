@@ -24,6 +24,7 @@ def run_session(session: Session) -> None:
         strategy=session.strategy,
         rounds=session.rounds,
         agents={role: a.display_name for role, a in session.agents.items()},
+        workspace=session.workspace,
     )
     try:
         result = strategy.run(session)

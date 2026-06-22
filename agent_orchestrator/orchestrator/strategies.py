@@ -16,12 +16,14 @@ Conversation context is shared two ways, chosen per backend:
 
 from __future__ import annotations
 
+import difflib
+import os
 import re
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple
 
 from ..adapters.base import Message
-from .session import Session, Turn
+from .session import Session, Turn, WorkspaceFile
 
 
 class StopRequested(Exception):
@@ -98,6 +100,72 @@ def _update_artifact(session: Session, role: str, rnd: int, text: str) -> None:
     version = session.set_artifact(art, name, role, rnd)
     session.emit("artifact", content=art, version=version,
                  author=name, role=role, round=rnd)
+
+
+# -- workspace (real files on disk) ---------------------------------------
+
+# A file block an editing agent emits:  <FILE path="src/foo.py">…contents…</FILE>
+_FILE_RE = re.compile(r'<FILE\s+path="([^"]+)"\s*>\n?(.*?)</FILE>', re.DOTALL | re.IGNORECASE)
+
+
+def _extract_files(text: str) -> List[Tuple[str, str]]:
+    """Pull ``(relative_path, contents)`` pairs out of an editing turn."""
+    return [(m.group(1).strip(), m.group(2)) for m in _FILE_RE.finditer(text)]
+
+
+def _safe_join(root: str, rel: str) -> str:
+    """Resolve ``rel`` under ``root``, refusing paths that escape the workspace."""
+    root_real = os.path.realpath(root)
+    full = os.path.realpath(os.path.join(root_real, rel))
+    if full != root_real and not full.startswith(root_real + os.sep):
+        raise AgentTurnError(f"refusing to write outside the workspace: {rel!r}")
+    return full
+
+
+def _apply_workspace_edits(session: Session, role: str, rnd: int, text: str) -> int:
+    """Write the agent's ``<FILE>`` blocks to disk, recording per-file diffs.
+
+    Returns the number of files written. Never stages or commits — changes stay
+    in the working tree for the user to review.
+    """
+    root = session.workspace
+    name = session.agents[role].display_name
+    written = 0
+    for rel, body in _extract_files(text):
+        new_content = body.strip("\n") + "\n" if body.strip() else ""
+        full = _safe_join(root, rel)
+        existed = os.path.isfile(full)
+        old = ""
+        if existed:
+            with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                old = fh.read()
+        os.makedirs(os.path.dirname(full) or root, exist_ok=True)
+        with open(full, "w", encoding="utf-8") as fh:
+            fh.write(new_content)
+        diff = "".join(difflib.unified_diff(
+            old.splitlines(keepends=True), new_content.splitlines(keepends=True),
+            fromfile=f"a/{rel}", tofile=f"b/{rel}"))
+        adds = sum(1 for ln in diff.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
+        dels = sum(1 for ln in diff.splitlines() if ln.startswith("-") and not ln.startswith("---"))
+        wf = WorkspaceFile(path=rel, content=new_content,
+                           status="modified" if existed else "created",
+                           additions=adds, deletions=dels, diff=diff,
+                           author=name, role=role, round=rnd)
+        session.record_workspace_file(wf)
+        session.emit("workspace_edit", path=rel, status=wf.status, additions=adds,
+                     deletions=dels, diff=diff, author=name, role=role, round=rnd)
+        written += 1
+    return written
+
+
+def _workspace_summary(session: Session) -> str:
+    """Render the current workspace diffs for a reviewer's prompt."""
+    if not session.workspace_files:
+        return "(no files changed yet)"
+    parts = []
+    for path, wf in session.workspace_files.items():
+        parts.append(f"### {path} ({wf.status}, +{wf.additions}/-{wf.deletions})\n{wf.diff}")
+    return "\n\n".join(parts)
 
 
 def _run_turn(session: Session, role: str, system: str, instruction: str, rnd: int) -> str:
@@ -552,6 +620,64 @@ class CodeAuthoring(Strategy):
         return self.finish(session, session.artifact)
 
 
+class WorkspaceBuild(Strategy):
+    name = "workspace_build"
+    description = (
+        "Build in a real working directory: an implementer creates/edits files on disk, "
+        "a reviewer critiques the resulting diff, until approved."
+    )
+    roles = [("implementer", "Implementer"), ("reviewer", "Reviewer")]
+
+    IMPL_SYS = (
+        "You are the IMPLEMENTER working in a real project workspace. Accomplish the task "
+        "by creating or modifying files. Output EACH changed file IN FULL as a block: a "
+        'line `<FILE path="relative/path.ext">`, then the complete new file contents, then '
+        "a line `</FILE>`. Use forward-slash relative paths inside the workspace; never "
+        "absolute paths or `..`. Address the reviewer's feedback in later rounds."
+    )
+    REVIEW_SYS = (
+        "You are the REVIEWER. Review the diff of the implementer's changes for "
+        "correctness, completeness, edge cases, and clarity — be specific and actionable. "
+        "Do NOT output <FILE> blocks; give feedback only. End with APPROVE or REQUEST CHANGES."
+    )
+    personas = {"implementer": IMPL_SYS, "reviewer": REVIEW_SYS}
+
+    def run(self, session: Session) -> str:
+        if not session.workspace:
+            raise AgentTurnError("workspace_build requires a workspace directory")
+        os.makedirs(session.workspace, exist_ok=True)
+        for rnd in range(1, session.rounds + 1):
+            text = _run_turn(
+                session, "implementer", self.IMPL_SYS,
+                f"Task:\n{session.task}\n\nCreate or modify the files needed. Output each "
+                f'changed file in full inside <FILE path="..."> tags. Address any reviewer '
+                f"feedback.",
+                rnd,
+            )
+            if _apply_workspace_edits(session, "implementer", rnd, text) == 0:
+                session.emit("status", message=f"No <FILE> edits parsed in round {rnd}.")
+            review = _run_turn(
+                session, "reviewer", self.REVIEW_SYS,
+                f"Task:\n{session.task}\n\nCurrent changes:\n\n{_workspace_summary(session)}\n\n"
+                f"Review them and end with APPROVE or REQUEST CHANGES.",
+                rnd,
+            )
+            if "APPROVE" in review.upper() and "REQUEST CHANGES" not in review.upper():
+                session.emit("status", message=f"Reviewer approved in round {rnd}.")
+                break
+        return self.finish(session, self._summary(session))
+
+    @staticmethod
+    def _summary(session: Session) -> str:
+        files = session.workspace_files
+        if not files:
+            return "No files were changed."
+        lines = [f"Changed {len(files)} file(s) in {session.workspace}:"]
+        for path, wf in files.items():
+            lines.append(f"  {wf.status:8} {path}  (+{wf.additions}/-{wf.deletions})")
+        return "\n".join(lines)
+
+
 STRATEGIES = {
     s.name: s
     for s in (
@@ -562,6 +688,7 @@ STRATEGIES = {
         PanelJudge(),
         DocAuthoring(),
         CodeAuthoring(),
+        WorkspaceBuild(),
         CustomStrategy(),
     )
 }

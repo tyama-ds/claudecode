@@ -58,6 +58,7 @@ press **Run collaboration**. Turns stream into the transcript as they happen.
 | **Panel + Judge** | contender A, B, C, judge | Three agents argue competing positions; an impartial judge evaluates them and delivers the verdict. |
 | **Doc authoring** | writer, editor | Co-write a document: the writer drafts/revises a shared **artifact**, the editor critiques each version, until approved. |
 | **Code authoring** | implementer, reviewer | Co-build code: the implementer writes/revises a single code **artifact**, the reviewer critiques each version, until approved. |
+| **Workspace build** | implementer, reviewer | Build in a **real working directory**: the implementer creates/edits files on disk, the reviewer critiques the diff, until approved. |
 | **Custom** | your own (2–5) | Define each participant from scratch — backend, model, and persona — then they discuss and close with a conclusion. |
 
 The authoring strategies build a shared **Artifact** — one evolving document or
@@ -65,6 +66,16 @@ code file, shown in a dedicated panel above the transcript with **version
 history, a Preview/Diff toggle, Copy, and Download**. Editing agents output the
 full updated artifact in `<ARTIFACT>…</ARTIFACT>` tags; reviewers give feedback
 only.
+
+**Workspace build** goes one step further: agents write to a **real directory on
+disk**. The implementer emits each changed file as `<FILE path="…">…full
+contents…</FILE>`; the orchestrator writes it (confined to the workspace root —
+`..` and absolute paths are refused) and computes a unified diff per file, shown
+in a Workspace panel with a file list and colorized diffs. Changes are left in
+the working tree for you to review and commit — the orchestrator never stages or
+commits. The workspace defaults to the server's launch directory and can be
+overridden per run. (This is the backend-agnostic Phase-2 mode; native
+CLI-driven file editing is a planned follow-up.)
 
 For **every role** you can independently choose the **backend, model, and
 persona** (system prompt) right in the UI — mix Claude Code, Codex, GPT, and

@@ -49,6 +49,21 @@ class ArtifactVersion:
 
 
 @dataclass
+class WorkspaceFile:
+    """The latest state of one file edited in the workspace."""
+
+    path: str
+    content: str
+    status: str  # created | modified
+    additions: int
+    deletions: int
+    diff: str
+    author: str
+    role: str
+    round: int
+
+
+@dataclass
 class Session:
     """A single collaboration run."""
 
@@ -63,6 +78,8 @@ class Session:
     scratchpad: List[Note] = field(default_factory=list)  # shared blackboard
     artifact: str = ""                                     # the document/code being built
     artifact_versions: List[ArtifactVersion] = field(default_factory=list)
+    workspace: Optional[str] = None                        # real working directory (Phase 2)
+    workspace_files: Dict[str, WorkspaceFile] = field(default_factory=dict)  # path -> latest
     personas: Dict[str, str] = field(default_factory=dict)  # per-role system-prompt overrides
     role_order: List[str] = field(default_factory=list)     # ordered roles (used by custom strategy)
     stop_requested: bool = False
@@ -117,6 +134,19 @@ class Session:
             ArtifactVersion(author=author, role=role, round=rnd, content=content)
         )
         return len(self.artifact_versions)
+
+    # -- shared workspace (real files on disk) ----------------------------
+
+    def record_workspace_file(self, wf: "WorkspaceFile") -> None:
+        """Store/replace the latest state of an edited workspace file."""
+        self.workspace_files[wf.path] = wf
+
+    def workspace_view(self) -> List[dict]:
+        return [
+            {"path": w.path, "status": w.status,
+             "additions": w.additions, "deletions": w.deletions}
+            for w in self.workspace_files.values()
+        ]
 
 
 class SessionManager:
