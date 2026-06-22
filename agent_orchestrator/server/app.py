@@ -135,6 +135,7 @@ class Handler(BaseHTTPRequestHandler):
                     "model": s.local_model, "base_url": s.local_base_url,
                     "key_set": bool(s.local_api_key and s.local_api_key != "local"),
                     "key_from_env": bool(os.environ.get("LOCAL_LLM_API_KEY")),
+                    "use_proxy": s.local_use_proxy,
                 },
             },
         }

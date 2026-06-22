@@ -127,6 +127,11 @@ python -m agent_orchestrator run \
 | `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | Claude (API) | — / `claude-opus-4-8` |
 | `OPENAI_API_KEY` / `OPENAI_MODEL` | GPT (API) | — / `gpt-4o` |
 | `LOCAL_LLM_BASE_URL` / `LOCAL_LLM_MODEL` | ローカルLLM | `http://localhost:11434/v1` / `llama3.1` |
+| `LOCAL_LLM_USE_PROXY` | ローカルLLMをproxy経由で送信（`1`/`true` で有効。既定は直結） | 無効 |
+
+ローカルLLM はエンドポイントが localhost のことが多いため**既定で直結**します。proxy 経由に
+したい場合は、Settings（⚙）の *Local LLM* で **Send via proxy** にチェック（または
+`LOCAL_LLM_USE_PROXY=1`）してください。
 
 ## 拡張方法
 

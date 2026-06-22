@@ -111,6 +111,10 @@ in-app **Settings** (⚙) — used whenever the matching environment variable is
 set, and held in memory for the local server only (never displayed back). Point
 any provider's base URL at any OpenAI-compatible endpoint.
 
+Local-LLM calls **connect directly by default** (the endpoint is usually on
+localhost). If you need them routed through the proxy too, tick **Send via
+proxy** under *Local LLM* in Settings (or set `LOCAL_LLM_USE_PROXY=1`).
+
 ## Headless usage
 
 ```bash

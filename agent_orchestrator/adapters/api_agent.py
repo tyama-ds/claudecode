@@ -41,14 +41,18 @@ class ApiHTTPError(RuntimeError):
         self.body = body or ""
 
 
-def _post_json(url: str, headers: dict, payload: dict) -> dict:
-    """POST JSON and return the parsed response, honouring the configured proxy."""
+def _post_json(url: str, headers: dict, payload: dict, use_proxy: bool = True) -> dict:
+    """POST JSON and return the parsed response.
+
+    The configured proxy is applied only when ``use_proxy`` is true, so local-LLM
+    calls can opt out and connect directly to a localhost endpoint.
+    """
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url, data=body, method="POST",
         headers={**headers, "Content-Type": "application/json"},
     )
-    proxy = get_settings().proxy
+    proxy = get_settings().proxy if use_proxy else None
     try:
         if proxy:
             opener = urllib.request.build_opener(
@@ -170,11 +174,15 @@ class OpenAIAPIAdapter(AgentAdapter):
         else:
             token_params = ["max_tokens", "max_completion_tokens"]
 
+        # Local endpoints connect directly unless the user opts into the proxy.
+        use_proxy = settings.local_use_proxy if self.local else True
+
         last_error = None
         for i, param in enumerate(token_params):
             payload = {**base_payload, param: settings.max_tokens}
             try:
-                data = _post_json(url, {"Authorization": f"Bearer {key}"}, payload)
+                data = _post_json(url, {"Authorization": f"Bearer {key}"}, payload,
+                                  use_proxy=use_proxy)
             except ApiHTTPError as exc:
                 last_error = exc
                 body = exc.body.lower()

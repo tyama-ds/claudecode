@@ -606,6 +606,7 @@ async function loadSettings() {
       k.placeholder = p.key_from_env ? "set via environment"
         : (p.key_set ? "saved (hidden)" : "not set");
     }
+    $("#set-local-proxy").checked = !!(d.providers.local && d.providers.local.use_proxy);
   } catch (e) { $("#settings-status").textContent = "Failed to load: " + e; }
 }
 
@@ -619,6 +620,7 @@ async function saveSettings() {
     openai_base_url: v("set-openai-base"),
     local_api_key: v("set-local-key"), local_model: v("set-local-model"),
     local_base_url: v("set-local-base"),
+    local_use_proxy: $("#set-local-proxy").checked,
   };
   const st = $("#settings-status");
   st.textContent = "Saving…";

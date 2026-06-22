@@ -79,7 +79,7 @@ class TestOpenAITokenParam(unittest.TestCase):
     def test_newer_model_uses_completion_tokens_first(self):
         calls = []
 
-        def fake(url, headers, payload):
+        def fake(url, headers, payload, use_proxy=True):
             calls.append(dict(payload))
             return {"choices": [{"message": {"content": "ok"}}]}
 
@@ -93,7 +93,7 @@ class TestOpenAITokenParam(unittest.TestCase):
         import agent_orchestrator.adapters.api_agent as api
         calls = []
 
-        def fake(url, headers, payload):
+        def fake(url, headers, payload, use_proxy=True):
             calls.append(dict(payload))
             if "max_tokens" in payload:
                 raise api.ApiHTTPError(400, (
@@ -110,6 +110,53 @@ class TestOpenAITokenParam(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertIn("max_tokens", calls[0])
         self.assertIn("max_completion_tokens", calls[1])
+
+
+class TestLocalProxyToggle(unittest.TestCase):
+    """The local LLM can be sent through the proxy or directly (a UI checkbox)."""
+
+    def _captured_use_proxy(self, *, local, local_use_proxy):
+        import agent_orchestrator.adapters.api_agent as api
+        from agent_orchestrator.config import get_settings
+        seen = {}
+
+        def fake(url, headers, payload, use_proxy=True):
+            seen["use_proxy"] = use_proxy
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        settings = get_settings()
+        orig_post, orig_flag = api._post_json, settings.local_use_proxy
+        api._post_json = fake
+        settings.local_use_proxy = local_use_proxy
+        try:
+            api.OpenAIAPIAdapter(name="x", local=local).generate("hi")
+        finally:
+            api._post_json = orig_post
+            settings.local_use_proxy = orig_flag
+        return seen["use_proxy"]
+
+    def test_local_direct_by_default(self):
+        self.assertFalse(self._captured_use_proxy(local=True, local_use_proxy=False))
+
+    def test_local_via_proxy_when_enabled(self):
+        self.assertTrue(self._captured_use_proxy(local=True, local_use_proxy=True))
+
+    def test_non_local_always_uses_proxy(self):
+        # A remote provider ignores the local toggle and keeps proxy routing.
+        self.assertTrue(self._captured_use_proxy(local=False, local_use_proxy=False))
+
+    def test_apply_overrides_and_default(self):
+        from agent_orchestrator.config import Settings
+        s = Settings()
+        self.assertFalse(s.local_use_proxy)  # direct by default
+        s.apply_overrides({"local_use_proxy": True})
+        self.assertTrue(s.local_use_proxy)
+        s.apply_overrides({"local_use_proxy": False})
+        self.assertFalse(s.local_use_proxy)
+        # Omitting the key leaves the value untouched.
+        s.local_use_proxy = True
+        s.apply_overrides({"proxy": "http://p"})
+        self.assertTrue(s.local_use_proxy)
 
 
 if __name__ == "__main__":
