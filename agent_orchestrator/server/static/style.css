@@ -388,6 +388,18 @@ select option { background: #0c111b; color: var(--text); }
   margin: 0 0 10px; font-family: var(--mono); font-size: 11px;
   text-transform: uppercase; letter-spacing: 1.6px; color: var(--c);
 }
+.result-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.result-head h3 { margin: 0; }
+
+/* One-click copy button (on each turn card and the final deliverable). */
+.copy-btn {
+  margin-left: 8px; background: none; border: 1px solid var(--border);
+  color: var(--text-faint); border-radius: 6px; font-family: var(--mono);
+  font-size: 10.5px; line-height: 1; padding: 4px 8px; cursor: pointer; flex: none;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.copy-btn:hover { color: var(--text); border-color: var(--border-strong); }
+.copy-btn.copied { color: var(--good); border-color: rgba(76, 195, 138, 0.5); }
 .note {
   color: var(--text-faint); font-size: 12.5px; text-align: center;
   font-family: var(--mono); padding: 3px;

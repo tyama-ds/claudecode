@@ -317,6 +317,39 @@ function handleEvent(evt) {
   }
 }
 
+// One-click copy of an agent's raw (un-rendered) output.
+function makeCopyBtn(text) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "copy-btn";
+  b.title = "Copy output";
+  b.textContent = "Copy";
+  b.addEventListener("click", (e) => { e.stopPropagation(); copyText(text, b); });
+  return b;
+}
+function copyText(text, btn) {
+  const flash = () => {
+    btn.textContent = "Copied";
+    btn.classList.add("copied");
+    setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("copied"); }, 1200);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(flash).catch(() => fallbackCopy(text, flash));
+  } else {
+    fallbackCopy(text, flash);
+  }
+}
+function fallbackCopy(text, flash) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand("copy"); flash(); } catch (e) { /* ignore */ }
+  document.body.removeChild(ta);
+}
+
 function cardKey(d) { return `${d.role}-${d.round}`; }
 
 function addThinkingCard(d) {
@@ -356,6 +389,9 @@ function fillCard(d) {
       : "Context embedded in the prompt (fallback)";
     node.querySelector(".turn-head").appendChild(tag);
   }
+  if (d.ok && d.content) {
+    node.querySelector(".turn-head").appendChild(makeCopyBtn(d.content));
+  }
   node.querySelector(".turn-body").innerHTML = d.ok ? renderMarkdown(d.content) : escapeHtml(d.content);
   node.scrollIntoView({ behavior: "smooth", block: "end" });
 }
@@ -381,7 +417,17 @@ function renderScratchpad(notes) {
 function addResult(content) {
   const el = document.createElement("div");
   el.className = "result-card";
-  el.innerHTML = `<h3>Final deliverable</h3><div class="turn-body">${renderMarkdown(content)}</div>`;
+  const head = document.createElement("div");
+  head.className = "result-head";
+  const h3 = document.createElement("h3");
+  h3.textContent = "Final deliverable";
+  head.appendChild(h3);
+  head.appendChild(makeCopyBtn(content));
+  const body = document.createElement("div");
+  body.className = "turn-body";
+  body.innerHTML = renderMarkdown(content);
+  el.appendChild(head);
+  el.appendChild(body);
   $("#stream").appendChild(el);
   el.scrollIntoView({ behavior: "smooth", block: "end" });
 }
