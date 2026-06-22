@@ -5,6 +5,10 @@ Deliberately SDK-free: on a locked-down / audited machine this needs no
 Python calling the providers' REST endpoints directly. The only requirement is
 an API key (and, for local models, a running OpenAI-compatible server).
 
+Endpoints, keys, and an optional HTTP(S) proxy are read from
+:class:`~agent_orchestrator.config.Settings` at call time, so values entered in
+the UI Settings tab take effect immediately.
+
 - :class:`AnthropicAPIAdapter` → Claude Messages API.
 - :class:`OpenAIAPIAdapter` → OpenAI (or any OpenAI-compatible) chat endpoint;
   point ``base_url`` at a local server (Ollama / LM Studio) for local LLMs.
@@ -24,14 +28,22 @@ _API_TIMEOUT = 300  # seconds
 
 
 def _post_json(url: str, headers: dict, payload: dict) -> dict:
-    """POST JSON and return the parsed JSON response, with readable errors."""
+    """POST JSON and return the parsed response, honouring the configured proxy."""
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url, data=body, method="POST",
         headers={**headers, "Content-Type": "application/json"},
     )
+    proxy = get_settings().proxy
     try:
-        with urllib.request.urlopen(req, timeout=_API_TIMEOUT) as resp:
+        if proxy:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+            )
+            resp = opener.open(req, timeout=_API_TIMEOUT)
+        else:
+            resp = urllib.request.urlopen(req, timeout=_API_TIMEOUT)
+        with resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:500]
@@ -50,10 +62,9 @@ def _chat_messages(history: List[Message], prompt: str) -> list:
 
 
 class AnthropicAPIAdapter(AgentAdapter):
-    """Claude via the Messages REST API (``POST /v1/messages``)."""
+    """Claude via the Messages REST API (``POST {base}/v1/messages``)."""
 
     kind = "anthropic"
-    URL = "https://api.anthropic.com/v1/messages"
     VERSION = "2023-06-01"
 
     def __init__(self, name: str = "claude_api", display_name: Optional[str] = None,
@@ -63,11 +74,12 @@ class AnthropicAPIAdapter(AgentAdapter):
 
     def available(self) -> "tuple[bool, str]":
         if not get_settings().anthropic_api_key:
-            return False, "ANTHROPIC_API_KEY not set"
+            return False, "no API key (set ANTHROPIC_API_KEY or enter it in Settings)"
         return True, ""
 
     def _generate(self, prompt: str, system: Optional[str], history: List[Message]) -> str:
         settings = get_settings()
+        url = settings.anthropic_base_url.rstrip("/") + "/v1/messages"
         payload = {
             "model": self.model,
             "max_tokens": settings.max_tokens,
@@ -75,11 +87,8 @@ class AnthropicAPIAdapter(AgentAdapter):
         }
         if system:
             payload["system"] = system
-        headers = {
-            "x-api-key": settings.anthropic_api_key,
-            "anthropic-version": self.VERSION,
-        }
-        data = _post_json(self.URL, headers, payload)
+        headers = {"x-api-key": settings.anthropic_api_key, "anthropic-version": self.VERSION}
+        data = _post_json(url, headers, payload)
         blocks = data.get("content", [])
         text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
         if not text:
@@ -88,10 +97,11 @@ class AnthropicAPIAdapter(AgentAdapter):
 
 
 class OpenAIAPIAdapter(AgentAdapter):
-    """OpenAI-compatible chat completions (``POST /v1/chat/completions``).
+    """OpenAI-compatible chat completions (``POST {base}/chat/completions``).
 
-    With ``local=True`` this targets a local server (default: Ollama), which is
-    how local-LLM participants are powered — same wire format, different host.
+    Works with any OpenAI-compatible provider by setting its base URL: OpenAI,
+    Azure OpenAI, Together, Groq, OpenRouter, vLLM, or a local server (Ollama /
+    LM Studio) when ``local=True``.
     """
 
     kind = "openai"
@@ -101,31 +111,30 @@ class OpenAIAPIAdapter(AgentAdapter):
         name: str = "openai_api",
         display_name: Optional[str] = None,
         model: Optional[str] = None,
-        base_url: Optional[str] = None,
         local: bool = False,
     ):
         self.local = local
         settings = get_settings()
         super().__init__(name, display_name or ("Local LLM" if local else "GPT (API)"))
         self.model = model or (settings.local_model if local else settings.openai_model)
-        base = base_url or (settings.local_base_url if local else "https://api.openai.com/v1")
-        self.url = base.rstrip("/") + "/chat/completions"
 
     def available(self) -> "tuple[bool, str]":
         if not self.local and not get_settings().openai_api_key:
-            return False, "OPENAI_API_KEY not set"
+            return False, "no API key (set OPENAI_API_KEY or enter it in Settings)"
         return True, ""
 
     def _generate(self, prompt: str, system: Optional[str], history: List[Message]) -> str:
         settings = get_settings()
+        base = settings.local_base_url if self.local else settings.openai_base_url
+        url = base.rstrip("/") + "/chat/completions"
+        key = settings.local_api_key if self.local else settings.openai_api_key
+
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.extend(_chat_messages(history, prompt))
         payload = {"model": self.model, "messages": messages, "max_tokens": settings.max_tokens}
-        # Local servers usually ignore the key; OpenAI requires it.
-        key = "local" if self.local else settings.openai_api_key
-        data = _post_json(self.url, {"Authorization": f"Bearer {key}"}, payload)
+        data = _post_json(url, {"Authorization": f"Bearer {key}"}, payload)
         choices = data.get("choices") or []
         if not choices:
             raise RuntimeError(f"no choices in response: {json.dumps(data)[:300]}")

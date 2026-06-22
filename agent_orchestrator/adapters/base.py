@@ -39,6 +39,12 @@ class AgentAdapter(ABC):
     #: The :class:`~agent_orchestrator.config.AdapterKind` value, set by subclasses.
     kind: str = "base"
 
+    #: Whether this backend can use a structured conversation ``history`` (a list
+    #: of messages). When False, the orchestrator falls back to embedding the
+    #: transcript as text in the prompt. Backends that ignore history set this
+    #: False so the fallback path is used instead.
+    supports_history: bool = True
+
     def __init__(self, name: str, display_name: Optional[str] = None):
         self.name = name
         self.display_name = display_name or name

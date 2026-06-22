@@ -19,6 +19,8 @@
       </div>
     </div>
     <div class="topbar-right">
+      <button id="settings-open" class="theme-toggle" type="button"
+        title="Settings" aria-label="Open settings">⚙</button>
       <button id="theme-toggle" class="theme-toggle" type="button"
         title="Toggle light / dark" aria-label="Toggle light or dark theme">☾</button>
       <div id="conn" class="conn idle" role="status" aria-live="polite">
@@ -95,6 +97,64 @@
   <footer class="foot">
     Runs on the Python standard library — no installs, no telemetry.
   </footer>
+
+  <div id="settings-overlay" class="overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Settings">
+      <div class="modal-head">
+        <h2>Settings</h2>
+        <button id="settings-close" class="theme-toggle" type="button" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-note">
+          Used when the matching environment variable isn't set. Keys are held in
+          memory for this local server only and are never shown back. Works with any
+          OpenAI-compatible provider via its base URL.
+        </p>
+
+        <div class="set-group">
+          <div class="set-title">Network</div>
+          <label class="field">
+            <span class="field-label">HTTP(S) proxy</span>
+            <input id="set-proxy" type="text" placeholder="http://proxy.corp:8080 (blank = direct)" />
+          </label>
+        </div>
+
+        <div class="set-group">
+          <div class="set-title">Claude · Anthropic</div>
+          <label class="field"><span class="field-label">API key</span>
+            <input id="set-anthropic-key" type="password" autocomplete="off" /></label>
+          <label class="field"><span class="field-label">Model</span>
+            <input id="set-anthropic-model" type="text" /></label>
+          <label class="field"><span class="field-label">Base URL</span>
+            <input id="set-anthropic-base" type="text" /></label>
+        </div>
+
+        <div class="set-group">
+          <div class="set-title">GPT · OpenAI-compatible</div>
+          <label class="field"><span class="field-label">API key</span>
+            <input id="set-openai-key" type="password" autocomplete="off" /></label>
+          <label class="field"><span class="field-label">Model</span>
+            <input id="set-openai-model" type="text" /></label>
+          <label class="field"><span class="field-label">Base URL</span>
+            <input id="set-openai-base" type="text" placeholder="https://api.openai.com/v1" /></label>
+        </div>
+
+        <div class="set-group">
+          <div class="set-title">Local LLM</div>
+          <label class="field"><span class="field-label">API key (optional)</span>
+            <input id="set-local-key" type="password" autocomplete="off" /></label>
+          <label class="field"><span class="field-label">Model</span>
+            <input id="set-local-model" type="text" /></label>
+          <label class="field"><span class="field-label">Base URL</span>
+            <input id="set-local-base" type="text" placeholder="http://localhost:11434/v1" /></label>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <span id="settings-status" class="status"></span>
+        <button id="settings-save" class="btn primary" type="button">Save</button>
+      </div>
+    </div>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>
