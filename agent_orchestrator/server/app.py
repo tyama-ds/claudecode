@@ -88,6 +88,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_static(path[len("/static/"):])
         elif path == "/api/catalog":
             self._send_json({"agents": catalog(), "strategies": strategy_metadata()})
+        elif path == "/api/settings":
+            self._send_json(self._settings_payload())
         elif path.startswith("/api/stream/"):
             self._stream(path[len("/api/stream/"):])
         else:
@@ -97,12 +99,45 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/api/run":
             self._run()
+        elif path == "/api/settings":
+            get_settings().apply_overrides(self._read_body())
+            self._send_json(self._settings_payload())
         elif path.startswith("/api/stop/"):
             self._stop(path[len("/api/stop/"):])
         else:
             self._send_json({"error": "not found"}, status=404)
 
     # -- endpoints ---------------------------------------------------------
+
+    def _settings_payload(self) -> dict:
+        """Non-secret view of current settings for the UI (keys never echoed)."""
+        s = get_settings()
+
+        def prov(model, base, key, env_var):
+            return {
+                "model": model,
+                "base_url": base,
+                "key_set": bool(key),
+                "key_from_env": bool(os.environ.get(env_var)),
+            }
+
+        proxy_env = any(os.environ.get(v) for v in (
+            "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"))
+        return {
+            "proxy": s.proxy or "",
+            "proxy_from_env": proxy_env,
+            "providers": {
+                "anthropic": prov(s.anthropic_model, s.anthropic_base_url,
+                                  s.anthropic_api_key, "ANTHROPIC_API_KEY"),
+                "openai": prov(s.openai_model, s.openai_base_url,
+                               s.openai_api_key, "OPENAI_API_KEY"),
+                "local": {
+                    "model": s.local_model, "base_url": s.local_base_url,
+                    "key_set": bool(s.local_api_key and s.local_api_key != "local"),
+                    "key_from_env": bool(os.environ.get("LOCAL_LLM_API_KEY")),
+                },
+            },
+        }
 
     def _run(self) -> None:
         body = self._read_body()

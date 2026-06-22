@@ -410,8 +410,84 @@ function initTheme() {
   });
 }
 
+// -- settings --------------------------------------------------------------
+function openSettings() { $("#settings-overlay").hidden = false; loadSettings(); }
+function closeSettings() { $("#settings-overlay").hidden = true; }
+
+const SET_FIELDS = {
+  anthropic: ["set-anthropic-key", "set-anthropic-model", "set-anthropic-base"],
+  openai: ["set-openai-key", "set-openai-model", "set-openai-base"],
+  local: ["set-local-key", "set-local-model", "set-local-base"],
+};
+
+async function loadSettings() {
+  try {
+    const d = await (await fetch("/api/settings")).json();
+    $("#set-proxy").value = d.proxy || "";
+    $("#set-proxy").placeholder = d.proxy_from_env
+      ? "set via environment" : "http://proxy.corp:8080 (blank = direct)";
+    for (const [prov, [keyId, modelId, baseId]] of Object.entries(SET_FIELDS)) {
+      const p = d.providers[prov];
+      $("#" + modelId).value = p.model || "";
+      $("#" + baseId).value = p.base_url || "";
+      const k = $("#" + keyId);
+      k.value = "";
+      k.placeholder = p.key_from_env ? "set via environment"
+        : (p.key_set ? "saved (hidden)" : "not set");
+    }
+  } catch (e) { $("#settings-status").textContent = "Failed to load: " + e; }
+}
+
+async function saveSettings() {
+  const v = (id) => $("#" + id).value;
+  const payload = {
+    proxy: v("set-proxy"),
+    anthropic_api_key: v("set-anthropic-key"), anthropic_model: v("set-anthropic-model"),
+    anthropic_base_url: v("set-anthropic-base"),
+    openai_api_key: v("set-openai-key"), openai_model: v("set-openai-model"),
+    openai_base_url: v("set-openai-base"),
+    local_api_key: v("set-local-key"), local_model: v("set-local-model"),
+    local_base_url: v("set-local-base"),
+  };
+  const st = $("#settings-status");
+  st.textContent = "Saving…";
+  try {
+    await fetch("/api/settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    await refreshAvailability();
+    await loadSettings();
+    st.textContent = "Saved ✓";
+  } catch (e) { st.textContent = "Save failed: " + e; }
+}
+
+// Re-check backend availability after settings change, preserving selections.
+async function refreshAvailability() {
+  const data = await (await fetch("/api/catalog")).json();
+  state.agents = data.agents;
+  document.querySelectorAll("#roles select, #participants select").forEach((sel) => {
+    Array.from(sel.options).forEach((opt) => {
+      const ag = state.agents.find((a) => a.id === opt.value);
+      if (ag) {
+        opt.disabled = !ag.available;
+        opt.textContent = ag.available ? ag.label : `${ag.label} — ${ag.reason}`;
+      }
+    });
+  });
+}
+
 // -- boot ------------------------------------------------------------------
 initTheme();
 $("#run").addEventListener("click", run);
 $("#stop").addEventListener("click", stop);
+$("#settings-open").addEventListener("click", openSettings);
+$("#settings-close").addEventListener("click", closeSettings);
+$("#settings-save").addEventListener("click", saveSettings);
+$("#settings-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "settings-overlay") closeSettings();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("#settings-overlay").hidden) closeSettings();
+});
 loadCatalog().catch((e) => setStatus("Failed to load catalog: " + e, true));

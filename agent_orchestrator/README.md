@@ -87,6 +87,11 @@ the transcript embedded in the prompt. Each turn is tagged `ctx: history` or
 Optional config goes in a `.env` file (see `.env.example`). There are **no
 packages to install** — only an API key for each hosted backend you want.
 
+You can also enter API keys, models, base URLs, and an HTTP(S) **proxy** in the
+in-app **Settings** (⚙) — used whenever the matching environment variable isn't
+set, and held in memory for the local server only (never displayed back). Point
+any provider's base URL at any OpenAI-compatible endpoint.
+
 ## Headless usage
 
 ```bash
