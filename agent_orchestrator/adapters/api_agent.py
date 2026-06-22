@@ -27,6 +27,20 @@ from .base import AgentAdapter, Message
 _API_TIMEOUT = 300  # seconds
 
 
+class ApiHTTPError(RuntimeError):
+    """An HTTP error from a provider, carrying the status and response body.
+
+    Subclasses RuntimeError so it still surfaces as a normal turn error, while
+    letting adapters inspect ``.status`` / ``.body`` to recover (e.g. retry with
+    a different parameter name).
+    """
+
+    def __init__(self, status: int, body: str):
+        super().__init__(f"HTTP {status}: {body[:500]}")
+        self.status = status
+        self.body = body or ""
+
+
 def _post_json(url: str, headers: dict, payload: dict) -> dict:
     """POST JSON and return the parsed response, honouring the configured proxy."""
     body = json.dumps(payload).encode("utf-8")
@@ -46,8 +60,8 @@ def _post_json(url: str, headers: dict, payload: dict) -> dict:
         with resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")[:500]
-        raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+        detail = exc.read().decode("utf-8", "replace")
+        raise ApiHTTPError(exc.code, detail) from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"connection failed: {exc.reason}") from exc
 
@@ -59,6 +73,17 @@ def _chat_messages(history: List[Message], prompt: str) -> list:
     ]
     msgs.append({"role": "user", "content": prompt})
     return msgs
+
+
+def _needs_completion_tokens(model: str) -> bool:
+    """Whether a model rejects ``max_tokens`` and needs ``max_completion_tokens``.
+
+    Newer OpenAI models — the gpt-5 family and the o-series reasoning models —
+    require ``max_completion_tokens``; the 4o / 4.x families still use
+    ``max_tokens``. A wrong guess is corrected by the retry in the adapter.
+    """
+    m = (model or "").lower()
+    return m.startswith(("gpt-5", "o1", "o3", "o4"))
 
 
 class AnthropicAPIAdapter(AgentAdapter):
@@ -133,9 +158,37 @@ class OpenAIAPIAdapter(AgentAdapter):
         if system:
             messages.append({"role": "system", "content": system})
         messages.extend(_chat_messages(history, prompt))
-        payload = {"model": self.model, "messages": messages, "max_tokens": settings.max_tokens}
-        data = _post_json(url, {"Authorization": f"Bearer {key}"}, payload)
-        choices = data.get("choices") or []
-        if not choices:
-            raise RuntimeError(f"no choices in response: {json.dumps(data)[:300]}")
-        return choices[0].get("message", {}).get("content", "") or ""
+        base_payload = {"model": self.model, "messages": messages}
+
+        # Choose the token-limit parameter for the model; if the server rejects
+        # it as unsupported, retry with the other name. Covers OpenAI's 4o vs
+        # gpt-5/o-series split and any OpenAI-compatible provider.
+        if self.local:
+            token_params = ["max_tokens"]
+        elif _needs_completion_tokens(self.model):
+            token_params = ["max_completion_tokens", "max_tokens"]
+        else:
+            token_params = ["max_tokens", "max_completion_tokens"]
+
+        last_error = None
+        for i, param in enumerate(token_params):
+            payload = {**base_payload, param: settings.max_tokens}
+            try:
+                data = _post_json(url, {"Authorization": f"Bearer {key}"}, payload)
+            except ApiHTTPError as exc:
+                last_error = exc
+                body = exc.body.lower()
+                can_retry = (
+                    i + 1 < len(token_params)
+                    and exc.status == 400
+                    and param in body
+                    and ("unsupported" in body or "not supported" in body)
+                )
+                if can_retry:
+                    continue
+                raise
+            choices = data.get("choices") or []
+            if not choices:
+                raise RuntimeError(f"no choices in response: {json.dumps(data)[:300]}")
+            return choices[0].get("message", {}).get("content", "") or ""
+        raise last_error  # pragma: no cover - loop always returns or raises above

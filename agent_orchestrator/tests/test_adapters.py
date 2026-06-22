@@ -55,5 +55,62 @@ class TestRegistry(unittest.TestCase):
         self.assertIsInstance(reason, str)
 
 
+class TestOpenAITokenParam(unittest.TestCase):
+    """The OpenAI-compatible adapter must use the right token-limit parameter:
+    max_completion_tokens for gpt-5 / o-series, max_tokens for 4o, with a
+    self-correcting retry when the server rejects the chosen name."""
+
+    def _run_with_fake(self, model, fake):
+        import agent_orchestrator.adapters.api_agent as api
+        orig = api._post_json
+        api._post_json = fake
+        try:
+            return api.OpenAIAPIAdapter(name="x", model=model).generate("hi")
+        finally:
+            api._post_json = orig
+
+    def test_needs_completion_tokens_helper(self):
+        from agent_orchestrator.adapters.api_agent import _needs_completion_tokens
+        for m in ["gpt-5", "gpt-5-mini", "o1", "o1-mini", "o3", "o3-mini", "o4-mini"]:
+            self.assertTrue(_needs_completion_tokens(m), m)
+        for m in ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "llama3.1", ""]:
+            self.assertFalse(_needs_completion_tokens(m), m)
+
+    def test_newer_model_uses_completion_tokens_first(self):
+        calls = []
+
+        def fake(url, headers, payload):
+            calls.append(dict(payload))
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        res = self._run_with_fake("gpt-5-mini", fake)
+        self.assertTrue(res.ok, res.error)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("max_completion_tokens", calls[0])
+        self.assertNotIn("max_tokens", calls[0])
+
+    def test_retries_when_max_tokens_unsupported(self):
+        import agent_orchestrator.adapters.api_agent as api
+        calls = []
+
+        def fake(url, headers, payload):
+            calls.append(dict(payload))
+            if "max_tokens" in payload:
+                raise api.ApiHTTPError(400, (
+                    '{"error":{"message":"Unsupported parameter: \'max_tokens\' is not '
+                    'supported with this model. Use \'max_completion_tokens\' instead.",'
+                    '"code":"unsupported_parameter","param":"max_tokens"}}'
+                ))
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        # gpt-4o is treated as "old" → tries max_tokens, gets 400, retries the other name.
+        res = self._run_with_fake("gpt-4o", fake)
+        self.assertTrue(res.ok, res.error)
+        self.assertEqual(res.text, "ok")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("max_tokens", calls[0])
+        self.assertIn("max_completion_tokens", calls[1])
+
+
 if __name__ == "__main__":
     unittest.main()
