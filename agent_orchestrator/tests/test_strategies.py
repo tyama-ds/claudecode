@@ -71,8 +71,75 @@ class TestStrategies(unittest.TestCase):
             set(STRATEGIES),
             {"implementer_reviewer", "debate_consensus", "planner_executor",
              "round_robin", "panel_judge", "custom", "doc_authoring", "code_authoring",
-             "workspace_build"},
+             "workspace_build", "conductor_team"},
         )
+
+    def test_conductor_directive_parsers(self):
+        from agent_orchestrator.orchestrator.strategies import (
+            _parse_assignments, _parse_assessments, _conductor_done,
+        )
+        text = (
+            "@worker_1 [OK]: solid work\n"
+            "@worker_2 [WARN]: ignored the assignment\n"
+            "@worker_1: write the parser\n"
+            "@worker_2: write the tests\n"
+            "@stranger: ignore me\n"
+            "VERDICT: DONE\n"
+        )
+        workers = ["worker_1", "worker_2"]
+        self.assertEqual(
+            _parse_assignments(text, workers),
+            {"worker_1": "write the parser", "worker_2": "write the tests"},
+        )
+        self.assertEqual(
+            _parse_assessments(text, workers),
+            [("worker_1", "OK", "solid work"),
+             ("worker_2", "WARN", "ignored the assignment")],
+        )
+        self.assertTrue(_conductor_done(text))
+        self.assertFalse(_conductor_done("VERDICT: CONTINUE\n@worker_1: keep going"))
+
+    def _conductor_session(self, conductor_body, rounds=2, workers=2):
+        agents = {
+            "conductor": _FixedAdapter("Maestro", conductor_body),
+            "reviewer": _FixedAdapter("Critic", "Looks reasonable; minor gaps."),
+        }
+        order = ["conductor"]
+        for i in range(1, workers + 1):
+            agents[f"worker_{i}"] = _FixedAdapter(f"W{i}", f"worker {i} output")
+            order.append(f"worker_{i}")
+        order.append("reviewer")
+        s = Session(id="ct", task="Build a thing.", strategy="conductor_team",
+                    rounds=rounds, agents=agents)
+        s.role_order = order
+        return s
+
+    def test_conductor_team_runs_and_tracks_workers(self):
+        body = ("@worker_1 [OK]: good\n@worker_2 [WARN]: nothing delivered\n"
+                "@worker_1: do part A\n@worker_2: do part B\nVERDICT: CONTINUE")
+        session = self._conductor_session(body, rounds=2, workers=2)
+        result = get_strategy("conductor_team").run(session)
+        self.assertTrue(result)
+        statuses = [e.data["status"] for e in session.bus.history if e.type == "worker_status"]
+        for expected in ("assigned", "delivered", "warned", "ok"):
+            self.assertIn(expected, statuses)
+        self.assertIn("result", [e.type for e in session.bus.history])
+
+    def test_conductor_done_stops_early(self):
+        body = ("@worker_1 [OK]: done\n@worker_2 [OK]: done\n"
+                "@worker_1: x\n@worker_2: y\nVERDICT: DONE")
+        session = self._conductor_session(body, rounds=4, workers=2)
+        get_strategy("conductor_team").run(session)
+        # round 1 assigns+works; round 2 conductor says DONE -> no round-2 worker turns.
+        worker_rounds = {t.round for t in session.transcript if t.role.startswith("worker")}
+        self.assertEqual(worker_rounds, {1})
+
+    def test_conductor_team_requires_full_team(self):
+        agents = {"conductor": _FixedAdapter("c", "x"), "reviewer": _FixedAdapter("r", "x")}
+        session = Session(id="ct", task="t", strategy="conductor_team", rounds=1, agents=agents)
+        session.role_order = ["conductor", "reviewer"]
+        with self.assertRaises(AgentTurnError):
+            get_strategy("conductor_team").run(session)
 
     def test_extract_files(self):
         from agent_orchestrator.orchestrator.strategies import _extract_files
@@ -175,7 +242,8 @@ class TestStrategies(unittest.TestCase):
         self.assertIn("Conversation so far", prompt_b)  # transcript embedded instead
 
     def test_each_strategy_produces_transcript_and_result(self):
-        for name in (n for n in STRATEGIES if n != "custom"):  # custom needs runtime roles
+        # custom and conductor_team need runtime-supplied roles.
+        for name in (n for n in STRATEGIES if n not in ("custom", "conductor_team")):
             with self.subTest(strategy=name):
                 session = _session(name, rounds=2)
                 result = get_strategy(name).run(session)

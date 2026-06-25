@@ -59,6 +59,7 @@ python -m agent_orchestrator serve
 | **Doc authoring（文章共同制作）** | writer, editor | 共有**Artifact**（文書）を writer が起草・改稿し、editor が各版を批評。承認まで反復。 |
 | **Code authoring（コード共同制作）** | implementer, reviewer | 単一の**Artifact**（コード）を implementer が編集し、reviewer が各版を批評。承認まで反復。 |
 | **Workspace build（実ファイル開発）** | implementer, reviewer | **実ディレクトリ**上で implementer がファイルを作成/編集し、reviewer が差分を批評。承認まで反復。 |
+| **Conductor team（コンダクター方式）** | conductor, workers (2〜4), reviewer | **コンダクター**がタスクを分解して各ワーカーに割当て、reviewer が各ワーカーの成果を個別レビューしてコンダクターに報告。コンダクターは毎ラウンド全員を評価し、**働いていないワーカーを名指しで指摘**して再割当て。完了まで反復。 |
 | **Custom（自由定義）** | 自分で定義 (2〜5体) | 参加者ごとにバックエンド・モデル・人格を自由に設定し、議論して結論を統合。 |
 
 authoring 系は共有**Artifact**（1つの育つドキュメント/コード）を作ります。トランスクリプト上部の
@@ -72,6 +73,13 @@ Workspace パネル（ファイル一覧＋色付き差分）に表示します�
 コミットは行いません（レビューと commit はユーザーが実施）。ワークスペースは既定でサーバ起動
 ディレクトリ、実行ごとに上書き指定可能です。（これはバックエンド非依存の Phase 2。CLI 自身に
 よる実ファイル編集は今後の予定です。）
+
+**Conductor team** は上司＋チーム型のワークフローです。コンダクターは小さな行プロトコルで
+チームに指示します（割当て `@worker_1: <サブタスク>`、指摘 `@worker_2 [WARN]: <不足点>`、
+完了 `VERDICT: DONE`）。トランスクリプト上部の **Team パネル**に各ワーカーの状態
+（*assigned → delivered → approved ✓ / called out ⚠*）がライブ表示され、誰が働いていて誰が
+サボっているか一目で分かります。最後にコンダクターが全員の成果を最終成果物に統合します。
+ワーカー数（2〜4）は UI で指定します。
 
 **各ロールごとに**「バックエンド・モデル・人格(system prompt)」を個別に指定できます
 （UI上で編集可）。1回の実行で Claude Code・Codex・GPT・ローカルモデルを**混在**させたり、

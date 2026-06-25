@@ -158,14 +158,15 @@ class Handler(BaseHTTPRequestHandler):
 
         rounds = max(1, min(rounds, 8))
 
-        # Roles are fixed by the strategy, except for the user-defined "custom"
-        # strategy whose participants come from the request.
-        if strategy.custom:
+        # Roles are fixed by the strategy, except for strategies with a dynamic
+        # role set (the user-defined "custom" panel, the conductor's team) whose
+        # participants come from the request.
+        if strategy.custom or strategy.dynamic_roles:
             order = body.get("role_order") or list(roles_spec.keys())
             role_list = [(k, k) for k in order]
             if len(role_list) < 2:
                 self._send_json(
-                    {"error": "custom strategy needs at least 2 participants"}, status=400
+                    {"error": "this strategy needs at least 2 participants"}, status=400
                 )
                 return
         else:

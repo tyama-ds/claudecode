@@ -168,6 +168,45 @@ def _workspace_summary(session: Session) -> str:
     return "\n\n".join(parts)
 
 
+# -- conductor / team directives ------------------------------------------
+
+# The conductor speaks to the team in a small line protocol:
+#   @worker_1: <assignment>           — assign a subtask
+#   @worker_2 [WARN]: <what failed>   — assess a worker (OK or WARN)
+#   VERDICT: DONE                     — the task is complete
+_ASSIGN_RE = re.compile(r"^[ \t]*@(\w+)[ \t]*:[ \t]*(.+)$", re.MULTILINE)
+_ASSESS_RE = re.compile(r"@(\w+)[ \t]*\[[ \t]*(OK|WARN)[ \t]*\][ \t]*:[ \t]*([^\n]*)", re.IGNORECASE)
+_DONE_RE = re.compile(r"VERDICT[ \t]*:[ \t]*DONE", re.IGNORECASE)
+
+
+def _parse_assignments(text: str, workers: List[str]) -> Dict[str, str]:
+    """Pull ``@worker_key: instruction`` lines, keeping only real worker keys.
+
+    Assessment lines (``@worker [OK]: …``) are skipped — their ``[..]`` breaks the
+    bare ``@key:`` shape, so the regex never matches them.
+    """
+    out: Dict[str, str] = {}
+    for m in _ASSIGN_RE.finditer(text):
+        if m.group(1) in workers:
+            out[m.group(1)] = m.group(2).strip()
+    return out
+
+
+def _parse_assessments(text: str, workers: List[str]) -> List[Tuple[str, str, str]]:
+    """Pull ``(worker_key, "OK"|"WARN", note)`` assessments from a conductor turn."""
+    out: List[Tuple[str, str, str]] = []
+    for m in _ASSESS_RE.finditer(text):
+        if m.group(1) in workers:
+            out.append((m.group(1), m.group(2).upper(), m.group(3).strip()))
+    return out
+
+
+def _conductor_done(text: str) -> bool:
+    """Whether the conductor declared the task complete."""
+    return bool(_DONE_RE.search(text) or re.search(r"^[ \t]*DONE[ \t]*$", text, re.MULTILINE))
+
+
+
 def _run_turn(session: Session, role: str, system: str, instruction: str, rnd: int) -> str:
     """Execute one agent turn: emit events, record it, return its text.
 
@@ -240,6 +279,9 @@ class Strategy(ABC):
     personas: Dict[str, str] = {}
     #: True for the user-defined strategy whose roles come from the request.
     custom: bool = False
+    #: True when the role set (count/keys) is supplied per run via the request,
+    #: rather than fixed by :attr:`roles` (e.g. the conductor's variable team).
+    dynamic_roles: bool = False
     default_rounds: int = 2
 
     @abstractmethod
@@ -678,6 +720,132 @@ class WorkspaceBuild(Strategy):
         return "\n".join(lines)
 
 
+class ConductorTeam(Strategy):
+    name = "conductor_team"
+    description = (
+        "A conductor assigns subtasks to a team of workers, a reviewer checks each "
+        "worker's output, and the conductor evaluates the team each round — calling out "
+        "anyone who didn't deliver — until the task is done."
+    )
+    roles = []          # dynamic: conductor + worker_1..N + reviewer (from the request)
+    dynamic_roles = True
+    default_rounds = 3
+
+    CONDUCTOR_SYS = (
+        "You are the CONDUCTOR leading a team of workers to accomplish one shared task. "
+        "You decompose the task, assign concrete subtasks, hold workers accountable — "
+        "naming and pushing anyone who doesn't deliver — and integrate their work into the "
+        "result. Be specific and demanding but fair. Always use the EXACT worker keys "
+        "(e.g. worker_1) when assigning or assessing."
+    )
+    REVIEWER_SYS = (
+        "You are the REVIEWER. You inspect one worker's output at a time against the "
+        "assignment the conductor gave them, and report back to the conductor. Be specific: "
+        "did they fulfil the assignment? Flag gaps, errors, and anyone who under-delivered. "
+        "Keep it short and actionable."
+    )
+
+    @staticmethod
+    def _worker_sys(me: str, conductor: str) -> str:
+        return (
+            f"You are {me}, a WORKER on a team led by the conductor {conductor}. Carry out the "
+            f"specific assignment the conductor gives you — thoroughly and concretely. Stay "
+            f"focused on your assignment and produce real output, not a plan to do it later."
+        )
+
+    personas = {"conductor": CONDUCTOR_SYS, "reviewer": REVIEWER_SYS}
+
+    def run(self, session: Session) -> str:
+        order = session.role_order or list(session.agents)
+        workers = [r for r in order if r.startswith("worker")]
+        if "conductor" not in session.agents or "reviewer" not in session.agents or not workers:
+            raise AgentTurnError(
+                "conductor_team needs a conductor, a reviewer, and at least one worker"
+            )
+        names = {r: session.agents[r].display_name for r in session.agents}
+        cname = names["conductor"]
+        team = ", ".join(f"{names[w]} ({w})" for w in workers)
+
+        for w in workers:  # seed the roster panel
+            session.emit("worker_status", round=0, worker=w, name=names[w],
+                         status="idle", note="awaiting assignment")
+
+        for rnd in range(1, session.rounds + 1):
+            # 1. Conductor: assess the prior round (round >= 2) and assign this round.
+            instruction = self._conductor_instruction(session, workers, team, rnd)
+            ctext = _run_turn(session, "conductor", self.CONDUCTOR_SYS, instruction, rnd)
+
+            for w, verdict, note in _parse_assessments(ctext, workers):
+                session.emit("worker_status", round=rnd, worker=w, name=names[w],
+                             status=("ok" if verdict == "OK" else "warned"), note=note)
+
+            assignments = _parse_assignments(ctext, workers)
+            for w in workers:
+                instr = assignments.get(w)
+                session.emit("worker_status", round=rnd, worker=w, name=names[w],
+                             status=("assigned" if instr else "idle"),
+                             note=(instr or "no assignment from the conductor"))
+
+            if rnd > 1 and _conductor_done(ctext):
+                session.emit("status", message=f"Conductor declared the work DONE in round {rnd}.")
+                break
+
+            # 2. Each worker carries out its assignment.
+            for w in workers:
+                instr = assignments.get(w) or (
+                    "You were not given a specific assignment. Contribute the single most "
+                    "useful next step toward the task."
+                )
+                _run_turn(
+                    session, w, self._worker_sys(names[w], cname),
+                    f"Task:\n{session.task}\n\nThe conductor ({cname}) assigned you:\n{instr}\n\n"
+                    f"Complete your assignment concretely now.",
+                    rnd,
+                )
+                session.emit("worker_status", round=rnd, worker=w, name=names[w],
+                             status="delivered", note="")
+
+            # 3. Reviewer inspects each worker individually and reports to the conductor.
+            for w in workers:
+                _run_turn(
+                    session, "reviewer", self.REVIEWER_SYS,
+                    f"Task:\n{session.task}\n\nReview {names[w]} ({w})'s latest output against "
+                    f"the assignment they were given this round. Did they fulfil it? Note "
+                    f"quality, gaps, and whether they pulled their weight. Address your report "
+                    f"to the conductor ({cname}).",
+                    rnd,
+                )
+
+        # Conductor consolidates the team's work into the final deliverable.
+        final = _run_turn(
+            session, "conductor", self.CONDUCTOR_SYS,
+            f"Task:\n{session.task}\n\nThe collaboration is complete. Consolidate the team's "
+            f"work into the final deliverable, integrating the workers' contributions and the "
+            f"reviewer's feedback into one coherent result.",
+            session.rounds,
+        )
+        return self.finish(session, final)
+
+    def _conductor_instruction(self, session: Session, workers: List[str],
+                               team: str, rnd: int) -> str:
+        keys = ", ".join(workers)
+        if rnd == 1:
+            return (
+                f"Task:\n{session.task}\n\nYou lead this team: {team}. Break the task into "
+                f"concrete subtasks and assign one to each worker. Write each assignment on its "
+                f"own line as '@worker_key: instruction', using the exact keys: {keys}."
+            )
+        return (
+            f"Task:\n{session.task}\n\nYour team: {team}. Review the previous round — each "
+            f"worker's output and the reviewer's reports. FIRST assess every worker, one per "
+            f"line, as '@worker_key [OK]: reason' or '@worker_key [WARN]: what they failed to "
+            f"deliver' — call out anyone who slacked or ignored their assignment. THEN reassign "
+            f"with '@worker_key: instruction' lines (keys: {keys}). FINALLY write 'VERDICT: "
+            f"DONE' if the task is fully complete and the reviewer is satisfied, otherwise "
+            f"'VERDICT: CONTINUE'."
+        )
+
+
 STRATEGIES = {
     s.name: s
     for s in (
@@ -689,6 +857,7 @@ STRATEGIES = {
         DocAuthoring(),
         CodeAuthoring(),
         WorkspaceBuild(),
+        ConductorTeam(),
         CustomStrategy(),
     )
 }
@@ -712,6 +881,7 @@ def strategy_metadata() -> List[dict]:
             ],
             "default_rounds": s.default_rounds,
             "custom": s.custom,
+            "dynamic_roles": s.dynamic_roles,
         }
         for s in STRATEGIES.values()
     ]

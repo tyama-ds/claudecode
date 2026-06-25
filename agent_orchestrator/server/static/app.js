@@ -9,15 +9,16 @@ const state = {
   connState: "idle",
   artifact: { versions: [], view: "preview" },
   workspace: { files: {}, order: [], selected: null },
+  team: { workers: {}, order: [], conductor: "", round: 0 },
 };
 
 const $ = (sel) => document.querySelector(sel);
 
 // Which accent bucket a role belongs to (drives the card colour).
 function accentFor(role) {
-  if (["implementer", "agent_a", "planner"].includes(role)) return "acc-a";
+  if (["implementer", "agent_a", "planner", "conductor"].includes(role)) return "acc-a";
   if (["reviewer", "agent_b", "executor"].includes(role)) return "acc-b";
-  const m = /^agent_(\d+)$/.exec(role); // custom participants agent_1, agent_2, …
+  const m = /^(?:agent|worker)_(\d+)$/.exec(role); // custom / team members
   if (m) return ["acc-a", "acc-b", "acc-c"][(parseInt(m[1], 10) - 1) % 3];
   return "acc-c"; // synthesizer / judge / anything else
 }
@@ -92,8 +93,52 @@ function renderRoles() {
 
   const wrap = $("#roles");
   wrap.innerHTML = "";
+  if (st.name === "conductor_team") { renderConductorBuilder(wrap); return; }
   if (st.custom) { renderCustomBuilder(wrap); return; }
   st.roles.forEach((role) => wrap.appendChild(roleCard(role.key, role.label, role.system || "", false)));
+}
+
+// Conductor team: one conductor, 2–4 workers (add/remove), one reviewer.
+const CONDUCTOR_DEFAULTS = {
+  conductor: "Leads the team: decomposes the task, assigns subtasks, holds workers " +
+    "accountable (calling out anyone who doesn't deliver), and integrates the result.",
+  worker: "Carries out the specific assignment the conductor gives, concretely and in full.",
+  reviewer: "Reviews each worker's output against its assignment and reports back to the conductor.",
+};
+function renderConductorBuilder(wrap) {
+  wrap.appendChild(roleCard("conductor", "Conductor", CONDUCTOR_DEFAULTS.conductor, false));
+
+  const holder = document.createElement("div");
+  holder.id = "workers"; holder.className = "roles";
+  wrap.appendChild(holder);
+  const add = document.createElement("button");
+  add.type = "button"; add.className = "btn ghost add-worker";
+  add.textContent = "+ Add worker";
+  add.addEventListener("click", () => addWorker(holder));
+  wrap.appendChild(add);
+  addWorker(holder);
+  addWorker(holder);
+
+  wrap.appendChild(roleCard("reviewer", "Reviewer", CONDUCTOR_DEFAULTS.reviewer, false));
+}
+
+function addWorker(holder) {
+  if (holder.children.length >= 4) return;
+  const i = holder.children.length + 1;
+  holder.appendChild(roleCard("worker_" + i, "Worker " + i, CONDUCTOR_DEFAULTS.worker, true));
+  relabelWorkers(holder);
+}
+
+function relabelWorkers(holder) {
+  Array.from(holder.children).forEach((card, i) => {
+    const key = "worker_" + (i + 1);
+    const bucket = accentFor(key);
+    card.className = "role " + (bucket === "acc-b" ? "b" : bucket === "acc-c" ? "c" : "");
+    card.querySelector(".role-name").childNodes[0].nodeValue = "Worker " + (i + 1);
+    card.querySelector("select").dataset.role = key;
+  });
+  const add = document.querySelector(".add-worker");
+  if (add) add.disabled = holder.children.length >= 4;
 }
 
 // Build one role card: backend picker + optional model + editable persona.
@@ -108,7 +153,10 @@ function roleCard(key, label, defaultSystem, removable) {
   if (removable) {
     const rm = document.createElement("button");
     rm.type = "button"; rm.className = "role-remove"; rm.textContent = "×"; rm.title = "Remove";
-    rm.addEventListener("click", () => { const h = box.parentElement; box.remove(); relabelParticipants(h); });
+    rm.addEventListener("click", () => {
+      const h = box.parentElement; box.remove();
+      (h && h.id === "workers" ? relabelWorkers : relabelParticipants)(h);
+    });
     name.appendChild(rm);
   }
   box.appendChild(name);
@@ -209,6 +257,19 @@ function rolesPayload() {
     });
     return { roles, role_order: order };
   }
+  if (st && st.name === "conductor_team") {
+    const fixed = Array.from(document.querySelectorAll("#roles > .role")); // [conductor, reviewer]
+    const order = ["conductor"];
+    roles.conductor = collectRole(fixed[0]);
+    document.querySelectorAll("#workers > .role").forEach((card, i) => {
+      const key = "worker_" + (i + 1);
+      order.push(key);
+      roles[key] = collectRole(card);
+    });
+    roles.reviewer = collectRole(fixed[fixed.length - 1]);
+    order.push("reviewer");
+    return { roles, role_order: order };
+  }
   document.querySelectorAll("#roles > .role").forEach((card) => {
     roles[card.querySelector("select").dataset.role] = collectRole(card);
   });
@@ -268,6 +329,9 @@ async function run() {
   state.cards = {};
   state.artifact = { versions: [], view: "preview" };
   state.workspace = { files: {}, order: [], selected: null };
+  state.team = { workers: {}, order: [], conductor: "", round: 0 };
+  $("#team").hidden = true;
+  $("#team-roster").innerHTML = "";
   $("#stream").innerHTML = "";
   $("#sp-list").innerHTML = "";
   $("#scratchpad").hidden = true;
@@ -310,10 +374,13 @@ function handleEvent(evt) {
     $("#meta").textContent = `${data.strategy} · ${data.rounds} rounds · ${agents}`;
     $("#artifact-ext").value = data.strategy === "code_authoring" ? ".py" : ".md";
     if (data.workspace) $("#workspace-path").textContent = data.workspace;
+    if (data.strategy === "conductor_team") seedTeam(data.agents);
   } else if (type === "artifact") {
     handleArtifact(data);
   } else if (type === "workspace_edit") {
     handleWorkspaceEdit(data);
+  } else if (type === "worker_status") {
+    handleWorkerStatus(data);
   } else if (type === "turn_start") {
     addThinkingCard(data);
   } else if (type === "turn_end") {
@@ -524,6 +591,56 @@ function renderWorkspace() {
   });
   const sel = w.files[w.selected];
   $("#ws-diff").innerHTML = sel ? renderUnifiedDiff(sel.diff) : "";
+}
+
+// -- conductor team roster -------------------------------------------------
+const TEAM_BADGES = {
+  idle:      { label: "idle",      icon: "○" },
+  assigned:  { label: "assigned",  icon: "→" },
+  delivered: { label: "delivered", icon: "•" },
+  ok:        { label: "approved",  icon: "✓" },
+  warned:    { label: "called out", icon: "⚠" },
+};
+
+function seedTeam(agents) {
+  const t = state.team;
+  t.conductor = (agents && agents.conductor) || "Conductor";
+  t.order = Object.keys(agents || {}).filter((k) => k.startsWith("worker"))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  t.order.forEach((k) => { t.workers[k] = { name: agents[k], status: "idle", note: "", round: 0 }; });
+  $("#team").hidden = t.order.length === 0;
+  renderTeam();
+}
+
+function handleWorkerStatus(d) {
+  const t = state.team;
+  if (!t.order.includes(d.worker)) { t.order.push(d.worker); }
+  t.workers[d.worker] = { name: d.name, status: d.status, note: d.note || "", round: d.round };
+  if (d.round > t.round) t.round = d.round;
+  $("#team").hidden = false;
+  renderTeam();
+}
+
+function renderTeam() {
+  const t = state.team;
+  $("#team-meta").textContent =
+    `conductor: ${t.conductor}` + (t.round ? `  ·  round ${t.round}` : "");
+  const list = $("#team-roster");
+  list.innerHTML = "";
+  t.order.forEach((key) => {
+    const w = t.workers[key];
+    const b = TEAM_BADGES[w.status] || TEAM_BADGES.idle;
+    const li = document.createElement("li");
+    li.className = "team-row st-" + w.status;
+    li.innerHTML =
+      `<span class="team-ava">${escapeHtml(initials(w.name))}</span>` +
+      `<span class="team-main"><span class="team-name">${escapeHtml(w.name)} ` +
+      `<small>${escapeHtml(key)}</small></span>` +
+      (w.note ? `<span class="team-note">${escapeHtml(w.note)}</span>` : "") +
+      `</span>` +
+      `<span class="team-badge st-${w.status}">${b.icon} ${b.label}</span>`;
+    list.appendChild(li);
+  });
 }
 
 // Colorize a unified diff produced by difflib.

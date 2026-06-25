@@ -322,7 +322,7 @@ html[data-theme="light"] .artifact-body pre { background: #f1f3f9; }
 html[data-theme="light"] .d-add { color: #0f7a4f; }
 html[data-theme="light"] .d-del { color: #b03048; }
 .d-hunk { color: #6aa6ff; }
-.d-meta { color: var(--faint); }
+.d-meta { color: var(--text-faint); }
 
 /* Workspace panel — files edited on disk + their diffs. */
 .ws-grid { display: grid; grid-template-columns: 220px 1fr; gap: 12px; }
@@ -339,6 +339,29 @@ html[data-theme="light"] .d-del { color: #b03048; }
   white-space: nowrap; flex: 1; }
 .ws-stat { font-family: var(--mono); font-size: 10.5px; white-space: nowrap; }
 #ws-diff { max-height: 420px; }
+
+/* Conductor team roster — who's working and who got called out. */
+.team-roster { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.team-row { display: flex; align-items: center; gap: 11px; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: 10px; background: rgba(255, 255, 255, 0.02); }
+.team-row.st-warned { border-color: rgba(251, 113, 133, 0.5); background: rgba(251, 113, 133, 0.07); }
+.team-row.st-ok { border-color: rgba(52, 211, 153, 0.4); }
+.team-ava { width: 30px; height: 30px; flex: none; border-radius: 9px; display: grid;
+  place-items: center; font-family: var(--mono); font-size: 11px; font-weight: 700;
+  color: var(--ground); background: linear-gradient(135deg, var(--a), var(--b)); }
+.team-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.team-name { font-size: 13px; color: var(--text); }
+.team-name small { font-family: var(--mono); font-size: 10px; color: var(--text-faint); }
+.team-note { font-size: 11.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.team-badge { flex: none; font-family: var(--mono); font-size: 10.5px; padding: 3px 9px;
+  border-radius: 999px; border: 1px solid var(--border-strong); color: var(--text-dim);
+  white-space: nowrap; }
+.team-badge.st-assigned { color: var(--b); border-color: rgba(43, 212, 192, 0.45); }
+.team-badge.st-delivered { color: var(--text); }
+.team-badge.st-ok { color: #34d399; border-color: rgba(52, 211, 153, 0.5); }
+.team-badge.st-warned { color: #fb7185; border-color: rgba(251, 113, 133, 0.6);
+  background: rgba(251, 113, 133, 0.1); }
 
 /* Empty-state hero: the two-agent duality */
 .empty { text-align: center; padding: 54px 18px; }
@@ -514,7 +537,7 @@ html[data-theme="light"] .d-del { color: #b03048; }
   font-size: 12.5px; color: var(--text); cursor: pointer; }
 .field-check input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--a);
   cursor: pointer; flex: none; }
-.field-check small { color: var(--faint); }
+.field-check small { color: var(--text-faint); }
 .modal input[type="text"], .modal input[type="password"] {
   width: 100%; background: rgba(8, 11, 18, 0.7); color: var(--text);
   border: 1px solid var(--border-strong); border-radius: var(--radius-sm);

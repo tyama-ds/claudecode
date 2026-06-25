@@ -59,6 +59,7 @@ press **Run collaboration**. Turns stream into the transcript as they happen.
 | **Doc authoring** | writer, editor | Co-write a document: the writer drafts/revises a shared **artifact**, the editor critiques each version, until approved. |
 | **Code authoring** | implementer, reviewer | Co-build code: the implementer writes/revises a single code **artifact**, the reviewer critiques each version, until approved. |
 | **Workspace build** | implementer, reviewer | Build in a **real working directory**: the implementer creates/edits files on disk, the reviewer critiques the diff, until approved. |
+| **Conductor team** | conductor, workers (2–4), reviewer | A **conductor** splits the task and assigns each worker a subtask; a reviewer checks each worker's output and reports back; the conductor evaluates the team every round — **calling out anyone who didn't deliver** — and reassigns until the work is done. |
 | **Custom** | your own (2–5) | Define each participant from scratch — backend, model, and persona — then they discuss and close with a conclusion. |
 
 The authoring strategies build a shared **Artifact** — one evolving document or
@@ -76,6 +77,14 @@ the working tree for you to review and commit — the orchestrator never stages 
 commits. The workspace defaults to the server's launch directory and can be
 overridden per run. (This is the backend-agnostic Phase-2 mode; native
 CLI-driven file editing is a planned follow-up.)
+
+**Conductor team** models a boss-and-team workflow: the conductor speaks to the
+team in a small line protocol (`@worker_1: <subtask>` to assign,
+`@worker_2 [WARN]: <what's missing>` to call someone out, `VERDICT: DONE` to
+finish). A **Team** panel above the transcript shows each worker's live status —
+*assigned → delivered → approved ✓ / called out ⚠* — so you can see at a glance
+who's pulling their weight. The conductor consolidates the team's work into the
+final deliverable. The number of workers (2–4) is set in the UI.
 
 For **every role** you can independently choose the **backend, model, and
 persona** (system prompt) right in the UI — mix Claude Code, Codex, GPT, and
