@@ -75,8 +75,8 @@ contents…</FILE>`; the orchestrator writes it (confined to the workspace root 
 in a Workspace panel with a file list and colorized diffs. Changes are left in
 the working tree for you to review and commit — the orchestrator never stages or
 commits. Set the **workspace directory** in the UI (blank = the server's launch
-directory), and tick **Create as new local repo** to have the orchestrator
-`mkdir` it and `git init` a fresh repo to script in. (This is the
+directory), and tick **Create the directory if it doesn't exist** to have the
+orchestrator `mkdir` a fresh folder to script in (no git involved). (This is the
 backend-agnostic Phase-2 mode; native CLI-driven file editing is a planned
 follow-up.)
 

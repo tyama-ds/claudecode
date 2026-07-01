@@ -1,25 +1,22 @@
-"""Tests for server-side helpers (workspace repo creation)."""
+"""Tests for server-side helpers (workspace directory creation)."""
 
 import os
 import tempfile
 import unittest
 
-from agent_orchestrator.server.app import _init_workspace_repo
+from agent_orchestrator.server.app import _ensure_workspace_dir
 
 
-class TestWorkspaceRepo(unittest.TestCase):
-    def test_creates_directory_and_reports_status(self):
-        path = os.path.join(tempfile.mkdtemp(), "fresh", "repo")
-        result = _init_workspace_repo(path)
-        self.assertTrue(os.path.isdir(path))  # created even if git is absent
-        self.assertIn(result, ("init", "exists", "nogit"))
+class TestWorkspaceDir(unittest.TestCase):
+    def test_creates_directory_no_git(self):
+        path = os.path.join(tempfile.mkdtemp(), "fresh", "proj")
+        self.assertEqual(_ensure_workspace_dir(path), "created")
+        self.assertTrue(os.path.isdir(path))
+        self.assertFalse(os.path.isdir(os.path.join(path, ".git")))  # no git involved
 
-    def test_second_init_reports_existing_repo(self):
-        path = os.path.join(tempfile.mkdtemp(), "repo")
-        first = _init_workspace_repo(path)
-        if first == "init":  # git available -> a .git now exists
-            self.assertTrue(os.path.isdir(os.path.join(path, ".git")))
-            self.assertEqual(_init_workspace_repo(path), "exists")
+    def test_existing_directory_reports_exists(self):
+        path = tempfile.mkdtemp()
+        self.assertEqual(_ensure_workspace_dir(path), "exists")
 
 
 if __name__ == "__main__":

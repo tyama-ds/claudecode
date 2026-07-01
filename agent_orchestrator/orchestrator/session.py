@@ -79,7 +79,7 @@ class Session:
     artifact: str = ""                                     # the document/code being built
     artifact_versions: List[ArtifactVersion] = field(default_factory=list)
     workspace: Optional[str] = None                        # real working directory (Phase 2)
-    workspace_git: Optional[str] = None                    # None | "init" | "exists" | "nogit"
+    workspace_created: Optional[str] = None                # None | "created" | "exists"
     workspace_files: Dict[str, WorkspaceFile] = field(default_factory=dict)  # path -> latest
     reference_dir: Optional[str] = None                    # read-only reference directory
     references: List[Tuple[str, str]] = field(default_factory=list)  # (relpath, content)

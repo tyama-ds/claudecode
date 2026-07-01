@@ -307,7 +307,7 @@ async function run() {
   if ($("#strategy").value === "workspace_build") {
     const ws = $("#workspace-dir").value.trim();
     if (ws) payload.workspace = ws;
-    payload.init_repo = $("#workspace-init").checked;
+    payload.create_dir = $("#workspace-init").checked;
   }
 
   setStatus("Starting…");
@@ -381,14 +381,14 @@ function handleEvent(evt) {
     const agents = Object.entries(data.agents).map(([r, n]) => `${r}=${n}`).join("  ·  ");
     const extras = [];
     if (data.references) extras.push(`${data.references} reference file(s)`);
-    if (data.workspace_git) extras.push(`repo: ${data.workspace_git}`);
+    if (data.workspace_created === "created") extras.push("dir created");
     $("#meta").textContent =
       `${data.strategy} · ${data.rounds} rounds · ${agents}` +
       (extras.length ? ` · ${extras.join(" · ")}` : "");
     $("#artifact-ext").value = data.strategy === "code_authoring" ? ".py" : ".md";
     if (data.workspace) {
       $("#workspace-path").textContent =
-        data.workspace + (data.workspace_git === "init" ? "  (new git repo)" : "");
+        data.workspace + (data.workspace_created === "created" ? "  (created)" : "");
     }
     if (data.strategy === "conductor_team") seedTeam(data.agents);
   } else if (type === "artifact") {

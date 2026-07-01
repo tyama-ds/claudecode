@@ -25,7 +25,7 @@ def run_session(session: Session) -> None:
         rounds=session.rounds,
         agents={role: a.display_name for role, a in session.agents.items()},
         workspace=session.workspace,
-        workspace_git=session.workspace_git,
+        workspace_created=session.workspace_created,
         references=len(session.references),
         reference_dir=session.reference_dir,
     )

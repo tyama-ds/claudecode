@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import os
 import queue
-import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 from urllib.parse import urlparse
@@ -36,21 +35,14 @@ _CONTENT_TYPES = {
 MANAGER = SessionManager()
 
 
-def _init_workspace_repo(path: str) -> str:
-    """Create ``path`` if needed and ``git init`` it as a fresh local repo.
+def _ensure_workspace_dir(path: str) -> str:
+    """Create the workspace directory if it doesn't exist (no git involved).
 
-    Returns "exists" if it was already a repo, "init" on success, or "nogit" if
-    git is unavailable (the directory is still created and usable, just untracked).
+    Returns "created" if it was newly made, or "exists" if it was already there.
     """
+    existed = os.path.isdir(path)
     os.makedirs(path, exist_ok=True)
-    if os.path.isdir(os.path.join(path, ".git")):
-        return "exists"
-    try:
-        subprocess.run(["git", "init"], cwd=path, check=True,
-                       capture_output=True, timeout=30)
-        return "init"
-    except (OSError, subprocess.SubprocessError):
-        return "nogit"
+    return "exists" if existed else "created"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -234,8 +226,8 @@ class Handler(BaseHTTPRequestHandler):
             # override it. Edits are confined to this root (see _safe_join).
             ws = (body.get("workspace") or "").strip() or os.getcwd()
             session.workspace = os.path.realpath(ws)
-            if body.get("init_repo"):
-                session.workspace_git = _init_workspace_repo(session.workspace)
+            if body.get("create_dir"):
+                session.workspace_created = _ensure_workspace_dir(session.workspace)
 
         start_session(session)
         self._send_json({"session_id": session.id})
