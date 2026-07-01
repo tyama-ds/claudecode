@@ -34,10 +34,25 @@ class AgentTurnError(Exception):
     """Raised when an agent turn fails, aborting the collaboration."""
 
 
+def _reference_block(session: Session) -> str:
+    """Render the read-only reference files loaded for the session, if any."""
+    if not session.references:
+        return ""
+    parts = [
+        f"REFERENCE FILES — read-only context loaded from {session.reference_dir}. "
+        "Consult these to inform your work; you cannot edit them."
+    ]
+    for rel, content in session.references:
+        parts.append(f"----- {rel} -----\n{content}")
+    return "\n\n".join(parts)
+
+
 def _scratchpad_system(session: Session, system: str) -> str:
-    """Append the shared-scratchpad protocol + current contents to a system prompt."""
+    """Append reference files + the shared-scratchpad protocol to a system prompt."""
+    refs = _reference_block(session)
+    ref_part = f"\n\n{refs}" if refs else ""
     return (
-        f"{system}\n\n"
+        f"{system}{ref_part}\n\n"
         "SHARED SCRATCHPAD — a team blackboard visible to every agent. To record a "
         "durable fact, decision, or open question for the others, add a line beginning "
         "with 'NOTE:' anywhere in your reply.\n"
@@ -166,6 +181,57 @@ def _workspace_summary(session: Session) -> str:
     for path, wf in session.workspace_files.items():
         parts.append(f"### {path} ({wf.status}, +{wf.additions}/-{wf.deletions})\n{wf.diff}")
     return "\n\n".join(parts)
+
+
+# -- read-only reference material -----------------------------------------
+
+# Directories and file kinds never worth loading as reference context.
+_REF_SKIP_DIRS = {
+    ".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache",
+    ".pytest_cache", "dist", "build", ".idea", ".vscode", ".tox", ".next",
+}
+_REF_MAX_FILES = 40
+_REF_MAX_FILE_BYTES = 16 * 1024
+_REF_MAX_TOTAL_BYTES = 120 * 1024
+
+
+def load_references(root: str, *, max_files: int = _REF_MAX_FILES,
+                    max_file_bytes: int = _REF_MAX_FILE_BYTES,
+                    max_total_bytes: int = _REF_MAX_TOTAL_BYTES) -> List[Tuple[str, str]]:
+    """Load small text files under ``root`` as ``(relpath, content)`` pairs.
+
+    Skips VCS/build directories, dotfiles, and binary files; truncates any file
+    over ``max_file_bytes`` and stops once the file-count or total-size budget is
+    reached, so the reference block stays bounded regardless of directory size.
+    """
+    root_real = os.path.realpath(root)
+    out: List[Tuple[str, str]] = []
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(root_real):
+        dirnames[:] = sorted(
+            d for d in dirnames if d not in _REF_SKIP_DIRS and not d.startswith(".")
+        )
+        for fn in sorted(filenames):
+            if len(out) >= max_files or total >= max_total_bytes:
+                return out
+            if fn.startswith("."):
+                continue
+            full = os.path.join(dirpath, fn)
+            try:
+                with open(full, "rb") as fh:
+                    raw = fh.read(max_file_bytes + 1)
+            except OSError:
+                continue
+            head = raw[:max_file_bytes]
+            if b"\x00" in head:  # binary
+                continue
+            text = head.decode("utf-8", errors="replace")
+            if len(raw) > max_file_bytes:
+                text += "\n… (truncated)"
+            rel = os.path.relpath(full, root_real)
+            out.append((rel, text))
+            total += len(text.encode("utf-8"))
+    return out
 
 
 # -- conductor / team directives ------------------------------------------

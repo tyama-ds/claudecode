@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 from urllib.parse import urlparse
@@ -22,7 +23,7 @@ from ..orchestrator import (
     start_session,
     strategy_metadata,
 )
-from ..orchestrator.strategies import get_strategy
+from ..orchestrator.strategies import get_strategy, load_references
 
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 _CONTENT_TYPES = {
@@ -33,6 +34,23 @@ _CONTENT_TYPES = {
 
 # Shared, process-wide session registry.
 MANAGER = SessionManager()
+
+
+def _init_workspace_repo(path: str) -> str:
+    """Create ``path`` if needed and ``git init`` it as a fresh local repo.
+
+    Returns "exists" if it was already a repo, "init" on success, or "nogit" if
+    git is unavailable (the directory is still created and usable, just untracked).
+    """
+    os.makedirs(path, exist_ok=True)
+    if os.path.isdir(os.path.join(path, ".git")):
+        return "exists"
+    try:
+        subprocess.run(["git", "init"], cwd=path, check=True,
+                       capture_output=True, timeout=30)
+        return "init"
+    except (OSError, subprocess.SubprocessError):
+        return "nogit"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -199,11 +217,26 @@ class Handler(BaseHTTPRequestHandler):
         session = MANAGER.create(task, strategy_name, rounds, agents)
         session.personas = personas
         session.role_order = [k for k, _ in role_list]
+
+        # Optional read-only reference directory (any strategy): load its files
+        # into the agents' shared context.
+        ref = (body.get("reference_dir") or "").strip()
+        if ref:
+            ref_real = os.path.realpath(ref)
+            if not os.path.isdir(ref_real):
+                self._send_json({"error": f"reference directory not found: {ref}"}, status=400)
+                return
+            session.reference_dir = ref_real
+            session.references = load_references(ref_real)
+
         if strategy_name == "workspace_build":
             # Default to the directory the server was launched from; a request may
             # override it. Edits are confined to this root (see _safe_join).
             ws = (body.get("workspace") or "").strip() or os.getcwd()
             session.workspace = os.path.realpath(ws)
+            if body.get("init_repo"):
+                session.workspace_git = _init_workspace_repo(session.workspace)
+
         start_session(session)
         self._send_json({"session_id": session.id})
 

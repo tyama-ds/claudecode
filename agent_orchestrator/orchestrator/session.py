@@ -6,7 +6,7 @@ import re
 import threading
 import uuid
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from ..adapters.base import AgentAdapter
 from .events import Event, EventBus
@@ -79,7 +79,10 @@ class Session:
     artifact: str = ""                                     # the document/code being built
     artifact_versions: List[ArtifactVersion] = field(default_factory=list)
     workspace: Optional[str] = None                        # real working directory (Phase 2)
+    workspace_git: Optional[str] = None                    # None | "init" | "exists" | "nogit"
     workspace_files: Dict[str, WorkspaceFile] = field(default_factory=dict)  # path -> latest
+    reference_dir: Optional[str] = None                    # read-only reference directory
+    references: List[Tuple[str, str]] = field(default_factory=list)  # (relpath, content)
     personas: Dict[str, str] = field(default_factory=dict)  # per-role system-prompt overrides
     role_order: List[str] = field(default_factory=list)     # ordered roles (used by custom strategy)
     stop_requested: bool = False

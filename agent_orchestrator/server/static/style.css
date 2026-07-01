@@ -155,7 +155,9 @@ body::before {
   display: block; font-size: 12px; font-weight: 600;
   letter-spacing: 0.3px; color: var(--text-dim); margin-bottom: 7px;
 }
-textarea, select, input[type="number"] {
+.field-label small { color: var(--text-faint); font-weight: 400; letter-spacing: 0; }
+textarea, select, input[type="number"],
+#workspace-opts input[type="text"], #reference-dir {
   width: 100%;
   background: rgba(8, 11, 18, 0.7);
   color: var(--text);
@@ -167,6 +169,7 @@ textarea, select, input[type="number"] {
   outline: none;
   transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
 }
+#workspace-opts input::placeholder, #reference-dir::placeholder { color: var(--text-faint); }
 textarea { resize: vertical; font-family: var(--mono); font-size: 13px; line-height: 1.55; }
 textarea::placeholder { color: var(--text-faint); }
 textarea:focus, select:focus, input:focus {

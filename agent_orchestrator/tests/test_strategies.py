@@ -141,6 +141,55 @@ class TestStrategies(unittest.TestCase):
         with self.assertRaises(AgentTurnError):
             get_strategy("conductor_team").run(session)
 
+    def test_load_references_filters_and_truncates(self):
+        from agent_orchestrator.orchestrator.strategies import load_references
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, ".git"))
+        os.makedirs(os.path.join(d, "sub"))
+        with open(os.path.join(d, "a.txt"), "w") as fh:
+            fh.write("hello reference")
+        with open(os.path.join(d, "sub", "b.py"), "w") as fh:
+            fh.write("print(1)\n")
+        with open(os.path.join(d, ".secret"), "w") as fh:  # dotfile -> skipped
+            fh.write("nope")
+        with open(os.path.join(d, ".git", "config"), "w") as fh:  # in .git -> skipped
+            fh.write("nope")
+        with open(os.path.join(d, "bin.dat"), "wb") as fh:  # binary -> skipped
+            fh.write(b"\x00\x01\x02data")
+        with open(os.path.join(d, "big.txt"), "w") as fh:
+            fh.write("x" * 100)
+        refs = load_references(d, max_file_bytes=10)
+        paths = {p for p, _ in refs}
+        self.assertIn("a.txt", paths)
+        self.assertIn(os.path.join("sub", "b.py"), paths)
+        self.assertNotIn(".secret", paths)
+        self.assertNotIn("bin.dat", paths)
+        self.assertFalse(any(p.startswith(".git") for p in paths))
+        big = dict(refs)["big.txt"]
+        self.assertIn("truncated", big)
+        self.assertLessEqual(len(big), 10 + len("\n… (truncated)"))
+
+    def test_load_references_respects_max_files(self):
+        from agent_orchestrator.orchestrator.strategies import load_references
+        d = tempfile.mkdtemp()
+        for i in range(10):
+            with open(os.path.join(d, f"f{i}.txt"), "w") as fh:
+                fh.write("data")
+        self.assertEqual(len(load_references(d, max_files=3)), 3)
+
+    def test_reference_block_injected_into_system(self):
+        from agent_orchestrator.orchestrator.strategies import _scratchpad_system
+        session = Session(id="r", task="t", strategy="round_robin", rounds=1, agents={})
+        session.reference_dir = "/some/dir"
+        session.references = [("notes.md", "IMPORTANT CONTEXT")]
+        sysprompt = _scratchpad_system(session, "You are an agent.")
+        self.assertIn("REFERENCE FILES", sysprompt)
+        self.assertIn("notes.md", sysprompt)
+        self.assertIn("IMPORTANT CONTEXT", sysprompt)
+        # No reference dir -> no reference block.
+        empty = Session(id="r2", task="t", strategy="round_robin", rounds=1, agents={})
+        self.assertNotIn("REFERENCE FILES", _scratchpad_system(empty, "You are an agent."))
+
     def test_extract_files(self):
         from agent_orchestrator.orchestrator.strategies import _extract_files
         files = _extract_files('x <FILE path="a/b.py">\nprint(1)\n</FILE> y')

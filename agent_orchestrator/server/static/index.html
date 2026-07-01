@@ -58,6 +58,21 @@
         <input id="rounds" type="number" min="1" max="8" value="2" />
       </label>
 
+      <div id="workspace-opts" class="set-group" hidden>
+        <div class="set-title">Workspace</div>
+        <label class="field"><span class="field-label">Directory</span>
+          <input id="workspace-dir" type="text"
+            placeholder="blank = server's launch directory" /></label>
+        <label class="field-check"><input id="workspace-init" type="checkbox" />
+          <span>Create as new local repo <small>(mkdir + git init)</small></span></label>
+      </div>
+
+      <label class="field">
+        <span class="field-label">Reference directory <small>(optional, read-only)</small></span>
+        <input id="reference-dir" type="text"
+          placeholder="a local folder whose files the agents may consult" />
+      </label>
+
       <div class="actions">
         <button id="run" class="btn primary">
           <span class="btn-label">Run collaboration</span>

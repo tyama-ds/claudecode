@@ -74,9 +74,19 @@ contents…</FILE>`; the orchestrator writes it (confined to the workspace root 
 `..` and absolute paths are refused) and computes a unified diff per file, shown
 in a Workspace panel with a file list and colorized diffs. Changes are left in
 the working tree for you to review and commit — the orchestrator never stages or
-commits. The workspace defaults to the server's launch directory and can be
-overridden per run. (This is the backend-agnostic Phase-2 mode; native
-CLI-driven file editing is a planned follow-up.)
+commits. Set the **workspace directory** in the UI (blank = the server's launch
+directory), and tick **Create as new local repo** to have the orchestrator
+`mkdir` it and `git init` a fresh repo to script in. (This is the
+backend-agnostic Phase-2 mode; native CLI-driven file editing is a planned
+follow-up.)
+
+**Reference directory** (any strategy, optional): point it at a local folder and
+the orchestrator loads its text files as **read-only context** every agent can
+consult — useful for handing the team a spec, an existing codebase, or example
+data to work from. It's bounded on purpose (skips `.git`/`node_modules`/binaries,
+caps at 40 files · 16 KB each · 120 KB total, truncating the rest) so prompts stay
+manageable. The files are never edited; to have agents modify files, use the
+Workspace above.
 
 **Conductor team** models a boss-and-team workflow: the conductor speaks to the
 team in a small line protocol (`@worker_1: <subtask>` to assign,
