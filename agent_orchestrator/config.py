@@ -75,6 +75,9 @@ class Settings:
 
     # Outbound HTTP(S) proxy applied to API calls (None = direct).
     proxy: Optional[str] = None
+    # Whether local-LLM calls go through the proxy too. Local endpoints are
+    # usually on localhost, so they default to a direct connection.
+    local_use_proxy: bool = False
 
     # Generation limits.
     max_tokens: int = 4096
@@ -102,6 +105,8 @@ class Settings:
             openai_base_url=os.environ.get("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL),
             local_base_url=os.environ.get("LOCAL_LLM_BASE_URL", DEFAULT_LOCAL_BASE_URL),
             proxy=proxy,
+            local_use_proxy=os.environ.get("LOCAL_LLM_USE_PROXY", "").strip().lower()
+            in ("1", "true", "yes", "on"),
             max_tokens=int(os.environ.get("ORCHESTRATOR_MAX_TOKENS", "4096")),
             cli_timeout=int(os.environ.get("ORCHESTRATOR_CLI_TIMEOUT", "600")),
         )
@@ -125,6 +130,8 @@ class Settings:
         if "proxy" in data:
             p = (data.get("proxy") or "").strip()
             self.proxy = p or None
+        if "local_use_proxy" in data:
+            self.local_use_proxy = bool(data.get("local_use_proxy"))
 
 
 # A process-wide settings instance, lazily initialised.

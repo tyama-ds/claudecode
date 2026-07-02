@@ -7,15 +7,142 @@ const state = {
   sessionId: null,
   cards: {},         // role-round -> DOM node (thinking -> filled)
   connState: "idle",
+  artifact: { versions: [], view: "preview" },
+  workspace: { files: {}, order: [], selected: null },
+  team: { workers: {}, order: [], conductor: "", round: 0 },
+  tab: "stream",     // active feed tab
+  log: [],           // finished turns, for the Export button
+  lang: localStorage.getItem("ao-lang") || "en",
 };
 
 const $ = (sel) => document.querySelector(sel);
 
+// -- i18n (EN default, JA toggle) -------------------------------------------
+const JA = {
+  // compose rail
+  "Compose": "実行設定",
+  "Task": "タスク",
+  "Describe the task for the agents to collaborate on…": "エージェントに協働してもらうタスクを記述…",
+  "Strategy": "戦略",
+  "Rounds": "ラウンド数",
+  "Workspace": "ワークスペース",
+  "Directory": "ディレクトリ",
+  "blank = server's launch directory": "空欄＝サーバ起動ディレクトリ",
+  "Create the directory if it doesn't exist": "ディレクトリが無ければ作成",
+  "(no git)": "（git なし）",
+  "Reference directory": "参照ディレクトリ",
+  "(optional, read-only)": "（任意・読み取り専用）",
+  "a local folder whose files the agents may consult": "エージェントに読ませたいローカルフォルダ",
+  "Run collaboration": "コラボレーションを実行",
+  "Stop": "停止",
+  "Tip: Ctrl+Enter (⌘+Enter) in the task box runs it": "ヒント: タスク欄で Ctrl+Enter（⌘+Enter）でも実行できます",
+  // feed
+  "Transcript": "トランスクリプト",
+  "Artifact": "成果物",
+  "Team": "チーム",
+  "Shared scratchpad": "共有メモ",
+  "Preview": "プレビュー",
+  "Diff": "差分",
+  "Copy": "コピー",
+  "Copied": "コピー済",
+  "Download": "ダウンロード",
+  "Export": "書き出し",
+  "Latest": "最新へ",
+  "Two agents, one task.": "2つのエージェント、1つのタスク。",
+  "Final deliverable": "最終成果物",
+  "round": "ラウンド",
+  "thinking": "考え中",
+  // history
+  "Recent sessions": "最近のセッション",
+  "No sessions yet.": "セッションはまだありません。",
+  // statuses
+  "Please enter a task.": "タスクを入力してください。",
+  "Starting…": "開始中…",
+  "Collaboration running…": "コラボレーション実行中…",
+  "Done.": "完了しました。",
+  "Stopped.": "停止しました。",
+  "Stop requested…": "停止をリクエストしました…",
+  "Session ended with an error.": "セッションはエラーで終了しました。",
+  "Failed to start.": "開始に失敗しました。",
+  "Network error: ": "ネットワークエラー: ",
+  // role builder
+  "Persona": "ペルソナ",
+  "model (optional — uses default)": "モデル（任意・未入力なら既定値）",
+  "Leave blank to use the default persona below": "空欄なら下記の既定ペルソナを使用",
+  "Describe this participant's role / character (optional)": "この参加者の役割・キャラクターを記述（任意）",
+  "Default: ": "既定: ",
+  "+ Add worker": "+ ワーカーを追加",
+  "+ Add participant": "+ 参加者を追加",
+  "Worker": "ワーカー",
+  "Participant": "参加者",
+  "Conductor": "コンダクター",
+  "Reviewer": "レビュアー",
+  // strategy groups
+  "Discuss & decide": "議論・検討",
+  "Author together": "共同作成",
+  "Team play": "チーム編成",
+  // team badges
+  "idle": "待機",
+  "assigned": "割当済",
+  "delivered": "提出済",
+  "approved": "承認",
+  "called out": "要注意",
+  // settings modal
+  "Settings": "設定",
+  "Used when the matching environment variable isn't set. Keys are held in memory for this local server only and are never shown back. Works with any OpenAI-compatible provider via its base URL.":
+    "対応する環境変数が未設定のときに使われます。キーはこのローカルサーバのメモリ上にのみ保持され、再表示されません。Base URL を指定すれば OpenAI 互換の任意のプロバイダで使えます。",
+  "Network": "ネットワーク",
+  "HTTP(S) proxy": "HTTP(S) プロキシ",
+  "API key": "APIキー",
+  "API key (optional)": "APIキー（任意）",
+  "Model": "モデル",
+  "Base URL": "ベースURL",
+  "Send via proxy": "プロキシ経由で送信",
+  "(off = direct connection)": "（オフ＝直接接続）",
+  "Save": "保存",
+  "Saved ✓": "保存しました ✓",
+  "Saving…": "保存中…",
+  // footer
+  "Runs on the Python standard library — no installs, no telemetry.":
+    "Python 標準ライブラリのみで動作 — インストール不要・テレメトリなし。",
+};
+
+const EMPTY_COPY = {
+  en: "Configure the collaboration on the left and press <em>Run</em>. " +
+      "Each agent's turn streams in here as it happens.",
+  ja: "左側でコラボレーションを設定して<em>実行</em>を押してください。" +
+      "各エージェントのターンがここにリアルタイムで表示されます。",
+};
+
+function t(s) { return state.lang === "ja" && JA[s] ? JA[s] : s; }
+
+function applyLang() {
+  document.documentElement.lang = state.lang;
+  document.querySelectorAll("[data-i18n]").forEach((el) => {
+    if (!el.dataset.en) el.dataset.en = el.textContent.replace(/\s+/g, " ").trim();
+    el.textContent = t(el.dataset.en);
+  });
+  document.querySelectorAll("[data-i18n-ph]").forEach((el) => {
+    if (!el.dataset.enPh) el.dataset.enPh = el.getAttribute("placeholder") || "";
+    el.setAttribute("placeholder", t(el.dataset.enPh));
+  });
+  const copy = $("#empty-copy");
+  if (copy) copy.innerHTML = EMPTY_COPY[state.lang] || EMPTY_COPY.en;
+  $("#lang-toggle").textContent = state.lang === "ja" ? "EN" : "JA";
+}
+
+function toggleLang() {
+  state.lang = state.lang === "ja" ? "en" : "ja";
+  localStorage.setItem("ao-lang", state.lang);
+  applyLang();
+  renderRoles(); // rebuild role cards with translated labels
+}
+
 // Which accent bucket a role belongs to (drives the card colour).
 function accentFor(role) {
-  if (["implementer", "agent_a", "planner"].includes(role)) return "acc-a";
+  if (["implementer", "agent_a", "planner", "conductor"].includes(role)) return "acc-a";
   if (["reviewer", "agent_b", "executor"].includes(role)) return "acc-b";
-  const m = /^agent_(\d+)$/.exec(role); // custom participants agent_1, agent_2, …
+  const m = /^(?:agent|worker)_(\d+)$/.exec(role); // custom / team members
   if (m) return ["acc-a", "acc-b", "acc-c"][(parseInt(m[1], 10) - 1) % 3];
   return "acc-c"; // synthesizer / judge / anything else
 }
@@ -60,6 +187,14 @@ function renderMarkdown(text) {
 }
 
 // -- catalog & role rendering ----------------------------------------------
+// Human grouping of the strategy list (anything unknown lands in the first group).
+const STRATEGY_GROUPS = [
+  ["Discuss & decide", ["implementer_reviewer", "debate_consensus", "planner_executor",
+    "round_robin", "panel_judge", "custom"]],
+  ["Author together", ["doc_authoring", "code_authoring", "workspace_build"]],
+  ["Team play", ["conductor_team"]],
+];
+
 async function loadCatalog() {
   const res = await fetch("/api/catalog");
   const data = await res.json();
@@ -68,14 +203,27 @@ async function loadCatalog() {
 
   const sel = $("#strategy");
   sel.innerHTML = "";
-  for (const st of state.strategies) {
-    const opt = document.createElement("option");
-    opt.value = st.name;
-    opt.textContent = st.name.replace(/_/g, " ");
-    sel.appendChild(opt);
+  const grouped = new Set(STRATEGY_GROUPS.flatMap(([, names]) => names));
+  for (const [label, names] of STRATEGY_GROUPS) {
+    const members = state.strategies.filter((s) => names.includes(s.name));
+    const extras = label === STRATEGY_GROUPS[0][0]
+      ? state.strategies.filter((s) => !grouped.has(s.name)) : [];
+    if (!members.length && !extras.length) continue;
+    const og = document.createElement("optgroup");
+    og.label = t(label);
+    for (const st of [...members, ...extras]) {
+      const opt = document.createElement("option");
+      opt.value = st.name;
+      opt.textContent = st.name.replace(/_/g, " ");
+      opt.title = st.description;
+      og.appendChild(opt);
+    }
+    sel.appendChild(og);
   }
-  sel.addEventListener("change", renderRoles);
+  sel.addEventListener("change", () => { renderRoles(); persistForm(); });
+  restoreForm("strategy");
   renderRoles();
+  restoreForm("fields");
 }
 
 function currentStrategy() {
@@ -87,11 +235,56 @@ function renderRoles() {
   if (!st) return;
   $("#strategy-desc").textContent = st.description;
   $("#rounds").value = st.default_rounds;
+  $("#workspace-opts").hidden = st.name !== "workspace_build";
 
   const wrap = $("#roles");
   wrap.innerHTML = "";
+  if (st.name === "conductor_team") { renderConductorBuilder(wrap); return; }
   if (st.custom) { renderCustomBuilder(wrap); return; }
   st.roles.forEach((role) => wrap.appendChild(roleCard(role.key, role.label, role.system || "", false)));
+}
+
+// Conductor team: one conductor, 2–4 workers (add/remove), one reviewer.
+const CONDUCTOR_DEFAULTS = {
+  conductor: "Leads the team: decomposes the task, assigns subtasks, holds workers " +
+    "accountable (calling out anyone who doesn't deliver), and integrates the result.",
+  worker: "Carries out the specific assignment the conductor gives, concretely and in full.",
+  reviewer: "Reviews each worker's output against its assignment and reports back to the conductor.",
+};
+function renderConductorBuilder(wrap) {
+  wrap.appendChild(roleCard("conductor", t("Conductor"), CONDUCTOR_DEFAULTS.conductor, false));
+
+  const holder = document.createElement("div");
+  holder.id = "workers"; holder.className = "roles";
+  wrap.appendChild(holder);
+  const add = document.createElement("button");
+  add.type = "button"; add.className = "btn ghost add-worker";
+  add.textContent = t("+ Add worker");
+  add.addEventListener("click", () => addWorker(holder));
+  wrap.appendChild(add);
+  addWorker(holder);
+  addWorker(holder);
+
+  wrap.appendChild(roleCard("reviewer", t("Reviewer"), CONDUCTOR_DEFAULTS.reviewer, false));
+}
+
+function addWorker(holder) {
+  if (holder.children.length >= 4) return;
+  const i = holder.children.length + 1;
+  holder.appendChild(roleCard("worker_" + i, t("Worker") + " " + i, CONDUCTOR_DEFAULTS.worker, true));
+  relabelWorkers(holder);
+}
+
+function relabelWorkers(holder) {
+  Array.from(holder.children).forEach((card, i) => {
+    const key = "worker_" + (i + 1);
+    const bucket = accentFor(key);
+    card.className = "role " + (bucket === "acc-b" ? "b" : bucket === "acc-c" ? "c" : "");
+    card.querySelector(".role-name").childNodes[0].nodeValue = t("Worker") + " " + (i + 1);
+    card.querySelector("select").dataset.role = key;
+  });
+  const add = document.querySelector(".add-worker");
+  if (add) add.disabled = holder.children.length >= 4;
 }
 
 // Build one role card: backend picker + optional model + editable persona.
@@ -106,7 +299,10 @@ function roleCard(key, label, defaultSystem, removable) {
   if (removable) {
     const rm = document.createElement("button");
     rm.type = "button"; rm.className = "role-remove"; rm.textContent = "×"; rm.title = "Remove";
-    rm.addEventListener("click", () => { const h = box.parentElement; box.remove(); relabelParticipants(h); });
+    rm.addEventListener("click", () => {
+      const h = box.parentElement; box.remove();
+      (h && h.id === "workers" ? relabelWorkers : relabelParticipants)(h);
+    });
     name.appendChild(rm);
   }
   box.appendChild(name);
@@ -129,24 +325,24 @@ function roleCard(key, label, defaultSystem, removable) {
 
   const model = document.createElement("input");
   model.type = "text"; model.className = "model-in";
-  model.placeholder = "model (optional — uses default)";
+  model.placeholder = t("model (optional — uses default)");
   box.appendChild(model);
 
   const det = document.createElement("details");
   det.className = "persona";
   const sum = document.createElement("summary");
-  sum.textContent = "Persona";
+  sum.textContent = t("Persona");
   det.appendChild(sum);
   const ta = document.createElement("textarea");
   ta.className = "persona-in"; ta.rows = 3;
   ta.placeholder = defaultSystem
-    ? "Leave blank to use the default persona below"
-    : "Describe this participant's role / character (optional)";
+    ? t("Leave blank to use the default persona below")
+    : t("Describe this participant's role / character (optional)");
   det.appendChild(ta);
   if (defaultSystem) {
     const hint = document.createElement("div");
     hint.className = "persona-default";
-    hint.textContent = "Default: " + defaultSystem;
+    hint.textContent = t("Default: ") + defaultSystem;
     det.appendChild(hint);
   }
   box.appendChild(det);
@@ -160,7 +356,7 @@ function renderCustomBuilder(wrap) {
   wrap.appendChild(holder);
   const add = document.createElement("button");
   add.type = "button"; add.className = "btn ghost add-participant";
-  add.textContent = "+ Add participant";
+  add.textContent = t("+ Add participant");
   add.addEventListener("click", () => addParticipant(holder));
   wrap.appendChild(add);
   addParticipant(holder);
@@ -170,7 +366,7 @@ function renderCustomBuilder(wrap) {
 function addParticipant(holder) {
   if (holder.children.length >= 5) return;
   const i = holder.children.length;
-  holder.appendChild(roleCard("agent_" + (i + 1), "Participant " + (i + 1), "", true));
+  holder.appendChild(roleCard("agent_" + (i + 1), t("Participant") + " " + (i + 1), "", true));
   relabelParticipants(holder);
 }
 
@@ -179,7 +375,7 @@ function relabelParticipants(holder) {
     const key = "agent_" + (i + 1);
     const bucket = accentFor(key);
     card.className = "role " + (bucket === "acc-b" ? "b" : bucket === "acc-c" ? "c" : "");
-    card.querySelector(".role-name").childNodes[0].nodeValue = "Participant " + (i + 1);
+    card.querySelector(".role-name").childNodes[0].nodeValue = t("Participant") + " " + (i + 1);
     card.querySelector("select").dataset.role = key;
   });
   const add = document.querySelector(".add-participant");
@@ -207,10 +403,46 @@ function rolesPayload() {
     });
     return { roles, role_order: order };
   }
+  if (st && st.name === "conductor_team") {
+    const fixed = Array.from(document.querySelectorAll("#roles > .role")); // [conductor, reviewer]
+    const order = ["conductor"];
+    roles.conductor = collectRole(fixed[0]);
+    document.querySelectorAll("#workers > .role").forEach((card, i) => {
+      const key = "worker_" + (i + 1);
+      order.push(key);
+      roles[key] = collectRole(card);
+    });
+    roles.reviewer = collectRole(fixed[fixed.length - 1]);
+    order.push("reviewer");
+    return { roles, role_order: order };
+  }
   document.querySelectorAll("#roles > .role").forEach((card) => {
     roles[card.querySelector("select").dataset.role] = collectRole(card);
   });
   return { roles };
+}
+
+// -- form persistence (task, strategy, dirs survive a reload) ---------------
+const PERSIST_FIELDS = ["task", "rounds", "workspace-dir", "reference-dir"];
+
+function persistForm() {
+  const data = { strategy: $("#strategy").value };
+  PERSIST_FIELDS.forEach((id) => { data[id] = $("#" + id).value; });
+  data["workspace-init"] = $("#workspace-init").checked;
+  try { localStorage.setItem("ao-form", JSON.stringify(data)); } catch { /* ignore */ }
+}
+
+function restoreForm(phase) {
+  let data;
+  try { data = JSON.parse(localStorage.getItem("ao-form") || "{}"); } catch { return; }
+  if (phase === "strategy") {
+    if (data.strategy) $("#strategy").value = data.strategy;
+    if (!$("#strategy").value && state.strategies[0]) $("#strategy").value = state.strategies[0].name;
+    return;
+  }
+  // phase "fields": after renderRoles(), which resets rounds to the default
+  PERSIST_FIELDS.forEach((id) => { if (data[id] != null && data[id] !== "") $("#" + id).value = data[id]; });
+  if (data["workspace-init"] != null) $("#workspace-init").checked = data["workspace-init"];
 }
 
 // -- run / stream ----------------------------------------------------------
@@ -226,9 +458,34 @@ function setStatus(msg, isErr) {
   el.className = "status" + (isErr ? " err" : "");
 }
 
+// Reset every per-run view. Also called on session_start so an SSE reconnect
+// (which replays the whole event backlog) doesn't duplicate the transcript.
+function resetRunUI() {
+  state.cards = {};
+  state.log = [];
+  state.artifact = { versions: [], view: "preview" };
+  state.workspace = { files: {}, order: [], selected: null };
+  state.team = { workers: {}, order: [], conductor: "", round: 0 };
+  ["artifact", "workspace", "team"].forEach((name) => {
+    const b = document.querySelector(`.ftab[data-tab="${name}"]`);
+    if (b) { b.hidden = true; b.classList.remove("badge"); }
+  });
+  setTab("stream");
+  $("#stream").innerHTML = "";
+  $("#sp-list").innerHTML = "";
+  $("#scratchpad").hidden = true;
+  $("#artifact-body").innerHTML = "";
+  $("#ws-files").innerHTML = "";
+  $("#ws-diff").innerHTML = "";
+  $("#team-roster").innerHTML = "";
+  $("#meta").textContent = "";
+  $("#export-md").hidden = true;
+  setSeg("preview");
+}
+
 async function run() {
   const task = $("#task").value.trim();
-  if (!task) { setStatus("Please enter a task.", true); return; }
+  if (!task) { setStatus(t("Please enter a task."), true); return; }
 
   const rp = rolesPayload();
   const payload = {
@@ -238,8 +495,16 @@ async function run() {
     roles: rp.roles,
   };
   if (rp.role_order) payload.role_order = rp.role_order;
+  const refDir = $("#reference-dir").value.trim();
+  if (refDir) payload.reference_dir = refDir;
+  if ($("#strategy").value === "workspace_build") {
+    const ws = $("#workspace-dir").value.trim();
+    if (ws) payload.workspace = ws;
+    payload.create_dir = $("#workspace-init").checked;
+  }
+  persistForm();
 
-  setStatus("Starting…");
+  setStatus(t("Starting…"));
   $("#run").disabled = true;
   let res, data;
   try {
@@ -250,12 +515,12 @@ async function run() {
     });
     data = await res.json();
   } catch (e) {
-    setStatus("Network error: " + e, true);
+    setStatus(t("Network error: ") + e, true);
     $("#run").disabled = false;
     return;
   }
   if (!res.ok) {
-    let msg = data.error || "Failed to start.";
+    let msg = data.error || t("Failed to start.");
     if (data.details) msg += " (" + data.details.map((d) => `${d.role}: ${d.reason}`).join("; ") + ")";
     setStatus(msg, true);
     $("#run").disabled = false;
@@ -263,10 +528,7 @@ async function run() {
   }
 
   state.sessionId = data.session_id;
-  state.cards = {};
-  $("#stream").innerHTML = "";
-  $("#sp-list").innerHTML = "";
-  $("#scratchpad").hidden = true;
+  resetRunUI();
   $("#stop").disabled = false;
   openStream(data.session_id);
 }
@@ -281,24 +543,52 @@ function openStream(id) {
     handleEvent(evt);
   };
   es.onerror = () => {
-    if (state.connState === "running") setConn("disconnected", "error");
+    if (state.connState === "running") setConn("reconnecting", "error");
   };
+}
+
+// Reopen a past (or still-running) session from the history list; the event
+// bus replays its full backlog, so the whole transcript is reconstructed.
+function openSession(id) {
+  state.sessionId = id;
+  resetRunUI();
+  $("#stop").disabled = false; // session_end in the replay re-disables it
+  setStatus("");
+  openStream(id);
 }
 
 async function stop() {
   if (!state.sessionId) return;
   await fetch(`/api/stop/${state.sessionId}`, { method: "POST" });
-  setStatus("Stop requested…");
+  setStatus(t("Stop requested…"));
 }
 
 // -- event handling --------------------------------------------------------
 function handleEvent(evt) {
   const { type, data } = evt;
   if (type === "session_start") {
+    resetRunUI(); // idempotent replays: never duplicate the transcript
     setConn("running", "running");
-    setStatus("Collaboration running…");
+    setStatus(t("Collaboration running…"));
     const agents = Object.entries(data.agents).map(([r, n]) => `${r}=${n}`).join("  ·  ");
-    $("#meta").textContent = `${data.strategy} · ${data.rounds} rounds · ${agents}`;
+    const extras = [];
+    if (data.references) extras.push(`${data.references} reference file(s)`);
+    if (data.workspace_created === "created") extras.push("dir created");
+    $("#meta").textContent =
+      `${data.strategy} · ${data.rounds} rounds · ${agents}` +
+      (extras.length ? ` · ${extras.join(" · ")}` : "");
+    $("#artifact-ext").value = data.strategy === "code_authoring" ? ".py" : ".md";
+    if (data.workspace) {
+      $("#workspace-path").textContent =
+        data.workspace + (data.workspace_created === "created" ? "  (created)" : "");
+    }
+    if (data.strategy === "conductor_team") seedTeam(data.agents);
+  } else if (type === "artifact") {
+    handleArtifact(data);
+  } else if (type === "workspace_edit") {
+    handleWorkspaceEdit(data);
+  } else if (type === "worker_status") {
+    handleWorkerStatus(data);
   } else if (type === "turn_start") {
     addThinkingCard(data);
   } else if (type === "turn_end") {
@@ -317,21 +607,53 @@ function handleEvent(evt) {
   }
 }
 
+// -- feed tabs ---------------------------------------------------------------
+const TAB_PANES = { stream: "#tab-stream", artifact: "#tab-artifact",
+  workspace: "#tab-workspace", team: "#tab-team" };
+
+function setTab(name) {
+  state.tab = name;
+  document.querySelectorAll(".ftab").forEach((b) => {
+    const active = b.dataset.tab === name;
+    b.classList.toggle("active", active);
+    if (active) b.classList.remove("badge");
+  });
+  for (const [tab, sel] of Object.entries(TAB_PANES)) $(sel).hidden = tab !== name;
+}
+
+// Show a tab button once its pane has content; dot-badge it if not focused.
+function revealTab(name) {
+  const btn = document.querySelector(`.ftab[data-tab="${name}"]`);
+  if (!btn) return;
+  btn.hidden = false;
+  if (state.tab !== name) btn.classList.add("badge");
+}
+
+// -- smart autoscroll --------------------------------------------------------
+function nearBottom() {
+  return window.innerHeight + window.scrollY
+    >= document.documentElement.scrollHeight - 240;
+}
+function autoScroll(node) {
+  if (nearBottom()) node.scrollIntoView({ behavior: "smooth", block: "end" });
+  else $("#jump-latest").hidden = false;
+}
+
 // One-click copy of an agent's raw (un-rendered) output.
 function makeCopyBtn(text) {
   const b = document.createElement("button");
   b.type = "button";
   b.className = "copy-btn";
   b.title = "Copy output";
-  b.textContent = "Copy";
+  b.textContent = t("Copy");
   b.addEventListener("click", (e) => { e.stopPropagation(); copyText(text, b); });
   return b;
 }
 function copyText(text, btn) {
   const flash = () => {
-    btn.textContent = "Copied";
+    btn.textContent = t("Copied");
     btn.classList.add("copied");
-    setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("copied"); }, 1200);
+    setTimeout(() => { btn.textContent = t("Copy"); btn.classList.remove("copied"); }, 1200);
   };
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text).then(flash).catch(() => fallbackCopy(text, flash));
@@ -355,6 +677,7 @@ function cardKey(d) { return `${d.role}-${d.round}`; }
 function addThinkingCard(d) {
   const node = document.createElement("div");
   node.className = `turn thinking ${accentFor(d.role)}`;
+  node.dataset.start = Date.now();
   node.innerHTML = `
     <div class="turn-head">
       <span class="avatar">${escapeHtml(initials(d.agent))}</span>
@@ -362,24 +685,28 @@ function addThinkingCard(d) {
         <span class="agent">${escapeHtml(d.agent)}</span>
         <span class="role-tag">${escapeHtml(d.role)}</span>
       </span>
-      <span class="round">round ${d.round}</span>
+      <span class="round">${t("round")} ${d.round}</span>
+      <span class="dur"></span>
     </div>
-    <div class="turn-body">thinking</div>`;
+    <div class="turn-body">${t("thinking")}</div>`;
   $("#stream").appendChild(node);
   state.cards[cardKey(d)] = node;
-  node.scrollIntoView({ behavior: "smooth", block: "end" });
+  autoScroll(node);
 }
+
+// Live elapsed-seconds counter on every in-progress turn.
+setInterval(() => {
+  document.querySelectorAll(".turn.thinking").forEach((n) => {
+    const t0 = parseInt(n.dataset.start || "0", 10);
+    if (t0) n.querySelector(".dur").textContent = Math.round((Date.now() - t0) / 1000) + "s";
+  });
+}, 1000);
 
 function fillCard(d) {
   const node = state.cards[cardKey(d)] || (() => { addThinkingCard(d); return state.cards[cardKey(d)]; })();
   node.classList.remove("thinking");
   if (!d.ok) node.classList.add("failed");
-  if (d.duration != null) {
-    const dur = document.createElement("span");
-    dur.className = "dur";
-    dur.textContent = `${d.duration}s`;
-    node.querySelector(".turn-head").appendChild(dur);
-  }
+  node.querySelector(".dur").textContent = d.duration != null ? `${d.duration}s` : "";
   if (d.via) {
     const tag = document.createElement("span");
     tag.className = "via via-" + d.via;
@@ -393,7 +720,9 @@ function fillCard(d) {
     node.querySelector(".turn-head").appendChild(makeCopyBtn(d.content));
   }
   node.querySelector(".turn-body").innerHTML = d.ok ? renderMarkdown(d.content) : escapeHtml(d.content);
-  node.scrollIntoView({ behavior: "smooth", block: "end" });
+  state.log.push({ agent: d.agent, role: d.role, round: d.round, content: d.content, ok: d.ok });
+  $("#export-md").hidden = false;
+  autoScroll(node);
 }
 
 function addNote(msg) {
@@ -414,13 +743,190 @@ function renderScratchpad(notes) {
   $("#scratchpad").hidden = !(notes && notes.length);
 }
 
+// -- artifact (shared evolving document / code) ----------------------------
+function handleArtifact(d) {
+  const a = state.artifact;
+  a.versions.push(d);
+  a.content = d.content;
+  a.prev = a.versions.length > 1 ? a.versions[a.versions.length - 2].content : "";
+  revealTab("artifact");
+  renderArtifact();
+}
+
+function setSeg(which) {
+  $("#artifact-view-preview").classList.toggle("active", which === "preview");
+  $("#artifact-view-diff").classList.toggle("active", which === "diff");
+}
+
+function renderArtifact() {
+  const a = state.artifact;
+  if (!a.versions.length) return;
+  const v = a.versions[a.versions.length - 1];
+  $("#artifact-meta").textContent = `v${v.version} · ${v.author} [${v.role}] · ${t("round")} ${v.round}`;
+  const body = $("#artifact-body");
+  if (a.view === "diff") {
+    body.className = "artifact-body diff";
+    body.innerHTML = renderDiff(a.prev || "", a.content || "");
+  } else {
+    body.className = "artifact-body";
+    const ext = $("#artifact-ext").value;
+    body.innerHTML = (ext === ".md" || ext === ".txt")
+      ? renderMarkdown(a.content || "")
+      : `<pre><code>${escapeHtml(a.content || "")}</code></pre>`;
+  }
+}
+
+// Minimal LCS line diff for the Diff view.
+function renderDiff(oldText, newText) {
+  const a = oldText.split("\n"), b = newText.split("\n");
+  const n = a.length, m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const rows = [];
+  const push = (cls, sign, line) =>
+    rows.push(`<div class="dline ${cls}">${escapeHtml(sign + " " + line)}</div>`);
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { push("d-ctx", " ", a[i]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { push("d-del", "-", a[i]); i++; }
+    else { push("d-add", "+", b[j]); j++; }
+  }
+  while (i < n) push("d-del", "-", a[i++]);
+  while (j < m) push("d-add", "+", b[j++]);
+  return rows.join("") || '<div class="dline d-ctx">(no changes)</div>';
+}
+
+function downloadBlob(text, filename) {
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function downloadArtifact() {
+  downloadBlob(state.artifact.content || "", "artifact" + $("#artifact-ext").value);
+}
+
+// Export the whole transcript as a markdown file.
+function exportTranscript() {
+  const lines = [`# Agent Orchestrator — transcript`, ""];
+  const meta = $("#meta").textContent;
+  if (meta) lines.push(`> ${meta}`, "");
+  for (const e of state.log) {
+    if (e.final) lines.push(`## ${t("Final deliverable")}`, "", e.content, "");
+    else lines.push(`## ${e.agent} [${e.role}] — ${t("round")} ${e.round}${e.ok ? "" : " (failed)"}`,
+      "", e.content, "");
+  }
+  downloadBlob(lines.join("\n"), `transcript-${state.sessionId || "session"}.md`);
+}
+
+// -- workspace (real files edited on disk) ---------------------------------
+function handleWorkspaceEdit(d) {
+  const w = state.workspace;
+  if (!(d.path in w.files)) w.order.push(d.path);
+  w.files[d.path] = d;
+  if (!w.selected || w.selected === d.path) w.selected = d.path;
+  revealTab("workspace");
+  renderWorkspace();
+}
+
+function renderWorkspace() {
+  const w = state.workspace;
+  const list = $("#ws-files");
+  list.innerHTML = "";
+  w.order.forEach((path) => {
+    const f = w.files[path];
+    const li = document.createElement("li");
+    li.className = "ws-file" + (path === w.selected ? " active" : "");
+    li.innerHTML =
+      `<span class="ws-dot ${f.status}"></span>` +
+      `<span class="ws-name">${escapeHtml(path)}</span>` +
+      `<span class="ws-stat"><span class="d-add">+${f.additions}</span> ` +
+      `<span class="d-del">-${f.deletions}</span></span>`;
+    li.addEventListener("click", () => { w.selected = path; renderWorkspace(); });
+    list.appendChild(li);
+  });
+  const sel = w.files[w.selected];
+  $("#ws-diff").innerHTML = sel ? renderUnifiedDiff(sel.diff) : "";
+}
+
+// -- conductor team roster -------------------------------------------------
+const TEAM_BADGES = {
+  idle:      { label: "idle",      icon: "○" },
+  assigned:  { label: "assigned",  icon: "→" },
+  delivered: { label: "delivered", icon: "•" },
+  ok:        { label: "approved",  icon: "✓" },
+  warned:    { label: "called out", icon: "⚠" },
+};
+
+function seedTeam(agents) {
+  const t = state.team;
+  t.conductor = (agents && agents.conductor) || "Conductor";
+  t.order = Object.keys(agents || {}).filter((k) => k.startsWith("worker"))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  t.order.forEach((k) => { t.workers[k] = { name: agents[k], status: "idle", note: "", round: 0 }; });
+  if (t.order.length) revealTab("team");
+  renderTeam();
+}
+
+function handleWorkerStatus(d) {
+  const t = state.team;
+  if (!t.order.includes(d.worker)) { t.order.push(d.worker); }
+  t.workers[d.worker] = { name: d.name, status: d.status, note: d.note || "", round: d.round };
+  if (d.round > t.round) t.round = d.round;
+  revealTab("team");
+  renderTeam();
+}
+
+function renderTeam() {
+  const tm = state.team;
+  $("#team-meta").textContent =
+    `conductor: ${tm.conductor}` + (tm.round ? `  ·  ${t("round")} ${tm.round}` : "");
+  const list = $("#team-roster");
+  list.innerHTML = "";
+  tm.order.forEach((key) => {
+    const w = tm.workers[key];
+    const b = TEAM_BADGES[w.status] || TEAM_BADGES.idle;
+    const li = document.createElement("li");
+    li.className = "team-row st-" + w.status;
+    li.innerHTML =
+      `<span class="team-ava">${escapeHtml(initials(w.name))}</span>` +
+      `<span class="team-main"><span class="team-name">${escapeHtml(w.name)} ` +
+      `<small>${escapeHtml(key)}</small></span>` +
+      (w.note ? `<span class="team-note">${escapeHtml(w.note)}</span>` : "") +
+      `</span>` +
+      `<span class="team-badge st-${w.status}">${b.icon} ${t(b.label)}</span>`;
+    list.appendChild(li);
+  });
+}
+
+// Colorize a unified diff produced by difflib.
+function renderUnifiedDiff(diff) {
+  if (!diff) return '<div class="dline d-ctx">(no textual changes)</div>';
+  return diff.split("\n").map((ln) => {
+    let cls = "d-ctx";
+    if (ln.startsWith("+") && !ln.startsWith("+++")) cls = "d-add";
+    else if (ln.startsWith("-") && !ln.startsWith("---")) cls = "d-del";
+    else if (ln.startsWith("@@")) cls = "d-hunk";
+    else if (ln.startsWith("+++") || ln.startsWith("---")) cls = "d-meta";
+    return `<div class="dline ${cls}">${escapeHtml(ln)}</div>`;
+  }).join("");
+}
+
 function addResult(content) {
   const el = document.createElement("div");
   el.className = "result-card";
   const head = document.createElement("div");
   head.className = "result-head";
   const h3 = document.createElement("h3");
-  h3.textContent = "Final deliverable";
+  h3.textContent = t("Final deliverable");
   head.appendChild(h3);
   head.appendChild(makeCopyBtn(content));
   const body = document.createElement("div");
@@ -429,31 +935,68 @@ function addResult(content) {
   el.appendChild(head);
   el.appendChild(body);
   $("#stream").appendChild(el);
-  el.scrollIntoView({ behavior: "smooth", block: "end" });
+  state.log.push({ final: true, content });
+  $("#export-md").hidden = false;
+  autoScroll(el);
 }
 
 function finish(status) {
   if (state.es) { state.es.close(); state.es = null; }
   $("#run").disabled = false;
   $("#stop").disabled = true;
-  if (status === "done") { setConn("done", "done"); setStatus("Done."); }
-  else if (status === "stopped") { setConn("stopped", "idle"); setStatus("Stopped."); }
-  else { setConn("error", "error"); }
+  if (status === "done") { setConn("done", "done"); setStatus(t("Done.")); }
+  else if (status === "stopped") { setConn("stopped", "idle"); setStatus(t("Stopped.")); }
+  else { setConn("error", "error"); setStatus(t("Session ended with an error."), true); }
 }
 
-// -- theme (light / dark) --------------------------------------------------
-function applyTheme(t) {
-  document.documentElement.dataset.theme = t;
-  const btn = $("#theme-toggle");
-  if (btn) btn.textContent = t === "light" ? "☀" : "☾";
+// -- session history ---------------------------------------------------------
+async function toggleHistory() {
+  const pop = $("#history-pop");
+  if (!pop.hidden) { pop.hidden = true; return; }
+  const list = $("#history-list");
+  list.innerHTML = "";
+  try {
+    const d = await (await fetch("/api/sessions")).json();
+    if (!d.sessions.length) {
+      list.innerHTML = `<li class="history-empty">${escapeHtml(t("No sessions yet."))}</li>`;
+    }
+    d.sessions.forEach((s) => {
+      const li = document.createElement("li");
+      li.className = "history-item";
+      const when = new Date(s.created * 1000).toLocaleTimeString();
+      li.innerHTML =
+        `<span class="hist-status st-${escapeHtml(s.status)}"></span>` +
+        `<span class="hist-main"><span class="hist-task">${escapeHtml(s.task)}</span>` +
+        `<span class="hist-sub">${escapeHtml(s.strategy)} · ${when} · ${escapeHtml(s.status)}</span></span>`;
+      li.addEventListener("click", () => { pop.hidden = true; openSession(s.id); });
+      list.appendChild(li);
+    });
+  } catch (e) {
+    list.innerHTML = `<li class="history-empty">${escapeHtml(String(e))}</li>`;
+  }
+  pop.hidden = false;
 }
-function initTheme() {
-  applyTheme(localStorage.getItem("ao-theme") || "dark");
-  $("#theme-toggle").addEventListener("click", () => {
-    const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
-    localStorage.setItem("ao-theme", next);
-    applyTheme(next);
-  });
+
+// -- theme (auto / light / dark) ---------------------------------------------
+const THEME_ICONS = { auto: "◐", light: "☀", dark: "☾" };
+
+function themeMode() { return localStorage.getItem("ao-theme") || "auto"; }
+
+function applyTheme() {
+  const mode = themeMode();
+  const resolved = mode !== "auto" ? mode
+    : (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+  document.documentElement.dataset.theme = resolved;
+  const btn = $("#theme-toggle");
+  btn.textContent = THEME_ICONS[mode] || THEME_ICONS.auto;
+  btn.title = "Theme: " + mode;
+}
+
+function cycleTheme() {
+  const order = ["auto", "light", "dark"];
+  const next = order[(order.indexOf(themeMode()) + 1) % order.length];
+  localStorage.setItem("ao-theme", next);
+  applyTheme();
 }
 
 // -- settings --------------------------------------------------------------
@@ -481,6 +1024,7 @@ async function loadSettings() {
       k.placeholder = p.key_from_env ? "set via environment"
         : (p.key_set ? "saved (hidden)" : "not set");
     }
+    $("#set-local-proxy").checked = !!(d.providers.local && d.providers.local.use_proxy);
   } catch (e) { $("#settings-status").textContent = "Failed to load: " + e; }
 }
 
@@ -494,9 +1038,10 @@ async function saveSettings() {
     openai_base_url: v("set-openai-base"),
     local_api_key: v("set-local-key"), local_model: v("set-local-model"),
     local_base_url: v("set-local-base"),
+    local_use_proxy: $("#set-local-proxy").checked,
   };
   const st = $("#settings-status");
-  st.textContent = "Saving…";
+  st.textContent = t("Saving…");
   try {
     await fetch("/api/settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -504,7 +1049,7 @@ async function saveSettings() {
     });
     await refreshAvailability();
     await loadSettings();
-    st.textContent = "Saved ✓";
+    st.textContent = t("Saved ✓");
   } catch (e) { st.textContent = "Save failed: " + e; }
 }
 
@@ -524,16 +1069,54 @@ async function refreshAvailability() {
 }
 
 // -- boot ------------------------------------------------------------------
-initTheme();
+applyTheme();
+window.matchMedia("(prefers-color-scheme: light)")
+  .addEventListener("change", () => { if (themeMode() === "auto") applyTheme(); });
+applyLang();
+
 $("#run").addEventListener("click", run);
 $("#stop").addEventListener("click", stop);
+$("#theme-toggle").addEventListener("click", cycleTheme);
+$("#lang-toggle").addEventListener("click", toggleLang);
+$("#history-open").addEventListener("click", toggleHistory);
+$("#export-md").addEventListener("click", exportTranscript);
 $("#settings-open").addEventListener("click", openSettings);
 $("#settings-close").addEventListener("click", closeSettings);
 $("#settings-save").addEventListener("click", saveSettings);
 $("#settings-overlay").addEventListener("click", (e) => {
   if (e.target.id === "settings-overlay") closeSettings();
 });
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !$("#settings-overlay").hidden) closeSettings();
+document.querySelectorAll(".ftab").forEach((b) =>
+  b.addEventListener("click", () => setTab(b.dataset.tab)));
+$("#jump-latest").addEventListener("click", () => {
+  window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "smooth" });
+  $("#jump-latest").hidden = true;
 });
+window.addEventListener("scroll", () => { if (nearBottom()) $("#jump-latest").hidden = true; });
+$("#artifact-view-preview").addEventListener("click", () => { state.artifact.view = "preview"; setSeg("preview"); renderArtifact(); });
+$("#artifact-view-diff").addEventListener("click", () => { state.artifact.view = "diff"; setSeg("diff"); renderArtifact(); });
+$("#artifact-ext").addEventListener("change", renderArtifact);
+$("#artifact-copy").addEventListener("click", (e) => copyText(state.artifact.content || "", e.currentTarget));
+$("#artifact-download").addEventListener("click", downloadArtifact);
+
+// Ctrl+Enter / Cmd+Enter in the task box runs the collaboration.
+$("#task").addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && !$("#run").disabled) run();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    if (!$("#settings-overlay").hidden) closeSettings();
+    else if (!$("#history-pop").hidden) $("#history-pop").hidden = true;
+  }
+});
+document.addEventListener("click", (e) => {
+  const pop = $("#history-pop");
+  if (!pop.hidden && !pop.contains(e.target) && e.target.id !== "history-open") pop.hidden = true;
+});
+
+// Form values survive a reload.
+["task", "rounds", "workspace-dir", "reference-dir"].forEach((id) =>
+  $("#" + id).addEventListener("input", persistForm));
+$("#workspace-init").addEventListener("change", persistForm);
+
 loadCatalog().catch((e) => setStatus("Failed to load catalog: " + e, true));

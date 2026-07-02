@@ -1,11 +1,31 @@
 """Tests for the collaboration strategies (run against mock agents)."""
 
+import os
+import tempfile
 import unittest
 
 from agent_orchestrator.adapters.base import AgentAdapter
 from agent_orchestrator.adapters.mock import MockAdapter
 from agent_orchestrator.orchestrator.session import Session
-from agent_orchestrator.orchestrator.strategies import STRATEGIES, get_strategy
+from agent_orchestrator.orchestrator.strategies import (
+    STRATEGIES,
+    AgentTurnError,
+    get_strategy,
+)
+
+
+class _FixedAdapter(AgentAdapter):
+    """Returns a fixed body each turn (used to feed <FILE> blocks)."""
+
+    kind = "fixed"
+
+    def __init__(self, name, body):
+        super().__init__(name, display_name=name)
+        self.supports_history = False
+        self._body = body
+
+    def _generate(self, prompt, system, history):
+        return self._body
 
 
 class _CapturingAdapter(AgentAdapter):
@@ -33,13 +53,16 @@ def _custom_session(a, b):
 def _session(strategy_name, rounds=2):
     strategy = get_strategy(strategy_name)
     agents = {key: MockAdapter(name=key, display_name=key) for key, _ in strategy.roles}
-    return Session(
+    session = Session(
         id="test",
         task="Write a function that sorts a list.",
         strategy=strategy_name,
         rounds=rounds,
         agents=agents,
     )
+    if strategy_name == "workspace_build":
+        session.workspace = tempfile.mkdtemp()
+    return session
 
 
 class TestStrategies(unittest.TestCase):
@@ -47,8 +70,175 @@ class TestStrategies(unittest.TestCase):
         self.assertEqual(
             set(STRATEGIES),
             {"implementer_reviewer", "debate_consensus", "planner_executor",
-             "round_robin", "panel_judge", "custom"},
+             "round_robin", "panel_judge", "custom", "doc_authoring", "code_authoring",
+             "workspace_build", "conductor_team"},
         )
+
+    def test_conductor_directive_parsers(self):
+        from agent_orchestrator.orchestrator.strategies import (
+            _parse_assignments, _parse_assessments, _conductor_done,
+        )
+        text = (
+            "@worker_1 [OK]: solid work\n"
+            "@worker_2 [WARN]: ignored the assignment\n"
+            "@worker_1: write the parser\n"
+            "@worker_2: write the tests\n"
+            "@stranger: ignore me\n"
+            "VERDICT: DONE\n"
+        )
+        workers = ["worker_1", "worker_2"]
+        self.assertEqual(
+            _parse_assignments(text, workers),
+            {"worker_1": "write the parser", "worker_2": "write the tests"},
+        )
+        self.assertEqual(
+            _parse_assessments(text, workers),
+            [("worker_1", "OK", "solid work"),
+             ("worker_2", "WARN", "ignored the assignment")],
+        )
+        self.assertTrue(_conductor_done(text))
+        self.assertFalse(_conductor_done("VERDICT: CONTINUE\n@worker_1: keep going"))
+
+    def _conductor_session(self, conductor_body, rounds=2, workers=2):
+        agents = {
+            "conductor": _FixedAdapter("Maestro", conductor_body),
+            "reviewer": _FixedAdapter("Critic", "Looks reasonable; minor gaps."),
+        }
+        order = ["conductor"]
+        for i in range(1, workers + 1):
+            agents[f"worker_{i}"] = _FixedAdapter(f"W{i}", f"worker {i} output")
+            order.append(f"worker_{i}")
+        order.append("reviewer")
+        s = Session(id="ct", task="Build a thing.", strategy="conductor_team",
+                    rounds=rounds, agents=agents)
+        s.role_order = order
+        return s
+
+    def test_conductor_team_runs_and_tracks_workers(self):
+        body = ("@worker_1 [OK]: good\n@worker_2 [WARN]: nothing delivered\n"
+                "@worker_1: do part A\n@worker_2: do part B\nVERDICT: CONTINUE")
+        session = self._conductor_session(body, rounds=2, workers=2)
+        result = get_strategy("conductor_team").run(session)
+        self.assertTrue(result)
+        statuses = [e.data["status"] for e in session.bus.history if e.type == "worker_status"]
+        for expected in ("assigned", "delivered", "warned", "ok"):
+            self.assertIn(expected, statuses)
+        self.assertIn("result", [e.type for e in session.bus.history])
+
+    def test_conductor_done_stops_early(self):
+        body = ("@worker_1 [OK]: done\n@worker_2 [OK]: done\n"
+                "@worker_1: x\n@worker_2: y\nVERDICT: DONE")
+        session = self._conductor_session(body, rounds=4, workers=2)
+        get_strategy("conductor_team").run(session)
+        # round 1 assigns+works; round 2 conductor says DONE -> no round-2 worker turns.
+        worker_rounds = {t.round for t in session.transcript if t.role.startswith("worker")}
+        self.assertEqual(worker_rounds, {1})
+
+    def test_conductor_team_requires_full_team(self):
+        agents = {"conductor": _FixedAdapter("c", "x"), "reviewer": _FixedAdapter("r", "x")}
+        session = Session(id="ct", task="t", strategy="conductor_team", rounds=1, agents=agents)
+        session.role_order = ["conductor", "reviewer"]
+        with self.assertRaises(AgentTurnError):
+            get_strategy("conductor_team").run(session)
+
+    def test_load_references_filters_and_truncates(self):
+        from agent_orchestrator.orchestrator.strategies import load_references
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, ".git"))
+        os.makedirs(os.path.join(d, "sub"))
+        with open(os.path.join(d, "a.txt"), "w") as fh:
+            fh.write("hello reference")
+        with open(os.path.join(d, "sub", "b.py"), "w") as fh:
+            fh.write("print(1)\n")
+        with open(os.path.join(d, ".secret"), "w") as fh:  # dotfile -> skipped
+            fh.write("nope")
+        with open(os.path.join(d, ".git", "config"), "w") as fh:  # in .git -> skipped
+            fh.write("nope")
+        with open(os.path.join(d, "bin.dat"), "wb") as fh:  # binary -> skipped
+            fh.write(b"\x00\x01\x02data")
+        with open(os.path.join(d, "big.txt"), "w") as fh:
+            fh.write("x" * 100)
+        refs = load_references(d, max_file_bytes=10)
+        paths = {p for p, _ in refs}
+        self.assertIn("a.txt", paths)
+        self.assertIn(os.path.join("sub", "b.py"), paths)
+        self.assertNotIn(".secret", paths)
+        self.assertNotIn("bin.dat", paths)
+        self.assertFalse(any(p.startswith(".git") for p in paths))
+        big = dict(refs)["big.txt"]
+        self.assertIn("truncated", big)
+        self.assertLessEqual(len(big), 10 + len("\n… (truncated)"))
+
+    def test_load_references_respects_max_files(self):
+        from agent_orchestrator.orchestrator.strategies import load_references
+        d = tempfile.mkdtemp()
+        for i in range(10):
+            with open(os.path.join(d, f"f{i}.txt"), "w") as fh:
+                fh.write("data")
+        self.assertEqual(len(load_references(d, max_files=3)), 3)
+
+    def test_reference_block_injected_into_system(self):
+        from agent_orchestrator.orchestrator.strategies import _scratchpad_system
+        session = Session(id="r", task="t", strategy="round_robin", rounds=1, agents={})
+        session.reference_dir = "/some/dir"
+        session.references = [("notes.md", "IMPORTANT CONTEXT")]
+        sysprompt = _scratchpad_system(session, "You are an agent.")
+        self.assertIn("REFERENCE FILES", sysprompt)
+        self.assertIn("notes.md", sysprompt)
+        self.assertIn("IMPORTANT CONTEXT", sysprompt)
+        # No reference dir -> no reference block.
+        empty = Session(id="r2", task="t", strategy="round_robin", rounds=1, agents={})
+        self.assertNotIn("REFERENCE FILES", _scratchpad_system(empty, "You are an agent."))
+
+    def test_extract_files(self):
+        from agent_orchestrator.orchestrator.strategies import _extract_files
+        files = _extract_files('x <FILE path="a/b.py">\nprint(1)\n</FILE> y')
+        self.assertEqual(files, [("a/b.py", "print(1)\n")])
+
+    def test_workspace_build_writes_files(self):
+        d = tempfile.mkdtemp()
+        impl = _FixedAdapter("impl", '<FILE path="hello.py">\nprint("hi")\n</FILE>')
+        rev = _FixedAdapter("rev", "Looks good. APPROVE")
+        session = Session(id="w", task="say hi", strategy="workspace_build", rounds=1,
+                          agents={"implementer": impl, "reviewer": rev}, workspace=d)
+        result = get_strategy("workspace_build").run(session)
+        self.assertTrue(os.path.isfile(os.path.join(d, "hello.py")))
+        self.assertEqual(session.workspace_files["hello.py"].status, "created")
+        self.assertIn("workspace_edit", [e.type for e in session.bus.history])
+        self.assertIn("hello.py", result)
+
+    def test_workspace_build_requires_workspace(self):
+        impl = _FixedAdapter("i", "")
+        session = Session(id="w", task="t", strategy="workspace_build", rounds=1,
+                          agents={"implementer": impl, "reviewer": impl})
+        with self.assertRaises(AgentTurnError):
+            get_strategy("workspace_build").run(session)
+
+    def test_workspace_rejects_path_escape(self):
+        from agent_orchestrator.orchestrator.strategies import _apply_workspace_edits
+        d = tempfile.mkdtemp()
+        impl = _FixedAdapter("i", "")
+        session = Session(id="w", task="t", strategy="workspace_build", rounds=1,
+                          agents={"implementer": impl, "reviewer": impl}, workspace=d)
+        with self.assertRaises(AgentTurnError):
+            _apply_workspace_edits(session, "implementer", 1, '<FILE path="../evil.py">x</FILE>')
+        self.assertFalse(os.path.exists(os.path.join(os.path.dirname(d), "evil.py")))
+
+    def test_extract_artifact(self):
+        from agent_orchestrator.orchestrator.strategies import _extract_artifact
+        self.assertEqual(_extract_artifact("pre <ARTIFACT>\nhello\n</ARTIFACT> post"), "hello")
+        self.assertEqual(_extract_artifact("```python\nprint(1)\n```"), "print(1)")
+        self.assertIsNone(_extract_artifact("just prose, no block"))
+
+    def test_authoring_builds_artifact(self):
+        for name in ("doc_authoring", "code_authoring"):
+            with self.subTest(strategy=name):
+                session = _session(name, rounds=1)
+                result = get_strategy(name).run(session)
+                self.assertTrue(session.artifact, "expected a non-empty artifact")
+                self.assertEqual(result, session.artifact)  # deliverable is the artifact
+                self.assertTrue(session.artifact_versions)
+                self.assertIn("artifact", [e.type for e in session.bus.history])
 
     def test_scratchpad_absorbs_note_lines(self):
         s = _session("round_robin", rounds=1)
@@ -101,7 +291,8 @@ class TestStrategies(unittest.TestCase):
         self.assertIn("Conversation so far", prompt_b)  # transcript embedded instead
 
     def test_each_strategy_produces_transcript_and_result(self):
-        for name in (n for n in STRATEGIES if n != "custom"):  # custom needs runtime roles
+        # custom and conductor_team need runtime-supplied roles.
+        for name in (n for n in STRATEGIES if n not in ("custom", "conductor_team")):
             with self.subTest(strategy=name):
                 session = _session(name, rounds=2)
                 result = get_strategy(name).run(session)

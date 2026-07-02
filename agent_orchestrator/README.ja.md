@@ -56,7 +56,37 @@ python -m agent_orchestrator serve
 | **Planner + Executor** | planner, executor | 一方が計画、他方が実行。各ラウンドで計画を調整。 |
 | **Round-robin（自由対話）** | agent A, B, C | 複数エージェントが全会話を共有しつつ自由に議論し、最後に結論を統合。 |
 | **Panel + Judge（3者＋審判）** | contender A, B, C, judge | 3体が異なる主張を提示し、公平な審判が評価して裁定を下す。 |
+| **Doc authoring（文章共同制作）** | writer, editor | 共有**Artifact**（文書）を writer が起草・改稿し、editor が各版を批評。承認まで反復。 |
+| **Code authoring（コード共同制作）** | implementer, reviewer | 単一の**Artifact**（コード）を implementer が編集し、reviewer が各版を批評。承認まで反復。 |
+| **Workspace build（実ファイル開発）** | implementer, reviewer | **実ディレクトリ**上で implementer がファイルを作成/編集し、reviewer が差分を批評。承認まで反復。 |
+| **Conductor team（コンダクター方式）** | conductor, workers (2〜4), reviewer | **コンダクター**がタスクを分解して各ワーカーに割当て、reviewer が各ワーカーの成果を個別レビューしてコンダクターに報告。コンダクターは毎ラウンド全員を評価し、**働いていないワーカーを名指しで指摘**して再割当て。完了まで反復。 |
 | **Custom（自由定義）** | 自分で定義 (2〜5体) | 参加者ごとにバックエンド・モデル・人格を自由に設定し、議論して結論を統合。 |
+
+authoring 系は共有**Artifact**（1つの育つドキュメント/コード）を作ります。フィードの
+専用タブに表示され、**版管理・Preview/Diff 切替・コピー・ダウンロード**が可能です。編集役は
+更新後の全文を `<ARTIFACT>…</ARTIFACT>` タグで出力し、レビュー役は指摘のみを返します。
+
+**Workspace build** はさらに一歩進み、**ディスク上の実ディレクトリ**へ書き込みます。実装役は
+変更ファイルを `<FILE path="…">…全文…</FILE>` で出力し、オーケストレーターがワークスペース
+直下に限定して書き込み（`..` や絶対パスは拒否）、ファイルごとの unified diff を計算して
+Workspace パネル（ファイル一覧＋色付き差分）に表示します。変更は作業ツリーに残し、ステージ／
+コミットは行いません（レビューと commit はユーザーが実施）。**ワークスペースのディレクトリ**は
+UIで指定でき（空欄＝サーバ起動ディレクトリ）、**「無ければディレクトリを作成」**にチェックすると
+`mkdir` して新しいフォルダを用意し、そこでスクリプティングできます（git は使いません）。（これは
+バックエンド非依存の Phase 2。CLI 自身による実ファイル編集は今後の予定です。）
+
+**参照ディレクトリ**（全ストラテジー・任意）: ローカルフォルダを指定すると、その中のテキスト
+ファイルを**読み取り専用コンテキスト**として全エージェントに渡します。仕様書・既存コードベース・
+サンプルデータなどをチームに参照させるのに便利です。プロンプトが肥大しないよう上限付き
+（`.git`/`node_modules`/バイナリを除外、最大 40ファイル・1ファイル16KB・合計120KB、超過は
+切り詰め）。これらは編集されません。ファイルを編集させたい場合は上記の Workspace を使います。
+
+**Conductor team** は上司＋チーム型のワークフローです。コンダクターは小さな行プロトコルで
+チームに指示します（割当て `@worker_1: <サブタスク>`、指摘 `@worker_2 [WARN]: <不足点>`、
+完了 `VERDICT: DONE`）。フィードの **Team タブ**に各ワーカーの状態
+（*assigned → delivered → approved ✓ / called out ⚠*）がライブ表示され、誰が働いていて誰が
+サボっているか一目で分かります。最後にコンダクターが全員の成果を最終成果物に統合します。
+ワーカー数（2〜4）は UI で指定します。
 
 **各ロールごとに**「バックエンド・モデル・人格(system prompt)」を個別に指定できます
 （UI上で編集可）。1回の実行で Claude Code・Codex・GPT・ローカルモデルを**混在**させたり、
@@ -70,6 +100,14 @@ python -m agent_orchestrator serve
 会話を構造化された **history（メッセージ列）** として渡し（自分の発言=assistant、他者=user）、
 非対応のバックエンドは自動的に「トランスクリプトをプロンプトに埋め込む」方式へフォール
 バックします。各ターンには `ctx: history` / `ctx: prompt` のタグが付き、どちらの方式かが分かります。
+
+**コンソールUI** はフィードを *Transcript / Artifact / Workspace / Team* のタブで整理し、
+非表示タブが更新されるとドットバッジで知らせます。使い勝手の機能も内蔵:
+**セッション履歴（▤）**から過去・実行中のセッションを開くと全トランスクリプトをリプレイ表示、
+トランスクリプト全体を Markdown で**書き出し（Export）**、フォーム入力（タスク・戦略・
+ディレクトリ）はリロード後も保持、スマート自動スクロール（勝手に最下部へ飛ばさず
+*↓ 最新へ* ピルを表示）、実行中ターンの経過秒数表示、`Ctrl+Enter` で実行、
+**日本語 / English 切替**、OS 設定に追従する auto / light / dark テーマ。
 
 ## バックエンド（アダプタ）
 
@@ -112,6 +150,11 @@ python -m agent_orchestrator run \
 | `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | Claude (API) | — / `claude-opus-4-8` |
 | `OPENAI_API_KEY` / `OPENAI_MODEL` | GPT (API) | — / `gpt-4o` |
 | `LOCAL_LLM_BASE_URL` / `LOCAL_LLM_MODEL` | ローカルLLM | `http://localhost:11434/v1` / `llama3.1` |
+| `LOCAL_LLM_USE_PROXY` | ローカルLLMをproxy経由で送信（`1`/`true` で有効。既定は直結） | 無効 |
+
+ローカルLLM はエンドポイントが localhost のことが多いため**既定で直結**します。proxy 経由に
+したい場合は、Settings（⚙）の *Local LLM* で **Send via proxy** にチェック（または
+`LOCAL_LLM_USE_PROXY=1`）してください。
 
 ## 拡張方法
 

@@ -16,11 +16,14 @@ Conversation context is shared two ways, chosen per backend:
 
 from __future__ import annotations
 
+import difflib
+import os
+import re
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple
 
 from ..adapters.base import Message
-from .session import Session, Turn
+from .session import Session, Turn, WorkspaceFile
 
 
 class StopRequested(Exception):
@@ -31,10 +34,25 @@ class AgentTurnError(Exception):
     """Raised when an agent turn fails, aborting the collaboration."""
 
 
+def _reference_block(session: Session) -> str:
+    """Render the read-only reference files loaded for the session, if any."""
+    if not session.references:
+        return ""
+    parts = [
+        f"REFERENCE FILES — read-only context loaded from {session.reference_dir}. "
+        "Consult these to inform your work; you cannot edit them."
+    ]
+    for rel, content in session.references:
+        parts.append(f"----- {rel} -----\n{content}")
+    return "\n\n".join(parts)
+
+
 def _scratchpad_system(session: Session, system: str) -> str:
-    """Append the shared-scratchpad protocol + current contents to a system prompt."""
+    """Append reference files + the shared-scratchpad protocol to a system prompt."""
+    refs = _reference_block(session)
+    ref_part = f"\n\n{refs}" if refs else ""
     return (
-        f"{system}\n\n"
+        f"{system}{ref_part}\n\n"
         "SHARED SCRATCHPAD — a team blackboard visible to every agent. To record a "
         "durable fact, decision, or open question for the others, add a line beginning "
         "with 'NOTE:' anywhere in your reply.\n"
@@ -67,6 +85,192 @@ def _render_transcript(session: Session) -> str:
     return "\n\n".join(
         f"{t.agent} [{t.role}]: {t.content}" for t in session.transcript if t.ok
     )
+
+
+_ARTIFACT_RE = re.compile(r"<ARTIFACT>\s*(.*?)\s*</ARTIFACT>", re.DOTALL | re.IGNORECASE)
+_FENCE_RE = re.compile(r"```[\w.+-]*\n(.*?)```", re.DOTALL)
+
+
+def _extract_artifact(text: str) -> Optional[str]:
+    """Pull the artifact body out of an editing turn.
+
+    Prefers an explicit ``<ARTIFACT>…</ARTIFACT>`` block; falls back to the first
+    fenced code block. Returns ``None`` if neither is present.
+    """
+    m = _ARTIFACT_RE.search(text)
+    if m:
+        return m.group(1).strip()
+    fm = _FENCE_RE.search(text)
+    if fm:
+        return fm.group(1).strip()
+    return None
+
+
+def _update_artifact(session: Session, role: str, rnd: int, text: str) -> None:
+    """Save a new artifact version from an editing turn and notify the UI."""
+    art = _extract_artifact(text)
+    if art is None:  # editing roles should always produce content
+        art = text.strip()
+    name = session.agents[role].display_name
+    version = session.set_artifact(art, name, role, rnd)
+    session.emit("artifact", content=art, version=version,
+                 author=name, role=role, round=rnd)
+
+
+# -- workspace (real files on disk) ---------------------------------------
+
+# A file block an editing agent emits:  <FILE path="src/foo.py">…contents…</FILE>
+_FILE_RE = re.compile(r'<FILE\s+path="([^"]+)"\s*>\n?(.*?)</FILE>', re.DOTALL | re.IGNORECASE)
+
+
+def _extract_files(text: str) -> List[Tuple[str, str]]:
+    """Pull ``(relative_path, contents)`` pairs out of an editing turn."""
+    return [(m.group(1).strip(), m.group(2)) for m in _FILE_RE.finditer(text)]
+
+
+def _safe_join(root: str, rel: str) -> str:
+    """Resolve ``rel`` under ``root``, refusing paths that escape the workspace."""
+    root_real = os.path.realpath(root)
+    full = os.path.realpath(os.path.join(root_real, rel))
+    if full != root_real and not full.startswith(root_real + os.sep):
+        raise AgentTurnError(f"refusing to write outside the workspace: {rel!r}")
+    return full
+
+
+def _apply_workspace_edits(session: Session, role: str, rnd: int, text: str) -> int:
+    """Write the agent's ``<FILE>`` blocks to disk, recording per-file diffs.
+
+    Returns the number of files written. Never stages or commits — changes stay
+    in the working tree for the user to review.
+    """
+    root = session.workspace
+    name = session.agents[role].display_name
+    written = 0
+    for rel, body in _extract_files(text):
+        new_content = body.strip("\n") + "\n" if body.strip() else ""
+        full = _safe_join(root, rel)
+        existed = os.path.isfile(full)
+        old = ""
+        if existed:
+            with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                old = fh.read()
+        os.makedirs(os.path.dirname(full) or root, exist_ok=True)
+        with open(full, "w", encoding="utf-8") as fh:
+            fh.write(new_content)
+        diff = "".join(difflib.unified_diff(
+            old.splitlines(keepends=True), new_content.splitlines(keepends=True),
+            fromfile=f"a/{rel}", tofile=f"b/{rel}"))
+        adds = sum(1 for ln in diff.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
+        dels = sum(1 for ln in diff.splitlines() if ln.startswith("-") and not ln.startswith("---"))
+        wf = WorkspaceFile(path=rel, content=new_content,
+                           status="modified" if existed else "created",
+                           additions=adds, deletions=dels, diff=diff,
+                           author=name, role=role, round=rnd)
+        session.record_workspace_file(wf)
+        session.emit("workspace_edit", path=rel, status=wf.status, additions=adds,
+                     deletions=dels, diff=diff, author=name, role=role, round=rnd)
+        written += 1
+    return written
+
+
+def _workspace_summary(session: Session) -> str:
+    """Render the current workspace diffs for a reviewer's prompt."""
+    if not session.workspace_files:
+        return "(no files changed yet)"
+    parts = []
+    for path, wf in session.workspace_files.items():
+        parts.append(f"### {path} ({wf.status}, +{wf.additions}/-{wf.deletions})\n{wf.diff}")
+    return "\n\n".join(parts)
+
+
+# -- read-only reference material -----------------------------------------
+
+# Directories and file kinds never worth loading as reference context.
+_REF_SKIP_DIRS = {
+    ".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache",
+    ".pytest_cache", "dist", "build", ".idea", ".vscode", ".tox", ".next",
+}
+_REF_MAX_FILES = 40
+_REF_MAX_FILE_BYTES = 16 * 1024
+_REF_MAX_TOTAL_BYTES = 120 * 1024
+
+
+def load_references(root: str, *, max_files: int = _REF_MAX_FILES,
+                    max_file_bytes: int = _REF_MAX_FILE_BYTES,
+                    max_total_bytes: int = _REF_MAX_TOTAL_BYTES) -> List[Tuple[str, str]]:
+    """Load small text files under ``root`` as ``(relpath, content)`` pairs.
+
+    Skips VCS/build directories, dotfiles, and binary files; truncates any file
+    over ``max_file_bytes`` and stops once the file-count or total-size budget is
+    reached, so the reference block stays bounded regardless of directory size.
+    """
+    root_real = os.path.realpath(root)
+    out: List[Tuple[str, str]] = []
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(root_real):
+        dirnames[:] = sorted(
+            d for d in dirnames if d not in _REF_SKIP_DIRS and not d.startswith(".")
+        )
+        for fn in sorted(filenames):
+            if len(out) >= max_files or total >= max_total_bytes:
+                return out
+            if fn.startswith("."):
+                continue
+            full = os.path.join(dirpath, fn)
+            try:
+                with open(full, "rb") as fh:
+                    raw = fh.read(max_file_bytes + 1)
+            except OSError:
+                continue
+            head = raw[:max_file_bytes]
+            if b"\x00" in head:  # binary
+                continue
+            text = head.decode("utf-8", errors="replace")
+            if len(raw) > max_file_bytes:
+                text += "\n… (truncated)"
+            rel = os.path.relpath(full, root_real)
+            out.append((rel, text))
+            total += len(text.encode("utf-8"))
+    return out
+
+
+# -- conductor / team directives ------------------------------------------
+
+# The conductor speaks to the team in a small line protocol:
+#   @worker_1: <assignment>           — assign a subtask
+#   @worker_2 [WARN]: <what failed>   — assess a worker (OK or WARN)
+#   VERDICT: DONE                     — the task is complete
+_ASSIGN_RE = re.compile(r"^[ \t]*@(\w+)[ \t]*:[ \t]*(.+)$", re.MULTILINE)
+_ASSESS_RE = re.compile(r"@(\w+)[ \t]*\[[ \t]*(OK|WARN)[ \t]*\][ \t]*:[ \t]*([^\n]*)", re.IGNORECASE)
+_DONE_RE = re.compile(r"VERDICT[ \t]*:[ \t]*DONE", re.IGNORECASE)
+
+
+def _parse_assignments(text: str, workers: List[str]) -> Dict[str, str]:
+    """Pull ``@worker_key: instruction`` lines, keeping only real worker keys.
+
+    Assessment lines (``@worker [OK]: …``) are skipped — their ``[..]`` breaks the
+    bare ``@key:`` shape, so the regex never matches them.
+    """
+    out: Dict[str, str] = {}
+    for m in _ASSIGN_RE.finditer(text):
+        if m.group(1) in workers:
+            out[m.group(1)] = m.group(2).strip()
+    return out
+
+
+def _parse_assessments(text: str, workers: List[str]) -> List[Tuple[str, str, str]]:
+    """Pull ``(worker_key, "OK"|"WARN", note)`` assessments from a conductor turn."""
+    out: List[Tuple[str, str, str]] = []
+    for m in _ASSESS_RE.finditer(text):
+        if m.group(1) in workers:
+            out.append((m.group(1), m.group(2).upper(), m.group(3).strip()))
+    return out
+
+
+def _conductor_done(text: str) -> bool:
+    """Whether the conductor declared the task complete."""
+    return bool(_DONE_RE.search(text) or re.search(r"^[ \t]*DONE[ \t]*$", text, re.MULTILINE))
+
 
 
 def _run_turn(session: Session, role: str, system: str, instruction: str, rnd: int) -> str:
@@ -141,6 +345,9 @@ class Strategy(ABC):
     personas: Dict[str, str] = {}
     #: True for the user-defined strategy whose roles come from the request.
     custom: bool = False
+    #: True when the role set (count/keys) is supplied per run via the request,
+    #: rather than fixed by :attr:`roles` (e.g. the conductor's variable team).
+    dynamic_roles: bool = False
     default_rounds: int = 2
 
     @abstractmethod
@@ -437,6 +644,274 @@ class CustomStrategy(Strategy):
         return self.finish(session, closing)
 
 
+class DocAuthoring(Strategy):
+    name = "doc_authoring"
+    description = (
+        "Co-write a document: a writer drafts and revises a shared artifact while an "
+        "editor critiques each version, until it's approved."
+    )
+    roles = [("writer", "Writer"), ("editor", "Editor")]
+
+    WRITER_SYS = (
+        "You are the WRITER. Produce and iteratively improve a single document for the "
+        "task. When you write or revise it, output the COMPLETE current version wrapped in "
+        "<ARTIFACT> and </ARTIFACT> tags (put nothing else inside the tags). Address the "
+        "editor's feedback in each revision."
+    )
+    EDITOR_SYS = (
+        "You are the EDITOR. Critique the writer's latest document for structure, clarity, "
+        "accuracy, and completeness — be specific and actionable. Do NOT rewrite it or "
+        "output an <ARTIFACT> block; give feedback only. End with APPROVE or REQUEST CHANGES."
+    )
+    personas = {"writer": WRITER_SYS, "editor": EDITOR_SYS}
+
+    def run(self, session: Session) -> str:
+        for rnd in range(1, session.rounds + 1):
+            text = _run_turn(
+                session, "writer", self.WRITER_SYS,
+                f"Task:\n{session.task}\n\nWrite or revise the document, addressing any "
+                f"editor feedback. Output the full document inside <ARTIFACT> tags.",
+                rnd,
+            )
+            _update_artifact(session, "writer", rnd, text)
+            review = _run_turn(
+                session, "editor", self.EDITOR_SYS,
+                f"Task:\n{session.task}\n\nReview the writer's latest document and end with "
+                f"APPROVE or REQUEST CHANGES.",
+                rnd,
+            )
+            if "APPROVE" in review.upper() and "REQUEST CHANGES" not in review.upper():
+                session.emit("status", message=f"Editor approved in round {rnd}.")
+                break
+        return self.finish(session, session.artifact)
+
+
+class CodeAuthoring(Strategy):
+    name = "code_authoring"
+    description = (
+        "Co-build code: an implementer writes and revises a single code artifact while a "
+        "reviewer critiques each version, until it's approved."
+    )
+    roles = [("implementer", "Implementer"), ("reviewer", "Reviewer")]
+
+    IMPL_SYS = (
+        "You are the IMPLEMENTER. Build and iteratively improve a single code file for the "
+        "task. When you write or revise it, output the COMPLETE current file wrapped in "
+        "<ARTIFACT> and </ARTIFACT> tags (put nothing else inside the tags). Address the "
+        "reviewer's feedback in each revision."
+    )
+    REVIEW_SYS = (
+        "You are the REVIEWER. Review the implementer's latest code for correctness, edge "
+        "cases, tests, and clarity — be specific. Do NOT output an <ARTIFACT> block; give "
+        "feedback only. End with APPROVE or REQUEST CHANGES."
+    )
+    personas = {"implementer": IMPL_SYS, "reviewer": REVIEW_SYS}
+
+    def run(self, session: Session) -> str:
+        for rnd in range(1, session.rounds + 1):
+            text = _run_turn(
+                session, "implementer", self.IMPL_SYS,
+                f"Task:\n{session.task}\n\nWrite or revise the code, addressing any reviewer "
+                f"feedback. Output the full file inside <ARTIFACT> tags.",
+                rnd,
+            )
+            _update_artifact(session, "implementer", rnd, text)
+            review = _run_turn(
+                session, "reviewer", self.REVIEW_SYS,
+                f"Task:\n{session.task}\n\nReview the implementer's latest code and end with "
+                f"APPROVE or REQUEST CHANGES.",
+                rnd,
+            )
+            if "APPROVE" in review.upper() and "REQUEST CHANGES" not in review.upper():
+                session.emit("status", message=f"Reviewer approved in round {rnd}.")
+                break
+        return self.finish(session, session.artifact)
+
+
+class WorkspaceBuild(Strategy):
+    name = "workspace_build"
+    description = (
+        "Build in a real working directory: an implementer creates/edits files on disk, "
+        "a reviewer critiques the resulting diff, until approved."
+    )
+    roles = [("implementer", "Implementer"), ("reviewer", "Reviewer")]
+
+    IMPL_SYS = (
+        "You are the IMPLEMENTER working in a real project workspace. Accomplish the task "
+        "by creating or modifying files. Output EACH changed file IN FULL as a block: a "
+        'line `<FILE path="relative/path.ext">`, then the complete new file contents, then '
+        "a line `</FILE>`. Use forward-slash relative paths inside the workspace; never "
+        "absolute paths or `..`. Address the reviewer's feedback in later rounds."
+    )
+    REVIEW_SYS = (
+        "You are the REVIEWER. Review the diff of the implementer's changes for "
+        "correctness, completeness, edge cases, and clarity — be specific and actionable. "
+        "Do NOT output <FILE> blocks; give feedback only. End with APPROVE or REQUEST CHANGES."
+    )
+    personas = {"implementer": IMPL_SYS, "reviewer": REVIEW_SYS}
+
+    def run(self, session: Session) -> str:
+        if not session.workspace:
+            raise AgentTurnError("workspace_build requires a workspace directory")
+        os.makedirs(session.workspace, exist_ok=True)
+        for rnd in range(1, session.rounds + 1):
+            text = _run_turn(
+                session, "implementer", self.IMPL_SYS,
+                f"Task:\n{session.task}\n\nCreate or modify the files needed. Output each "
+                f'changed file in full inside <FILE path="..."> tags. Address any reviewer '
+                f"feedback.",
+                rnd,
+            )
+            if _apply_workspace_edits(session, "implementer", rnd, text) == 0:
+                session.emit("status", message=f"No <FILE> edits parsed in round {rnd}.")
+            review = _run_turn(
+                session, "reviewer", self.REVIEW_SYS,
+                f"Task:\n{session.task}\n\nCurrent changes:\n\n{_workspace_summary(session)}\n\n"
+                f"Review them and end with APPROVE or REQUEST CHANGES.",
+                rnd,
+            )
+            if "APPROVE" in review.upper() and "REQUEST CHANGES" not in review.upper():
+                session.emit("status", message=f"Reviewer approved in round {rnd}.")
+                break
+        return self.finish(session, self._summary(session))
+
+    @staticmethod
+    def _summary(session: Session) -> str:
+        files = session.workspace_files
+        if not files:
+            return "No files were changed."
+        lines = [f"Changed {len(files)} file(s) in {session.workspace}:"]
+        for path, wf in files.items():
+            lines.append(f"  {wf.status:8} {path}  (+{wf.additions}/-{wf.deletions})")
+        return "\n".join(lines)
+
+
+class ConductorTeam(Strategy):
+    name = "conductor_team"
+    description = (
+        "A conductor assigns subtasks to a team of workers, a reviewer checks each "
+        "worker's output, and the conductor evaluates the team each round — calling out "
+        "anyone who didn't deliver — until the task is done."
+    )
+    roles = []          # dynamic: conductor + worker_1..N + reviewer (from the request)
+    dynamic_roles = True
+    default_rounds = 3
+
+    CONDUCTOR_SYS = (
+        "You are the CONDUCTOR leading a team of workers to accomplish one shared task. "
+        "You decompose the task, assign concrete subtasks, hold workers accountable — "
+        "naming and pushing anyone who doesn't deliver — and integrate their work into the "
+        "result. Be specific and demanding but fair. Always use the EXACT worker keys "
+        "(e.g. worker_1) when assigning or assessing."
+    )
+    REVIEWER_SYS = (
+        "You are the REVIEWER. You inspect one worker's output at a time against the "
+        "assignment the conductor gave them, and report back to the conductor. Be specific: "
+        "did they fulfil the assignment? Flag gaps, errors, and anyone who under-delivered. "
+        "Keep it short and actionable."
+    )
+
+    @staticmethod
+    def _worker_sys(me: str, conductor: str) -> str:
+        return (
+            f"You are {me}, a WORKER on a team led by the conductor {conductor}. Carry out the "
+            f"specific assignment the conductor gives you — thoroughly and concretely. Stay "
+            f"focused on your assignment and produce real output, not a plan to do it later."
+        )
+
+    personas = {"conductor": CONDUCTOR_SYS, "reviewer": REVIEWER_SYS}
+
+    def run(self, session: Session) -> str:
+        order = session.role_order or list(session.agents)
+        workers = [r for r in order if r.startswith("worker")]
+        if "conductor" not in session.agents or "reviewer" not in session.agents or not workers:
+            raise AgentTurnError(
+                "conductor_team needs a conductor, a reviewer, and at least one worker"
+            )
+        names = {r: session.agents[r].display_name for r in session.agents}
+        cname = names["conductor"]
+        team = ", ".join(f"{names[w]} ({w})" for w in workers)
+
+        for w in workers:  # seed the roster panel
+            session.emit("worker_status", round=0, worker=w, name=names[w],
+                         status="idle", note="awaiting assignment")
+
+        for rnd in range(1, session.rounds + 1):
+            # 1. Conductor: assess the prior round (round >= 2) and assign this round.
+            instruction = self._conductor_instruction(session, workers, team, rnd)
+            ctext = _run_turn(session, "conductor", self.CONDUCTOR_SYS, instruction, rnd)
+
+            for w, verdict, note in _parse_assessments(ctext, workers):
+                session.emit("worker_status", round=rnd, worker=w, name=names[w],
+                             status=("ok" if verdict == "OK" else "warned"), note=note)
+
+            assignments = _parse_assignments(ctext, workers)
+            for w in workers:
+                instr = assignments.get(w)
+                session.emit("worker_status", round=rnd, worker=w, name=names[w],
+                             status=("assigned" if instr else "idle"),
+                             note=(instr or "no assignment from the conductor"))
+
+            if rnd > 1 and _conductor_done(ctext):
+                session.emit("status", message=f"Conductor declared the work DONE in round {rnd}.")
+                break
+
+            # 2. Each worker carries out its assignment.
+            for w in workers:
+                instr = assignments.get(w) or (
+                    "You were not given a specific assignment. Contribute the single most "
+                    "useful next step toward the task."
+                )
+                _run_turn(
+                    session, w, self._worker_sys(names[w], cname),
+                    f"Task:\n{session.task}\n\nThe conductor ({cname}) assigned you:\n{instr}\n\n"
+                    f"Complete your assignment concretely now.",
+                    rnd,
+                )
+                session.emit("worker_status", round=rnd, worker=w, name=names[w],
+                             status="delivered", note="")
+
+            # 3. Reviewer inspects each worker individually and reports to the conductor.
+            for w in workers:
+                _run_turn(
+                    session, "reviewer", self.REVIEWER_SYS,
+                    f"Task:\n{session.task}\n\nReview {names[w]} ({w})'s latest output against "
+                    f"the assignment they were given this round. Did they fulfil it? Note "
+                    f"quality, gaps, and whether they pulled their weight. Address your report "
+                    f"to the conductor ({cname}).",
+                    rnd,
+                )
+
+        # Conductor consolidates the team's work into the final deliverable.
+        final = _run_turn(
+            session, "conductor", self.CONDUCTOR_SYS,
+            f"Task:\n{session.task}\n\nThe collaboration is complete. Consolidate the team's "
+            f"work into the final deliverable, integrating the workers' contributions and the "
+            f"reviewer's feedback into one coherent result.",
+            session.rounds,
+        )
+        return self.finish(session, final)
+
+    def _conductor_instruction(self, session: Session, workers: List[str],
+                               team: str, rnd: int) -> str:
+        keys = ", ".join(workers)
+        if rnd == 1:
+            return (
+                f"Task:\n{session.task}\n\nYou lead this team: {team}. Break the task into "
+                f"concrete subtasks and assign one to each worker. Write each assignment on its "
+                f"own line as '@worker_key: instruction', using the exact keys: {keys}."
+            )
+        return (
+            f"Task:\n{session.task}\n\nYour team: {team}. Review the previous round — each "
+            f"worker's output and the reviewer's reports. FIRST assess every worker, one per "
+            f"line, as '@worker_key [OK]: reason' or '@worker_key [WARN]: what they failed to "
+            f"deliver' — call out anyone who slacked or ignored their assignment. THEN reassign "
+            f"with '@worker_key: instruction' lines (keys: {keys}). FINALLY write 'VERDICT: "
+            f"DONE' if the task is fully complete and the reviewer is satisfied, otherwise "
+            f"'VERDICT: CONTINUE'."
+        )
+
+
 STRATEGIES = {
     s.name: s
     for s in (
@@ -445,6 +920,10 @@ STRATEGIES = {
         PlannerExecutor(),
         RoundRobin(),
         PanelJudge(),
+        DocAuthoring(),
+        CodeAuthoring(),
+        WorkspaceBuild(),
+        ConductorTeam(),
         CustomStrategy(),
     )
 }
@@ -468,6 +947,7 @@ def strategy_metadata() -> List[dict]:
             ],
             "default_rounds": s.default_rounds,
             "custom": s.custom,
+            "dynamic_roles": s.dynamic_roles,
         }
         for s in STRATEGIES.values()
     ]

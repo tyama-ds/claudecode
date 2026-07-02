@@ -22,7 +22,7 @@ from ..orchestrator import (
     start_session,
     strategy_metadata,
 )
-from ..orchestrator.strategies import get_strategy
+from ..orchestrator.strategies import get_strategy, load_references
 
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 _CONTENT_TYPES = {
@@ -33,6 +33,16 @@ _CONTENT_TYPES = {
 
 # Shared, process-wide session registry.
 MANAGER = SessionManager()
+
+
+def _ensure_workspace_dir(path: str) -> str:
+    """Create the workspace directory if it doesn't exist (no git involved).
+
+    Returns "created" if it was newly made, or "exists" if it was already there.
+    """
+    existed = os.path.isdir(path)
+    os.makedirs(path, exist_ok=True)
+    return "exists" if existed else "created"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -90,6 +100,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"agents": catalog(), "strategies": strategy_metadata()})
         elif path == "/api/settings":
             self._send_json(self._settings_payload())
+        elif path == "/api/sessions":
+            self._send_json({"sessions": self._sessions_payload()})
         elif path.startswith("/api/stream/"):
             self._stream(path[len("/api/stream/"):])
         else:
@@ -108,6 +120,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "not found"}, status=404)
 
     # -- endpoints ---------------------------------------------------------
+
+    def _sessions_payload(self) -> list:
+        """Newest-first summary of every session this server has run.
+
+        The event bus keeps each session's full history, so the UI can reopen
+        any of these (running or finished) and replay the whole transcript.
+        """
+        out = []
+        for s in sorted(MANAGER.all(), key=lambda s: s.created, reverse=True):
+            task = s.task if len(s.task) <= 100 else s.task[:100] + "…"
+            out.append({
+                "id": s.id, "task": task, "strategy": s.strategy,
+                "rounds": s.rounds, "status": s.status, "created": s.created,
+            })
+        return out
 
     def _settings_payload(self) -> dict:
         """Non-secret view of current settings for the UI (keys never echoed)."""
@@ -135,6 +162,7 @@ class Handler(BaseHTTPRequestHandler):
                     "model": s.local_model, "base_url": s.local_base_url,
                     "key_set": bool(s.local_api_key and s.local_api_key != "local"),
                     "key_from_env": bool(os.environ.get("LOCAL_LLM_API_KEY")),
+                    "use_proxy": s.local_use_proxy,
                 },
             },
         }
@@ -157,14 +185,15 @@ class Handler(BaseHTTPRequestHandler):
 
         rounds = max(1, min(rounds, 8))
 
-        # Roles are fixed by the strategy, except for the user-defined "custom"
-        # strategy whose participants come from the request.
-        if strategy.custom:
+        # Roles are fixed by the strategy, except for strategies with a dynamic
+        # role set (the user-defined "custom" panel, the conductor's team) whose
+        # participants come from the request.
+        if strategy.custom or strategy.dynamic_roles:
             order = body.get("role_order") or list(roles_spec.keys())
             role_list = [(k, k) for k in order]
             if len(role_list) < 2:
                 self._send_json(
-                    {"error": "custom strategy needs at least 2 participants"}, status=400
+                    {"error": "this strategy needs at least 2 participants"}, status=400
                 )
                 return
         else:
@@ -197,6 +226,26 @@ class Handler(BaseHTTPRequestHandler):
         session = MANAGER.create(task, strategy_name, rounds, agents)
         session.personas = personas
         session.role_order = [k for k, _ in role_list]
+
+        # Optional read-only reference directory (any strategy): load its files
+        # into the agents' shared context.
+        ref = (body.get("reference_dir") or "").strip()
+        if ref:
+            ref_real = os.path.realpath(ref)
+            if not os.path.isdir(ref_real):
+                self._send_json({"error": f"reference directory not found: {ref}"}, status=400)
+                return
+            session.reference_dir = ref_real
+            session.references = load_references(ref_real)
+
+        if strategy_name == "workspace_build":
+            # Default to the directory the server was launched from; a request may
+            # override it. Edits are confined to this root (see _safe_join).
+            ws = (body.get("workspace") or "").strip() or os.getcwd()
+            session.workspace = os.path.realpath(ws)
+            if body.get("create_dir"):
+                session.workspace_created = _ensure_workspace_dir(session.workspace)
+
         start_session(session)
         self._send_json({"session_id": session.id})
 

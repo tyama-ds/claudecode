@@ -24,6 +24,10 @@ def run_session(session: Session) -> None:
         strategy=session.strategy,
         rounds=session.rounds,
         agents={role: a.display_name for role, a in session.agents.items()},
+        workspace=session.workspace,
+        workspace_created=session.workspace_created,
+        references=len(session.references),
+        reference_dir=session.reference_dir,
     )
     try:
         result = strategy.run(session)

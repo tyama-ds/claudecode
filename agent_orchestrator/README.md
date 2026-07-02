@@ -56,7 +56,45 @@ press **Run collaboration**. Turns stream into the transcript as they happen.
 | **Planner + Executor** | planner, executor | One plans, the other executes; the planner adjusts each round. |
 | **Round-robin (free dialogue)** | agent A, B, C | Several agents discuss openly — each sees the whole thread and addresses the others — then close with a shared conclusion. |
 | **Panel + Judge** | contender A, B, C, judge | Three agents argue competing positions; an impartial judge evaluates them and delivers the verdict. |
+| **Doc authoring** | writer, editor | Co-write a document: the writer drafts/revises a shared **artifact**, the editor critiques each version, until approved. |
+| **Code authoring** | implementer, reviewer | Co-build code: the implementer writes/revises a single code **artifact**, the reviewer critiques each version, until approved. |
+| **Workspace build** | implementer, reviewer | Build in a **real working directory**: the implementer creates/edits files on disk, the reviewer critiques the diff, until approved. |
+| **Conductor team** | conductor, workers (2–4), reviewer | A **conductor** splits the task and assigns each worker a subtask; a reviewer checks each worker's output and reports back; the conductor evaluates the team every round — **calling out anyone who didn't deliver** — and reassigns until the work is done. |
 | **Custom** | your own (2–5) | Define each participant from scratch — backend, model, and persona — then they discuss and close with a conclusion. |
+
+The authoring strategies build a shared **Artifact** — one evolving document or
+code file, shown in its own tab of the feed with **version
+history, a Preview/Diff toggle, Copy, and Download**. Editing agents output the
+full updated artifact in `<ARTIFACT>…</ARTIFACT>` tags; reviewers give feedback
+only.
+
+**Workspace build** goes one step further: agents write to a **real directory on
+disk**. The implementer emits each changed file as `<FILE path="…">…full
+contents…</FILE>`; the orchestrator writes it (confined to the workspace root —
+`..` and absolute paths are refused) and computes a unified diff per file, shown
+in a Workspace panel with a file list and colorized diffs. Changes are left in
+the working tree for you to review and commit — the orchestrator never stages or
+commits. Set the **workspace directory** in the UI (blank = the server's launch
+directory), and tick **Create the directory if it doesn't exist** to have the
+orchestrator `mkdir` a fresh folder to script in (no git involved). (This is the
+backend-agnostic Phase-2 mode; native CLI-driven file editing is a planned
+follow-up.)
+
+**Reference directory** (any strategy, optional): point it at a local folder and
+the orchestrator loads its text files as **read-only context** every agent can
+consult — useful for handing the team a spec, an existing codebase, or example
+data to work from. It's bounded on purpose (skips `.git`/`node_modules`/binaries,
+caps at 40 files · 16 KB each · 120 KB total, truncating the rest) so prompts stay
+manageable. The files are never edited; to have agents modify files, use the
+Workspace above.
+
+**Conductor team** models a boss-and-team workflow: the conductor speaks to the
+team in a small line protocol (`@worker_1: <subtask>` to assign,
+`@worker_2 [WARN]: <what's missing>` to call someone out, `VERDICT: DONE` to
+finish). A **Team** tab in the feed shows each worker's live status —
+*assigned → delivered → approved ✓ / called out ⚠* — so you can see at a glance
+who's pulling their weight. The conductor consolidates the team's work into the
+final deliverable. The number of workers (2–4) is set in the UI.
 
 For **every role** you can independently choose the **backend, model, and
 persona** (system prompt) right in the UI — mix Claude Code, Codex, GPT, and
@@ -72,6 +110,16 @@ structured message **history** — each agent's own turns as `assistant`, the
 others' as `user`. Backends that can't use history fall back automatically to
 the transcript embedded in the prompt. Each turn is tagged `ctx: history` or
 `ctx: prompt` so you can see which path was used.
+
+**The console** keeps the feed organized in tabs — *Transcript / Artifact /
+Workspace / Team* — with a dot badge when a background tab updates. Quality of
+life built in: a **session history** (▤) that can reopen any past or running
+session with its full transcript replayed; one-click **Export** of the whole
+transcript as Markdown; form values (task, strategy, directories) that survive a
+reload; smart autoscroll with a *↓ Latest* pill instead of yanking you to the
+bottom; a live elapsed-seconds counter on in-progress turns; `Ctrl+Enter` to
+run; an **English / 日本語** toggle; and an auto / light / dark theme that follows
+your OS by default.
 
 ## Backends (adapters)
 
@@ -91,6 +139,10 @@ You can also enter API keys, models, base URLs, and an HTTP(S) **proxy** in the
 in-app **Settings** (⚙) — used whenever the matching environment variable isn't
 set, and held in memory for the local server only (never displayed back). Point
 any provider's base URL at any OpenAI-compatible endpoint.
+
+Local-LLM calls **connect directly by default** (the endpoint is usually on
+localhost). If you need them routed through the proxy too, tick **Send via
+proxy** under *Local LLM* in Settings (or set `LOCAL_LLM_USE_PROXY=1`).
 
 ## Headless usage
 
