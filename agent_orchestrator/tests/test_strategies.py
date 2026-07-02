@@ -234,6 +234,46 @@ class TestStrategies(unittest.TestCase):
             self.assertEqual(fh.read(), 'print("hello")\n')
         self.assertEqual(session.workspace_files["hello.py"].role, "reviewer")
 
+    def test_workspace_build_multiple_reviewers_all_must_approve(self):
+        """With several reviewers, the loop only stops early when every one of
+        them approves; each reviewer gets design + review turns."""
+        d = tempfile.mkdtemp()
+        agents = {
+            "implementer": _FixedAdapter("impl", '<FILE path="a.py">\nx = 1\n</FILE>'),
+            "reviewer_1": _FixedAdapter("rev1", "Fine by me. APPROVE"),
+            "reviewer_2": _FixedAdapter("rev2", "Not there yet. REQUEST CHANGES"),
+        }
+        session = Session(id="mr", task="t", strategy="workspace_build", rounds=2,
+                          agents=agents, workspace=d)
+        session.role_order = ["implementer", "reviewer_1", "reviewer_2"]
+        get_strategy("workspace_build").run(session)
+        # 3 design turns + 2 full build rounds of (impl + 2 reviews) = 9 turns
+        self.assertEqual(len(session.transcript), 9)
+        roles_r0 = [t.role for t in session.transcript if t.round == 0]
+        self.assertEqual(roles_r0, ["implementer", "reviewer_1", "reviewer_2"])
+        msgs = [e.data["message"] for e in session.bus.history if e.type == "status"]
+        self.assertTrue(any("1/2 reviewer(s) approved" in m for m in msgs))
+
+        # unanimous approval stops after round 1
+        agents["reviewer_2"] = _FixedAdapter("rev2", "Great. APPROVE")
+        session2 = Session(id="mr2", task="t", strategy="workspace_build", rounds=2,
+                           agents=agents, workspace=tempfile.mkdtemp())
+        session2.role_order = ["implementer", "reviewer_1", "reviewer_2"]
+        get_strategy("workspace_build").run(session2)
+        self.assertEqual(len(session2.transcript), 6)  # design 3 + one build round
+
+    def test_workspace_build_turns_carry_actions(self):
+        d = tempfile.mkdtemp()
+        impl = _FixedAdapter("impl", '<FILE path="a.py">\nx = 1\n</FILE>')
+        rev = _FixedAdapter("rev", "APPROVE")
+        session = Session(id="act", task="t", strategy="workspace_build", rounds=1,
+                          agents={"implementer": impl, "reviewer": rev}, workspace=d)
+        get_strategy("workspace_build").run(session)
+        actions = [(e.data["round"], e.data["action"])
+                   for e in session.bus.history if e.type == "turn_start"]
+        self.assertEqual(actions, [(0, "design"), (0, "design"),
+                                   (1, "implement"), (1, "review")])
+
     def test_snapshot_and_detect_native_edits(self):
         """Files changed directly on disk (a CLI editing natively) are detected
         by diffing tree snapshots and attributed to the acting role."""

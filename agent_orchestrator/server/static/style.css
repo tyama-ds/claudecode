@@ -121,15 +121,36 @@ body::before {
 /* ---- Console layout --------------------------------------------------- */
 .console {
   display: grid;
-  grid-template-columns: 372px 1fr;
+  grid-template-columns: 372px minmax(0, 1fr);
+  grid-template-areas: "rail feed";
   gap: 22px;
   max-width: 1320px;
   margin: 0 auto;
   padding: 24px 28px 8px;
   align-items: start;
 }
+/* When a run is live, the agent board takes a third column on the right. */
+.console.has-board {
+  grid-template-columns: 372px minmax(0, 1fr) 254px;
+  grid-template-areas: "rail feed board";
+  max-width: 1580px;
+}
+.rail { grid-area: rail; }
+.feed { grid-area: feed; min-width: 0; }
+.board { grid-area: board; }
+@media (max-width: 1280px) {
+  /* board becomes a horizontal strip above the feed */
+  .console.has-board {
+    grid-template-columns: 372px minmax(0, 1fr);
+    grid-template-areas: "rail board" "rail feed";
+  }
+  .board { position: static !important; }
+  .board-list { flex-direction: row !important; flex-wrap: wrap; }
+  .board-list .brow { flex: 1 1 210px; }
+}
 @media (max-width: 920px) {
-  .console { grid-template-columns: 1fr; }
+  .console { grid-template-columns: 1fr; grid-template-areas: "rail" "feed"; }
+  .console.has-board { grid-template-columns: 1fr; grid-template-areas: "rail" "board" "feed"; }
   .rail { position: static !important; }
 }
 
@@ -577,6 +598,57 @@ html[data-theme="light"] .history-item:hover { background: rgba(20, 30, 55, 0.06
 }
 .hist-sub { font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); }
 .history-empty { color: var(--text-faint); font-size: 12.5px; padding: 8px 10px; }
+
+/* ---- Live agent board (who's doing what, right now) --------------------- */
+.board { padding: 16px; position: sticky; top: 90px; align-self: start; }
+.board .panel-head { margin-bottom: 12px; }
+.board-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.brow {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--border); border-left-width: 3px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+.brow.acc-a { border-left-color: var(--a); }
+.brow.acc-b { border-left-color: var(--b); }
+.brow.acc-c { border-left-color: var(--c); }
+.board-ava {
+  width: 30px; height: 30px; flex: none; border-radius: 9px;
+  display: grid; place-items: center;
+  font-family: var(--mono); font-size: 11px; font-weight: 700; color: #08111a;
+  background: var(--text-dim);
+}
+.brow.acc-a .board-ava { background: linear-gradient(150deg, var(--a), #f7c071); }
+.brow.acc-b .board-ava { background: linear-gradient(150deg, var(--b), #6ee7da); }
+.brow.acc-c .board-ava { background: linear-gradient(150deg, var(--c), #c7b6ff); }
+html[data-theme="light"] .board-ava { color: #fff; }
+.board-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; line-height: 1.3; }
+.board-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.board-name {
+  font-size: 12.5px; font-weight: 650; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.board-sub {
+  font-family: var(--mono); font-size: 10px; color: var(--text-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.board-state {
+  flex: none;
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--mono); font-size: 10px;
+  padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--border-strong); color: var(--text-dim);
+  white-space: nowrap;
+}
+.bdot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.brow.st-working { border-color: rgba(43, 212, 192, 0.4); background: rgba(43, 212, 192, 0.05); }
+.brow.st-working .board-state { color: var(--b); border-color: rgba(43, 212, 192, 0.45); }
+.brow.st-working .bdot { animation: pulse 1.1s ease-in-out infinite; }
+.brow.st-done .board-state { color: var(--good); border-color: rgba(52, 211, 153, 0.4); }
+.brow.st-failed { border-color: rgba(251, 113, 133, 0.5); }
+.brow.st-failed .board-state { color: var(--bad); border-color: rgba(251, 113, 133, 0.5); }
 
 /* ---- "Jump to latest" pill (smart autoscroll) -------------------------- */
 .jump-latest {

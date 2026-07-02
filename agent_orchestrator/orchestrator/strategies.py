@@ -341,12 +341,15 @@ def _conductor_done(text: str) -> bool:
 
 
 
-def _run_turn(session: Session, role: str, system: str, instruction: str, rnd: int) -> str:
+def _run_turn(session: Session, role: str, system: str, instruction: str, rnd: int,
+              action: str = "") -> str:
     """Execute one agent turn: emit events, record it, return its text.
 
     ``instruction`` is the short per-turn directive; the conversation context is
     supplied automatically — as ``history`` when the backend supports it, or
-    embedded in the prompt as a fallback when it doesn't.
+    embedded in the prompt as a fallback when it doesn't. ``action`` is a short
+    machine-friendly label of what the agent is doing right now ("design",
+    "implement", "review", …) surfaced live on the UI's agent board.
 
     Raises :class:`StopRequested` on a stop request and :class:`AgentTurnError`
     if the backend fails.
@@ -355,7 +358,8 @@ def _run_turn(session: Session, role: str, system: str, instruction: str, rnd: i
         raise StopRequested()
 
     adapter = session.agents[role]
-    session.emit("turn_start", agent=adapter.display_name, role=role, round=rnd)
+    session.emit("turn_start", agent=adapter.display_name, role=role, round=rnd,
+                 action=action)
 
     # A per-role persona override from the UI wins over the strategy's default.
     system = session.personas.get(role) or system
@@ -394,6 +398,7 @@ def _run_turn(session: Session, role: str, system: str, instruction: str, rnd: i
         error=result.error,
         duration=round(result.duration, 2),
         via=("history" if use_history else "prompt"),
+        action=action,
     )
     if not result.ok:
         raise AgentTurnError(f"{adapter.display_name} ({role}) failed: {result.error}")
@@ -799,29 +804,39 @@ class CodeAuthoring(Strategy):
 class WorkspaceBuild(Strategy):
     name = "workspace_build"
     description = (
-        "Pair-build in a real working directory: the agents first discuss and agree "
-        "on a design, then the implementer builds while the reviewer critiques each "
-        "diff (applying small fixes directly), until approved."
+        "Co-build in a real working directory: the team first discusses and agrees "
+        "on a design, then the implementer builds while one or more reviewers "
+        "critique each diff (applying small fixes directly), until all approve."
     )
+    # Default pair for headless runs/tests; the UI supplies a dynamic role list
+    # (implementer + reviewer_1..N) so several reviewers can co-create.
     roles = [("implementer", "Implementer"), ("reviewer", "Reviewer")]
+    dynamic_roles = True
 
     IMPL_SYS = (
-        "You are the IMPLEMENTER, pair-building software with a reviewer in a real "
-        "project workspace. First the two of you agree on a design; then you implement "
-        "it, addressing the reviewer's feedback each round. When implementing, follow "
-        "the editing instructions given in each turn. Use forward-slash relative paths "
-        "inside the workspace; never absolute paths or `..`."
+        "You are the IMPLEMENTER, co-building software with one or more reviewers in "
+        "a real project workspace. First the team agrees on a design; then you "
+        "implement it, addressing the reviewers' feedback each round. When "
+        "implementing, follow the editing instructions given in each turn. Use "
+        "forward-slash relative paths inside the workspace; never absolute paths "
+        "or `..`."
     )
     REVIEW_SYS = (
-        "You are the REVIEWER, pair-building software with an implementer in a real "
-        "project workspace. First the two of you agree on a design. Then, each round, "
-        "review the diff of the implementer's changes for correctness, completeness, "
-        "edge cases, and clarity — be specific and actionable. You may apply small, "
-        "uncontroversial fixes (typos, obvious bugs) yourself using the editing "
-        "instructions given in the turn; leave substantial changes to the implementer "
-        "as feedback. End every review with APPROVE or REQUEST CHANGES."
+        "You are a REVIEWER (possibly one of several), co-building software with an "
+        "implementer in a real project workspace. First the team agrees on a design. "
+        "Then, each round, review the diff of the implementer's changes for "
+        "correctness, completeness, edge cases, and clarity — be specific and "
+        "actionable, and don't just repeat what other reviewers already said. You may "
+        "apply small, uncontroversial fixes (typos, obvious bugs) yourself using the "
+        "editing instructions given in the turn; leave substantial changes to the "
+        "implementer as feedback. End every review with APPROVE or REQUEST CHANGES."
     )
     personas = {"implementer": IMPL_SYS, "reviewer": REVIEW_SYS}
+
+    @staticmethod
+    def _reviewers(session: Session) -> List[str]:
+        order = session.role_order or sorted(session.agents)
+        return [r for r in order if r != "implementer" and r in session.agents]
 
     @staticmethod
     def _edit_how(session: Session, role: str) -> str:
@@ -842,63 +857,83 @@ class WorkspaceBuild(Strategy):
     def run(self, session: Session) -> str:
         if not session.workspace:
             raise AgentTurnError("workspace_build requires a workspace directory")
+        if "implementer" not in session.agents:
+            raise AgentTurnError("workspace_build needs an 'implementer' role")
+        reviewers = self._reviewers(session)
+        if not reviewers:
+            raise AgentTurnError("workspace_build needs at least one reviewer")
         os.makedirs(session.workspace, exist_ok=True)
         baseline = _snapshot_workspace(session.workspace)
 
         # Phase 1 — design consultation (round 0): agree on an approach first.
         session.emit("status",
-                     message="Design phase: the agents discuss and agree on an approach "
-                             "before writing any code.")
+                     message="Design phase: the team discusses and agrees on an "
+                             "approach before writing any code.")
         _run_turn(
             session, "implementer", self.IMPL_SYS,
             f"Task:\n{session.task}\n\nBefore any code is written, propose a concise "
             f"implementation plan: the files you would create, what each is responsible "
-            f"for, and the key design decisions. Ask the reviewer about anything you are "
-            f"unsure of. Do NOT create, edit, or output any files yet.",
-            0,
+            f"for, and the key design decisions. Ask the reviewers about anything you "
+            f"are unsure of. Do NOT create, edit, or output any files yet.",
+            0, action="design",
         )
         _, baseline = _detect_native_edits(session, "implementer", 0, baseline)
-        _run_turn(
-            session, "reviewer", self.REVIEW_SYS,
-            f"Task:\n{session.task}\n\nDiscuss the implementer's proposed plan: point "
-            f"out risks, missing pieces, and simpler alternatives, answer their "
-            f"questions, then state the agreed design as a short bullet list. Do NOT "
-            f"create, edit, or output any files yet.",
-            0,
-        )
-        _, baseline = _detect_native_edits(session, "reviewer", 0, baseline)
+        for rv in reviewers:
+            _run_turn(
+                session, rv, self.REVIEW_SYS,
+                f"Task:\n{session.task}\n\nDiscuss the implementer's proposed plan "
+                f"(and what other reviewers said, if any): point out risks, missing "
+                f"pieces, and simpler alternatives, answer their questions, then state "
+                f"the design you'd agree to as a short bullet list. Do NOT create, "
+                f"edit, or output any files yet.",
+                0, action="design",
+            )
+            _, baseline = _detect_native_edits(session, rv, 0, baseline)
 
-        # Phase 2 — build loop: implement, review (with direct small fixes), repeat.
+        # Phase 2 — build loop: implement, then every reviewer weighs in (with
+        # direct small fixes); repeat until all reviewers approve.
         for rnd in range(1, session.rounds + 1):
             text = _run_turn(
                 session, "implementer", self.IMPL_SYS,
-                f"Task:\n{session.task}\n\nImplement it now, following the design you "
-                f"both agreed on and addressing any reviewer feedback. "
+                f"Task:\n{session.task}\n\nImplement it now, following the design the "
+                f"team agreed on and addressing all reviewer feedback. "
                 f"{self._edit_how(session, 'implementer')}",
-                rnd,
+                rnd, action="implement",
             )
             applied = _apply_workspace_edits(session, "implementer", rnd, text)
             native, baseline = _detect_native_edits(session, "implementer", rnd, baseline)
             if applied + native == 0:
                 session.emit("status", message=f"No file changes in round {rnd}.")
 
-            review = _run_turn(
-                session, "reviewer", self.REVIEW_SYS,
-                f"Task:\n{session.task}\n\nCurrent changes:\n\n{_workspace_summary(session)}\n\n"
-                f"Review them. If you spot a small, uncontroversial fix, you may apply it "
-                f"yourself: {self._edit_how(session, 'reviewer')} "
-                f"End with APPROVE or REQUEST CHANGES.",
-                rnd,
-            )
-            r_applied = _apply_workspace_edits(session, "reviewer", rnd, review)
-            r_native, baseline = _detect_native_edits(session, "reviewer", rnd, baseline)
-            if r_applied + r_native:
+            approvals = 0
+            for rv in reviewers:
+                review = _run_turn(
+                    session, rv, self.REVIEW_SYS,
+                    f"Task:\n{session.task}\n\nCurrent changes:\n\n"
+                    f"{_workspace_summary(session)}\n\n"
+                    f"Review them. If you spot a small, uncontroversial fix, you may "
+                    f"apply it yourself: {self._edit_how(session, rv)} "
+                    f"End with APPROVE or REQUEST CHANGES.",
+                    rnd, action="review",
+                )
+                r_applied = _apply_workspace_edits(session, rv, rnd, review)
+                r_native, baseline = _detect_native_edits(session, rv, rnd, baseline)
+                if r_applied + r_native:
+                    session.emit("status",
+                                 message=f"{session.agents[rv].display_name} ({rv}) "
+                                         f"applied {r_applied + r_native} direct "
+                                         f"fix(es) in round {rnd}.")
+                if "APPROVE" in review.upper() and "REQUEST CHANGES" not in review.upper():
+                    approvals += 1
+            if approvals == len(reviewers):
                 session.emit("status",
-                             message=f"Reviewer applied {r_applied + r_native} direct "
-                                     f"fix(es) in round {rnd}.")
-            if "APPROVE" in review.upper() and "REQUEST CHANGES" not in review.upper():
-                session.emit("status", message=f"Reviewer approved in round {rnd}.")
+                             message=f"All {len(reviewers)} reviewer(s) approved in "
+                                     f"round {rnd}.")
                 break
+            if rnd < session.rounds:
+                session.emit("status",
+                             message=f"{approvals}/{len(reviewers)} reviewer(s) "
+                                     f"approved in round {rnd} — continuing.")
         return self.finish(session, self._summary(session))
 
     @staticmethod

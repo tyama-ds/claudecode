@@ -58,7 +58,7 @@ press **Run collaboration**. Turns stream into the transcript as they happen.
 | **Panel + Judge** | contender A, B, C, judge | Three agents argue competing positions; an impartial judge evaluates them and delivers the verdict. |
 | **Doc authoring** | writer, editor | Co-write a document: the writer drafts/revises a shared **artifact**, the editor critiques each version, until approved. |
 | **Code authoring** | implementer, reviewer | Co-build code: the implementer writes/revises a single code **artifact**, the reviewer critiques each version, until approved. |
-| **Workspace build** | implementer, reviewer | **Pair-build in a real working directory**: the agents first discuss and agree on a design, then the implementer builds while the reviewer critiques each diff (applying small fixes directly), until approved. |
+| **Workspace build** | implementer, reviewers (1–3) | **Co-build in a real working directory**: the team first discusses and agrees on a design, then the implementer builds while one or more reviewers critique each diff (applying small fixes directly), until **all** approve. |
 | **Conductor team** | conductor, workers (2–4), reviewer | A **conductor** splits the task and assigns each worker a subtask; a reviewer checks each worker's output and reports back; the conductor evaluates the team every round — **calling out anyone who didn't deliver** — and reassigns until the work is done. |
 | **Custom** | your own (2–5) | Define each participant from scratch — backend, model, and persona — then they discuss and close with a conclusion. |
 
@@ -68,12 +68,14 @@ history, a Preview/Diff toggle, Copy, and Download**. Editing agents output the
 full updated artifact in `<ARTIFACT>…</ARTIFACT>` tags; reviewers give feedback
 only.
 
-**Workspace build** goes one step further: the two agents **pair-build in a real
+**Workspace build** goes one step further: the team **co-builds in a real
 directory on disk**. It opens with a **design consultation** (round 0) — the
-implementer proposes a plan, the reviewer challenges it, and they agree on a
+implementer proposes a plan, each reviewer challenges it, and they agree on a
 design before any code is written. Then the build loop runs: the implementer
-creates/edits files, the reviewer critiques each diff and may **apply small
-fixes directly**, until approved.
+creates/edits files, every reviewer critiques the diff (each may **apply small
+fixes directly**), and the round only closes early when **all reviewers
+approve**. You can add up to three reviewers, each with its own backend, model,
+and persona — e.g. a Claude Code implementer reviewed by both Codex and GPT.
 
 Files are edited two ways, chosen automatically per backend:
 
@@ -125,7 +127,10 @@ the transcript embedded in the prompt. Each turn is tagged `ctx: history` or
 `ctx: prompt` so you can see which path was used.
 
 **The console** keeps the feed organized in tabs — *Transcript / Artifact /
-Workspace / Team* — with a dot badge when a background tab updates. Quality of
+Workspace / Team* — with a dot badge when a background tab updates. During a
+run, a **live agent board** docks on the right showing, for every participant,
+what it is doing *right now* — designing, implementing, or reviewing, with a
+pulsing working state, round number, and elapsed seconds. Quality of
 life built in: a **session history** (▤) that can reopen any past or running
 session with its full transcript replayed; one-click **Export** of the whole
 transcript as Markdown; form values (task, strategy, directories) that survive a

@@ -10,6 +10,7 @@ const state = {
   artifact: { versions: [], view: "preview" },
   workspace: { files: {}, order: [], selected: null },
   team: { workers: {}, order: [], conductor: "", round: 0 },
+  board: { order: [], roles: {} },   // live who's-doing-what panel
   tab: "stream",     // active feed tab
   log: [],           // finished turns, for the Export button
   lang: localStorage.getItem("ao-lang") || "en",
@@ -65,8 +66,19 @@ const JA = {
   "Session ended with an error.": "セッションはエラーで終了しました。",
   "Failed to start.": "開始に失敗しました。",
   "Network error: ": "ネットワークエラー: ",
+  // agent board
+  "Agents": "エージェント",
+  "waiting": "待機",
+  "working": "作業中",
+  "done": "完了",
+  "failed": "失敗",
+  "design": "設計",
+  "implement": "実装",
+  "review": "レビュー",
   // role builder
   "Persona": "ペルソナ",
+  "Implementer": "実装役",
+  "+ Add reviewer": "+ レビュアーを追加",
   "model (optional — uses default)": "モデル（任意・未入力なら既定値）",
   "Leave blank to use the default persona below": "空欄なら下記の既定ペルソナを使用",
   "Describe this participant's role / character (optional)": "この参加者の役割・キャラクターを記述（任意）",
@@ -142,6 +154,8 @@ function toggleLang() {
 function accentFor(role) {
   if (["implementer", "agent_a", "planner", "conductor"].includes(role)) return "acc-a";
   if (["reviewer", "agent_b", "executor"].includes(role)) return "acc-b";
+  const rv = /^reviewer_(\d+)$/.exec(role); // workspace_build review panel
+  if (rv) return ["acc-b", "acc-c"][(parseInt(rv[1], 10) - 1) % 2];
   const m = /^(?:agent|worker)_(\d+)$/.exec(role); // custom / team members
   if (m) return ["acc-a", "acc-b", "acc-c"][(parseInt(m[1], 10) - 1) % 3];
   return "acc-c"; // synthesizer / judge / anything else
@@ -240,8 +254,46 @@ function renderRoles() {
   const wrap = $("#roles");
   wrap.innerHTML = "";
   if (st.name === "conductor_team") { renderConductorBuilder(wrap); return; }
+  if (st.name === "workspace_build") { renderWorkspaceBuilder(wrap, st); return; }
   if (st.custom) { renderCustomBuilder(wrap); return; }
   st.roles.forEach((role) => wrap.appendChild(roleCard(role.key, role.label, role.system || "", false)));
+}
+
+// Workspace build: one implementer + 1–3 reviewers (add/remove).
+function renderWorkspaceBuilder(wrap, st) {
+  const meta = Object.fromEntries((st.roles || []).map((r) => [r.key, r]));
+  const implSys = (meta.implementer || {}).system || "";
+  const revSys = (meta.reviewer || {}).system || "";
+  wrap.appendChild(roleCard("implementer", t("Implementer"), implSys, false));
+
+  const holder = document.createElement("div");
+  holder.id = "reviewers"; holder.className = "roles";
+  wrap.appendChild(holder);
+  const add = document.createElement("button");
+  add.type = "button"; add.className = "btn ghost add-reviewer";
+  add.textContent = t("+ Add reviewer");
+  add.addEventListener("click", () => addReviewer(holder, revSys));
+  wrap.appendChild(add);
+  addReviewer(holder, revSys);
+}
+
+function addReviewer(holder, sys) {
+  if (holder.children.length >= 3) return;
+  const i = holder.children.length + 1;
+  holder.appendChild(roleCard("reviewer_" + i, t("Reviewer") + " " + i, sys, true));
+  relabelReviewers(holder);
+}
+
+function relabelReviewers(holder) {
+  Array.from(holder.children).forEach((card, i) => {
+    const key = "reviewer_" + (i + 1);
+    const bucket = accentFor(key);
+    card.className = "role " + (bucket === "acc-b" ? "b" : bucket === "acc-c" ? "c" : "");
+    card.querySelector(".role-name").childNodes[0].nodeValue = t("Reviewer") + " " + (i + 1);
+    card.querySelector("select").dataset.role = key;
+  });
+  const add = document.querySelector(".add-reviewer");
+  if (add) add.disabled = holder.children.length >= 3;
 }
 
 // Conductor team: one conductor, 2–4 workers (add/remove), one reviewer.
@@ -300,8 +352,12 @@ function roleCard(key, label, defaultSystem, removable) {
     const rm = document.createElement("button");
     rm.type = "button"; rm.className = "role-remove"; rm.textContent = "×"; rm.title = "Remove";
     rm.addEventListener("click", () => {
-      const h = box.parentElement; box.remove();
-      (h && h.id === "workers" ? relabelWorkers : relabelParticipants)(h);
+      const h = box.parentElement;
+      if (h && h.id === "reviewers" && h.children.length <= 1) return; // keep ≥1 reviewer
+      box.remove();
+      if (h && h.id === "workers") relabelWorkers(h);
+      else if (h && h.id === "reviewers") relabelReviewers(h);
+      else relabelParticipants(h);
     });
     name.appendChild(rm);
   }
@@ -403,6 +459,16 @@ function rolesPayload() {
     });
     return { roles, role_order: order };
   }
+  if (st && st.name === "workspace_build") {
+    const order = ["implementer"];
+    roles.implementer = collectRole(document.querySelector("#roles > .role"));
+    document.querySelectorAll("#reviewers > .role").forEach((card, i) => {
+      const key = "reviewer_" + (i + 1);
+      order.push(key);
+      roles[key] = collectRole(card);
+    });
+    return { roles, role_order: order };
+  }
   if (st && st.name === "conductor_team") {
     const fixed = Array.from(document.querySelectorAll("#roles > .role")); // [conductor, reviewer]
     const order = ["conductor"];
@@ -481,6 +547,7 @@ function resetRunUI() {
   $("#meta").textContent = "";
   $("#export-md").hidden = true;
   setSeg("preview");
+  resetBoard();
 }
 
 async function run() {
@@ -583,6 +650,7 @@ function handleEvent(evt) {
         data.workspace + (data.workspace_created === "created" ? "  (created)" : "");
     }
     if (data.strategy === "conductor_team") seedTeam(data.agents);
+    seedBoard(data.agents);
   } else if (type === "artifact") {
     handleArtifact(data);
   } else if (type === "workspace_edit") {
@@ -591,8 +659,10 @@ function handleEvent(evt) {
     handleWorkerStatus(data);
   } else if (type === "turn_start") {
     addThinkingCard(data);
+    boardTurn(data, "start");
   } else if (type === "turn_end") {
     fillCard(data);
+    boardTurn(data, "end");
   } else if (type === "status") {
     addNote(data.message);
   } else if (type === "scratchpad") {
@@ -605,6 +675,65 @@ function handleEvent(evt) {
   } else if (type === "session_end") {
     finish(data.status);
   }
+}
+
+// -- live agent board (who's doing what, right now) --------------------------
+function seedBoard(agents) {
+  const b = state.board;
+  b.order = Object.keys(agents || {});
+  b.roles = {};
+  b.order.forEach((r) => {
+    b.roles[r] = { name: agents[r], state: "waiting", action: "", round: 0,
+                   start: 0, duration: null };
+  });
+  const show = b.order.length > 0;
+  $("#board").hidden = !show;
+  document.querySelector(".console").classList.toggle("has-board", show);
+  renderBoard();
+}
+
+function boardTurn(d, phase) {
+  const e = state.board.roles[d.role];
+  if (!e) return;
+  if (phase === "start") {
+    e.state = "working"; e.action = d.action || ""; e.round = d.round;
+    e.start = Date.now(); e.duration = null;
+  } else {
+    e.state = d.ok ? "done" : "failed";
+    if (d.action) e.action = d.action;
+    e.round = d.round; e.duration = d.duration; e.start = 0;
+  }
+  renderBoard();
+}
+
+function renderBoard() {
+  const list = $("#board-list");
+  list.innerHTML = "";
+  state.board.order.forEach((role) => {
+    const e = state.board.roles[role];
+    const li = document.createElement("li");
+    li.className = `brow st-${e.state} ${accentFor(role)}`;
+    const bits = [role];
+    if (e.action) bits.push(t(e.action));
+    if (e.round) bits.push("r" + e.round);
+    const time = e.duration != null ? " · " + e.duration + "s" : "";
+    li.innerHTML =
+      `<span class="board-ava">${escapeHtml(initials(e.name))}</span>` +
+      `<span class="board-main">` +
+      `<span class="board-top"><span class="board-name">${escapeHtml(e.name)}</span>` +
+      `<span class="board-state"><span class="bdot"></span>${escapeHtml(t(e.state))}</span></span>` +
+      `<span class="board-sub">${escapeHtml(bits.join(" · "))}` +
+      `<span class="board-time" data-role="${escapeHtml(role)}">${escapeHtml(time)}</span>` +
+      `</span></span>`;
+    list.appendChild(li);
+  });
+}
+
+function resetBoard() {
+  state.board = { order: [], roles: {} };
+  $("#board").hidden = true;
+  $("#board-list").innerHTML = "";
+  document.querySelector(".console").classList.remove("has-board");
 }
 
 // -- feed tabs ---------------------------------------------------------------
@@ -694,12 +823,18 @@ function addThinkingCard(d) {
   autoScroll(node);
 }
 
-// Live elapsed-seconds counter on every in-progress turn.
+// Live elapsed-seconds counter on every in-progress turn and board row.
 setInterval(() => {
   document.querySelectorAll(".turn.thinking").forEach((n) => {
     const t0 = parseInt(n.dataset.start || "0", 10);
     if (t0) n.querySelector(".dur").textContent = Math.round((Date.now() - t0) / 1000) + "s";
   });
+  for (const role of state.board.order) {
+    const e = state.board.roles[role];
+    if (e.state !== "working" || !e.start) continue;
+    const el = document.querySelector(`.board-time[data-role="${role}"]`);
+    if (el) el.textContent = " · " + Math.round((Date.now() - e.start) / 1000) + "s";
+  }
 }, 1000);
 
 function fillCard(d) {
