@@ -58,7 +58,7 @@ press **Run collaboration**. Turns stream into the transcript as they happen.
 | **Panel + Judge** | contender A, B, C, judge | Three agents argue competing positions; an impartial judge evaluates them and delivers the verdict. |
 | **Doc authoring** | writer, editor | Co-write a document: the writer drafts/revises a shared **artifact**, the editor critiques each version, until approved. |
 | **Code authoring** | implementer, reviewer | Co-build code: the implementer writes/revises a single code **artifact**, the reviewer critiques each version, until approved. |
-| **Workspace build** | implementer, reviewer | Build in a **real working directory**: the implementer creates/edits files on disk, the reviewer critiques the diff, until approved. |
+| **Workspace build** | implementer, reviewers (1–3) | **Co-build in a real working directory**: the team first discusses and agrees on a design, then the implementer builds while one or more reviewers critique each diff (applying small fixes directly), until **all** approve. |
 | **Conductor team** | conductor, workers (2–4), reviewer | A **conductor** splits the task and assigns each worker a subtask; a reviewer checks each worker's output and reports back; the conductor evaluates the team every round — **calling out anyone who didn't deliver** — and reassigns until the work is done. |
 | **Custom** | your own (2–5) | Define each participant from scratch — backend, model, and persona — then they discuss and close with a conclusion. |
 
@@ -68,17 +68,32 @@ history, a Preview/Diff toggle, Copy, and Download**. Editing agents output the
 full updated artifact in `<ARTIFACT>…</ARTIFACT>` tags; reviewers give feedback
 only.
 
-**Workspace build** goes one step further: agents write to a **real directory on
-disk**. The implementer emits each changed file as `<FILE path="…">…full
-contents…</FILE>`; the orchestrator writes it (confined to the workspace root —
-`..` and absolute paths are refused) and computes a unified diff per file, shown
-in a Workspace panel with a file list and colorized diffs. Changes are left in
-the working tree for you to review and commit — the orchestrator never stages or
-commits. Set the **workspace directory** in the UI (blank = the server's launch
-directory), and tick **Create the directory if it doesn't exist** to have the
-orchestrator `mkdir` a fresh folder to script in (no git involved). (This is the
-backend-agnostic Phase-2 mode; native CLI-driven file editing is a planned
-follow-up.)
+**Workspace build** goes one step further: the team **co-builds in a real
+directory on disk**. It opens with a **design consultation** (round 0) — the
+implementer proposes a plan, each reviewer challenges it, and they agree on a
+design before any code is written. Then the build loop runs: the implementer
+creates/edits files, every reviewer critiques the diff (each may **apply small
+fixes directly**), and the round only closes early when **all reviewers
+approve**. You can add up to three reviewers, each with its own backend, model,
+and persona — e.g. a Claude Code implementer reviewed by both Codex and GPT.
+
+Files are edited two ways, chosen automatically per backend:
+
+- **Native (CLI backends)** — Claude Code and Codex are launched *inside* the
+  workspace with their own file tools enabled (`--permission-mode acceptEdits` /
+  `--full-auto`), so they genuinely edit the files themselves. The orchestrator
+  snapshots the tree around each turn and turns whatever changed into per-file
+  unified diffs for the UI.
+- **`<FILE>` protocol (API backends and anything else)** — the agent emits each
+  changed file in full as `<FILE path="…">…</FILE>`; the orchestrator writes it,
+  confined to the workspace root (`..` and absolute paths are refused).
+
+Either way, every change lands in the **Workspace tab** with a file list and
+colorized diffs, and stays in the working tree for you to review and commit —
+the orchestrator never stages or commits. Set the **workspace directory** in the
+UI (blank = the server's launch directory), and tick **Create the directory if
+it doesn't exist** to have the orchestrator `mkdir` a fresh folder to build in
+(no git involved).
 
 **Reference directory** (any strategy, optional): point it at a local folder and
 the orchestrator loads its text files as **read-only context** every agent can
@@ -112,7 +127,16 @@ the transcript embedded in the prompt. Each turn is tagged `ctx: history` or
 `ctx: prompt` so you can see which path was used.
 
 **The console** keeps the feed organized in tabs — *Transcript / Artifact /
-Workspace / Team* — with a dot badge when a background tab updates. Quality of
+Workspace / Team* — with a dot badge when a background tab updates. During a
+run, a **live agent board** docks on the right showing, for every participant,
+what it is doing *right now* — designing, implementing, or reviewing, with a
+pulsing working state, round number, and elapsed seconds. Above it, an animated
+**interaction graph** (pure SVG, no dependencies) shows who is talking to whom:
+the active agent glows, dots flow along the edges — implementer → workspace
+while coding, workspace → reviewer while reviewing, conductor → worker on an
+assignment — coloured green for approvals and red for change requests /
+call-outs, with a running caption underneath (e.g. *"Codex → Claude Code ·
+requests changes"*). Quality of
 life built in: a **session history** (▤) that can reopen any past or running
 session with its full transcript replayed; one-click **Export** of the whole
 transcript as Markdown; form values (task, strategy, directories) that survive a
