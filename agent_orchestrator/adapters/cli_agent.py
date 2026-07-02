@@ -42,7 +42,14 @@ def _render_conversation(prompt: str, system: Optional[str], history: List[Messa
 
 
 class CLIAgentAdapter(AgentAdapter):
-    """Run a coding-agent CLI non-interactively, one turn at a time."""
+    """Run a coding-agent CLI non-interactively, one turn at a time.
+
+    When :attr:`workdir` is set (workspace strategies), the CLI is launched
+    *inside* that directory with ``workspace_args`` appended — flags that let it
+    edit files natively with its own tools (e.g. Claude Code's
+    ``--permission-mode acceptEdits``). The orchestrator then detects the
+    resulting file changes by diffing the tree around the turn.
+    """
 
     kind = "cli"
 
@@ -52,14 +59,22 @@ class CLIAgentAdapter(AgentAdapter):
         command: Sequence[str],
         display_name: Optional[str] = None,
         timeout: Optional[int] = None,
+        workspace_args: Sequence[str] = (),
     ):
         super().__init__(name, display_name)
         self.command = list(command)
+        self.workspace_args = list(workspace_args)
         self.timeout = timeout if timeout is not None else get_settings().cli_timeout
 
     @property
     def executable(self) -> str:
         return self.command[0] if self.command else ""
+
+    def _build_argv(self) -> List[str]:
+        """The argv for one turn: base command, plus edit flags in a workspace."""
+        if self.workdir:
+            return self.command + self.workspace_args
+        return list(self.command)
 
     def available(self) -> "tuple[bool, str]":
         if not self.command:
@@ -75,11 +90,12 @@ class CLIAgentAdapter(AgentAdapter):
         full_prompt = _render_conversation(prompt, system, history)
         try:
             proc = subprocess.run(
-                self.command,
+                self._build_argv(),
                 input=full_prompt,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
+                cwd=self.workdir or None,
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"timed out after {self.timeout}s") from exc
@@ -96,18 +112,28 @@ class CLIAgentAdapter(AgentAdapter):
 # -- presets ---------------------------------------------------------------
 
 def claude_code_adapter(name: str = "claude_code") -> CLIAgentAdapter:
-    """Claude Code CLI in headless print mode."""
+    """Claude Code CLI in headless print mode.
+
+    In a workspace it edits files natively (auto-accepted file edits only —
+    anything else still follows the CLI's normal permission policy).
+    """
     return CLIAgentAdapter(
         name=name,
         display_name="Claude Code",
         command=["claude", "-p", "--output-format", "text"],
+        workspace_args=["--permission-mode", "acceptEdits"],
     )
 
 
 def codex_adapter(name: str = "codex") -> CLIAgentAdapter:
-    """OpenAI Codex CLI in non-interactive exec mode."""
+    """OpenAI Codex CLI in non-interactive exec mode.
+
+    In a workspace it runs with the workspace-write sandbox so it can edit
+    files natively.
+    """
     return CLIAgentAdapter(
         name=name,
         display_name="Codex",
         command=["codex", "exec"],
+        workspace_args=["--full-auto"],
     )

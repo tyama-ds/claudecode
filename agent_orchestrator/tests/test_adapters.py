@@ -159,5 +159,26 @@ class TestLocalProxyToggle(unittest.TestCase):
         self.assertTrue(s.local_use_proxy)
 
 
+class TestCLIWorkspaceMode(unittest.TestCase):
+    """CLI adapters gain native file-editing flags only inside a workspace."""
+
+    def test_argv_plain_outside_workspace(self):
+        from agent_orchestrator.adapters.cli_agent import claude_code_adapter
+        a = claude_code_adapter()
+        self.assertEqual(a._build_argv(), ["claude", "-p", "--output-format", "text"])
+
+    def test_argv_gains_edit_flags_in_workspace(self):
+        from agent_orchestrator.adapters.cli_agent import claude_code_adapter, codex_adapter
+        a = claude_code_adapter()
+        a.workdir = "/tmp/ws"
+        self.assertEqual(
+            a._build_argv(),
+            ["claude", "-p", "--output-format", "text", "--permission-mode", "acceptEdits"],
+        )
+        c = codex_adapter()
+        c.workdir = "/tmp/ws"
+        self.assertEqual(c._build_argv(), ["codex", "exec", "--full-auto"])
+
+
 if __name__ == "__main__":
     unittest.main()

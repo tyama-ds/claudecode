@@ -137,6 +137,23 @@ def _safe_join(root: str, rel: str) -> str:
     return full
 
 
+def _record_edit(session: Session, role: str, rnd: int, rel: str,
+                 old: str, new: str, status: str) -> None:
+    """Record one file change (diff + stats) on the session and notify the UI."""
+    name = session.agents[role].display_name
+    diff = "".join(difflib.unified_diff(
+        old.splitlines(keepends=True), new.splitlines(keepends=True),
+        fromfile=f"a/{rel}", tofile=f"b/{rel}"))
+    adds = sum(1 for ln in diff.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
+    dels = sum(1 for ln in diff.splitlines() if ln.startswith("-") and not ln.startswith("---"))
+    wf = WorkspaceFile(path=rel, content=new, status=status,
+                       additions=adds, deletions=dels, diff=diff,
+                       author=name, role=role, round=rnd)
+    session.record_workspace_file(wf)
+    session.emit("workspace_edit", path=rel, status=status, additions=adds,
+                 deletions=dels, diff=diff, author=name, role=role, round=rnd)
+
+
 def _apply_workspace_edits(session: Session, role: str, rnd: int, text: str) -> int:
     """Write the agent's ``<FILE>`` blocks to disk, recording per-file diffs.
 
@@ -144,7 +161,6 @@ def _apply_workspace_edits(session: Session, role: str, rnd: int, text: str) -> 
     in the working tree for the user to review.
     """
     root = session.workspace
-    name = session.agents[role].display_name
     written = 0
     for rel, body in _extract_files(text):
         new_content = body.strip("\n") + "\n" if body.strip() else ""
@@ -157,20 +173,72 @@ def _apply_workspace_edits(session: Session, role: str, rnd: int, text: str) -> 
         os.makedirs(os.path.dirname(full) or root, exist_ok=True)
         with open(full, "w", encoding="utf-8") as fh:
             fh.write(new_content)
-        diff = "".join(difflib.unified_diff(
-            old.splitlines(keepends=True), new_content.splitlines(keepends=True),
-            fromfile=f"a/{rel}", tofile=f"b/{rel}"))
-        adds = sum(1 for ln in diff.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
-        dels = sum(1 for ln in diff.splitlines() if ln.startswith("-") and not ln.startswith("---"))
-        wf = WorkspaceFile(path=rel, content=new_content,
-                           status="modified" if existed else "created",
-                           additions=adds, deletions=dels, diff=diff,
-                           author=name, role=role, round=rnd)
-        session.record_workspace_file(wf)
-        session.emit("workspace_edit", path=rel, status=wf.status, additions=adds,
-                     deletions=dels, diff=diff, author=name, role=role, round=rnd)
+        _record_edit(session, role, rnd, rel, old, new_content,
+                     "modified" if existed else "created")
         written += 1
     return written
+
+
+# -- native workspace edits (a CLI agent editing files with its own tools) --
+
+_WS_MAX_FILE_BYTES = 256 * 1024
+_WS_MAX_FILES = 2000
+
+
+def _snapshot_workspace(root: str) -> Dict[str, str]:
+    """Map ``relpath -> content`` for every small text file under ``root``.
+
+    Binary/huge/unreadable files are skipped, as are dependency/VCS dirs, so a
+    snapshot stays cheap even in a real project tree.
+    """
+    snap: Dict[str, str] = {}
+    if not os.path.isdir(root):
+        return snap
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in sorted(dirnames) if d not in _REF_SKIP_DIRS]
+        for fn in sorted(filenames):
+            if len(snap) >= _WS_MAX_FILES:
+                return snap
+            full = os.path.join(dirpath, fn)
+            try:
+                if os.path.getsize(full) > _WS_MAX_FILE_BYTES:
+                    continue
+                with open(full, "r", encoding="utf-8") as fh:
+                    content = fh.read()
+            except (OSError, UnicodeDecodeError, ValueError):
+                continue
+            snap[os.path.relpath(full, root).replace(os.sep, "/")] = content
+    return snap
+
+
+def _detect_native_edits(session: Session, role: str, rnd: int,
+                         baseline: Dict[str, str]) -> Tuple[int, Dict[str, str]]:
+    """Diff the tree against a pre-turn snapshot; record changes made directly
+    on disk (a CLI agent editing with its own tools).
+
+    Changes already recorded via ``<FILE>`` blocks are skipped (same content).
+    Returns ``(changed_count, new_snapshot)`` so the caller can roll forward.
+    """
+    after = _snapshot_workspace(session.workspace)
+    changed = 0
+    for rel, content in after.items():
+        if baseline.get(rel) == content:
+            continue
+        wf = session.workspace_files.get(rel)
+        if wf is not None and wf.content == content:
+            continue  # already recorded this turn (e.g. via a <FILE> block)
+        _record_edit(session, role, rnd, rel, baseline.get(rel, ""), content,
+                     "modified" if rel in baseline else "created")
+        changed += 1
+    for rel, old in baseline.items():
+        if rel in after:
+            continue
+        wf = session.workspace_files.get(rel)
+        if wf is not None and wf.status == "deleted":
+            continue
+        _record_edit(session, role, rnd, rel, old, "", "deleted")
+        changed += 1
+    return changed, after
 
 
 def _workspace_summary(session: Session) -> str:
@@ -731,45 +799,103 @@ class CodeAuthoring(Strategy):
 class WorkspaceBuild(Strategy):
     name = "workspace_build"
     description = (
-        "Build in a real working directory: an implementer creates/edits files on disk, "
-        "a reviewer critiques the resulting diff, until approved."
+        "Pair-build in a real working directory: the agents first discuss and agree "
+        "on a design, then the implementer builds while the reviewer critiques each "
+        "diff (applying small fixes directly), until approved."
     )
     roles = [("implementer", "Implementer"), ("reviewer", "Reviewer")]
 
     IMPL_SYS = (
-        "You are the IMPLEMENTER working in a real project workspace. Accomplish the task "
-        "by creating or modifying files. Output EACH changed file IN FULL as a block: a "
-        'line `<FILE path="relative/path.ext">`, then the complete new file contents, then '
-        "a line `</FILE>`. Use forward-slash relative paths inside the workspace; never "
-        "absolute paths or `..`. Address the reviewer's feedback in later rounds."
+        "You are the IMPLEMENTER, pair-building software with a reviewer in a real "
+        "project workspace. First the two of you agree on a design; then you implement "
+        "it, addressing the reviewer's feedback each round. When implementing, follow "
+        "the editing instructions given in each turn. Use forward-slash relative paths "
+        "inside the workspace; never absolute paths or `..`."
     )
     REVIEW_SYS = (
-        "You are the REVIEWER. Review the diff of the implementer's changes for "
-        "correctness, completeness, edge cases, and clarity — be specific and actionable. "
-        "Do NOT output <FILE> blocks; give feedback only. End with APPROVE or REQUEST CHANGES."
+        "You are the REVIEWER, pair-building software with an implementer in a real "
+        "project workspace. First the two of you agree on a design. Then, each round, "
+        "review the diff of the implementer's changes for correctness, completeness, "
+        "edge cases, and clarity — be specific and actionable. You may apply small, "
+        "uncontroversial fixes (typos, obvious bugs) yourself using the editing "
+        "instructions given in the turn; leave substantial changes to the implementer "
+        "as feedback. End every review with APPROVE or REQUEST CHANGES."
     )
     personas = {"implementer": IMPL_SYS, "reviewer": REVIEW_SYS}
+
+    @staticmethod
+    def _edit_how(session: Session, role: str) -> str:
+        """Per-role editing instructions: native tools (CLI in the workspace) or
+        the <FILE> protocol (everything else)."""
+        if getattr(session.agents[role], "workdir", None):
+            return (
+                "You are running INSIDE the workspace directory: create and edit the "
+                "files directly with your own file tools. Do not print <FILE> blocks; "
+                "after editing, summarise what you changed and why."
+            )
+        return (
+            "Output EACH file you create or change IN FULL as a block: a line "
+            '`<FILE path="relative/path.ext">`, then the complete new file contents, '
+            "then a line `</FILE>`."
+        )
 
     def run(self, session: Session) -> str:
         if not session.workspace:
             raise AgentTurnError("workspace_build requires a workspace directory")
         os.makedirs(session.workspace, exist_ok=True)
+        baseline = _snapshot_workspace(session.workspace)
+
+        # Phase 1 — design consultation (round 0): agree on an approach first.
+        session.emit("status",
+                     message="Design phase: the agents discuss and agree on an approach "
+                             "before writing any code.")
+        _run_turn(
+            session, "implementer", self.IMPL_SYS,
+            f"Task:\n{session.task}\n\nBefore any code is written, propose a concise "
+            f"implementation plan: the files you would create, what each is responsible "
+            f"for, and the key design decisions. Ask the reviewer about anything you are "
+            f"unsure of. Do NOT create, edit, or output any files yet.",
+            0,
+        )
+        _, baseline = _detect_native_edits(session, "implementer", 0, baseline)
+        _run_turn(
+            session, "reviewer", self.REVIEW_SYS,
+            f"Task:\n{session.task}\n\nDiscuss the implementer's proposed plan: point "
+            f"out risks, missing pieces, and simpler alternatives, answer their "
+            f"questions, then state the agreed design as a short bullet list. Do NOT "
+            f"create, edit, or output any files yet.",
+            0,
+        )
+        _, baseline = _detect_native_edits(session, "reviewer", 0, baseline)
+
+        # Phase 2 — build loop: implement, review (with direct small fixes), repeat.
         for rnd in range(1, session.rounds + 1):
             text = _run_turn(
                 session, "implementer", self.IMPL_SYS,
-                f"Task:\n{session.task}\n\nCreate or modify the files needed. Output each "
-                f'changed file in full inside <FILE path="..."> tags. Address any reviewer '
-                f"feedback.",
+                f"Task:\n{session.task}\n\nImplement it now, following the design you "
+                f"both agreed on and addressing any reviewer feedback. "
+                f"{self._edit_how(session, 'implementer')}",
                 rnd,
             )
-            if _apply_workspace_edits(session, "implementer", rnd, text) == 0:
-                session.emit("status", message=f"No <FILE> edits parsed in round {rnd}.")
+            applied = _apply_workspace_edits(session, "implementer", rnd, text)
+            native, baseline = _detect_native_edits(session, "implementer", rnd, baseline)
+            if applied + native == 0:
+                session.emit("status", message=f"No file changes in round {rnd}.")
+
             review = _run_turn(
                 session, "reviewer", self.REVIEW_SYS,
                 f"Task:\n{session.task}\n\nCurrent changes:\n\n{_workspace_summary(session)}\n\n"
-                f"Review them and end with APPROVE or REQUEST CHANGES.",
+                f"Review them. If you spot a small, uncontroversial fix, you may apply it "
+                f"yourself: {self._edit_how(session, 'reviewer')} "
+                f"End with APPROVE or REQUEST CHANGES.",
                 rnd,
             )
+            r_applied = _apply_workspace_edits(session, "reviewer", rnd, review)
+            r_native, baseline = _detect_native_edits(session, "reviewer", rnd, baseline)
+            if r_applied + r_native:
+                session.emit("status",
+                             message=f"Reviewer applied {r_applied + r_native} direct "
+                                     f"fix(es) in round {rnd}.")
             if "APPROVE" in review.upper() and "REQUEST CHANGES" not in review.upper():
                 session.emit("status", message=f"Reviewer approved in round {rnd}.")
                 break

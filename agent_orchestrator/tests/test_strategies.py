@@ -207,6 +207,59 @@ class TestStrategies(unittest.TestCase):
         self.assertIn("workspace_edit", [e.type for e in session.bus.history])
         self.assertIn("hello.py", result)
 
+    def test_workspace_build_has_design_phase(self):
+        """The first two turns are a round-0 design consultation, and <FILE>
+        blocks emitted during it are NOT written to disk."""
+        d = tempfile.mkdtemp()
+        impl = _FixedAdapter("impl", '<FILE path="hello.py">\nprint("hi")\n</FILE>')
+        rev = _FixedAdapter("rev", "Plan looks fine. APPROVE")
+        session = Session(id="w", task="say hi", strategy="workspace_build", rounds=1,
+                          agents={"implementer": impl, "reviewer": rev}, workspace=d)
+        get_strategy("workspace_build").run(session)
+        self.assertEqual([t.round for t in session.transcript[:2]], [0, 0])
+        self.assertEqual([t.role for t in session.transcript[:2]],
+                         ["implementer", "reviewer"])
+        # the file lands in round 1 (build), not round 0 (consult)
+        self.assertEqual(session.workspace_files["hello.py"].round, 1)
+
+    def test_workspace_build_reviewer_can_fix_directly(self):
+        d = tempfile.mkdtemp()
+        impl = _FixedAdapter("impl", '<FILE path="hello.py">\nprint("hi")\n</FILE>')
+        rev = _FixedAdapter(
+            "rev", 'Nit fixed myself. <FILE path="hello.py">\nprint("hello")\n</FILE> APPROVE')
+        session = Session(id="w", task="say hi", strategy="workspace_build", rounds=1,
+                          agents={"implementer": impl, "reviewer": rev}, workspace=d)
+        get_strategy("workspace_build").run(session)
+        with open(os.path.join(d, "hello.py")) as fh:
+            self.assertEqual(fh.read(), 'print("hello")\n')
+        self.assertEqual(session.workspace_files["hello.py"].role, "reviewer")
+
+    def test_snapshot_and_detect_native_edits(self):
+        """Files changed directly on disk (a CLI editing natively) are detected
+        by diffing tree snapshots and attributed to the acting role."""
+        from agent_orchestrator.orchestrator.strategies import (
+            _detect_native_edits, _snapshot_workspace,
+        )
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "keep.txt"), "w") as fh:
+            fh.write("old\n")
+        session = Session(id="n", task="t", strategy="workspace_build", rounds=1,
+                          agents={"implementer": _FixedAdapter("i", "")}, workspace=d)
+        baseline = _snapshot_workspace(d)
+        # simulate a native CLI turn: modify, create, and delete files on disk
+        with open(os.path.join(d, "keep.txt"), "w") as fh:
+            fh.write("new\n")
+        with open(os.path.join(d, "made.py"), "w") as fh:
+            fh.write("x = 1\n")
+        changed, after = _detect_native_edits(session, "implementer", 2, baseline)
+        self.assertEqual(changed, 2)
+        self.assertEqual(session.workspace_files["keep.txt"].status, "modified")
+        self.assertEqual(session.workspace_files["made.py"].status, "created")
+        os.remove(os.path.join(d, "made.py"))
+        changed, _ = _detect_native_edits(session, "implementer", 3, after)
+        self.assertEqual(changed, 1)
+        self.assertEqual(session.workspace_files["made.py"].status, "deleted")
+
     def test_workspace_build_requires_workspace(self):
         impl = _FixedAdapter("i", "")
         session = Session(id="w", task="t", strategy="workspace_build", rounds=1,

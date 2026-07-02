@@ -245,6 +245,12 @@ class Handler(BaseHTTPRequestHandler):
             session.workspace = os.path.realpath(ws)
             if body.get("create_dir"):
                 session.workspace_created = _ensure_workspace_dir(session.workspace)
+            # CLI backends (Claude Code / Codex) run *inside* the workspace and
+            # edit files natively with their own tools; other backends keep the
+            # <FILE> protocol.
+            for adapter in agents.values():
+                if adapter.kind == "cli":
+                    adapter.workdir = session.workspace
 
         start_session(session)
         self._send_json({"session_id": session.id})

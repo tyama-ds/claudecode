@@ -45,6 +45,11 @@ class AgentAdapter(ABC):
     #: False so the fallback path is used instead.
     supports_history: bool = True
 
+    #: When set (workspace strategies only), the backend works *inside* this
+    #: directory. CLI backends run there and edit files natively with their own
+    #: tools; other backends ignore it and use the <FILE> protocol instead.
+    workdir: Optional[str] = None
+
     def __init__(self, name: str, display_name: Optional[str] = None):
         self.name = name
         self.display_name = display_name or name

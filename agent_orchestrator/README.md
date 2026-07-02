@@ -58,7 +58,7 @@ press **Run collaboration**. Turns stream into the transcript as they happen.
 | **Panel + Judge** | contender A, B, C, judge | Three agents argue competing positions; an impartial judge evaluates them and delivers the verdict. |
 | **Doc authoring** | writer, editor | Co-write a document: the writer drafts/revises a shared **artifact**, the editor critiques each version, until approved. |
 | **Code authoring** | implementer, reviewer | Co-build code: the implementer writes/revises a single code **artifact**, the reviewer critiques each version, until approved. |
-| **Workspace build** | implementer, reviewer | Build in a **real working directory**: the implementer creates/edits files on disk, the reviewer critiques the diff, until approved. |
+| **Workspace build** | implementer, reviewer | **Pair-build in a real working directory**: the agents first discuss and agree on a design, then the implementer builds while the reviewer critiques each diff (applying small fixes directly), until approved. |
 | **Conductor team** | conductor, workers (2–4), reviewer | A **conductor** splits the task and assigns each worker a subtask; a reviewer checks each worker's output and reports back; the conductor evaluates the team every round — **calling out anyone who didn't deliver** — and reassigns until the work is done. |
 | **Custom** | your own (2–5) | Define each participant from scratch — backend, model, and persona — then they discuss and close with a conclusion. |
 
@@ -68,17 +68,30 @@ history, a Preview/Diff toggle, Copy, and Download**. Editing agents output the
 full updated artifact in `<ARTIFACT>…</ARTIFACT>` tags; reviewers give feedback
 only.
 
-**Workspace build** goes one step further: agents write to a **real directory on
-disk**. The implementer emits each changed file as `<FILE path="…">…full
-contents…</FILE>`; the orchestrator writes it (confined to the workspace root —
-`..` and absolute paths are refused) and computes a unified diff per file, shown
-in a Workspace panel with a file list and colorized diffs. Changes are left in
-the working tree for you to review and commit — the orchestrator never stages or
-commits. Set the **workspace directory** in the UI (blank = the server's launch
-directory), and tick **Create the directory if it doesn't exist** to have the
-orchestrator `mkdir` a fresh folder to script in (no git involved). (This is the
-backend-agnostic Phase-2 mode; native CLI-driven file editing is a planned
-follow-up.)
+**Workspace build** goes one step further: the two agents **pair-build in a real
+directory on disk**. It opens with a **design consultation** (round 0) — the
+implementer proposes a plan, the reviewer challenges it, and they agree on a
+design before any code is written. Then the build loop runs: the implementer
+creates/edits files, the reviewer critiques each diff and may **apply small
+fixes directly**, until approved.
+
+Files are edited two ways, chosen automatically per backend:
+
+- **Native (CLI backends)** — Claude Code and Codex are launched *inside* the
+  workspace with their own file tools enabled (`--permission-mode acceptEdits` /
+  `--full-auto`), so they genuinely edit the files themselves. The orchestrator
+  snapshots the tree around each turn and turns whatever changed into per-file
+  unified diffs for the UI.
+- **`<FILE>` protocol (API backends and anything else)** — the agent emits each
+  changed file in full as `<FILE path="…">…</FILE>`; the orchestrator writes it,
+  confined to the workspace root (`..` and absolute paths are refused).
+
+Either way, every change lands in the **Workspace tab** with a file list and
+colorized diffs, and stays in the working tree for you to review and commit —
+the orchestrator never stages or commits. Set the **workspace directory** in the
+UI (blank = the server's launch directory), and tick **Create the directory if
+it doesn't exist** to have the orchestrator `mkdir` a fresh folder to build in
+(no git involved).
 
 **Reference directory** (any strategy, optional): point it at a local folder and
 the orchestrator loads its text files as **read-only context** every agent can
