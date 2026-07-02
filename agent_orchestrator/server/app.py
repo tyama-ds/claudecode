@@ -100,6 +100,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"agents": catalog(), "strategies": strategy_metadata()})
         elif path == "/api/settings":
             self._send_json(self._settings_payload())
+        elif path == "/api/sessions":
+            self._send_json({"sessions": self._sessions_payload()})
         elif path.startswith("/api/stream/"):
             self._stream(path[len("/api/stream/"):])
         else:
@@ -118,6 +120,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "not found"}, status=404)
 
     # -- endpoints ---------------------------------------------------------
+
+    def _sessions_payload(self) -> list:
+        """Newest-first summary of every session this server has run.
+
+        The event bus keeps each session's full history, so the UI can reopen
+        any of these (running or finished) and replay the whole transcript.
+        """
+        out = []
+        for s in sorted(MANAGER.all(), key=lambda s: s.created, reverse=True):
+            task = s.task if len(s.task) <= 100 else s.task[:100] + "…"
+            out.append({
+                "id": s.id, "task": task, "strategy": s.strategy,
+                "rounds": s.rounds, "status": s.status, "created": s.created,
+            })
+        return out
 
     def _settings_payload(self) -> dict:
         """Non-secret view of current settings for the UI (keys never echoed)."""

@@ -63,7 +63,7 @@ press **Run collaboration**. Turns stream into the transcript as they happen.
 | **Custom** | your own (2–5) | Define each participant from scratch — backend, model, and persona — then they discuss and close with a conclusion. |
 
 The authoring strategies build a shared **Artifact** — one evolving document or
-code file, shown in a dedicated panel above the transcript with **version
+code file, shown in its own tab of the feed with **version
 history, a Preview/Diff toggle, Copy, and Download**. Editing agents output the
 full updated artifact in `<ARTIFACT>…</ARTIFACT>` tags; reviewers give feedback
 only.
@@ -91,7 +91,7 @@ Workspace above.
 **Conductor team** models a boss-and-team workflow: the conductor speaks to the
 team in a small line protocol (`@worker_1: <subtask>` to assign,
 `@worker_2 [WARN]: <what's missing>` to call someone out, `VERDICT: DONE` to
-finish). A **Team** panel above the transcript shows each worker's live status —
+finish). A **Team** tab in the feed shows each worker's live status —
 *assigned → delivered → approved ✓ / called out ⚠* — so you can see at a glance
 who's pulling their weight. The conductor consolidates the team's work into the
 final deliverable. The number of workers (2–4) is set in the UI.
@@ -110,6 +110,16 @@ structured message **history** — each agent's own turns as `assistant`, the
 others' as `user`. Backends that can't use history fall back automatically to
 the transcript embedded in the prompt. Each turn is tagged `ctx: history` or
 `ctx: prompt` so you can see which path was used.
+
+**The console** keeps the feed organized in tabs — *Transcript / Artifact /
+Workspace / Team* — with a dot badge when a background tab updates. Quality of
+life built in: a **session history** (▤) that can reopen any past or running
+session with its full transcript replayed; one-click **Export** of the whole
+transcript as Markdown; form values (task, strategy, directories) that survive a
+reload; smart autoscroll with a *↓ Latest* pill instead of yanking you to the
+bottom; a live elapsed-seconds counter on in-progress turns; `Ctrl+Enter` to
+run; an **English / 日本語** toggle; and an auto / light / dark theme that follows
+your OS by default.
 
 ## Backends (adapters)
 

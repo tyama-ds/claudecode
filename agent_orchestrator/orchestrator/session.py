@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -86,6 +87,7 @@ class Session:
     personas: Dict[str, str] = field(default_factory=dict)  # per-role system-prompt overrides
     role_order: List[str] = field(default_factory=list)     # ordered roles (used by custom strategy)
     stop_requested: bool = False
+    created: float = field(default_factory=time.time)       # unix ts, for the history list
 
     # -- helpers used by the engine/strategies ----------------------------
 

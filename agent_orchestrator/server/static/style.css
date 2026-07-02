@@ -262,10 +262,38 @@ select option { background: #0c111b; color: var(--text); }
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .status { margin-top: 12px; font-size: 13px; color: var(--text-dim); min-height: 18px; }
 .status.err { color: var(--bad); }
+.kbd-hint { margin-top: 9px; }
 
 /* ---- Feed ------------------------------------------------------------- */
 .feed { padding: 20px; min-height: 64vh; }
+.feed-head { flex-wrap: wrap; gap: 10px; }
+.feed-right { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .meta { font-family: var(--mono); font-size: 11.5px; color: var(--text-faint); text-align: right; }
+
+/* Feed tabs: Transcript / Artifact / Workspace / Team */
+.feed-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.ftab {
+  position: relative;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 999px;
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.4px;
+  padding: 6px 14px; cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.ftab:hover { color: var(--text); border-color: var(--border-strong); }
+.ftab.active {
+  color: #08111a; border-color: transparent; font-weight: 700;
+  background: linear-gradient(110deg, var(--a), var(--b));
+}
+html[data-theme="light"] .ftab.active { color: #fff; }
+.ftab.badge::after {
+  content: ""; position: absolute; top: 3px; right: 5px;
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--c); box-shadow: 0 0 8px var(--c);
+}
+.tabpane[hidden] { display: none; }
 
 .stream { display: flex; flex-direction: column; gap: 14px; }
 
@@ -342,6 +370,10 @@ html[data-theme="light"] .d-del { color: #b03048; }
   white-space: nowrap; flex: 1; }
 .ws-stat { font-family: var(--mono); font-size: 10.5px; white-space: nowrap; }
 #ws-diff { max-height: 420px; }
+@media (max-width: 700px) {
+  .ws-grid { grid-template-columns: 1fr; }
+  .ws-files { border-right: none; max-height: 170px; }
+}
 
 /* Conductor team roster — who's working and who got called out. */
 .team-roster { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
@@ -502,6 +534,61 @@ html[data-theme="light"] .d-del { color: #b03048; }
   transition: color 0.15s ease, border-color 0.15s ease;
 }
 .theme-toggle:hover { color: var(--text); border-color: var(--border-strong); }
+.theme-toggle.wide {
+  width: auto; padding: 0 11px;
+  font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: 0.6px;
+}
+
+/* ---- Session history dropdown ----------------------------------------- */
+.history-pop {
+  position: fixed; top: 66px; right: 24px; z-index: 40;
+  width: min(420px, calc(100vw - 32px));
+  background: var(--surface); border: 1px solid var(--border-strong);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  backdrop-filter: blur(16px) saturate(130%);
+  padding: 10px;
+  animation: rise 0.18s ease both;
+}
+.history-head {
+  font-family: var(--mono); font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1.8px;
+  color: var(--text-faint); padding: 4px 8px 9px;
+}
+.history-pop ul {
+  list-style: none; margin: 0; padding: 0;
+  max-height: 52vh; overflow: auto; display: grid; gap: 4px;
+}
+.history-item {
+  display: flex; gap: 11px; align-items: center;
+  padding: 8px 10px; border-radius: 10px; cursor: pointer;
+}
+.history-item:hover { background: rgba(255, 255, 255, 0.05); }
+html[data-theme="light"] .history-item:hover { background: rgba(20, 30, 55, 0.06); }
+.hist-status { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-faint); }
+.hist-status.st-running { background: var(--b); box-shadow: 0 0 8px var(--b); }
+.hist-status.st-done { background: var(--good); }
+.hist-status.st-error { background: var(--bad); }
+.hist-status.st-stopped { background: var(--a); }
+.hist-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.hist-task {
+  font-size: 13px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hist-sub { font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); }
+.history-empty { color: var(--text-faint); font-size: 12.5px; padding: 8px 10px; }
+
+/* ---- "Jump to latest" pill (smart autoscroll) -------------------------- */
+.jump-latest {
+  position: fixed; right: 28px; bottom: 28px; z-index: 30;
+  border: 1px solid var(--border-strong); border-radius: 999px;
+  padding: 9px 16px;
+  font-family: var(--mono); font-size: 12px; color: var(--text);
+  background: var(--surface);
+  backdrop-filter: blur(12px) saturate(130%);
+  box-shadow: var(--shadow); cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.jump-latest:hover { color: var(--b); border-color: rgba(43, 212, 192, 0.5); }
 
 /* ---- Settings modal --------------------------------------------------- */
 .overlay {
@@ -573,7 +660,9 @@ html[data-theme="light"] .topbar { background: rgba(238, 241, 247, 0.72); }
 html[data-theme="light"] .mark { background: rgba(0, 0, 0, 0.02); }
 html[data-theme="light"] textarea,
 html[data-theme="light"] select,
-html[data-theme="light"] input[type="number"] { background: rgba(255, 255, 255, 0.92); }
+html[data-theme="light"] input[type="number"],
+html[data-theme="light"] #workspace-opts input[type="text"],
+html[data-theme="light"] #reference-dir { background: rgba(255, 255, 255, 0.92); }
 html[data-theme="light"] .model-in { background: rgba(255, 255, 255, 0.92); }
 html[data-theme="light"] select option { background: #ffffff; color: var(--text); }
 html[data-theme="light"] .turn-head { background: rgba(20, 30, 55, 0.025); }
