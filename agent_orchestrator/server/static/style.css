@@ -602,6 +602,44 @@ html[data-theme="light"] .history-item:hover { background: rgba(20, 30, 55, 0.06
 /* ---- Live agent board (who's doing what, right now) --------------------- */
 .board { padding: 16px; position: sticky; top: 90px; align-self: start; }
 .board .panel-head { margin-bottom: 12px; }
+
+/* Interaction graph: nodes + animated pulses showing who talks to whom. */
+.graph { margin-bottom: 12px; }
+#graph-svg { width: 100%; height: auto; display: block; }
+.gedge { stroke: var(--border-strong); stroke-width: 1; opacity: 0.45; }
+.gnode .gbody { fill: rgba(255, 255, 255, 0.06); stroke: var(--border-strong); stroke-width: 1; }
+.gnode.acc-a .gbody { fill: var(--a); stroke: none; }
+.gnode.acc-b .gbody { fill: var(--b); stroke: none; }
+.gnode.acc-c .gbody { fill: var(--c); stroke: none; }
+.gtext { font: 700 10px var(--mono); fill: #08111a; }
+.gnode.gws .gtext { font-size: 13px; }
+html[data-theme="light"] .gnode.acc-a .gtext,
+html[data-theme="light"] .gnode.acc-b .gtext,
+html[data-theme="light"] .gnode.acc-c .gtext { fill: #fff; }
+.glabel {
+  font: 600 7.5px var(--mono); fill: var(--text-faint);
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.gring { fill: none; stroke: transparent; stroke-width: 2.5; }
+.gnode.active .gring { stroke: var(--b); animation: pulse 1.1s ease-in-out infinite; }
+.gnode.active .gbody { filter: drop-shadow(0 0 6px rgba(43, 212, 192, 0.55)); }
+.gdot { fill: var(--b); filter: drop-shadow(0 0 4px var(--b)); }
+.gdot.good { fill: var(--good); filter: drop-shadow(0 0 4px var(--good)); }
+.gdot.bad { fill: var(--bad); filter: drop-shadow(0 0 4px var(--bad)); }
+.gdot.soft { fill: var(--text-dim); filter: none; }
+.gline-hot { stroke: rgba(43, 212, 192, 0.4); stroke-width: 1.4; }
+.gline-hot.good { stroke: rgba(52, 211, 153, 0.45); }
+.gline-hot.bad { stroke: rgba(251, 113, 133, 0.45); }
+.gline-hot.soft { stroke: rgba(150, 170, 210, 0.3); }
+.graph-caption {
+  font-family: var(--mono); font-size: 10.5px; color: var(--text-dim);
+  text-align: center; min-height: 15px; margin-top: 5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.graph-caption.flash { animation: rise 0.25s ease both; }
+@media (max-width: 1280px) {
+  .graph { max-width: 300px; margin: 0 auto 12px; }
+}
 .board-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .brow {
   display: flex; align-items: center; gap: 10px;

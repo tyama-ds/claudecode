@@ -130,7 +130,13 @@ the transcript embedded in the prompt. Each turn is tagged `ctx: history` or
 Workspace / Team* — with a dot badge when a background tab updates. During a
 run, a **live agent board** docks on the right showing, for every participant,
 what it is doing *right now* — designing, implementing, or reviewing, with a
-pulsing working state, round number, and elapsed seconds. Quality of
+pulsing working state, round number, and elapsed seconds. Above it, an animated
+**interaction graph** (pure SVG, no dependencies) shows who is talking to whom:
+the active agent glows, dots flow along the edges — implementer → workspace
+while coding, workspace → reviewer while reviewing, conductor → worker on an
+assignment — coloured green for approvals and red for change requests /
+call-outs, with a running caption underneath (e.g. *"Codex → Claude Code ·
+requests changes"*). Quality of
 life built in: a **session history** (▤) that can reopen any past or running
 session with its full transcript replayed; one-click **Export** of the whole
 transcript as Markdown; form values (task, strategy, directories) that survive a

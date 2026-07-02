@@ -11,6 +11,7 @@ const state = {
   workspace: { files: {}, order: [], selected: null },
   team: { workers: {}, order: [], conductor: "", round: 0 },
   board: { order: [], roles: {} },   // live who's-doing-what panel
+  graph: { pos: null, names: {}, sustained: [], strategy: "" },  // interaction graph
   tab: "stream",     // active feed tab
   log: [],           // finished turns, for the Export button
   lang: localStorage.getItem("ao-lang") || "en",
@@ -66,6 +67,18 @@ const JA = {
   "Session ended with an error.": "セッションはエラーで終了しました。",
   "Failed to start.": "開始に失敗しました。",
   "Network error: ": "ネットワークエラー: ",
+  // interaction graph captions
+  "designing…": "設計中…",
+  "implementing…": "実装中…",
+  "reviewing…": "レビュー中…",
+  "working…": "作業中…",
+  "assign": "指示",
+  "deliver": "提出",
+  "approve": "承認 ✓",
+  "request changes": "修正依頼",
+  "call out": "指摘",
+  "propose design": "設計を提案",
+  "discuss design": "設計を議論",
   // agent board
   "Agents": "エージェント",
   "waiting": "待機",
@@ -651,18 +664,23 @@ function handleEvent(evt) {
     }
     if (data.strategy === "conductor_team") seedTeam(data.agents);
     seedBoard(data.agents);
+    seedGraph(data.agents, data.strategy);
   } else if (type === "artifact") {
     handleArtifact(data);
   } else if (type === "workspace_edit") {
     handleWorkspaceEdit(data);
+    graphEdit(data);
   } else if (type === "worker_status") {
     handleWorkerStatus(data);
+    graphWorker(data);
   } else if (type === "turn_start") {
     addThinkingCard(data);
     boardTurn(data, "start");
+    graphTurnStart(data);
   } else if (type === "turn_end") {
     fillCard(data);
     boardTurn(data, "end");
+    graphTurnEnd(data);
   } else if (type === "status") {
     addNote(data.message);
   } else if (type === "scratchpad") {
@@ -675,6 +693,219 @@ function handleEvent(evt) {
   } else if (type === "session_end") {
     finish(data.status);
   }
+}
+
+// -- live interaction graph (who is talking to whom, animated) ---------------
+const SVGNS = "http://www.w3.org/2000/svg";
+
+function svgEl(name, attrs) {
+  const el = document.createElementNS(SVGNS, name);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  return el;
+}
+
+// Lay out the participants: workspace hub for workspace_build, conductor hub
+// for conductor_team, otherwise a ring. "__ws__" is the workspace node.
+function seedGraph(agents, strategy) {
+  const g = state.graph = { pos: {}, names: { ...(agents || {}) }, sustained: [],
+                            strategy };
+  const roles = Object.keys(agents || {});
+  if (roles.length < 2) { $("#graph").hidden = true; g.pos = null; return; }
+  const W = 220, cx = W / 2, cy = 88;
+  const place = (role, x, y) => { g.pos[role] = { x: Math.round(x), y: Math.round(y) }; };
+  if (strategy === "workspace_build" && roles.includes("implementer")) {
+    g.names.__ws__ = "workspace";
+    const reviewers = roles.filter((r) => r !== "implementer");
+    place("__ws__", cx, cy);
+    place("implementer", 32, cy);
+    const n = reviewers.length;
+    reviewers.forEach((r, i) => {
+      const a = n === 1 ? 0 : (i / (n - 1) - 0.5) * 1.7; // fan on the right
+      place(r, cx + 76 * Math.cos(a), cy + 62 * Math.sin(a));
+    });
+  } else if (roles.includes("conductor")) {
+    place("conductor", cx, cy);
+    const rest = roles.filter((r) => r !== "conductor");
+    rest.forEach((r, i) => {
+      const a = -Math.PI / 2 + (i * 2 * Math.PI) / rest.length;
+      place(r, cx + 76 * Math.cos(a), cy + 62 * Math.sin(a));
+    });
+  } else {
+    const start = roles.length === 2 ? 0 : -Math.PI / 2;
+    roles.forEach((r, i) => {
+      const a = start + (i * 2 * Math.PI) / roles.length;
+      place(r, cx + 74 * Math.cos(a), cy + 60 * Math.sin(a));
+    });
+  }
+  renderGraph();
+  $("#graph-caption").textContent = "";
+  $("#graph").hidden = false;
+}
+
+function renderGraph() {
+  const g = state.graph;
+  const svg = $("#graph-svg");
+  svg.innerHTML = "";
+  const roles = Object.keys(g.pos);
+  // static edges: spokes to the hub, or a full mesh for rings
+  const hub = g.pos.__ws__ ? "__ws__" : (g.pos.conductor ? "conductor" : null);
+  const edges = [];
+  if (hub) roles.filter((r) => r !== hub).forEach((r) => edges.push([hub, r]));
+  else for (let i = 0; i < roles.length; i++)
+    for (let j = i + 1; j < roles.length; j++) edges.push([roles[i], roles[j]]);
+  edges.forEach(([a, b]) => svg.appendChild(svgEl("line", {
+    x1: g.pos[a].x, y1: g.pos[a].y, x2: g.pos[b].x, y2: g.pos[b].y, class: "gedge",
+  })));
+  roles.forEach((role) => {
+    const p = g.pos[role];
+    const isWs = role === "__ws__";
+    const grp = svgEl("g", {
+      class: `gnode ${isWs ? "gws" : accentFor(role)}`,
+      "data-role": role, transform: `translate(${p.x},${p.y})`,
+    });
+    grp.appendChild(svgEl("circle", { r: 19, class: "gring" }));
+    grp.appendChild(svgEl("circle", { r: 15, class: "gbody" }));
+    const txt = svgEl("text", { class: "gtext", "text-anchor": "middle", dy: isWs ? "4.5" : "3.5" });
+    txt.textContent = isWs ? "📁" : initials(g.names[role]);
+    grp.appendChild(txt);
+    const lbl = svgEl("text", { class: "glabel", "text-anchor": "middle", y: 31 });
+    lbl.textContent = isWs ? "workspace" : role;
+    grp.appendChild(lbl);
+    svg.appendChild(grp);
+  });
+}
+
+function setGraphActive(role) {
+  document.querySelectorAll("#graph-svg .gnode").forEach((n) =>
+    n.classList.toggle("active", n.dataset.role === role));
+}
+
+// Animate a dot travelling from one node to another (loops=Infinity keeps it
+// flowing until the returned cancel function is called).
+function graphPulse(from, to, cls = "", loops = 1) {
+  const g = state.graph;
+  const svg = $("#graph-svg");
+  if (!svg || !g.pos || !g.pos[from]) return () => {};
+  const stops = [];
+  (Array.isArray(to) ? to : [to]).forEach((dst) => {
+    if (!g.pos[dst] || dst === from) return;
+    const p1 = g.pos[from], p2 = g.pos[dst];
+    const line = svgEl("line", {
+      x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, class: "gline-hot " + cls,
+    });
+    svg.insertBefore(line, svg.querySelector(".gnode"));
+    const dot = svgEl("circle", { r: 3.4, cx: p1.x, cy: p1.y, class: "gdot " + cls });
+    svg.appendChild(dot);
+    const t0 = performance.now(), dur = 900;
+    let raf = 0, done = false;
+    const stop = () => {
+      if (done) return;
+      done = true; cancelAnimationFrame(raf); dot.remove(); line.remove();
+    };
+    const step = (now) => {
+      if (done) return;
+      const k = (now - t0) / dur;
+      if (loops !== Infinity && k >= loops) { stop(); return; }
+      const f = k % 1;
+      dot.setAttribute("cx", p1.x + (p2.x - p1.x) * f);
+      dot.setAttribute("cy", p1.y + (p2.y - p1.y) * f);
+      raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    stops.push(stop);
+  });
+  return () => stops.forEach((s) => s());
+}
+
+function clearSustainedPulses() {
+  state.graph.sustained.forEach((cancel) => cancel());
+  state.graph.sustained = [];
+}
+
+function graphCaption(text) {
+  const el = $("#graph-caption");
+  el.textContent = text;
+  el.classList.remove("flash");
+  void el.offsetWidth; // restart the entrance animation
+  el.classList.add("flash");
+}
+
+function graphTurnStart(d) {
+  const g = state.graph;
+  if (!g.pos || !g.pos[d.role]) return;
+  setGraphActive(d.role);
+  clearSustainedPulses();
+  const others = Object.keys(g.pos).filter((r) => r !== d.role && r !== "__ws__");
+  const name = g.names[d.role] || d.role;
+  if (d.action === "implement" && g.pos.__ws__) {
+    g.sustained.push(graphPulse(d.role, "__ws__", "", Infinity));
+    graphCaption(`${name} · ${t("implementing…")}`);
+  } else if (d.action === "review" && g.pos.__ws__) {
+    g.sustained.push(graphPulse("__ws__", d.role, "", Infinity));
+    graphCaption(`${name} · ${t("reviewing…")}`);
+  } else if (d.action === "design") {
+    graphPulse(d.role, others, "soft");
+    graphCaption(`${name} · ${t("designing…")}`);
+  } else {
+    graphPulse(d.role, others, "soft");
+    graphCaption(`${name} · ${t("working…")}`);
+  }
+}
+
+function graphTurnEnd(d) {
+  const g = state.graph;
+  if (!g.pos) return;
+  clearSustainedPulses();
+  setGraphActive(null);
+  if (!g.pos[d.role]) return;
+  const names = g.names;
+  if (d.action === "design" && d.role !== "implementer" && g.pos.implementer) {
+    graphPulse(d.role, "implementer", "soft");
+    graphCaption(`${names[d.role]} → ${names.implementer} · ${t("discuss design")}`);
+  } else if (d.action === "design" && d.role === "implementer") {
+    graphCaption(`${names[d.role]} · ${t("propose design")}`);
+  } else if (d.action === "review" && d.ok && g.pos.implementer) {
+    const up = (d.content || "").toUpperCase();
+    if (up.includes("REQUEST CHANGES")) {
+      graphPulse(d.role, "implementer", "bad");
+      graphCaption(`${names[d.role]} → ${names.implementer} · ${t("request changes")}`);
+    } else if (up.includes("APPROVE")) {
+      graphPulse(d.role, "implementer", "good");
+      graphCaption(`${names[d.role]} → ${names.implementer} · ${t("approve")}`);
+    }
+  }
+}
+
+// Conductor-team arrows come straight from worker_status events.
+function graphWorker(d) {
+  const g = state.graph;
+  if (!g.pos || !g.pos.conductor || !g.pos[d.worker]) return;
+  const map = {
+    assigned:  ["conductor", d.worker, "", "assign"],
+    delivered: [d.worker, "conductor", "soft", "deliver"],
+    ok:        ["conductor", d.worker, "good", "approve"],
+    warned:    ["conductor", d.worker, "bad", "call out"],
+  };
+  const m = map[d.status];
+  if (!m) return;
+  graphPulse(m[0], m[1], m[2]);
+  graphCaption(`${g.names[m[0]] || m[0]} → ${g.names[m[1]] || m[1]} · ${t(m[3])}`);
+}
+
+// A file landing in the workspace: pulse author → workspace with the path.
+function graphEdit(d) {
+  const g = state.graph;
+  if (!g.pos || !g.pos.__ws__ || !g.pos[d.role]) return;
+  graphPulse(d.role, "__ws__", "good");
+  graphCaption(`${d.author} → 📁 ${d.path}`);
+}
+
+function resetGraph() {
+  clearSustainedPulses();
+  state.graph = { pos: null, names: {}, sustained: [], strategy: "" };
+  $("#graph").hidden = true;
+  $("#graph-svg").innerHTML = "";
+  $("#graph-caption").textContent = "";
 }
 
 // -- live agent board (who's doing what, right now) --------------------------
@@ -734,6 +965,7 @@ function resetBoard() {
   $("#board").hidden = true;
   $("#board-list").innerHTML = "";
   document.querySelector(".console").classList.remove("has-board");
+  resetGraph();
 }
 
 // -- feed tabs ---------------------------------------------------------------
@@ -1077,6 +1309,8 @@ function addResult(content) {
 
 function finish(status) {
   if (state.es) { state.es.close(); state.es = null; }
+  clearSustainedPulses();
+  setGraphActive(null);
   $("#run").disabled = false;
   $("#stop").disabled = true;
   if (status === "done") { setConn("done", "done"); setStatus(t("Done.")); }
