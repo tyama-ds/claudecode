@@ -21,6 +21,7 @@ import json
 import logging
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from deep_research_tool.utils.helpers import extract_json_from_response
@@ -113,6 +114,16 @@ class FermiEstimate:
         if self.reasoning:
             lines += ["", "### 推論過程", "", self.reasoning]
         return "\n".join(lines)
+
+    def save_docx(self, filepath) -> Path:
+        """Save as a Word document (requires python-docx)."""
+        from .fermi_export import save_fermi_docx
+        return save_fermi_docx(self, filepath)
+
+    def save_pdf(self, filepath) -> Path:
+        """Save as a PDF document (requires reportlab)."""
+        from .fermi_export import save_fermi_pdf
+        return save_fermi_pdf(self, filepath)
 
 
 def format_number(value: float) -> str:

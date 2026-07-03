@@ -2201,6 +2201,10 @@ print(f"推定値: {result.value:,.0f} {result.unit}")
 print(f"範囲: {result.low:,.0f} 〜 {result.high:,.0f}")
 print(f"確信度: {result.confidence:.0%}")
 print(result.to_markdown())  # 要素分解表・前提条件・推論過程を含むMarkdown
+
+# Word / PDF として保存（オプション依存が必要）
+result.save_docx("./output/fermi_estimate.docx")  # pip install python-docx
+result.save_pdf("./output/fermi_estimate.pdf")    # pip install reportlab（日本語フォント対応）
 ```
 
 ### 仮GUI（フェルミ推定ツール）
@@ -2223,6 +2227,8 @@ GUIでは以下が設定できます：
 - 既知の値（「名前=数値」形式で1行ずつ）
 - 参考情報（調査結果の抜粋など）
 
+推定完了後は「**Word保存**」「**PDF保存**」ボタンで結果をファイルに出力できます（要 `python-docx` / `reportlab`）。
+
 ### 出力される情報
 
 | フィールド | 説明 |
@@ -2233,6 +2239,8 @@ GUIでは以下が設定できます：
 | `assumptions` | 推定の前提条件リスト |
 | `confidence` | 確信度（範囲の狭さと根拠の確度から算出） |
 | `to_markdown()` | レポート貼り付け用のMarkdown |
+| `save_docx(path)` | Word文書として保存（要 `python-docx`） |
+| `save_pdf(path)` | PDF文書として保存（要 `reportlab`、日本語フォント対応） |
 
 ---
 

@@ -523,67 +523,8 @@ class ReportGenerator:
 
     def _register_japanese_fonts(self):
         """Register Japanese fonts for PDF generation."""
-        from reportlab.pdfbase import pdfmetrics
-        from reportlab.pdfbase.ttfonts import TTFont
-        import os
-
-        # Try to register a Japanese font
-        font_registered = False
-        registered_font_name = None
-
-        # Common Japanese font paths on different systems
-        japanese_fonts = [
-            # Linux - Noto fonts (most common)
-            ("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc", "NotoSansCJK"),
-            ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "NotoSansCJK"),
-            ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", "NotoSansCJK"),
-            # Linux - other fonts
-            ("/usr/share/fonts/truetype/takao-gothic/TakaoPGothic.ttf", "TakaoPGothic"),
-            ("/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf", "IPAGothic"),
-            ("/usr/share/fonts/truetype/vlgothic/VL-Gothic-Regular.ttf", "VLGothic"),
-            ("/usr/share/fonts/truetype/fonts-japanese-gothic.ttf", "JapaneseGothic"),
-            # Google fonts location
-            ("/usr/share/fonts/truetype/noto/NotoSansJP-Regular.ttf", "NotoSansJP"),
-            # macOS
-            ("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc", "Hiragino"),
-            ("/Library/Fonts/Arial Unicode.ttf", "ArialUnicode"),
-            # Windows
-            ("C:/Windows/Fonts/msgothic.ttc", "MSGothic"),
-            ("C:/Windows/Fonts/meiryo.ttc", "Meiryo"),
-            ("C:/Windows/Fonts/YuGothic.ttc", "YuGothic"),
-        ]
-
-        for font_path, font_name in japanese_fonts:
-            if os.path.exists(font_path):
-                try:
-                    pdfmetrics.registerFont(TTFont(font_name, font_path))
-                    font_registered = True
-                    registered_font_name = font_name
-                    break
-                except Exception as e:
-                    # Font might be in use or incompatible
-                    continue
-
-        # Try CID fonts as fallback (built into reportlab for Asian languages)
-        if not font_registered:
-            try:
-                from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-                pdfmetrics.registerFont(UnicodeCIDFont('HeiseiKakuGo-W5'))
-                registered_font_name = 'HeiseiKakuGo-W5'
-                font_registered = True
-            except Exception:
-                pass
-
-            if not font_registered:
-                try:
-                    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-                    pdfmetrics.registerFont(UnicodeCIDFont('HeiseiMin-W3'))
-                    registered_font_name = 'HeiseiMin-W3'
-                    font_registered = True
-                except Exception:
-                    pass
-
-        return registered_font_name
+        from deep_research_tool.utils.fonts import register_japanese_font
+        return register_japanese_font()
 
     def _generate_pdf(
         self,

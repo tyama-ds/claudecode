@@ -13,7 +13,7 @@ Usage:
 
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import ttk, filedialog, messagebox, scrolledtext
 
 
 class FermiEstimatorGUI:
@@ -23,6 +23,7 @@ class FermiEstimatorGUI:
         self.root = root
         self.root.title("フェルミ推定ツール (仮) - Deep Research Tool")
         self.root.geometry("820x680")
+        self.last_estimate = None  # Most recent FermiEstimate for export
         self._build_widgets()
 
     def _build_widgets(self):
@@ -76,11 +77,17 @@ class FermiEstimatorGUI:
         self.context_text = tk.Text(main, height=3, width=100)
         self.context_text.pack(fill=tk.X, pady=(2, 8))
 
-        # --- Run button + status ---
+        # --- Run/save buttons + status ---
         btn_frame = ttk.Frame(main)
         btn_frame.pack(fill=tk.X, pady=(0, 8))
         self.run_button = ttk.Button(btn_frame, text="推定実行", command=self._on_run)
         self.run_button.pack(side=tk.LEFT)
+        self.save_docx_button = ttk.Button(
+            btn_frame, text="Word保存", command=self._on_save_docx, state=tk.DISABLED)
+        self.save_docx_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.save_pdf_button = ttk.Button(
+            btn_frame, text="PDF保存", command=self._on_save_pdf, state=tk.DISABLED)
+        self.save_pdf_button.pack(side=tk.LEFT, padx=(8, 0))
         self.status_var = tk.StringVar(value="準備完了")
         ttk.Label(btn_frame, textvariable=self.status_var).pack(side=tk.LEFT, padx=12)
 
@@ -136,20 +143,60 @@ class FermiEstimatorGUI:
                 context=self.context_text.get("1.0", tk.END).strip(),
                 known_values=self._parse_known_values(),
             )
-            self.root.after(0, self._show_result, result.to_markdown())
+            self.root.after(0, self._show_result, result)
         except Exception as e:
             self.root.after(0, self._show_error, str(e))
 
-    def _show_result(self, markdown: str):
-        self.result_text.insert("1.0", markdown)
+    def _show_result(self, estimate):
+        self.last_estimate = estimate
+        self.result_text.insert("1.0", estimate.to_markdown())
         self.status_var.set("完了")
         self.run_button.config(state=tk.NORMAL)
+        self.save_docx_button.config(state=tk.NORMAL)
+        self.save_pdf_button.config(state=tk.NORMAL)
 
     def _show_error(self, message: str):
         self.result_text.insert("1.0", f"エラー: {message}\n")
         self.status_var.set("エラー")
         self.run_button.config(state=tk.NORMAL)
         messagebox.showerror("推定エラー", message)
+
+    def _on_save_docx(self):
+        self._save_estimate(
+            extension=".docx",
+            filetypes=[("Word文書", "*.docx")],
+            save_func=lambda est, path: est.save_docx(path),
+        )
+
+    def _on_save_pdf(self):
+        self._save_estimate(
+            extension=".pdf",
+            filetypes=[("PDF文書", "*.pdf")],
+            save_func=lambda est, path: est.save_pdf(path),
+        )
+
+    def _save_estimate(self, extension: str, filetypes, save_func):
+        if self.last_estimate is None:
+            messagebox.showwarning("保存エラー", "先に推定を実行してください。")
+            return
+
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=extension,
+            filetypes=filetypes,
+            initialfile=f"fermi_estimate{extension}",
+        )
+        if not filepath:
+            return
+
+        try:
+            saved = save_func(self.last_estimate, filepath)
+            self.status_var.set(f"保存しました: {saved}")
+            messagebox.showinfo("保存完了", f"保存しました:\n{saved}")
+        except ImportError as e:
+            # Missing optional dependency (python-docx / reportlab)
+            messagebox.showerror("依存パッケージ不足", str(e))
+        except Exception as e:
+            messagebox.showerror("保存エラー", str(e))
 
 
 def main():

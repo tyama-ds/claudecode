@@ -64,6 +64,11 @@ from .fermi_estimator import (
     FermiFactor,
 )
 
+from .fermi_export import (
+    save_fermi_docx,
+    save_fermi_pdf,
+)
+
 from .extension_interface import (
     ExtensionConfig,
     DeepThinkExtension,
@@ -98,6 +103,8 @@ __all__ = [
     "FermiEstimator",
     "FermiEstimate",
     "FermiFactor",
+    "save_fermi_docx",
+    "save_fermi_pdf",
     # Extensions
     "ExtensionConfig",
     "DeepThinkExtension",

@@ -126,3 +126,45 @@ class TestFormatNumber:
 
     def test_moderate_plain(self):
         assert format_number(2500) == "2,500"
+
+
+class TestFermiExport:
+    """Word/PDF export of Fermi estimates."""
+
+    @pytest.fixture
+    def estimate(self):
+        estimator = FermiEstimator(llm_client=_mock_llm(PIANO_TUNER_PAYLOAD))
+        return estimator.estimate("日本のピアノ調律師の人数は？")
+
+    def test_save_docx(self, estimate, tmp_path):
+        pytest.importorskip("docx")
+        path = estimate.save_docx(tmp_path / "fermi_test")
+        assert path.exists()
+        assert path.suffix == ".docx"
+
+        from docx import Document
+        doc = Document(path)
+        full_text = "\n".join(p.text for p in doc.paragraphs)
+        assert "フェルミ推定" in full_text
+        assert len(doc.tables) == 1
+        assert len(doc.tables[0].rows) == 4  # header + 3 factors
+
+    def test_save_pdf(self, estimate, tmp_path):
+        pytest.importorskip("reportlab")
+        path = estimate.save_pdf(tmp_path / "fermi_test")
+        assert path.exists()
+        assert path.suffix == ".pdf"
+        assert path.read_bytes()[:5] == b"%PDF-"
+
+    def test_save_docx_missing_dependency_raises_import_error(self, estimate, tmp_path, monkeypatch):
+        import builtins
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "docx" or name.startswith("docx."):
+                raise ImportError("No module named 'docx'")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        with pytest.raises(ImportError, match="python-docx"):
+            estimate.save_docx(tmp_path / "fermi_test")
