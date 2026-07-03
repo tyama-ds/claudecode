@@ -86,7 +86,12 @@ class Session:
     references: List[Tuple[str, str]] = field(default_factory=list)  # (relpath, content)
     personas: Dict[str, str] = field(default_factory=dict)  # per-role system-prompt overrides
     role_order: List[str] = field(default_factory=list)     # ordered roles (used by custom strategy)
+    supervisors: Dict[str, str] = field(default_factory=dict)  # role -> supervisor role (org chart)
+    tools: List[str] = field(default_factory=list)           # tool names agents may call
     stop_requested: bool = False
+    finish_requested: bool = False                           # human asked to wrap up gracefully
+    result: str = ""                                         # final deliverable (set by the engine)
+    parent_id: Optional[str] = None                          # session this one reworks (feedback)
     created: float = field(default_factory=time.time)       # unix ts, for the history list
 
     # -- helpers used by the engine/strategies ----------------------------

@@ -11,7 +11,8 @@ const state = {
   workspace: { files: {}, order: [], selected: null },
   team: { workers: {}, order: [], conductor: "", round: 0 },
   board: { order: [], roles: {} },   // live who's-doing-what panel
-  graph: { pos: null, names: {}, sustained: [], strategy: "" },  // interaction graph
+  graph: { pos: null, names: {}, edges: [], sup: {}, sustained: {}, strategy: "",
+           edit: false, sel: null },  // interaction graph (+ org-chart edit mode)
   tab: "stream",     // active feed tab
   log: [],           // finished turns, for the Export button
   lang: localStorage.getItem("ao-lang") || "en",
@@ -72,6 +73,13 @@ const JA = {
   "implementing…": "実装中…",
   "reviewing…": "レビュー中…",
   "working…": "作業中…",
+  "assigning…": "割り当て中…",
+  "integrating…": "統合中…",
+  "reports up": "報告",
+  "Click a member, then its new supervisor": "メンバー → 新しい上司の順にクリックで変更",
+  "now reports to": "の上司を変更 →",
+  "pick its new supervisor": "新しい上司をクリック",
+  "cannot supervise": "は上司にできません",
   "assign": "指示",
   "deliver": "提出",
   "approve": "承認 ✓",
@@ -91,7 +99,25 @@ const JA = {
   // role builder
   "Persona": "ペルソナ",
   "Implementer": "実装役",
+  "Manager": "マネージャー",
   "+ Add reviewer": "+ レビュアーを追加",
+  "+ Add conductor": "+ コンダクターを追加",
+  "Reports to": "上司",
+  // run controls
+  "Finish": "仕上げて終了",
+  "Finishing…": "仕上げをリクエストしました…",
+  "No limit — until declared done or you press Finish": "無制限 — 完了宣言か Finish 押下まで",
+  "Agent tools": "エージェント用ツール",
+  "(optional — usable by every agent)": "（任意 — 全エージェントが使用可）",
+  "(list workspace files)": "（ワークスペースのファイル一覧）",
+  "(read a workspace file)": "（ファイルを読む）",
+  "(shell commands in the workspace — trust required)": "（ワークスペースでシェル実行 — 要信頼）",
+  "(fetch a URL)": "（URLを取得）",
+  "Not satisfied? Send feedback": "不満があればフィードバック",
+  "What should be improved? The team reworks the task with this feedback…":
+    "どこを改善してほしいですか？ このフィードバック付きでチームが再作業します…",
+  "Rework with feedback": "フィードバックで再作業",
+  "Please enter feedback first.": "先にフィードバックを入力してください。",
   "model (optional — uses default)": "モデル（任意・未入力なら既定値）",
   "Leave blank to use the default persona below": "空欄なら下記の既定ペルソナを使用",
   "Describe this participant's role / character (optional)": "この参加者の役割・キャラクターを記述（任意）",
@@ -165,10 +191,11 @@ function toggleLang() {
 
 // Which accent bucket a role belongs to (drives the card colour).
 function accentFor(role) {
-  if (["implementer", "agent_a", "planner", "conductor"].includes(role)) return "acc-a";
+  if (["implementer", "agent_a", "planner", "conductor", "manager"].includes(role)) return "acc-a";
   if (["reviewer", "agent_b", "executor"].includes(role)) return "acc-b";
   const rv = /^reviewer_(\d+)$/.exec(role); // workspace_build review panel
   if (rv) return ["acc-b", "acc-c"][(parseInt(rv[1], 10) - 1) % 2];
+  if (/^conductor_\d+$/.test(role)) return "acc-c"; // org_team mid-managers
   const m = /^(?:agent|worker)_(\d+)$/.exec(role); // custom / team members
   if (m) return ["acc-a", "acc-b", "acc-c"][(parseInt(m[1], 10) - 1) % 3];
   return "acc-c"; // synthesizer / judge / anything else
@@ -219,7 +246,7 @@ const STRATEGY_GROUPS = [
   ["Discuss & decide", ["implementer_reviewer", "debate_consensus", "planner_executor",
     "round_robin", "panel_judge", "custom"]],
   ["Author together", ["doc_authoring", "code_authoring", "workspace_build"]],
-  ["Team play", ["conductor_team"]],
+  ["Team play", ["conductor_team", "org_team"]],
 ];
 
 async function loadCatalog() {
@@ -263,13 +290,155 @@ function renderRoles() {
   $("#strategy-desc").textContent = st.description;
   $("#rounds").value = st.default_rounds;
   $("#workspace-opts").hidden = st.name !== "workspace_build";
+  $("#rounds-inf-wrap").hidden = !st.supports_unlimited;
+  if (!st.supports_unlimited) $("#rounds-inf").checked = false;
+  $("#rounds").disabled = $("#rounds-inf").checked && !!st.supports_unlimited;
 
   const wrap = $("#roles");
   wrap.innerHTML = "";
+  if (st.name !== "org_team" && !state.es) resetBoard(); // drop a stale org preview
   if (st.name === "conductor_team") { renderConductorBuilder(wrap); return; }
   if (st.name === "workspace_build") { renderWorkspaceBuilder(wrap, st); return; }
+  if (st.name === "org_team") { renderOrgBuilder(wrap); return; }
   if (st.custom) { renderCustomBuilder(wrap); return; }
   st.roles.forEach((role) => wrap.appendChild(roleCard(role.key, role.label, role.system || "", false)));
+}
+
+// -- org_team builder: manager + conductors + workers, with a chain of command --
+const ORG_DEFAULTS = {
+  manager: "Top manager: decomposes the task, directs the units, integrates results, "
+    + "and declares DONE when the whole task is complete.",
+  conductor: "Mid-level manager: decomposes the unit's objective for their reports, "
+    + "holds them accountable, integrates their work, and reports upward.",
+  worker: "Carries out the exact assignment given, concretely and in full.",
+};
+
+function renderOrgBuilder(wrap) {
+  wrap.appendChild(roleCard("manager", t("Manager"), ORG_DEFAULTS.manager, false));
+
+  const mids = document.createElement("div");
+  mids.id = "org-mids"; mids.className = "roles";
+  wrap.appendChild(mids);
+  const addC = document.createElement("button");
+  addC.type = "button"; addC.className = "btn ghost add-conductor";
+  addC.textContent = t("+ Add conductor");
+  addC.addEventListener("click", () => addOrgMember(mids, "conductor"));
+  wrap.appendChild(addC);
+
+  const workers = document.createElement("div");
+  workers.id = "org-workers"; workers.className = "roles";
+  wrap.appendChild(workers);
+  const addW = document.createElement("button");
+  addW.type = "button"; addW.className = "btn ghost add-org-worker";
+  addW.textContent = t("+ Add worker");
+  addW.addEventListener("click", () => addOrgMember(workers, "worker"));
+  wrap.appendChild(addW);
+
+  addOrgMember(mids, "conductor");
+  addOrgMember(workers, "worker");
+  addOrgMember(workers, "worker");
+}
+
+function addOrgMember(holder, kind) {
+  const max = kind === "conductor" ? 3 : 8;
+  if (holder.children.length >= max) return;
+  const i = holder.children.length + 1;
+  const label = (kind === "conductor" ? t("Conductor") : t("Worker")) + " " + i;
+  const card = roleCard(kind + "_" + i, label, ORG_DEFAULTS[kind], true);
+  attachSupSelect(card);
+  holder.appendChild(card);
+  relabelOrg(holder, kind);
+  refreshOrgSup();
+}
+
+function relabelOrg(holder, kind) {
+  Array.from(holder.children).forEach((card, i) => {
+    const key = kind + "_" + (i + 1);
+    const bucket = accentFor(key);
+    card.className = "role " + (bucket === "acc-b" ? "b" : bucket === "acc-c" ? "c" : "");
+    card.querySelector(".role-name").childNodes[0].nodeValue =
+      (kind === "conductor" ? t("Conductor") : t("Worker")) + " " + (i + 1);
+    card.querySelector("select").dataset.role = key;
+  });
+  const btn = document.querySelector(kind === "conductor" ? ".add-conductor" : ".add-org-worker");
+  if (btn) btn.disabled = holder.children.length >= (kind === "conductor" ? 3 : 8);
+}
+
+function attachSupSelect(card) {
+  const lab = document.createElement("div");
+  lab.className = "sup-label";
+  lab.textContent = t("Reports to");
+  card.appendChild(lab);
+  const sw = document.createElement("div");
+  sw.className = "select-wrap";
+  const sel = document.createElement("select");
+  sel.className = "sup-in";
+  sel.addEventListener("change", renderOrgPreview);
+  sw.appendChild(sel);
+  card.appendChild(sw);
+}
+
+// Rebuild every "Reports to" dropdown after membership changes.
+function refreshOrgSup() {
+  const conductors = Array.from(document.querySelectorAll("#org-mids > .role select[data-role]"))
+    .map((s) => s.dataset.role);
+  document.querySelectorAll("#org-mids > .role, #org-workers > .role").forEach((card) => {
+    const key = card.querySelector("select").dataset.role;
+    const sel = card.querySelector(".sup-in");
+    if (!sel) return;
+    const isConductor = key.startsWith("conductor");
+    const options = ["manager", ...conductors.filter((c) => c !== key)];
+    const prev = sel.value;
+    sel.innerHTML = "";
+    options.forEach((o) => {
+      const opt = document.createElement("option");
+      opt.value = o; opt.textContent = o;
+      sel.appendChild(opt);
+    });
+    sel.value = options.includes(prev) ? prev
+      : (isConductor ? "manager" : (conductors[0] || "manager"));
+  });
+  renderOrgPreview();
+}
+
+// Current hierarchy from the builder DOM (cycles fall back to the manager).
+function orgBuilderHierarchy() {
+  const order = ["manager"];
+  const sup = {};
+  document.querySelectorAll("#org-mids > .role, #org-workers > .role").forEach((card) => {
+    const key = card.querySelector("select").dataset.role;
+    order.push(key);
+    const sel = card.querySelector(".sup-in");
+    sup[key] = (sel && sel.value) || "manager";
+  });
+  for (const r of order) {
+    const seen = new Set([r]);
+    let p = sup[r];
+    while (p && p !== "manager") {
+      if (seen.has(p)) { sup[r] = "manager"; break; }
+      seen.add(p);
+      p = sup[p];
+    }
+  }
+  return { order, sup };
+}
+
+// Live editable org-chart preview in the right panel (before the run starts).
+function renderOrgPreview() {
+  const st = currentStrategy();
+  if (!st || st.name !== "org_team" || document.querySelector("#org-mids") === null) return;
+  const { order, sup } = orgBuilderHierarchy();
+  const names = {};
+  order.forEach((r) => { names[r] = r; });
+  const g = state.graph = { pos: {}, names, edges: [], sup, sustained: {},
+                            strategy: "org_team", edit: true, sel: null };
+  layoutHierarchy(order, sup);
+  renderGraph();
+  $("#graph").hidden = false;
+  $("#board").hidden = false;
+  document.querySelector(".console").classList.add("has-board");
+  $("#board-list").innerHTML = "";
+  graphCaption(t("Click a member, then its new supervisor"));
 }
 
 // Workspace build: one implementer + 1–3 reviewers (add/remove).
@@ -367,10 +536,14 @@ function roleCard(key, label, defaultSystem, removable) {
     rm.addEventListener("click", () => {
       const h = box.parentElement;
       if (h && h.id === "reviewers" && h.children.length <= 1) return; // keep ≥1 reviewer
+      if (h && h.id === "org-workers" && h.children.length <= 1) return; // keep ≥1 worker
       box.remove();
       if (h && h.id === "workers") relabelWorkers(h);
       else if (h && h.id === "reviewers") relabelReviewers(h);
-      else relabelParticipants(h);
+      else if (h && (h.id === "org-mids" || h.id === "org-workers")) {
+        relabelOrg(h, h.id === "org-mids" ? "conductor" : "worker");
+        refreshOrgSup();
+      } else relabelParticipants(h);
     });
     name.appendChild(rm);
   }
@@ -472,6 +645,13 @@ function rolesPayload() {
     });
     return { roles, role_order: order };
   }
+  if (st && st.name === "org_team") {
+    const { order, sup } = orgBuilderHierarchy();
+    document.querySelectorAll("#roles .role").forEach((card) => {
+      roles[card.querySelector("select").dataset.role] = collectRole(card);
+    });
+    return { roles, role_order: order, supervisors: sup };
+  }
   if (st && st.name === "workspace_build") {
     const order = ["implementer"];
     roles.implementer = collectRole(document.querySelector("#roles > .role"));
@@ -559,22 +739,41 @@ function resetRunUI() {
   $("#team-roster").innerHTML = "";
   $("#meta").textContent = "";
   $("#export-md").hidden = true;
+  $("#feedback-wrap").hidden = true;
   setSeg("preview");
   resetBoard();
 }
 
-async function run() {
+async function run() { return startRun({}); }
+
+// Human feedback on the finished result -> the same team reworks the task.
+async function rework() {
+  const fb = $("#feedback").value.trim();
+  if (!fb) { setStatus(t("Please enter feedback first."), true); return; }
+  if (!state.sessionId) return;
+  const extra = { feedback: fb, parent_session: state.sessionId };
+  $("#feedback").value = "";
+  return startRun(extra);
+}
+
+async function startRun(extra) {
   const task = $("#task").value.trim();
   if (!task) { setStatus(t("Please enter a task."), true); return; }
 
+  const st = currentStrategy();
+  const unlimited = st && st.supports_unlimited && $("#rounds-inf").checked;
   const rp = rolesPayload();
   const payload = {
     task,
     strategy: $("#strategy").value,
-    rounds: parseInt($("#rounds").value, 10) || 2,
+    rounds: unlimited ? 0 : (parseInt($("#rounds").value, 10) || 2),
     roles: rp.roles,
   };
   if (rp.role_order) payload.role_order = rp.role_order;
+  if (rp.supervisors) payload.supervisors = rp.supervisors;
+  const tools = Array.from(document.querySelectorAll(".tool-check:checked"))
+    .map((c) => c.value);
+  if (tools.length) payload.tools = tools;
   const refDir = $("#reference-dir").value.trim();
   if (refDir) payload.reference_dir = refDir;
   if ($("#strategy").value === "workspace_build") {
@@ -582,6 +781,7 @@ async function run() {
     if (ws) payload.workspace = ws;
     payload.create_dir = $("#workspace-init").checked;
   }
+  Object.assign(payload, extra || {});
   persistForm();
 
   setStatus(t("Starting…"));
@@ -610,7 +810,16 @@ async function run() {
   state.sessionId = data.session_id;
   resetRunUI();
   $("#stop").disabled = false;
+  $("#finish").disabled = false;
   openStream(data.session_id);
+}
+
+// Graceful wrap-up: stop looping and produce the final deliverable now.
+async function requestFinish() {
+  if (!state.sessionId) return;
+  $("#finish").disabled = true;
+  await fetch(`/api/finish/${state.sessionId}`, { method: "POST" });
+  setStatus(t("Finishing…"));
 }
 
 function openStream(id) {
@@ -632,7 +841,8 @@ function openStream(id) {
 function openSession(id) {
   state.sessionId = id;
   resetRunUI();
-  $("#stop").disabled = false; // session_end in the replay re-disables it
+  $("#stop").disabled = false; // session_end in the replay re-disables these
+  $("#finish").disabled = false;
   setStatus("");
   openStream(id);
 }
@@ -664,7 +874,10 @@ function handleEvent(evt) {
     }
     if (data.strategy === "conductor_team") seedTeam(data.agents);
     seedBoard(data.agents);
-    seedGraph(data.agents, data.strategy);
+    seedGraph(data.agents, data.strategy, data.supervisors);
+  } else if (type === "tool_use") {
+    addNote(`🔧 ${data.agent} · ${data.tool}: ${data.input}`);
+    graphCaption(`${data.agent} · 🔧 ${data.tool}`);
   } else if (type === "artifact") {
     handleArtifact(data);
   } else if (type === "workspace_edit") {
@@ -704,16 +917,47 @@ function svgEl(name, attrs) {
   return el;
 }
 
-// Lay out the participants: workspace hub for workspace_build, conductor hub
-// for conductor_team, otherwise a ring. "__ws__" is the workspace node.
-function seedGraph(agents, strategy) {
-  const g = state.graph = { pos: {}, names: { ...(agents || {}) }, sustained: [],
-                            strategy };
+// Layered tree layout for a chain of command; fills g.pos and g.edges.
+function layoutHierarchy(roles, sup) {
+  const g = state.graph;
+  const depth = {};
+  const d = (r, seen) => {
+    if (depth[r] != null) return depth[r];
+    const p = sup[r];
+    if (!p || !roles.includes(p) || seen.has(p)) { depth[r] = 0; return 0; }
+    seen.add(r);
+    depth[r] = d(p, seen) + 1;
+    return depth[r];
+  };
+  roles.forEach((r) => d(r, new Set([r])));
+  const byLevel = {};
+  roles.forEach((r) => { (byLevel[depth[r]] = byLevel[depth[r]] || []).push(r); });
+  const levels = Object.keys(byLevel).map(Number).sort((a, b) => a - b);
+  const W = 220;
+  const yStep = levels.length > 1 ? Math.min(60, 128 / (levels.length - 1)) : 0;
+  levels.forEach((lv, li) => {
+    const members = byLevel[lv];
+    members.forEach((r, i) => {
+      g.pos[r] = { x: Math.round(((i + 1) * W) / (members.length + 1)),
+                   y: Math.round(28 + li * yStep) };
+    });
+  });
+  g.edges = roles.filter((r) => sup[r] && g.pos[sup[r]]).map((r) => [sup[r], r]);
+}
+
+// Lay out the participants: chain of command when supervisors exist, workspace
+// hub for workspace_build, conductor hub, otherwise a ring. "__ws__" = workspace.
+function seedGraph(agents, strategy, supervisors) {
+  const g = state.graph = { pos: {}, names: { ...(agents || {}) }, edges: [],
+                            sup: supervisors || {}, sustained: {}, strategy,
+                            edit: false, sel: null };
   const roles = Object.keys(agents || {});
   if (roles.length < 2) { $("#graph").hidden = true; g.pos = null; return; }
   const W = 220, cx = W / 2, cy = 88;
   const place = (role, x, y) => { g.pos[role] = { x: Math.round(x), y: Math.round(y) }; };
-  if (strategy === "workspace_build" && roles.includes("implementer")) {
+  if (supervisors && Object.keys(supervisors).length) {
+    layoutHierarchy(roles, supervisors);
+  } else if (strategy === "workspace_build" && roles.includes("implementer")) {
     g.names.__ws__ = "workspace";
     const reviewers = roles.filter((r) => r !== "implementer");
     place("__ws__", cx, cy);
@@ -723,6 +967,8 @@ function seedGraph(agents, strategy) {
       const a = n === 1 ? 0 : (i / (n - 1) - 0.5) * 1.7; // fan on the right
       place(r, cx + 76 * Math.cos(a), cy + 62 * Math.sin(a));
     });
+    Object.keys(g.pos).filter((r) => r !== "__ws__")
+      .forEach((r) => g.edges.push(["__ws__", r]));
   } else if (roles.includes("conductor")) {
     place("conductor", cx, cy);
     const rest = roles.filter((r) => r !== "conductor");
@@ -730,12 +976,15 @@ function seedGraph(agents, strategy) {
       const a = -Math.PI / 2 + (i * 2 * Math.PI) / rest.length;
       place(r, cx + 76 * Math.cos(a), cy + 62 * Math.sin(a));
     });
+    rest.forEach((r) => g.edges.push(["conductor", r]));
   } else {
     const start = roles.length === 2 ? 0 : -Math.PI / 2;
     roles.forEach((r, i) => {
       const a = start + (i * 2 * Math.PI) / roles.length;
       place(r, cx + 74 * Math.cos(a), cy + 60 * Math.sin(a));
     });
+    for (let i = 0; i < roles.length; i++)
+      for (let j = i + 1; j < roles.length; j++) g.edges.push([roles[i], roles[j]]);
   }
   renderGraph();
   $("#graph-caption").textContent = "";
@@ -747,37 +996,66 @@ function renderGraph() {
   const svg = $("#graph-svg");
   svg.innerHTML = "";
   const roles = Object.keys(g.pos);
-  // static edges: spokes to the hub, or a full mesh for rings
-  const hub = g.pos.__ws__ ? "__ws__" : (g.pos.conductor ? "conductor" : null);
-  const edges = [];
-  if (hub) roles.filter((r) => r !== hub).forEach((r) => edges.push([hub, r]));
-  else for (let i = 0; i < roles.length; i++)
-    for (let j = i + 1; j < roles.length; j++) edges.push([roles[i], roles[j]]);
-  edges.forEach(([a, b]) => svg.appendChild(svgEl("line", {
+  g.edges.forEach(([a, b]) => svg.appendChild(svgEl("line", {
     x1: g.pos[a].x, y1: g.pos[a].y, x2: g.pos[b].x, y2: g.pos[b].y, class: "gedge",
   })));
+  const crowded = roles.length > 6;
   roles.forEach((role) => {
     const p = g.pos[role];
     const isWs = role === "__ws__";
     const grp = svgEl("g", {
-      class: `gnode ${isWs ? "gws" : accentFor(role)}`,
+      class: `gnode ${isWs ? "gws" : accentFor(role)}`
+        + (g.edit ? " clickable" : "") + (g.sel === role ? " selected" : ""),
       "data-role": role, transform: `translate(${p.x},${p.y})`,
     });
-    grp.appendChild(svgEl("circle", { r: 19, class: "gring" }));
-    grp.appendChild(svgEl("circle", { r: 15, class: "gbody" }));
-    const txt = svgEl("text", { class: "gtext", "text-anchor": "middle", dy: isWs ? "4.5" : "3.5" });
+    const r = crowded ? 11 : 15;
+    grp.appendChild(svgEl("circle", { r: r + 4, class: "gring" }));
+    grp.appendChild(svgEl("circle", { r, class: "gbody" }));
+    const txt = svgEl("text", { class: "gtext" + (crowded ? " small" : ""),
+      "text-anchor": "middle", dy: isWs ? "4.5" : "3.5" });
     txt.textContent = isWs ? "📁" : initials(g.names[role]);
     grp.appendChild(txt);
-    const lbl = svgEl("text", { class: "glabel", "text-anchor": "middle", y: 31 });
+    const lbl = svgEl("text", { class: "glabel", "text-anchor": "middle", y: r + 15 });
     lbl.textContent = isWs ? "workspace" : role;
     grp.appendChild(lbl);
+    if (g.edit) grp.addEventListener("click", () => orgNodeClick(role));
     svg.appendChild(grp);
   });
 }
 
-function setGraphActive(role) {
-  document.querySelectorAll("#graph-svg .gnode").forEach((n) =>
-    n.classList.toggle("active", n.dataset.role === role));
+// Click-to-rewire in the org-chart editor: pick a member, then its new boss.
+function orgNodeClick(role) {
+  const g = state.graph;
+  if (!g.edit) return;
+  if (!g.sel) {
+    if (role === "manager") { graphCaption(t("Click a member, then its new supervisor")); return; }
+    g.sel = role;
+    renderGraph();
+    graphCaption(`${role} ${t("now reports to")} — ${t("pick its new supervisor")}`);
+    return;
+  }
+  if (g.sel === role) { g.sel = null; renderGraph(); return; }
+  const child = g.sel;
+  const okBoss = role === "manager" || /^conductor_\d+$/.test(role);
+  let descendant = false; // the new boss must not sit below the child
+  let p = g.sup[role];
+  while (p) { if (p === child) { descendant = true; break; } p = g.sup[p]; }
+  if (!okBoss || descendant) {
+    graphCaption(`${role} ${t("cannot supervise")}`);
+    g.sel = null;
+    renderGraph();
+    return;
+  }
+  const card = document.querySelector(`#roles select[data-role="${child}"]`);
+  const supSel = card && card.closest(".role").querySelector(".sup-in");
+  if (supSel) { supSel.value = role; }
+  graphCaption(`${child} → ${role} ✓`);
+  renderOrgPreview();
+}
+
+function markGraphActive(role, on) {
+  const node = document.querySelector(`#graph-svg .gnode[data-role="${role}"]`);
+  if (node) node.classList.toggle("active", on);
 }
 
 // Animate a dot travelling from one node to another (loops=Infinity keeps it
@@ -817,9 +1095,16 @@ function graphPulse(from, to, cls = "", loops = 1) {
   return () => stops.forEach((s) => s());
 }
 
-function clearSustainedPulses() {
-  state.graph.sustained.forEach((cancel) => cancel());
-  state.graph.sustained = [];
+// Sustained pulses are tracked per role, so parallel turns coexist.
+function clearSustainedPulses(role) {
+  const sus = state.graph.sustained || {};
+  const keys = role ? [role] : Object.keys(sus);
+  keys.forEach((k) => { (sus[k] || []).forEach((cancel) => cancel()); delete sus[k]; });
+}
+
+function addSustained(role, cancel) {
+  const sus = state.graph.sustained;
+  (sus[role] = sus[role] || []).push(cancel);
 }
 
 function graphCaption(text) {
@@ -832,17 +1117,23 @@ function graphCaption(text) {
 
 function graphTurnStart(d) {
   const g = state.graph;
-  if (!g.pos || !g.pos[d.role]) return;
-  setGraphActive(d.role);
-  clearSustainedPulses();
+  if (!g.pos || g.edit || !g.pos[d.role]) return;
+  markGraphActive(d.role, true);
+  clearSustainedPulses(d.role);
   const others = Object.keys(g.pos).filter((r) => r !== d.role && r !== "__ws__");
   const name = g.names[d.role] || d.role;
   if (d.action === "implement" && g.pos.__ws__) {
-    g.sustained.push(graphPulse(d.role, "__ws__", "", Infinity));
+    addSustained(d.role, graphPulse(d.role, "__ws__", "", Infinity));
     graphCaption(`${name} · ${t("implementing…")}`);
   } else if (d.action === "review" && g.pos.__ws__) {
-    g.sustained.push(graphPulse("__ws__", d.role, "", Infinity));
+    addSustained(d.role, graphPulse("__ws__", d.role, "", Infinity));
     graphCaption(`${name} · ${t("reviewing…")}`);
+  } else if (d.action === "assign") {
+    graphCaption(`${name} · ${t("assigning…")}`);
+  } else if (d.action === "integrate") {
+    const reports = Object.keys(g.sup || {}).filter((r) => g.sup[r] === d.role);
+    if (reports.length) addSustained(d.role, graphPulse(reports[0], d.role, "soft", Infinity));
+    graphCaption(`${name} · ${t("integrating…")}`);
   } else if (d.action === "design") {
     graphPulse(d.role, others, "soft");
     graphCaption(`${name} · ${t("designing…")}`);
@@ -854,11 +1145,12 @@ function graphTurnStart(d) {
 
 function graphTurnEnd(d) {
   const g = state.graph;
-  if (!g.pos) return;
-  clearSustainedPulses();
-  setGraphActive(null);
+  if (!g.pos || g.edit) return;
+  clearSustainedPulses(d.role);
+  markGraphActive(d.role, false);
   if (!g.pos[d.role]) return;
   const names = g.names;
+  const boss = (g.sup || {})[d.role];
   if (d.action === "design" && d.role !== "implementer" && g.pos.implementer) {
     graphPulse(d.role, "implementer", "soft");
     graphCaption(`${names[d.role]} → ${names.implementer} · ${t("discuss design")}`);
@@ -873,18 +1165,24 @@ function graphTurnEnd(d) {
       graphPulse(d.role, "implementer", "good");
       graphCaption(`${names[d.role]} → ${names.implementer} · ${t("approve")}`);
     }
+  } else if (d.action === "review" && d.ok && boss && g.pos[boss]) {
+    graphPulse(d.role, boss, "soft"); // an org unit reporting up the chain
+    graphCaption(`${names[d.role]} → ${names[boss]} · ${t("reports up")}`);
   }
 }
 
-// Conductor-team arrows come straight from worker_status events.
+// Team arrows come straight from worker_status events; `by` names the
+// supervisor (org_team), defaulting to the conductor (conductor_team).
 function graphWorker(d) {
   const g = state.graph;
-  if (!g.pos || !g.pos.conductor || !g.pos[d.worker]) return;
+  if (g.edit) return;
+  const from = d.by || "conductor";
+  if (!g.pos || !g.pos[from] || !g.pos[d.worker]) return;
   const map = {
-    assigned:  ["conductor", d.worker, "", "assign"],
-    delivered: [d.worker, "conductor", "soft", "deliver"],
-    ok:        ["conductor", d.worker, "good", "approve"],
-    warned:    ["conductor", d.worker, "bad", "call out"],
+    assigned:  [from, d.worker, "", "assign"],
+    delivered: [d.worker, from, "soft", "deliver"],
+    ok:        [from, d.worker, "good", "approve"],
+    warned:    [from, d.worker, "bad", "call out"],
   };
   const m = map[d.status];
   if (!m) return;
@@ -902,7 +1200,8 @@ function graphEdit(d) {
 
 function resetGraph() {
   clearSustainedPulses();
-  state.graph = { pos: null, names: {}, sustained: [], strategy: "" };
+  state.graph = { pos: null, names: {}, edges: [], sup: {}, sustained: {},
+                  strategy: "", edit: false, sel: null };
   $("#graph").hidden = true;
   $("#graph-svg").innerHTML = "";
   $("#graph-caption").textContent = "";
@@ -1310,10 +1609,15 @@ function addResult(content) {
 function finish(status) {
   if (state.es) { state.es.close(); state.es = null; }
   clearSustainedPulses();
-  setGraphActive(null);
+  document.querySelectorAll("#graph-svg .gnode.active")
+    .forEach((n) => n.classList.remove("active"));
   $("#run").disabled = false;
   $("#stop").disabled = true;
-  if (status === "done") { setConn("done", "done"); setStatus(t("Done.")); }
+  $("#finish").disabled = true;
+  if (status === "done") {
+    setConn("done", "done"); setStatus(t("Done."));
+    $("#feedback-wrap").hidden = false; // invite human feedback -> rework
+  }
   else if (status === "stopped") { setConn("stopped", "idle"); setStatus(t("Stopped.")); }
   else { setConn("error", "error"); setStatus(t("Session ended with an error."), true); }
 }
@@ -1445,6 +1749,11 @@ applyLang();
 
 $("#run").addEventListener("click", run);
 $("#stop").addEventListener("click", stop);
+$("#finish").addEventListener("click", requestFinish);
+$("#rework").addEventListener("click", rework);
+$("#rounds-inf").addEventListener("change", () => {
+  $("#rounds").disabled = $("#rounds-inf").checked;
+});
 $("#theme-toggle").addEventListener("click", cycleTheme);
 $("#lang-toggle").addEventListener("click", toggleLang);
 $("#history-open").addEventListener("click", toggleHistory);

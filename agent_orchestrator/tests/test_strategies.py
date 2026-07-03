@@ -71,7 +71,7 @@ class TestStrategies(unittest.TestCase):
             set(STRATEGIES),
             {"implementer_reviewer", "debate_consensus", "planner_executor",
              "round_robin", "panel_judge", "custom", "doc_authoring", "code_authoring",
-             "workspace_build", "conductor_team"},
+             "workspace_build", "conductor_team", "org_team"},
         )
 
     def test_conductor_directive_parsers(self):
@@ -249,8 +249,9 @@ class TestStrategies(unittest.TestCase):
         get_strategy("workspace_build").run(session)
         # 3 design turns + 2 full build rounds of (impl + 2 reviews) = 9 turns
         self.assertEqual(len(session.transcript), 9)
-        roles_r0 = [t.role for t in session.transcript if t.round == 0]
-        self.assertEqual(roles_r0, ["implementer", "reviewer_1", "reviewer_2"])
+        # reviewers run in parallel, so compare round-0 roles as a set
+        roles_r0 = {t.role for t in session.transcript if t.round == 0}
+        self.assertEqual(roles_r0, {"implementer", "reviewer_1", "reviewer_2"})
         msgs = [e.data["message"] for e in session.bus.history if e.type == "status"]
         self.assertTrue(any("1/2 reviewer(s) approved" in m for m in msgs))
 
@@ -273,6 +274,166 @@ class TestStrategies(unittest.TestCase):
                    for e in session.bus.history if e.type == "turn_start"]
         self.assertEqual(actions, [(0, "design"), (0, "design"),
                                    (1, "implement"), (1, "review")])
+
+    def test_org_team_hierarchy_runs_and_reports(self):
+        """manager -> 2 conductors -> workers: delegation flows down level by
+        level and reports come back up; top VERDICT: DONE stops early."""
+        agents = {
+            "manager": _FixedAdapter(
+                "Boss",
+                "@conductor_1 [OK]: good\n@conductor_2 [OK]: good\n"
+                "@conductor_1: build the backend\n@conductor_2: build the frontend\n"
+                "VERDICT: DONE"),
+            "conductor_1": _FixedAdapter("C1", "@worker_1: write the API"),
+            "conductor_2": _FixedAdapter("C2", "@worker_2: write the UI"),
+            "worker_1": _FixedAdapter("W1", "api done"),
+            "worker_2": _FixedAdapter("W2", "ui done"),
+        }
+        s = Session(id="org", task="Build an app.", strategy="org_team", rounds=3,
+                    agents=agents)
+        s.role_order = list(agents)
+        s.supervisors = {"conductor_1": "manager", "conductor_2": "manager",
+                         "worker_1": "conductor_1", "worker_2": "conductor_2"}
+        result = get_strategy("org_team").run(s)
+        self.assertTrue(result)
+        roles = [t.role for t in s.transcript]
+        self.assertEqual(roles[0], "manager")                    # top assigns first
+        self.assertIn("worker_1", roles)
+        self.assertIn("worker_2", roles)
+        # round 2's manager turn sees DONE -> early stop (round 1 ran in full)
+        self.assertLessEqual(max(t.round for t in s.transcript), 2)
+        ws = [e.data for e in s.bus.history if e.type == "worker_status"]
+        self.assertTrue(any(d.get("by") == "conductor_1" and d["worker"] == "worker_1"
+                            and d["status"] == "assigned" for d in ws))
+        self.assertTrue(any(d.get("by") == "manager" and d["worker"] == "conductor_1"
+                            for d in ws))
+
+    def test_org_team_rejects_bad_hierarchy(self):
+        agents = {"a": _FixedAdapter("A", "x"), "b": _FixedAdapter("B", "y")}
+        s = Session(id="bad", task="t", strategy="org_team", rounds=1, agents=agents)
+        s.role_order = ["a", "b"]
+        s.supervisors = {"a": "b", "b": "a"}  # cycle -> no top manager
+        with self.assertRaises(AgentTurnError):
+            get_strategy("org_team").run(s)
+
+    def test_unlimited_rounds_run_until_done(self):
+        """rounds=0 loops past the old cap until the conductor declares DONE."""
+        class DoneAtRound(AgentTurnError):
+            pass
+
+        class CountingConductor(AgentAdapter):
+            kind = "fixed"
+            def __init__(self):
+                super().__init__("cond", display_name="Cond")
+                self.supports_history = False
+                self.calls = 0
+            def _generate(self, prompt, system, history):
+                self.calls += 1
+                verdict = "VERDICT: DONE" if self.calls >= 12 else "VERDICT: CONTINUE"
+                return f"@worker_1 [OK]: fine\n@worker_1: keep going\n{verdict}"
+
+        agents = {"conductor": CountingConductor(),
+                  "worker_1": _FixedAdapter("W1", "done bit"),
+                  "reviewer": _FixedAdapter("R", "ok")}
+        s = Session(id="unl", task="t", strategy="conductor_team", rounds=0, agents=agents)
+        s.role_order = ["conductor", "worker_1", "reviewer"]
+        get_strategy("conductor_team").run(s)
+        self.assertGreater(max(t.round for t in s.transcript), 8)  # beyond old cap
+
+    def test_finish_request_wraps_up_gracefully(self):
+        """finish_requested stops the loop but still produces a deliverable."""
+        class FinishAfterFirstRound(AgentAdapter):
+            kind = "fixed"
+            def __init__(self, session_ref):
+                super().__init__("impl", display_name="impl")
+                self.supports_history = False
+                self.session_ref = session_ref
+                self.calls = 0
+            def _generate(self, prompt, system, history):
+                self.calls += 1
+                if self.calls == 1:          # design turn: plan only
+                    return "Plan: one file."
+                # implement turn: deliver, then the human presses Finish
+                self.session_ref[0].finish_requested = True
+                return '<FILE path="f.py">\nx = 1\n</FILE>'
+
+        ref = [None]
+        impl = FinishAfterFirstRound(ref)
+        rev = _FixedAdapter("rev", "REQUEST CHANGES")  # would never approve
+        s = Session(id="fin", task="t", strategy="workspace_build", rounds=0,
+                    agents={"implementer": impl, "reviewer": rev},
+                    workspace=tempfile.mkdtemp())
+        ref[0] = s
+        result = get_strategy("workspace_build").run(s)
+        self.assertIn("f.py", result)                       # deliverable produced
+        self.assertLessEqual(max(t.round for t in s.transcript), 1)
+        self.assertIn("result", [e.type for e in s.bus.history])
+
+    def test_implementer_continue_gets_extra_turns(self):
+        class ContinuingImpl(AgentAdapter):
+            kind = "fixed"
+            def __init__(self):
+                super().__init__("impl", display_name="impl")
+                self.supports_history = False
+                self.calls = 0
+            def _generate(self, prompt, system, history):
+                self.calls += 1
+                if self.calls == 1:          # design turn: plan only
+                    return "Plan: two files."
+                if self.calls == 2:
+                    return '<FILE path="one.py">\na = 1\n</FILE>\nCONTINUE'
+                return '<FILE path="two.py">\nb = 2\n</FILE>\nAll done.'
+
+        impl = ContinuingImpl()
+        rev = _FixedAdapter("rev", "APPROVE")
+        d = tempfile.mkdtemp()
+        s = Session(id="cont", task="t", strategy="workspace_build", rounds=1,
+                    agents={"implementer": impl, "reviewer": rev}, workspace=d)
+        get_strategy("workspace_build").run(s)
+        self.assertTrue(os.path.isfile(os.path.join(d, "one.py")))
+        self.assertTrue(os.path.isfile(os.path.join(d, "two.py")))
+        impl_turns = [t for t in s.transcript if t.role == "implementer" and t.round == 1]
+        self.assertEqual(len(impl_turns), 2)  # initial + one continuation
+
+    def test_tool_calls_execute_and_feed_back(self):
+        from agent_orchestrator.orchestrator.strategies import _run_turn
+
+        class ToolUser(AgentAdapter):
+            kind = "fixed"
+            def __init__(self):
+                super().__init__("tu", display_name="tu")
+                self.supports_history = False
+                self.prompts = []
+            def _generate(self, prompt, system, history):
+                self.prompts.append(prompt)
+                if len(self.prompts) == 1:
+                    return 'Let me check. <TOOL name="read_file">notes.txt</TOOL>'
+                return "Final answer using the file."
+
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "notes.txt"), "w") as fh:
+            fh.write("SECRET-42")
+        agent = ToolUser()
+        s = Session(id="tool", task="t", strategy="custom", rounds=1,
+                    agents={"agent_1": agent}, workspace=d)
+        s.tools = ["read_file"]
+        out = _run_turn(s, "agent_1", "You are an agent.", "Answer.", 1)
+        self.assertEqual(out, "Final answer using the file.")
+        self.assertIn("SECRET-42", agent.prompts[1])         # result fed back
+        self.assertIn("tool_use", [e.type for e in s.bus.history])
+
+    def test_workspace_context_included_for_existing_files(self):
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "existing.py"), "w") as fh:
+            fh.write("legacy = True\n")
+        impl = _CapturingAdapter("impl", supports_history=False)
+        rev = _FixedAdapter("rev", "APPROVE")
+        s = Session(id="ctx", task="t", strategy="workspace_build", rounds=1,
+                    agents={"implementer": impl, "reviewer": rev}, workspace=d)
+        get_strategy("workspace_build").run(s)
+        design_prompt = impl.calls[0][0]
+        self.assertIn("EXISTING WORKSPACE FILES", design_prompt)
+        self.assertIn("legacy = True", design_prompt)
 
     def test_snapshot_and_detect_native_edits(self):
         """Files changed directly on disk (a CLI editing natively) are detected
@@ -384,8 +545,8 @@ class TestStrategies(unittest.TestCase):
         self.assertIn("Conversation so far", prompt_b)  # transcript embedded instead
 
     def test_each_strategy_produces_transcript_and_result(self):
-        # custom and conductor_team need runtime-supplied roles.
-        for name in (n for n in STRATEGIES if n not in ("custom", "conductor_team")):
+        # custom, conductor_team, and org_team need runtime-supplied roles.
+        for name in (n for n in STRATEGIES if n not in ("custom", "conductor_team", "org_team")):
             with self.subTest(strategy=name):
                 session = _session(name, rounds=2)
                 result = get_strategy(name).run(session)
