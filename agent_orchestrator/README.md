@@ -141,6 +141,13 @@ Native CLI backends write files directly on disk and sidestep the problem
 entirely. Existing files in the workspace are loaded as context, so the team
 works *with* your local project instead of starting from scratch.
 
+**Automated verification.** Give *Workspace build* a **test command** (e.g.
+`pytest -q`) and the orchestrator runs it in the workspace after every build
+round (and again after reviewer fixes). The outcome streams into the UI as a
+🧪 pass/fail card with the output, and is injected into the team's prompts —
+reviewers are told not to approve while tests fail, and the implementer gets
+the failure output at the start of the next round.
+
 All strategies share a **scratchpad** — a team blackboard any agent can write to
 by adding `NOTE:` lines. It appears pinned above the transcript so the shared
 state of the collaboration is always visible.

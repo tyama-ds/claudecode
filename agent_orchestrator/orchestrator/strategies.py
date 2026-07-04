@@ -1027,6 +1027,35 @@ class WorkspaceBuild(Strategy):
     # Extra implementer turns granted within one round when it ends with CONTINUE.
     _MAX_CONTINUES = 4
 
+    # Automated verification: run the session's test command in the workspace
+    # and stream the outcome; the text summary is fed back to the agents.
+    _TEST_TIMEOUT = 120
+    _TEST_MAX_OUTPUT = 4_000
+
+    @classmethod
+    def _run_tests(cls, session: Session, rnd: int) -> str:
+        """Run ``session.test_command`` in the workspace; returns a prompt block
+        (empty string when no command is configured)."""
+        cmd = (session.test_command or "").strip()
+        if not cmd:
+            return ""
+        try:
+            proc = subprocess.run(cmd, shell=True, cwd=session.workspace,
+                                  capture_output=True, text=True,
+                                  timeout=cls._TEST_TIMEOUT)
+            output = ((proc.stdout or "") + (proc.stderr or ""))[-cls._TEST_MAX_OUTPUT:]
+            ok, code = proc.returncode == 0, proc.returncode
+        except subprocess.TimeoutExpired:
+            output, ok, code = f"(timed out after {cls._TEST_TIMEOUT}s)", False, -1
+        except OSError as exc:
+            output, ok, code = f"(could not run: {exc})", False, -1
+        session.emit("test_result", round=rnd, command=cmd, ok=ok, exit=code,
+                     output=output[-1_500:])
+        verdict = "PASSED" if ok else f"FAILED (exit {code})"
+        return (f"\n\n[AUTOMATED TEST RUN — `{cmd}` {verdict}]\n{output}\n"
+                + ("" if ok else "Tests are failing: fixing them takes priority, and "
+                                 "reviewers must NOT approve while they fail."))
+
     def run(self, session: Session) -> str:
         if not session.workspace:
             raise AgentTurnError("workspace_build requires a workspace directory")
@@ -1065,17 +1094,20 @@ class WorkspaceBuild(Strategy):
         for rv in reviewers:
             _, baseline = _detect_native_edits(session, rv, 0, baseline)
 
-        # Phase 2 — build loop: implement (incrementally), then every reviewer
-        # weighs in concurrently (with direct small fixes); repeat until all
-        # reviewers approve, the rounds run out, or a human presses Finish.
+        # Phase 2 — build loop: implement (incrementally), auto-run the tests,
+        # then every reviewer weighs in concurrently (with direct small fixes);
+        # repeat until all reviewers approve, the rounds run out, or a human
+        # presses Finish.
+        test_block = ""
         for rnd in _rounds_iter(session):
             if _wrap_up(session, rnd):
                 break
             text = _run_turn(
                 session, "implementer", self.IMPL_SYS,
-                f"Task:\n{session.task}{existing if rnd == 1 else ''}\n\nImplement it "
-                f"now, following the design the team agreed on and addressing all "
-                f"reviewer feedback. {self._edit_how(session, 'implementer')}",
+                f"Task:\n{session.task}{existing if rnd == 1 else ''}{test_block}\n\n"
+                f"Implement it now, following the design the team agreed on and "
+                f"addressing all reviewer feedback. "
+                f"{self._edit_how(session, 'implementer')}",
                 rnd, action="implement",
             )
             applied = _apply_workspace_edits(session, "implementer", rnd, text)
@@ -1099,10 +1131,14 @@ class WorkspaceBuild(Strategy):
             if applied + native == 0:
                 session.emit("status", message=f"No file changes in round {rnd}.")
 
+            # Automated verification: run the configured test command and share
+            # the outcome with the whole team.
+            test_block = self._run_tests(session, rnd)
+
             review_specs = [(
                 rv, self.REVIEW_SYS,
                 f"Task:\n{session.task}\n\nCurrent changes:\n\n"
-                f"{_workspace_summary(session)}\n\n"
+                f"{_workspace_summary(session)}{test_block}\n\n"
                 f"Review them. If you spot a small, uncontroversial fix, you may "
                 f"apply it yourself: {self._edit_how(session, rv)} "
                 f"End with APPROVE or REQUEST CHANGES.",
@@ -1111,17 +1147,21 @@ class WorkspaceBuild(Strategy):
             reviews = _run_turns_parallel(session, review_specs)
 
             approvals = 0
+            fixes = 0
             for rv in reviewers:
                 review = reviews.get(rv, "")
                 r_applied = _apply_workspace_edits(session, rv, rnd, review)
                 r_native, baseline = _detect_native_edits(session, rv, rnd, baseline)
                 if r_applied + r_native:
+                    fixes += r_applied + r_native
                     session.emit("status",
                                  message=f"{session.agents[rv].display_name} ({rv}) "
                                          f"applied {r_applied + r_native} direct "
                                          f"fix(es) in round {rnd}.")
                 if "APPROVE" in review.upper() and "REQUEST CHANGES" not in review.upper():
                     approvals += 1
+            if fixes:  # reviewers touched files -> re-verify before moving on
+                test_block = self._run_tests(session, rnd)
             if approvals == len(reviewers):
                 session.emit("status",
                              message=f"All {len(reviewers)} reviewer(s) approved in "

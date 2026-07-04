@@ -283,6 +283,8 @@ class Handler(BaseHTTPRequestHandler):
             session.workspace = os.path.realpath(ws)
             if body.get("create_dir"):
                 session.workspace_created = _ensure_workspace_dir(session.workspace)
+            # Optional auto-verification command, run in the workspace each round.
+            session.test_command = (body.get("test_command") or "").strip()[:400]
             # CLI backends (Claude Code / Codex) run *inside* the workspace and
             # edit files natively with their own tools; other backends keep the
             # <FILE> protocol.

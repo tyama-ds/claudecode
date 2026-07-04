@@ -113,6 +113,12 @@ const JA = {
   "(read a workspace file)": "（ファイルを読む）",
   "(shell commands in the workspace — trust required)": "（ワークスペースでシェル実行 — 要信頼）",
   "(fetch a URL)": "（URLを取得）",
+  "Test command": "テストコマンド",
+  "(auto-run after each build round)": "（各ビルドラウンド後に自動実行）",
+  "e.g. pytest -q — results are fed back to the team": "例: pytest -q — 結果はチームに戻されます",
+  "tests passed": "テスト合格",
+  "tests failed": "テスト失敗",
+  "output": "出力",
   "Not satisfied? Send feedback": "不満があればフィードバック",
   "What should be improved? The team reworks the task with this feedback…":
     "どこを改善してほしいですか？ このフィードバック付きでチームが再作業します…",
@@ -682,7 +688,7 @@ function rolesPayload() {
 }
 
 // -- form persistence (task, strategy, dirs survive a reload) ---------------
-const PERSIST_FIELDS = ["task", "rounds", "workspace-dir", "reference-dir"];
+const PERSIST_FIELDS = ["task", "rounds", "workspace-dir", "reference-dir", "test-cmd"];
 
 function persistForm() {
   const data = { strategy: $("#strategy").value };
@@ -780,6 +786,8 @@ async function startRun(extra) {
     const ws = $("#workspace-dir").value.trim();
     if (ws) payload.workspace = ws;
     payload.create_dir = $("#workspace-init").checked;
+    const testCmd = $("#test-cmd").value.trim();
+    if (testCmd) payload.test_command = testCmd;
   }
   Object.assign(payload, extra || {});
   persistForm();
@@ -878,6 +886,9 @@ function handleEvent(evt) {
   } else if (type === "tool_use") {
     addNote(`🔧 ${data.agent} · ${data.tool}: ${data.input}`);
     graphCaption(`${data.agent} · 🔧 ${data.tool}`);
+  } else if (type === "test_result") {
+    addTestResult(data);
+    graphCaption(`🧪 ${data.command} · ${data.ok ? t("tests passed") : t("tests failed")}`);
   } else if (type === "artifact") {
     handleArtifact(data);
   } else if (type === "workspace_edit") {
@@ -1398,6 +1409,30 @@ function addNote(msg) {
   $("#stream").appendChild(el);
 }
 
+// Automated test run result: a pass/fail card with the output on demand.
+function addTestResult(d) {
+  const el = document.createElement("div");
+  el.className = "test-card " + (d.ok ? "ok" : "bad");
+  const head = document.createElement("div");
+  head.className = "test-head";
+  head.textContent = (d.ok ? "🧪 ✅ " + t("tests passed") : "🧪 ❌ " + t("tests failed"))
+    + `  ·  ${d.command}` + (d.ok ? "" : `  ·  exit ${d.exit}`)
+    + `  ·  ${t("round")} ${d.round}`;
+  el.appendChild(head);
+  if (d.output && d.output.trim()) {
+    const det = document.createElement("details");
+    const sum = document.createElement("summary");
+    sum.textContent = t("output");
+    det.appendChild(sum);
+    const pre = document.createElement("pre");
+    pre.textContent = d.output;
+    det.appendChild(pre);
+    el.appendChild(det);
+  }
+  $("#stream").appendChild(el);
+  autoScroll(el);
+}
+
 function renderScratchpad(notes) {
   const list = $("#sp-list");
   list.innerHTML = "";
@@ -1793,7 +1828,7 @@ document.addEventListener("click", (e) => {
 });
 
 // Form values survive a reload.
-["task", "rounds", "workspace-dir", "reference-dir"].forEach((id) =>
+["task", "rounds", "workspace-dir", "reference-dir", "test-cmd"].forEach((id) =>
   $("#" + id).addEventListener("input", persistForm));
 $("#workspace-init").addEventListener("change", persistForm);
 

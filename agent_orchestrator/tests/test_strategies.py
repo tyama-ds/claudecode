@@ -435,6 +435,35 @@ class TestStrategies(unittest.TestCase):
         self.assertIn("EXISTING WORKSPACE FILES", design_prompt)
         self.assertIn("legacy = True", design_prompt)
 
+    def test_auto_test_command_runs_and_feeds_back(self):
+        """The configured test command runs after the implement phase; the
+        outcome is streamed and injected into the reviewers' prompts."""
+        d = tempfile.mkdtemp()
+        impl = _FixedAdapter("impl", '<FILE path="ok.py">\nx = 1\n</FILE>')
+        rev = _CapturingAdapter("rev", supports_history=False)
+        s = Session(id="at", task="t", strategy="workspace_build", rounds=1,
+                    agents={"implementer": impl, "reviewer": rev}, workspace=d)
+        s.test_command = "echo HELLO-TESTS"
+        get_strategy("workspace_build").run(s)
+        events = [e.data for e in s.bus.history if e.type == "test_result"]
+        self.assertTrue(events and events[0]["ok"])
+        review_prompt = rev.calls[1][0]  # calls[0] is the design turn
+        self.assertIn("AUTOMATED TEST RUN", review_prompt)
+        self.assertIn("HELLO-TESTS", review_prompt)
+
+    def test_auto_test_failure_blocks_approval_guidance(self):
+        d = tempfile.mkdtemp()
+        impl = _FixedAdapter("impl", '<FILE path="ok.py">\nx = 1\n</FILE>')
+        rev = _CapturingAdapter("rev", supports_history=False)
+        s = Session(id="atf", task="t", strategy="workspace_build", rounds=1,
+                    agents={"implementer": impl, "reviewer": rev}, workspace=d)
+        s.test_command = "echo BOOM && exit 3"
+        get_strategy("workspace_build").run(s)
+        ev = [e.data for e in s.bus.history if e.type == "test_result"][0]
+        self.assertFalse(ev["ok"])
+        self.assertEqual(ev["exit"], 3)
+        self.assertIn("must NOT approve", rev.calls[1][0])
+
     def test_snapshot_and_detect_native_edits(self):
         """Files changed directly on disk (a CLI editing natively) are detected
         by diffing tree snapshots and attributed to the acting role."""
