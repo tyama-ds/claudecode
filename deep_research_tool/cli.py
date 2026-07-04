@@ -150,6 +150,13 @@ def cli():
     help="Max sites to crawl per search in extended mode (default: 3)"
 )
 @click.option(
+    "--source-mode",
+    type=click.Choice(["web", "local", "hybrid"]),
+    default="web",
+    help="Information sources: web (default), local (documents only, "
+         "requires --documents), or hybrid (documents + web)"
+)
+@click.option(
     "--crawl-mode",
     type=click.Choice([
         "standard", "fast_batch", "fast_parallel", "aicrawl", "ai_crawl_selenium",
@@ -221,6 +228,7 @@ def research(
     crawl_max_pages: int,
     crawl_max_depth: int,
     crawl_max_sites: int,
+    source_mode: str,
     crawl_mode: str,
     ai_crawl_max_pages: int,
     ai_crawl_site_depth: int,
@@ -261,6 +269,7 @@ def research(
         crawl_max_pages=crawl_max_pages,
         crawl_max_depth=crawl_max_depth,
         crawl_max_sites=crawl_max_sites,
+        source_mode=source_mode,
         crawl_mode=crawl_mode,
         ai_crawl_max_total_pages=ai_crawl_max_pages,
         ai_crawl_site_depth=ai_crawl_site_depth,

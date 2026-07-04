@@ -385,6 +385,7 @@ class DeepResearchTool:
             crawling_llm=self.stage_llm_clients.get("crawling"),
             evaluation_llm=self.stage_llm_clients.get("evaluation"),
             writing_llm=self.stage_llm_clients.get("writing"),
+            source_mode=self.config.research.source_mode,
         )
 
         # Conduct research
@@ -1050,6 +1051,8 @@ def run_research(
     ai_crawl_max_llm_calls: int = 25,
     ai_crawl_max_pages_per_domain: int = 5,
     ai_crawl_politeness_delay: float = 1.0,
+    # Information source mode
+    source_mode: str = "web",
     # Evidence importance / gap-fill parameters
     importance_threshold: float = 0.6,
     min_high_importance_sources: int = 2,
@@ -1112,6 +1115,8 @@ def run_research(
         ai_crawl_max_llm_calls: aicrawl - LLM decision call budget per section
         ai_crawl_max_pages_per_domain: aicrawl - max pages fetched per domain
         ai_crawl_politeness_delay: aicrawl - min seconds between same-domain fetches
+        source_mode: Information sources: 'web' (default), 'local' (local
+            documents only; requires additional_documents), 'hybrid' (both)
         importance_threshold: min importance score to count as high-importance
         min_high_importance_sources: below this, gap-fill re-search triggers
         max_gap_fill_rounds: max gap-fill re-search rounds per section
@@ -1218,6 +1223,7 @@ def run_research(
         ai_crawl_max_llm_calls=ai_crawl_max_llm_calls,
         ai_crawl_max_pages_per_domain=ai_crawl_max_pages_per_domain,
         ai_crawl_politeness_delay=ai_crawl_politeness_delay,
+        source_mode=source_mode,
         importance_threshold=importance_threshold,
         min_high_importance_sources=min_high_importance_sources,
         max_gap_fill_rounds=max_gap_fill_rounds,

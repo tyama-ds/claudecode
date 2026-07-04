@@ -315,6 +315,13 @@ class ContentFilterMode(str, Enum):
     NONE = "none"          # No filtering
 
 
+class ResearchSourceMode(str, Enum):
+    """Which information sources the research uses."""
+    WEB = "web"        # Web search/crawl only (default)
+    LOCAL = "local"    # Local documents only (no web access)
+    HYBRID = "hybrid"  # Local documents + web
+
+
 class CrawlMode(str, Enum):
     """Crawl and evaluation mode for performance optimization."""
     STANDARD = "standard"          # Original sequential mode
@@ -371,6 +378,9 @@ class ResearchConfig:
     ai_crawl_max_llm_calls: int = 25     # LLM decision call budget per section
     ai_crawl_max_pages_per_domain: int = 5  # Cap of fetched pages per domain
     ai_crawl_politeness_delay: float = 1.0  # Min seconds between same-domain fetches
+
+    # Information source mode (web / local documents / hybrid)
+    source_mode: ResearchSourceMode = ResearchSourceMode.WEB
 
     # Evidence importance / gap-fill settings
     importance_threshold: float = 0.6      # Min score to count as high-importance
@@ -572,6 +582,8 @@ def create_config(
     ai_crawl_max_llm_calls: int = 25,
     ai_crawl_max_pages_per_domain: int = 5,
     ai_crawl_politeness_delay: float = 1.0,
+    # Information source mode
+    source_mode: str = "web",
     # Evidence importance / gap-fill parameters
     importance_threshold: float = 0.6,
     min_high_importance_sources: int = 2,
@@ -664,6 +676,9 @@ def create_config(
         ai_crawl_max_llm_calls: aicrawl mode - LLM decision call budget per section
         ai_crawl_max_pages_per_domain: aicrawl mode - max pages fetched per domain
         ai_crawl_politeness_delay: aicrawl mode - min seconds between same-domain fetches
+        source_mode: Information sources to use: 'web' (web only, default),
+            'local' (local documents only; requires additional_documents),
+            'hybrid' (local documents + web)
         importance_threshold: min importance score (0-1) to count a source as
             high-importance for the research purpose
         min_high_importance_sources: sections with fewer high-importance sources
@@ -758,6 +773,7 @@ def create_config(
         ai_crawl_max_llm_calls=ai_crawl_max_llm_calls,
         ai_crawl_max_pages_per_domain=ai_crawl_max_pages_per_domain,
         ai_crawl_politeness_delay=ai_crawl_politeness_delay,
+        source_mode=ResearchSourceMode(source_mode),
         importance_threshold=importance_threshold,
         min_high_importance_sources=min_high_importance_sources,
         max_gap_fill_rounds=max_gap_fill_rounds,

@@ -195,6 +195,20 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
     <details open>
       <summary>🌐 情報収集の設定</summary>
       <div class="body">
+        <label>情報ソース</label>
+        <div class="mode-cards" id="sourceModes">
+          <label class="mode-card sel"><input type="radio" name="source_mode" value="web" checked>
+            <span class="t">Web</span><span class="d">　Web検索・クロールで情報収集</span></label>
+          <label class="mode-card"><input type="radio" name="source_mode" value="local">
+            <span class="t">ローカル文献のみ</span><span class="d">　手元の文書だけを使用（Webアクセスなし）</span></label>
+          <label class="mode-card"><input type="radio" name="source_mode" value="hybrid">
+            <span class="t">ハイブリッド</span><span class="d">　ローカル文献＋Webの両方を使用</span></label>
+        </div>
+        <div id="localDocsBox" style="display:none">
+          <label>ローカル文書のパス（1行に1つ。フォルダ指定可: pdf/docx/txt/md等を自動検出）</label>
+          <textarea id="local_documents" placeholder="C:\docs\市場調査レポート.pdf&#10;/home/user/documents/"></textarea>
+        </div>
+
         <label>クロールモード</label>
         <div class="mode-cards" id="crawlModes">
           <label class="mode-card sel"><input type="radio" name="crawl_mode" value="standard" checked>
@@ -333,11 +347,16 @@ const $ = (id) => document.getElementById(id);
 let polling = null;
 let logLength = 0;
 
-// crawl-mode card selection highlight
+// mode card selection highlight (per radio group)
 document.querySelectorAll('.mode-card input').forEach(input => {
   input.addEventListener('change', () => {
-    document.querySelectorAll('.mode-card').forEach(c => c.classList.remove('sel'));
-    input.closest('.mode-card').classList.add('sel');
+    document.querySelectorAll(`.mode-card input[name=${input.name}]`).forEach(other => {
+      other.closest('.mode-card').classList.toggle('sel', other.checked);
+    });
+    if (input.name === 'source_mode') {
+      const needsDocs = input.value === 'local' || input.value === 'hybrid';
+      $('localDocsBox').style.display = needsDocs ? 'block' : 'none';
+    }
   });
 });
 
@@ -349,6 +368,7 @@ function collectParams() {
     requirements: $('requirements').value.trim(),
     provider: provider,
     model: $('model').value.trim(),
+    source_mode: document.querySelector('input[name=source_mode]:checked').value,
     crawl_mode: document.querySelector('input[name=crawl_mode]:checked').value,
     ai_crawl_max_pages: parseInt($('ai_crawl_max_pages').value) || 15,
     ai_crawl_site_depth: parseInt($('ai_crawl_site_depth').value) || 2,
@@ -364,6 +384,10 @@ function collectParams() {
   if (apiKey) {
     if (provider === 'openai') params.openai_api_key = apiKey;
     else if (provider === 'anthropic') params.anthropic_api_key = apiKey;
+  }
+  const docsText = $('local_documents').value.trim();
+  if (docsText && params.source_mode !== 'web') {
+    params.local_documents = docsText.split('\n').map(s => s.trim()).filter(Boolean);
   }
   // per-stage LLM overrides
   const stages = {};
@@ -387,6 +411,11 @@ async function startResearch() {
   if (!params.query) {
     $('formError').className = 'banner error';
     $('formError').textContent = '調査テーマを入力してください';
+    return;
+  }
+  if (params.source_mode === 'local' && !params.local_documents) {
+    $('formError').className = 'banner error';
+    $('formError').textContent = 'ローカル文献モードには文書パスの入力が必要です';
     return;
   }
   $('startBtn').disabled = true;

@@ -18,8 +18,9 @@ from ..evidence.content_filter import (
     create_moderate_filter,
 )
 from ..search.base import SearchResult
-from ..config import CrawlMode
+from ..config import CrawlMode, ResearchSourceMode
 from ..utils.helpers import extract_json_from_response
+from .local_store import LocalDocumentStore
 from .query_generator import QueryGenerator, ResearchPlan, TableOfContents, TableOfContentsItem
 from .content_extractor import ContentExtractor, ExtractedContent
 from .site_crawler import SiteCrawler, CrawlResult, extract_keywords_from_topic
@@ -172,6 +173,7 @@ class Researcher:
         crawling_llm=None,
         evaluation_llm=None,
         writing_llm=None,
+        source_mode: ResearchSourceMode = ResearchSourceMode.WEB,
     ):
         """
         Initialize Researcher.
@@ -217,6 +219,9 @@ class Researcher:
                 evaluation; defaults to llm_client
             writing_llm: LLM client for prose generation (synthesis,
                 executive summary); defaults to llm_client
+            source_mode: Information sources: WEB (web only), LOCAL (local
+                documents only; requires additional_documents at
+                conduct_research), HYBRID (local documents + web)
         """
         self.llm = llm_client
         self.planning_llm = planning_llm or llm_client
@@ -328,6 +333,10 @@ class Researcher:
         self.min_high_importance_sources = min_high_importance_sources
         self.max_gap_fill_rounds = max_gap_fill_rounds
 
+        # Information source mode and local document store
+        self.source_mode = source_mode
+        self.local_store = LocalDocumentStore()
+
     def _report_progress(self, message: str, percentage: float) -> None:
         """Report progress to callback if available."""
         if self.progress_callback:
@@ -353,12 +362,33 @@ class Researcher:
         Returns:
             Completed ResearchSession
         """
+        # Local source mode requires documents to work from
+        if self.source_mode == ResearchSourceMode.LOCAL and not additional_documents:
+            raise ValueError(
+                "source_mode='local' requires additional_documents "
+                "(ローカル文献モードには文書の指定が必要です)"
+            )
+
         # Initialize session
         self.session = ResearchSession(query=query, requirements=requirements)
         self.evidence_locker = EvidenceLocker(
             research_id=self.session.session_id,
             output_dir=self.output_dir / "evidence",
         )
+
+        # Register local documents for local/hybrid retrieval
+        if additional_documents and self.source_mode in (
+            ResearchSourceMode.LOCAL, ResearchSourceMode.HYBRID
+        ):
+            for doc in additional_documents:
+                self.local_store.add_document(
+                    title=doc.get("title", ""),
+                    content=doc.get("content", ""),
+                    path=str(doc.get("path", "")),
+                )
+            print(f"[LocalStore] {self.local_store.document_count} documents, "
+                  f"{self.local_store.chunk_count} chunks indexed "
+                  f"(source_mode={self.source_mode.value})")
 
         try:
             # Phase 1: Planning
@@ -463,14 +493,27 @@ class Researcher:
 
             section.status = "in_progress"
 
-            # Choose processing method based on crawl mode
-            if self.fast_crawler and self.crawl_mode in (CrawlMode.FAST_BATCH, CrawlMode.FAST_PARALLEL):
+            # Local document retrieval (local / hybrid source modes)
+            local_parts: List[ExtractedContent] = []
+            if self.source_mode in (ResearchSourceMode.LOCAL, ResearchSourceMode.HYBRID):
+                local_parts = self._collect_local_parts(section, available_queries)
+
+            if self.source_mode == ResearchSourceMode.LOCAL:
+                # Local-only: no web access at all
+                self._process_section_local_only(
+                    section=section,
+                    available_queries=available_queries,
+                    local_parts=local_parts,
+                )
+            # Web / hybrid: choose processing method based on crawl mode
+            elif self.fast_crawler and self.crawl_mode in (CrawlMode.FAST_BATCH, CrawlMode.FAST_PARALLEL):
                 # Fast crawl mode: parallel fetch + batch/parallel evaluation
                 self._process_section_with_fast_crawler(
                     section=section,
                     available_queries=available_queries,
                     section_idx=section_idx,
                     total_sections=total_sections,
+                    extra_parts=local_parts,
                 )
             elif self.ai_crawler and self.crawl_mode in (
                 CrawlMode.AI_CRAWL, CrawlMode.AI_CRAWL_SELENIUM
@@ -481,6 +524,7 @@ class Researcher:
                     available_queries=available_queries,
                     section_idx=section_idx,
                     total_sections=total_sections,
+                    extra_parts=local_parts,
                 )
             else:
                 # Standard mode: sequential processing
@@ -489,6 +533,7 @@ class Researcher:
                     available_queries=available_queries,
                     section_idx=section_idx,
                     total_sections=total_sections,
+                    extra_parts=local_parts,
                 )
 
             # Remove used queries
@@ -509,6 +554,7 @@ class Researcher:
         available_queries: List[str],
         section_idx: int,
         total_sections: int,
+        extra_parts: List[ExtractedContent] = None,
     ) -> None:
         """
         Process a section using fast crawler mode.
@@ -523,7 +569,7 @@ class Researcher:
                 section, available_queries, section_idx, total_sections
             )
 
-        section_content_parts: List[ExtractedContent] = []
+        section_content_parts: List[ExtractedContent] = list(extra_parts or [])
 
         # Progress callback for fast crawler
         def fast_progress(msg: str, current: int, total: int):
@@ -601,6 +647,7 @@ class Researcher:
         available_queries: List[str],
         section_idx: int,
         total_sections: int,
+        extra_parts: List[ExtractedContent] = None,
     ) -> None:
         """
         Process a section using AI crawl mode (LLM-driven crawling).
@@ -614,7 +661,7 @@ class Researcher:
                 section, available_queries, section_idx, total_sections
             )
 
-        section_content_parts: List[ExtractedContent] = []
+        section_content_parts: List[ExtractedContent] = list(extra_parts or [])
 
         def ai_progress(msg: str, current: int, total: int):
             self._report_progress(
@@ -685,6 +732,7 @@ class Researcher:
         available_queries: List[str],
         section_idx: int,
         total_sections: int,
+        extra_parts: List[ExtractedContent] = None,
     ) -> None:
         """
         Process a section with immediate content generation after research.
@@ -694,7 +742,7 @@ class Researcher:
         2. Extracts relevant content
         3. Immediately generates section content (not waiting until the end)
         """
-        section_content_parts: List[ExtractedContent] = []
+        section_content_parts: List[ExtractedContent] = list(extra_parts or [])
 
         # Research iterations for this section
         iteration = 0
@@ -926,6 +974,85 @@ class Researcher:
             }
             section.content = placeholder
 
+    def _collect_local_parts(
+        self,
+        section: TableOfContentsItem,
+        available_queries: List[str],
+        queries_override: List[str] = None,
+    ) -> List[ExtractedContent]:
+        """
+        Retrieve section-relevant content from the local document store.
+
+        Chunks are keyword-retrieved, then LLM-extracted like web pages so
+        they flow through the same relevance/importance pipeline.
+        """
+        if self.local_store.is_empty():
+            return []
+
+        queries = queries_override or available_queries[:self.max_queries_per_iteration]
+        query_text = " ".join(
+            [section.title, section.description] + list(queries)
+        ).strip()
+        keywords = extract_keywords_from_topic(
+            f"{section.title} {section.description}"
+        )
+
+        chunks = self.local_store.search(
+            query=query_text,
+            top_k=max(self.max_pages_per_query * 2, 4),
+            keywords=keywords,
+        )
+        if not chunks:
+            print(f"[LocalStore] No relevant chunks for section {section.section}")
+            return []
+
+        print(f"[LocalStore] Section {section.section}: {len(chunks)} candidate chunks")
+
+        parts: List[ExtractedContent] = []
+        for chunk in chunks:
+            extracted = self.content_extractor.extract_relevant_content(
+                raw_content=chunk.content,
+                source_url=chunk.source_url,
+                source_title=chunk.doc_title,
+                section_context=f"{section.section}. {section.title}",
+                research_query=self.session.query,
+            )
+            if extracted.relevance_score >= 0.2:
+                parts.append(extracted)
+                self.evidence_locker.add_evidence(
+                    url=chunk.source_url,
+                    title=chunk.doc_title,
+                    content_excerpt=extracted.processed_content[:500],
+                    evidence_type=EvidenceType.USER_PROVIDED,
+                    search_query="local_documents",
+                    section_reference=section.section,
+                    relevance_score=extracted.relevance_score,
+                    access_method="local",
+                )
+        return parts
+
+    def _process_section_local_only(
+        self,
+        section: TableOfContentsItem,
+        available_queries: List[str],
+        local_parts: List[ExtractedContent],
+    ) -> None:
+        """Process a section using local documents only (no web access)."""
+        queries = available_queries[:self.max_queries_per_iteration]
+
+        iter_record = ResearchIteration(
+            iteration_number=1,
+            section=section.section,
+            queries_executed=queries or ["local_documents"],
+            sources_found=len(local_parts),
+            content_extracted=len(local_parts),
+        )
+        iter_record.completed_at = datetime.now().isoformat()
+        self.session.iterations.append(iter_record)
+
+        print(f"[LocalOnly] Section {section.section}: {len(local_parts)} parts from local documents")
+        self._generate_and_save_section_content(section, local_parts)
+
     def _synthesize_parts(
         self,
         section: TableOfContentsItem,
@@ -1053,12 +1180,23 @@ Output JSON only:"""
         queries: List[str],
     ) -> List[ExtractedContent]:
         """
-        Collect additional sources for gap-fill using the active crawl mode.
+        Collect additional sources for gap-fill using the active source mode.
 
-        Crawler visited-sets reset per call, so previously visited sites are
-        re-crawled when the new queries lead back to them.
+        Local mode re-queries the document store with the new queries; web
+        and hybrid modes use the active crawl mode (crawler visited-sets
+        reset per call, so previously visited sites are re-crawled when the
+        new queries lead back to them). Hybrid also re-queries local
+        documents.
         """
         parts: List[ExtractedContent] = []
+
+        # Local retrieval with the NEW queries (local and hybrid modes)
+        if self.source_mode in (ResearchSourceMode.LOCAL, ResearchSourceMode.HYBRID):
+            parts.extend(self._collect_local_parts(
+                section, [], queries_override=queries,
+            ))
+            if self.source_mode == ResearchSourceMode.LOCAL:
+                return parts
 
         crawler = self.ai_crawler or self.fast_crawler
         if crawler:

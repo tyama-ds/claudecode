@@ -34,6 +34,7 @@ _CONFIG_PARAM_MAP = {
     "output_format": "output_format",
     "output_dir": "output_dir",
     "language": "language",
+    "source_mode": "source_mode",
     "crawl_mode": "crawl_mode",
     "ai_crawl_max_pages": "ai_crawl_max_total_pages",
     "ai_crawl_site_depth": "ai_crawl_site_depth",
@@ -67,6 +68,8 @@ def build_config_kwargs(params: Dict[str, Any]) -> Dict[str, Any]:
             continue
         kwargs[config_key] = value
 
+    # source_mode 'local' without web never touches the network; documents
+    # themselves are passed to tool.run, not create_config
     stage_llm = params.get("stage_llm") or {}
     cleaned_stages = {}
     for stage, spec in stage_llm.items():
@@ -79,6 +82,31 @@ def build_config_kwargs(params: Dict[str, Any]) -> Dict[str, Any]:
         kwargs["stage_llm"] = cleaned_stages
 
     return kwargs
+
+
+SUPPORTED_DOC_SUFFIXES = {".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx", ".pptx"}
+
+
+def expand_document_paths(raw_paths) -> list:
+    """
+    Expand a list of file/directory paths into document file paths.
+
+    Directories are scanned (non-recursive) for supported document types.
+    Nonexistent paths are skipped.
+    """
+    files = []
+    for raw in raw_paths or []:
+        raw = str(raw).strip()
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        if path.is_dir():
+            for f in sorted(path.iterdir()):
+                if f.is_file() and f.suffix.lower() in SUPPORTED_DOC_SUFFIXES:
+                    files.append(str(f))
+        elif path.is_file():
+            files.append(str(path))
+    return files
 
 
 class ResearchJob:
@@ -158,9 +186,18 @@ class JobManager:
             tool = DeepResearchTool(config)
             job.update("調査を開始します", 2)
 
+            documents = expand_document_paths(params.get("local_documents"))
+            if params.get("source_mode") == "local" and not documents:
+                raise ValueError(
+                    "ローカル文献モードには文書パスの指定が必要です"
+                )
+            if documents:
+                job.update(f"ローカル文書 {len(documents)} 件を読み込みます", 1)
+
             result = tool.run(
                 query=params.get("query", ""),
                 requirements=params.get("requirements", ""),
+                additional_documents=documents or None,
                 progress_callback=job.update,
             )
 
