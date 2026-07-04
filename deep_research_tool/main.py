@@ -79,6 +79,7 @@ def _create_report_generator(
             technical_level=config.report.v2_technical_level,
             enable_consistency_check=config.report.v2_enable_consistency_check,
             enable_two_phase=config.report.v2_enable_two_phase,
+            enable_polish=config.report.v2_enable_polish,
             language=config.research.language,
         )
         return generator, True
@@ -334,6 +335,11 @@ class DeepResearchTool:
             crawl_mode=self.config.research.crawl_mode,
             fast_crawl_workers=self.config.research.fast_crawl_workers,
             fast_crawl_batch_size=self.config.research.fast_crawl_batch_size,
+            ai_crawl_max_total_pages=self.config.research.ai_crawl_max_total_pages,
+            ai_crawl_max_depth=self.config.research.ai_crawl_max_depth,
+            ai_crawl_max_llm_calls=self.config.research.ai_crawl_max_llm_calls,
+            ai_crawl_max_pages_per_domain=self.config.research.ai_crawl_max_pages_per_domain,
+            ai_crawl_politeness_delay=self.config.research.ai_crawl_politeness_delay,
         )
 
         # Conduct research
@@ -991,6 +997,12 @@ def run_research(
     crawl_mode: str = "standard",
     fast_crawl_workers: int = 10,
     fast_crawl_batch_size: int = 5,
+    # AI crawl mode parameters
+    ai_crawl_max_total_pages: int = 15,
+    ai_crawl_max_depth: int = 3,
+    ai_crawl_max_llm_calls: int = 25,
+    ai_crawl_max_pages_per_domain: int = 5,
+    ai_crawl_politeness_delay: float = 1.0,
     # Auto figure/table generation parameters
     auto_figures: bool = False,
     auto_figures_include_images: bool = True,
@@ -1039,9 +1051,14 @@ def run_research(
         content_filter_mode: Content filter strictness ('strict', 'moderate', 'minimal', 'none')
         custom_blocked_domains: List of domains to block (ads, spam, etc.)
         custom_whitelisted_domains: List of domains to always allow
-        crawl_mode: Crawl mode for performance ('standard', 'fast_batch', 'fast_parallel')
+        crawl_mode: Crawl mode ('standard', 'fast_batch', 'fast_parallel', 'aicrawl')
         fast_crawl_workers: Max parallel workers for fast crawl mode
         fast_crawl_batch_size: Pages per batch in batch evaluation mode
+        ai_crawl_max_total_pages: aicrawl - max pages fetched per section
+        ai_crawl_max_depth: aicrawl - max link depth from search-result seeds
+        ai_crawl_max_llm_calls: aicrawl - LLM decision call budget per section
+        ai_crawl_max_pages_per_domain: aicrawl - max pages fetched per domain
+        ai_crawl_politeness_delay: aicrawl - min seconds between same-domain fetches
         auto_figures: Auto-generate figures/tables and embed in report
         auto_figures_include_images: Include images from web sources
         auto_figures_include_tables: Include extracted tables
@@ -1139,6 +1156,11 @@ def run_research(
         crawl_mode=crawl_mode,
         fast_crawl_workers=fast_crawl_workers,
         fast_crawl_batch_size=fast_crawl_batch_size,
+        ai_crawl_max_total_pages=ai_crawl_max_total_pages,
+        ai_crawl_max_depth=ai_crawl_max_depth,
+        ai_crawl_max_llm_calls=ai_crawl_max_llm_calls,
+        ai_crawl_max_pages_per_domain=ai_crawl_max_pages_per_domain,
+        ai_crawl_politeness_delay=ai_crawl_politeness_delay,
         auto_figures=auto_figures,
         auto_figures_include_images=auto_figures_include_images,
         auto_figures_include_tables=auto_figures_include_tables,

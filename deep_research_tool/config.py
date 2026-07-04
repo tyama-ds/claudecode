@@ -315,6 +315,7 @@ class CrawlMode(str, Enum):
     STANDARD = "standard"          # Original sequential mode
     FAST_BATCH = "fast_batch"      # Fast parallel crawl + batch LLM evaluation
     FAST_PARALLEL = "fast_parallel"  # Fast parallel crawl + parallel LLM evaluation
+    AI_CRAWL = "aicrawl"           # LLM-driven crawl (LLM decides which links to follow)
 
 
 @dataclass
@@ -353,9 +354,16 @@ class ResearchConfig:
     custom_whitelisted_domains: List[str] = field(default_factory=list)
 
     # Fast crawl mode settings
-    crawl_mode: CrawlMode = CrawlMode.STANDARD  # standard, fast_batch, fast_parallel
+    crawl_mode: CrawlMode = CrawlMode.STANDARD  # standard, fast_batch, fast_parallel, aicrawl
     fast_crawl_workers: int = 10   # Max parallel workers for fetching
     fast_crawl_batch_size: int = 5  # Pages per batch in batch evaluation mode
+
+    # AI crawl mode settings (LLM-driven crawling)
+    ai_crawl_max_total_pages: int = 15   # Fetch budget per section
+    ai_crawl_max_depth: int = 3          # Max link depth from search-result seeds
+    ai_crawl_max_llm_calls: int = 25     # LLM decision call budget per section
+    ai_crawl_max_pages_per_domain: int = 5  # Cap of fetched pages per domain
+    ai_crawl_politeness_delay: float = 1.0  # Min seconds between same-domain fetches
 
 
 @dataclass
@@ -388,6 +396,7 @@ class ReportConfig:
     v2_enable_consistency_check: bool = True
     v2_enable_two_phase: bool = True
     v2_include_glossary: bool = True
+    v2_enable_polish: bool = True  # Final naturalness polish pass over all chapters
 
     # Auto figure/table generation settings
     auto_figures: bool = False  # Auto-generate figures/tables during run_research
@@ -541,6 +550,12 @@ def create_config(
     crawl_mode: str = "standard",
     fast_crawl_workers: int = 10,
     fast_crawl_batch_size: int = 5,
+    # AI crawl mode parameters
+    ai_crawl_max_total_pages: int = 15,
+    ai_crawl_max_depth: int = 3,
+    ai_crawl_max_llm_calls: int = 25,
+    ai_crawl_max_pages_per_domain: int = 5,
+    ai_crawl_politeness_delay: float = 1.0,
     # Report generator version parameters
     report_generator_version: str = "v1",
     v2_writing_style: str = "business",
@@ -549,6 +564,7 @@ def create_config(
     v2_enable_consistency_check: bool = True,
     v2_enable_two_phase: bool = True,
     v2_include_glossary: bool = True,
+    v2_enable_polish: bool = True,
     # Auto figure/table generation parameters
     auto_figures: bool = False,
     auto_figures_include_images: bool = True,
@@ -614,9 +630,14 @@ def create_config(
         content_filter_mode: Content filter strictness ('strict', 'moderate', 'minimal', 'none')
         custom_blocked_domains: List of domains to block in addition to defaults
         custom_whitelisted_domains: List of domains to always allow
-        crawl_mode: Crawl mode ('standard', 'fast_batch', 'fast_parallel')
+        crawl_mode: Crawl mode ('standard', 'fast_batch', 'fast_parallel', 'aicrawl')
         fast_crawl_workers: Max parallel workers for fast crawl mode
         fast_crawl_batch_size: Pages per batch in batch evaluation mode
+        ai_crawl_max_total_pages: aicrawl mode - max pages fetched per section
+        ai_crawl_max_depth: aicrawl mode - max link depth from search-result seeds
+        ai_crawl_max_llm_calls: aicrawl mode - LLM decision call budget per section
+        ai_crawl_max_pages_per_domain: aicrawl mode - max pages fetched per domain
+        ai_crawl_politeness_delay: aicrawl mode - min seconds between same-domain fetches
         report_generator_version: Report generator version ('v1' or 'v2')
         v2_writing_style: V2 writing style ('formal', 'business', 'technical', 'executive', 'casual')
         v2_target_audience: V2 target audience ('expert', 'business', 'engineer', 'general', 'student')
@@ -624,6 +645,7 @@ def create_config(
         v2_enable_consistency_check: Enable V2 consistency checking
         v2_enable_two_phase: Enable V2 two-phase generation (draft + refinement)
         v2_include_glossary: Include glossary section in V2 reports
+        v2_enable_polish: Enable final naturalness polish pass over all V2 chapters
         auto_figures: Auto-generate figures/tables during run_research
         auto_figures_include_images: Include images from web sources in auto figures
         auto_figures_include_tables: Include extracted tables in auto figures
@@ -679,6 +701,11 @@ def create_config(
         crawl_mode=CrawlMode(crawl_mode),
         fast_crawl_workers=fast_crawl_workers,
         fast_crawl_batch_size=fast_crawl_batch_size,
+        ai_crawl_max_total_pages=ai_crawl_max_total_pages,
+        ai_crawl_max_depth=ai_crawl_max_depth,
+        ai_crawl_max_llm_calls=ai_crawl_max_llm_calls,
+        ai_crawl_max_pages_per_domain=ai_crawl_max_pages_per_domain,
+        ai_crawl_politeness_delay=ai_crawl_politeness_delay,
     )
 
     report_config = ReportConfig(
@@ -693,6 +720,7 @@ def create_config(
         v2_enable_consistency_check=v2_enable_consistency_check,
         v2_enable_two_phase=v2_enable_two_phase,
         v2_include_glossary=v2_include_glossary,
+        v2_enable_polish=v2_enable_polish,
         auto_figures=auto_figures,
         auto_figures_include_images=auto_figures_include_images,
         auto_figures_include_tables=auto_figures_include_tables,

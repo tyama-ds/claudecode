@@ -7,6 +7,25 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
+from ..utils.helpers import (
+    extract_json_array_from_response,
+    extract_json_from_response,
+    split_prose_and_meta,
+)
+
+# Delimiter between prose body and metadata JSON in synthesis responses
+SECTION_META_DELIMITER = "===SECTION_META==="
+
+# Style guide embedded in Japanese prose-generation prompts
+JA_STYLE_GUIDE = """【文体ガイドライン】
+- 常体（「だ・である」調）で統一し、調査報告書として自然で引き締まった日本語で書くこと。
+- 翻訳調を避けること。例：「〜することができる」→「〜できる」、「〜が存在する」→「〜がある」、「〜という事実」→「〜こと」、「それは〜を意味する」→「つまり〜だ」。不要な受動態や「それ」「これら」の多用も避ける。
+- 一文はおおむね60字以内を目安とし、長くなった文は分割する。文末表現（「〜である」「〜だ」「〜といえる」「〜がうかがえる」など）が同じ形で連続しないよう変化をつける。
+- 「まず」「一方で」「さらに」「このため」「その結果」「もっとも」などの接続表現で論理の流れを示す。ただし機械的に多用しない。
+- 箇条書きは、並列的な列挙が明らかに読みやすい場合に限って使い、基本は段落の文章として論じる。段落は3〜5文でまとめ、段落間のつながりを意識する。
+- 主語と述語のねじれ、同じ語の近接した繰り返し、冗長な修飾（「非常に大きな重要性を持つ」→「きわめて重要だ」）に注意する。
+- 数値・固有名詞・年号は出典の表記を正確に保持する。"""
+
 
 @dataclass
 class ExtractedContent:
@@ -73,18 +92,39 @@ class ContentExtractor:
         Returns:
             ExtractedContent with processed information
         """
-        lang_instruction = (
-            "Respond in Japanese." if self.language == "ja"
-            else f"Respond in {self.language}."
-        )
-
         # Truncate content if too long
         max_content_length = 8000
         truncated_content = raw_content[:max_content_length]
         if len(raw_content) > max_content_length:
             truncated_content += "\n... [content truncated]"
 
-        prompt = f"""Source URL: {source_url}
+        if self.language == "ja":
+            prompt = f"""情報源URL: {source_url}
+情報源タイトル: {source_title}
+
+【調査の文脈】
+- 調査テーマ: {research_query}
+- 対象セクション: {section_context}
+
+【情報源の内容】
+{truncated_content}
+
+この内容を分析し、調査テーマに関連する情報を抽出してください。JSONで回答:
+{{
+    "processed_content": "関連する内容の要約（500〜1000字）。翻訳調を避け、自然な日本語の文章として書く",
+    "key_points": ["要点1", "要点2", ...],
+    "quotes": [
+        {{"text": "情報源からの正確な引用", "context": "この引用が重要な理由"}}
+    ],
+    "relevance_score": 0.0から1.0の数値,
+    "extraction_notes": "この情報源の品質・限界に関するメモ"
+}}
+
+調査テーマとセクションに直接関連する情報に絞ること。
+レポートで引用できる正確な引用文を含めること。
+relevance_score は 0（無関係）〜1（きわめて関連が高い）で評価すること。"""
+        else:
+            prompt = f"""Source URL: {source_url}
 Source Title: {source_title}
 
 Research Context:
@@ -94,7 +134,7 @@ Research Context:
 Source Content:
 {truncated_content}
 
-{lang_instruction}
+Respond in {self.language}.
 
 Analyze this content and extract relevant information. Return as JSON:
 {{
@@ -114,29 +154,25 @@ Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
         response = self.llm.generate(prompt)
 
         try:
-            content = response.content
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start != -1 and end > start:
-                data = json.loads(content[start:end])
+            data = extract_json_from_response(response.content)
 
-                # Use processed_content from LLM, fall back to truncated raw content if empty
-                processed = data.get("processed_content", "")
-                if not processed or len(processed.strip()) < 10:
-                    # LLM returned empty or very short content, use raw content
-                    processed = truncated_content[:2000]
+            # Use processed_content from LLM, fall back to truncated raw content if empty
+            processed = data.get("processed_content", "")
+            if not processed or len(processed.strip()) < 10:
+                # LLM returned empty or very short content, use raw content
+                processed = truncated_content[:2000]
 
-                return ExtractedContent(
-                    source_url=source_url,
-                    source_title=source_title,
-                    raw_content=raw_content,
-                    processed_content=processed,
-                    key_points=data.get("key_points", []),
-                    quotes=data.get("quotes", []),
-                    relevance_score=float(data.get("relevance_score", 0.5)),
-                    extraction_notes=data.get("extraction_notes", ""),
-                )
-        except (json.JSONDecodeError, ValueError):
+            return ExtractedContent(
+                source_url=source_url,
+                source_title=source_title,
+                raw_content=raw_content,
+                processed_content=processed,
+                key_points=data.get("key_points", []),
+                quotes=data.get("quotes", []),
+                relevance_score=float(data.get("relevance_score", 0.5)),
+                extraction_notes=data.get("extraction_notes", ""),
+            )
+        except (json.JSONDecodeError, ValueError, TypeError):
             pass
 
         # Fallback: return basic extraction
@@ -168,11 +204,6 @@ Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
         Returns:
             Dictionary with synthesized content and metadata
         """
-        lang_instruction = (
-            "Write in Japanese." if self.language == "ja"
-            else f"Write in {self.language}."
-        )
-
         # Prepare source summaries
         source_summaries = []
         for i, ec in enumerate(extracted_contents, 1):
@@ -191,7 +222,32 @@ Key Points:
 
         sources_text = "\n---\n".join(source_summaries)
 
-        prompt = f"""Section: {section_title}
+        if self.language == "ja":
+            # Japanese: write prose directly (no JSON wrapping), metadata after a delimiter
+            prompt = f"""あなたは調査レポートの執筆者です。以下の情報源をもとに、レポートの1セクションの本文を執筆してください。
+
+【セクション】{section_title}
+【セクションの説明】{section_description}
+【調査要件】{requirements if requirements else "包括的な分析"}
+
+【情報源】
+{sources_text}
+
+{JA_STYLE_GUIDE}
+
+【執筆ルール】
+1. 情報源に基づく事実には、文末に [SOURCE N] の形式で出典番号を付けること。この表記は一字一句変えない（翻訳・省略・変形しない）。
+2. あなた自身の分析・解釈は、「〜と考えられる」「〜と推察される」「〜可能性がある」などの表現で、事実の記述と自然に区別すること。
+3. 情報源にない主張はしない。情報源の間で内容が食い違う場合は、その旨を本文中で明記する。
+4. 見出しや箇条書きの多用は避け、本文（マークダウンの段落）として書く。セクションタイトルは出力しない。
+5. JSONやコードブロックで囲まず、本文をそのまま書き始めること。
+
+本文を書き終えたら、最後に次の区切り記号とメタ情報を必ず出力すること:
+
+{SECTION_META_DELIMITER}
+{{"summary": "このセクションの要約（2〜3文）", "analysis_points": ["主要な分析ポイント"], "information_gaps": ["さらに調査が必要な点"], "confidence_level": "high/medium/low"}}"""
+        else:
+            prompt = f"""Section: {section_title}
 Description: {section_description}
 
 Research Requirements: {requirements if requirements else "Comprehensive analysis"}
@@ -199,51 +255,50 @@ Research Requirements: {requirements if requirements else "Comprehensive analysi
 Available Sources:
 {sources_text}
 
-{lang_instruction}
+Write in {self.language}.
 
 Synthesize the information from these sources into well-written section content.
 
 IMPORTANT:
 1. Clearly distinguish between:
    - Factual information from sources (cite as [SOURCE N])
-   - Your own analysis or interpretation (mark as [ANALYSIS])
+   - Your own analysis or interpretation (phrase naturally as your assessment)
 2. Do not make claims that aren't supported by the sources
 3. Note any conflicting information between sources
-4. Identify gaps where more information is needed
+4. Write flowing paragraphs (markdown), not JSON. Do not output the section title.
 
-Return as JSON:
-{{
-    "content": "Full section content with citations",
-    "summary": "Brief summary of key findings",
-    "source_references": [1, 2, 3],
-    "analysis_points": ["Your analytical insights"],
-    "information_gaps": ["Areas needing more research"],
-    "confidence_level": "high/medium/low"
-}}"""
+After the body, output this delimiter followed by metadata:
+
+{SECTION_META_DELIMITER}
+{{"summary": "Brief summary of key findings", "analysis_points": ["Your analytical insights"], "information_gaps": ["Areas needing more research"], "confidence_level": "high/medium/low"}}"""
 
         response = self.llm.generate(prompt)
 
-        # Prepare fallback content in case JSON parsing fails or content is empty
+        # Prepare fallback content in case parsing fails or content is empty
         fallback_content = "\n\n".join(
             ec.processed_content for ec in extracted_contents if ec.processed_content
         )
 
         try:
-            content = response.content
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start != -1 and end > start:
-                result = json.loads(content[start:end])
+            body, meta = split_prose_and_meta(response.content, SECTION_META_DELIMITER)
 
-                # Check if content is empty or too short, use fallback
-                result_content = result.get("content", "")
-                if not result_content or len(result_content.strip()) < 10:
-                    result["content"] = fallback_content
-                    if not result.get("summary"):
-                        result["summary"] = "Content compiled from multiple sources"
+            if not body or len(body.strip()) < 10:
+                body = fallback_content
+                if not meta.get("summary"):
+                    meta["summary"] = "Content compiled from multiple sources"
 
-                return result
-        except (json.JSONDecodeError, ValueError):
+            return {
+                "content": body,
+                "summary": meta.get("summary", ""),
+                "source_references": meta.get(
+                    "source_references",
+                    list(range(1, len(extracted_contents) + 1)),
+                ),
+                "analysis_points": meta.get("analysis_points", []),
+                "information_gaps": meta.get("information_gaps", []),
+                "confidence_level": meta.get("confidence_level", "medium"),
+            }
+        except Exception:
             pass
 
         # Fallback
@@ -350,7 +405,27 @@ Key Points: {', '.join(ec.key_points[:3]) if ec.key_points else 'N/A'}
         lang_instruction: str,
     ) -> List[Dict[str, str]]:
         """Generate a detailed outline for the section."""
-        prompt = f"""Section: {section_title}
+        if self.language == "ja":
+            prompt = f"""【セクション】{section_title}
+【セクションの説明】{section_description}
+【調査要件】{requirements if requirements else "包括的な分析"}
+
+【情報源】
+{sources_text[:6000]}
+
+情報源に基づいて、このセクションの詳細なアウトラインを作成してください。
+トピックを網羅する4〜6個の論点で構成すること。論点の並びは、読み手が自然に理解できる論理的な流れ（概要→詳細→分析など）にすること。
+
+JSONで回答:
+{{
+    "outline": [
+        {{"title": "論点のタイトル", "description": "この論点で扱う内容", "key_facts": ["含めるべき事実1", "事実2"]}}
+    ]
+}}
+
+JSONのみを出力:"""
+        else:
+            prompt = f"""Section: {section_title}
 Description: {section_description}
 Requirements: {requirements if requirements else "Comprehensive analysis"}
 
@@ -362,21 +437,33 @@ Available Sources:
 Based on the available sources, create a detailed outline for this section.
 The outline should have 4-6 key points that comprehensively cover the topic.
 
-Return as JSON array:
-[
-    {{"title": "Point title", "description": "What this point should cover", "key_facts": ["fact1", "fact2"]}},
-    ...
-]"""
+Return as JSON:
+{{
+    "outline": [
+        {{"title": "Point title", "description": "What this point should cover", "key_facts": ["fact1", "fact2"]}}
+    ]
+}}
+
+Output JSON only:"""
 
         try:
             response = self.llm.generate(prompt)
             content = response.content
-            start = content.find("[")
-            end = content.rfind("]") + 1
-            if start != -1 and end > start:
-                outline = json.loads(content[start:end])
-                if outline and len(outline) > 0:
-                    return outline
+            outline = []
+            try:
+                data = extract_json_from_response(content)
+                outline = data.get("outline", [])
+            except (json.JSONDecodeError, ValueError):
+                pass
+            if not outline:
+                # Tolerate legacy bare-array responses
+                try:
+                    outline = extract_json_array_from_response(content)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            if outline and len(outline) > 0:
+                return outline
+            print("[WARNING] Outline parsing produced no outline entries")
         except (json.JSONDecodeError, ValueError) as e:
             print(f"[WARNING] Outline parsing failed: {e}")
 
@@ -395,7 +482,26 @@ Return as JSON array:
         lang_instruction: str,
     ) -> str:
         """Generate detailed content for a single outline point."""
-        prompt = f"""Section: {section_title}
+        if self.language == "ja":
+            prompt = f"""【セクション】{section_title}
+【執筆する論点】{point.get('title', '')}
+【論点の説明】{point.get('description', '')}
+【含めるべき事実】{', '.join(point.get('key_facts', []))}
+
+【情報源】
+{sources_text[:5000]}
+
+この論点について、400〜600字程度の本文を執筆してください。
+
+【執筆ルール】
+1. 常体（である調）で、翻訳調を避けた自然な日本語の段落として書く。文末表現が単調に繰り返されないよう変化をつける。
+2. 情報源に基づく事実には [SOURCE N] の形式で出典番号を付ける（この表記は一字一句変えない）。
+3. 具体的で情報量のある記述にする。情報源にない主張はしない。
+4. 見出し・タイトル・箇条書きは付けず、本文の段落のみを書く。
+
+本文のみを出力（JSON不要）:"""
+        else:
+            prompt = f"""Section: {section_title}
 Point to elaborate: {point.get('title', '')}
 Point description: {point.get('description', '')}
 Key facts to include: {', '.join(point.get('key_facts', []))}
@@ -444,7 +550,26 @@ Write the content directly (no JSON):"""
             for s in detailed_sections
         )
 
-        prompt = f"""Section: {section_title}
+        if self.language == "ja":
+            prompt = f"""以下は同じセクション「{section_title}」のために書かれた下書きの断片です。これらを、一人の書き手が最初から書き下ろしたような、一貫した流れを持つ本文に統合してください。
+
+【セクションの説明】{section_description}
+
+【下書き断片】
+{sections_text}
+
+{JA_STYLE_GUIDE}
+
+【統合ルール】
+1. 事実と [SOURCE N] の出典表記はすべて正確に維持する（[SOURCE N] は一字一句変えない）。
+2. 重複する記述は一度だけにまとめ、断片の順序も論理的な流れを優先して入れ替えてよい。
+3. 「### 見出し」のような断片の区切りは残さず、段落のつながり（接続表現・指示の受け直し）で文章として流れを作る。
+4. 断片にない情報を加えない。
+5. 冒頭はセクションの主題を1〜2文で導入し、末尾は次の論点につながる形か、小括で締める。
+
+統合後の本文のみを出力（JSON・見出し不要）:"""
+        else:
+            prompt = f"""Section: {section_title}
 Description: {section_description}
 
 Content parts to integrate:
@@ -452,14 +577,15 @@ Content parts to integrate:
 
 {lang_instruction}
 
-Integrate these content parts into a cohesive, well-structured section.
+Rewrite these draft fragments into one cohesive section that reads as if
+written by a single author from scratch.
 
 Requirements:
-1. Maintain all factual information and citations [SOURCE N]
-2. Ensure smooth transitions between topics
-3. Remove any redundancy
-4. Keep the section well-organized with clear flow
-5. Do not add information not present in the original parts
+1. Maintain all factual information and citations [SOURCE N] exactly
+2. Merge duplicated statements; you may reorder fragments for logical flow
+3. Remove the "### heading" fragment markers; connect paragraphs with transitions
+4. Do not add information not present in the original parts
+5. Open with 1-2 sentences introducing the section's theme, close with a brief wrap-up
 
 Write the integrated content directly (no JSON, no section title):"""
 
@@ -481,7 +607,16 @@ Write the integrated content directly (no JSON, no section title):"""
         lang_instruction: str,
     ) -> str:
         """Generate a brief summary of the section content."""
-        prompt = f"""Section: {section_title}
+        if self.language == "ja":
+            prompt = f"""【セクション】{section_title}
+
+【本文】
+{content[:2000]}
+
+このセクションの要点を、常体（である調）の自然な日本語で2〜3文に要約してください。
+要約のみを出力（JSON不要）:"""
+        else:
+            prompt = f"""Section: {section_title}
 
 Content:
 {content[:2000]}
@@ -537,11 +672,7 @@ Analyze and return as JSON:
         response = self.llm.generate(prompt)
 
         try:
-            content = response.content
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start != -1 and end > start:
-                return json.loads(content[start:end])
+            return extract_json_from_response(response.content)
         except (json.JSONDecodeError, ValueError):
             pass
 
@@ -613,17 +744,13 @@ Return as JSON array with relevance (high/medium/low/none):
         response = self.llm.generate(prompt)
 
         try:
-            content = response.content
-            start = content.find("[")
-            end = content.rfind("]") + 1
-            if start != -1 and end > start:
-                evaluations = json.loads(content[start:end])
+            evaluations = extract_json_array_from_response(response.content)
 
-                for eval_item in evaluations:
-                    idx = eval_item.get("index", 0) - 1
-                    if 0 <= idx < len(relevant_images):
-                        relevant_images[idx]["relevance"] = eval_item.get("relevance", "low")
-                        relevant_images[idx]["suggested_caption"] = eval_item.get("suggested_caption", "")
+            for eval_item in evaluations:
+                idx = eval_item.get("index", 0) - 1
+                if 0 <= idx < len(relevant_images):
+                    relevant_images[idx]["relevance"] = eval_item.get("relevance", "low")
+                    relevant_images[idx]["suggested_caption"] = eval_item.get("suggested_caption", "")
         except (json.JSONDecodeError, ValueError):
             pass
 

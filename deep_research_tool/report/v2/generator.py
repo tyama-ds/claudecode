@@ -18,6 +18,10 @@ from datetime import datetime
 from .context import ReportContext, WritingStyle, TargetAudience, ChapterSummary
 from .consistency import ConsistencyChecker, ConsistencyReport
 from .glossary import GlossaryManager
+from ...utils.helpers import split_prose_and_meta
+
+# Delimiter between chapter prose and metadata JSON in generation responses
+CHAPTER_META_DELIMITER = "===CHAPTER_META==="
 
 
 @dataclass
@@ -75,6 +79,7 @@ class ReportGeneratorV2:
         technical_level: int = 3,
         enable_consistency_check: bool = True,
         enable_two_phase: bool = True,
+        enable_polish: bool = True,
         progress_callback: Callable[[str, int, int], None] = None,
     ):
         """
@@ -88,6 +93,7 @@ class ReportGeneratorV2:
             technical_level: Technical level (1-5)
             enable_consistency_check: Run consistency check after generation
             enable_two_phase: Enable two-phase generation (draft + refinement)
+            enable_polish: Run a final naturalness polish pass over all chapters
             progress_callback: Progress callback function
         """
         self.llm = llm_client
@@ -97,6 +103,7 @@ class ReportGeneratorV2:
         self.technical_level = technical_level
         self.enable_consistency_check = enable_consistency_check
         self.enable_two_phase = enable_two_phase
+        self.enable_polish = enable_polish
         self.progress_callback = progress_callback
 
         # Initialize components
@@ -216,6 +223,11 @@ class ReportGeneratorV2:
                 self._report_progress("Refining for consistency...", 85, 100)
                 chapters = self._refine_chapters(chapters, consistency_report, context)
 
+        # Phase 3: Naturalness polish over all chapters
+        if self.enable_polish:
+            self._report_progress("Polishing chapters for naturalness...", 90, 100)
+            chapters = self._polish_chapters(chapters, context)
+
         # Calculate totals
         total_word_count = sum(c.word_count for c in chapters.values())
         context.total_word_count = total_word_count
@@ -243,17 +255,36 @@ class ReportGeneratorV2:
         # Build the prompt with full context
         context_prompt = context.get_full_context_prompt()
 
-        # Format content data
+        # Format content data. The Researcher stores section_contents entries
+        # with keys title/content/summary/sources; extracted_content is kept
+        # as a preferred source when a caller provides per-source material.
+        no_info = "情報なし" if self.language == "ja" else "No information"
         if isinstance(content_data, dict):
             sources = content_data.get("sources", [])
             extracted = content_data.get("extracted_content", [])
-            content_summary = "\n".join([
-                f"- {e.get('title', 'N/A')}: {e.get('content', '')[:500]}"
-                for e in extracted[:10]
-            ]) if extracted else "情報なし"
+            if extracted:
+                content_summary = "\n".join([
+                    f"- {e.get('title', 'N/A')}: {e.get('content', '')[:1200]}"
+                    for e in extracted[:12]
+                ])
+            else:
+                parts = []
+                body = content_data.get("content", "")
+                if body:
+                    parts.append(body[:4000])
+                summary = content_data.get("summary", "")
+                if summary:
+                    label = "要約: " if self.language == "ja" else "Summary: "
+                    parts.append(label + summary[:600])
+                if sources:
+                    label = "情報源:" if self.language == "ja" else "Sources:"
+                    parts.append(label + "\n" + "\n".join(
+                        f"- {s}" for s in sources[:10]
+                    ))
+                content_summary = "\n\n".join(parts) if parts else no_info
         else:
             sources = []
-            content_summary = str(content_data)[:2000] if content_data else "情報なし"
+            content_summary = str(content_data)[:4000] if content_data else no_info
 
         if self.language == "ja":
             prompt = f"""{context_prompt}
@@ -273,19 +304,17 @@ class ReportGeneratorV2:
 1. 用語統一ルールに従い、一貫した用語を使用する
 2. 前章までの内容と矛盾しないようにする
 3. 文体・スタイル指示に従う
-4. 事実に基づいた記述を行い、推測は明示する
-5. 必要に応じて前章を参照・引用する
+4. 事実に基づいた記述を行い、推測は「〜と考えられる」などの表現で明示する
+5. 必要に応じて前章を参照する
 
-出力形式（JSON）:
-{{
-    "content": "本文（マークダウン形式）",
-    "key_points": ["要点1", "要点2", "要点3"],
-    "terms_used": ["使用した専門用語1", "専門用語2"],
-    "facts_stated": ["記述した事実1", "事実2"],
-    "word_count": 文字数
-}}
+【出力形式】
+まず本文をマークダウンでそのまま書く（章見出し「## {section_number}. {section_title}」から始める）。
+JSONやコードブロックで囲まない。
 
-JSONのみを出力:"""
+本文の後、最後に次の区切り記号とメタ情報を必ず出力する:
+
+{CHAPTER_META_DELIMITER}
+{{"key_points": ["要点1", "要点2", "要点3"], "terms_used": ["使用した専門用語1"], "facts_stated": ["記述した重要な事実1"]}}"""
         else:
             prompt = f"""{context_prompt}
 
@@ -304,40 +333,33 @@ Important notes:
 1. Follow terminology consistency rules
 2. Do not contradict previous chapters
 3. Follow style instructions
-4. Base writing on facts; clearly mark speculation
+4. Base writing on facts; phrase speculation naturally as your assessment
 5. Reference previous chapters when appropriate
 
-Output format (JSON):
-{{
-    "content": "main text (markdown format)",
-    "key_points": ["point1", "point2", "point3"],
-    "terms_used": ["technical term1", "term2"],
-    "facts_stated": ["fact1", "fact2"],
-    "word_count": word_count
-}}
+[OUTPUT FORMAT]
+Write the body directly as markdown (start with the heading "## {section_number}. {section_title}").
+Do not wrap it in JSON or a code block.
 
-Output only JSON:"""
+After the body, output this delimiter followed by metadata:
+
+{CHAPTER_META_DELIMITER}
+{{"key_points": ["point1", "point2", "point3"], "terms_used": ["technical term1"], "facts_stated": ["fact1"]}}"""
 
         try:
             response = self.llm.generate(prompt)
-            content = response.content.strip()
+            body, meta = split_prose_and_meta(response.content, CHAPTER_META_DELIMITER)
 
-            # Parse JSON
-            if "```" in content:
-                content = content.split("```")[1].split("```")[0]
-                if content.startswith("json"):
-                    content = content[4:]
-
-            data = json.loads(content)
+            if not body or not body.strip():
+                raise ValueError("Empty chapter body in LLM response")
 
             return ChapterContent(
                 section_number=section_number,
                 section_title=section_title,
-                content=data.get("content", ""),
-                word_count=data.get("word_count", len(data.get("content", ""))),
-                key_points=data.get("key_points", []),
-                terms_used=data.get("terms_used", []),
-                facts_stated=data.get("facts_stated", []),
+                content=body,
+                word_count=len(body),
+                key_points=meta.get("key_points", []),
+                terms_used=meta.get("terms_used", []),
+                facts_stated=meta.get("facts_stated", []),
                 is_draft=True,
             )
 
@@ -437,6 +459,83 @@ Output only the revised content (no JSON):"""
 
             except Exception as e:
                 print(f"[ReportGeneratorV2] Refinement failed for {section_num}: {e}")
+
+        return chapters
+
+    def _polish_chapters(
+        self,
+        chapters: Dict[str, ChapterContent],
+        context: ReportContext,
+    ) -> Dict[str, ChapterContent]:
+        """
+        Polish all chapters for naturalness (one LLM call per chapter).
+
+        Facts, numbers, citations and heading structure are kept intact; only
+        the prose quality is improved. A rewrite whose length falls outside
+        60%-150% of the original is rejected to guard against summarizing or
+        inflating rewrites.
+        """
+        style_instructions = context.get_style_instructions()
+        prev_tail = ""
+
+        for section_num in sorted(chapters.keys()):
+            chapter = chapters[section_num]
+            if not chapter.content or not chapter.content.strip():
+                continue
+
+            if self.language == "ja":
+                prompt = f"""あなたは日本語の報告書の推敲者です。以下の章の内容・事実・構成は変えずに、日本語としての自然さだけを磨いてください。
+
+{style_instructions}
+
+【直前の章の末尾（つながりの参考。書き換え対象ではない）】
+{prev_tail or "（これが最初の章）"}
+
+【推敲対象の章】
+{chapter.content}
+
+【推敲ルール】
+1. 事実・数値・固有名詞・出典表記・見出し構成は一切変更しない。情報の追加・削除もしない。
+2. 翻訳調・単調な文末・不自然な語順・冗長表現を直し、段落内と段落間の流れを滑らかにする。
+3. 文体（です・ます調／である調）は上記スタイル指示に統一する。
+4. 修正が不要な文はそのまま残してよい。
+
+推敲後の本文のみを出力（前置き・JSON・コードブロック不要）:"""
+            else:
+                prompt = f"""You are a prose editor for a research report. Polish the following chapter for naturalness only, without changing its content, facts, or structure.
+
+{style_instructions}
+
+[END OF PREVIOUS CHAPTER (for transition context; not to be rewritten)]
+{prev_tail or "(this is the first chapter)"}
+
+[CHAPTER TO POLISH]
+{chapter.content}
+
+[EDITING RULES]
+1. Do not change facts, numbers, proper nouns, citations, or heading structure. Do not add or remove information.
+2. Fix awkward phrasing, monotonous sentence endings, and redundancy; smooth the flow within and between paragraphs.
+3. Keep the style consistent with the instructions above.
+4. Sentences that need no edits may be kept as-is.
+
+Output only the polished body (no preamble, no JSON, no code block):"""
+
+            try:
+                response = self.llm.generate(prompt)
+                polished = response.content.strip()
+
+                original_len = len(chapter.content)
+                if polished and 0.6 * original_len <= len(polished) <= 1.5 * original_len:
+                    chapter.content = polished
+                    chapter.word_count = len(polished)
+                    chapter.is_draft = False
+                else:
+                    print(f"[ReportGeneratorV2] Polish rejected for {section_num} "
+                          f"(length {len(polished)} vs original {original_len})")
+            except Exception as e:
+                print(f"[ReportGeneratorV2] Polish failed for {section_num}: {e}")
+
+            prev_tail = chapter.content[-300:]
 
         return chapters
 

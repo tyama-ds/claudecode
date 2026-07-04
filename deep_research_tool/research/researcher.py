@@ -19,10 +19,12 @@ from ..evidence.content_filter import (
 )
 from ..search.base import SearchResult
 from ..config import CrawlMode
+from ..utils.helpers import extract_json_from_response
 from .query_generator import QueryGenerator, ResearchPlan, TableOfContents, TableOfContentsItem
 from .content_extractor import ContentExtractor, ExtractedContent
 from .site_crawler import SiteCrawler, CrawlResult, extract_keywords_from_topic
 from .fast_crawler import FastCrawler, EvaluationMode, CrawlResult as FastCrawlResult
+from .ai_crawler import AICrawler
 
 
 class ResearchState(str, Enum):
@@ -156,6 +158,11 @@ class Researcher:
         crawl_mode: CrawlMode = CrawlMode.STANDARD,
         fast_crawl_workers: int = 10,
         fast_crawl_batch_size: int = 5,
+        ai_crawl_max_total_pages: int = 15,
+        ai_crawl_max_depth: int = 3,
+        ai_crawl_max_llm_calls: int = 25,
+        ai_crawl_max_pages_per_domain: int = 5,
+        ai_crawl_politeness_delay: float = 1.0,
     ):
         """
         Initialize Researcher.
@@ -178,9 +185,14 @@ class Researcher:
             use_enhanced_synthesis: Use multi-pass content generation for better quality
             content_filter: Content filter instance (None to use default based on filter_mode)
             filter_mode: Filter strictness: "strict", "moderate", "minimal", or "none"
-            crawl_mode: Crawl mode (standard, fast_batch, fast_parallel)
+            crawl_mode: Crawl mode (standard, fast_batch, fast_parallel, aicrawl)
             fast_crawl_workers: Max parallel workers for fast crawl mode
             fast_crawl_batch_size: Pages per batch in batch evaluation mode
+            ai_crawl_max_total_pages: aicrawl - max pages fetched per section
+            ai_crawl_max_depth: aicrawl - max link depth from search-result seeds
+            ai_crawl_max_llm_calls: aicrawl - LLM decision call budget per section
+            ai_crawl_max_pages_per_domain: aicrawl - max pages fetched per domain
+            ai_crawl_politeness_delay: aicrawl - min seconds between same-domain fetches
         """
         self.llm = llm_client
         self.search = search_client
@@ -246,6 +258,21 @@ class Researcher:
                 content_filter=self.content_filter,
                 max_workers=fast_crawl_workers,
                 batch_size=fast_crawl_batch_size,
+                language=language,
+            )
+
+        # AI crawl mode (LLM-driven crawling)
+        self.ai_crawler: Optional[AICrawler] = None
+        if crawl_mode == CrawlMode.AI_CRAWL:
+            self.ai_crawler = AICrawler(
+                search_client=search_client,
+                llm_client=llm_client,
+                content_filter=self.content_filter,
+                max_total_pages=ai_crawl_max_total_pages,
+                max_depth=ai_crawl_max_depth,
+                max_llm_calls=ai_crawl_max_llm_calls,
+                max_pages_per_domain=ai_crawl_max_pages_per_domain,
+                politeness_delay=ai_crawl_politeness_delay,
                 language=language,
             )
 
@@ -389,6 +416,14 @@ class Researcher:
                     section_idx=section_idx,
                     total_sections=total_sections,
                 )
+            elif self.ai_crawler and self.crawl_mode == CrawlMode.AI_CRAWL:
+                # AI crawl mode: LLM decides which links to follow
+                self._process_section_with_ai_crawler(
+                    section=section,
+                    available_queries=available_queries,
+                    section_idx=section_idx,
+                    total_sections=total_sections,
+                )
             else:
                 # Standard mode: sequential processing
                 self._process_section_with_immediate_generation(
@@ -500,6 +535,90 @@ class Researcher:
 
         # Generate and save section content
         print(f"[FastCrawler] Section {section.section} complete. Parts: {len(section_content_parts)}")
+        self._generate_and_save_section_content(section, section_content_parts)
+
+    def _process_section_with_ai_crawler(
+        self,
+        section: TableOfContentsItem,
+        available_queries: List[str],
+        section_idx: int,
+        total_sections: int,
+    ) -> None:
+        """
+        Process a section using AI crawl mode (LLM-driven crawling).
+
+        Seeds a crawl from search results, then lets the LLM read each page
+        and decide which links to follow next.
+        """
+        if not self.ai_crawler:
+            # Fallback to standard processing
+            return self._process_section_with_immediate_generation(
+                section, available_queries, section_idx, total_sections
+            )
+
+        section_content_parts: List[ExtractedContent] = []
+
+        def ai_progress(msg: str, current: int, total: int):
+            self._report_progress(
+                f"{section.section}: {msg}",
+                10 + (section_idx / total_sections) * 70 + (current / max(total, 1)) * 10
+            )
+
+        queries = available_queries[:self.max_queries_per_iteration]
+        if not queries:
+            queries = self.query_generator.generate_follow_up_queries(
+                section, "", []
+            )
+
+        print(f"[AICrawler] Processing section {section.section} with {len(queries)} queries")
+
+        crawl_result: FastCrawlResult = self.ai_crawler.crawl_and_evaluate(
+            queries=queries,
+            section_context=f"{section.section}. {section.title}: {section.description}",
+            research_topic=self.session.query,
+            max_pages_per_query=self.max_pages_per_query,
+            min_relevance_score=0.2,
+            progress_callback=ai_progress,
+        )
+
+        print(f"[AICrawler] Found {len(crawl_result.pages)} relevant pages "
+              f"({crawl_result.pages_fetched} fetched, "
+              f"eval: {crawl_result.total_eval_time:.1f}s)")
+
+        for page in crawl_result.pages:
+            extracted = ExtractedContent(
+                source_url=page.url,
+                source_title=page.title,
+                raw_content=page.content,
+                processed_content=page.processed_content or page.content[:2000],
+                key_points=page.key_points,
+                relevance_score=page.relevance_score,
+                extraction_notes=f"ai_crawler (depth={page.metadata.get('depth', 0)}, "
+                                 f"decided_by={page.metadata.get('decided_by', 'llm')})",
+            )
+            section_content_parts.append(extracted)
+
+            self.evidence_locker.add_evidence(
+                url=page.url,
+                title=page.title,
+                content_excerpt=page.processed_content[:500] if page.processed_content else page.snippet,
+                evidence_type=EvidenceType.WEB_PAGE,
+                search_query=page.metadata.get("query", "aicrawl"),
+                section_reference=section.section,
+                relevance_score=page.relevance_score,
+            )
+
+        iter_record = ResearchIteration(
+            iteration_number=1,
+            section=section.section,
+            queries_executed=queries,
+            sources_found=crawl_result.pages_fetched,
+            content_extracted=len(crawl_result.pages),
+        )
+        iter_record.completed_at = datetime.now().isoformat()
+        self.session.iterations.append(iter_record)
+
+        print(f"[AICrawler] Section {section.section} complete. Parts: {len(section_content_parts)}")
         self._generate_and_save_section_content(section, section_content_parts)
 
     def _process_section_with_immediate_generation(
@@ -767,15 +886,11 @@ Return JSON:
 
         try:
             response = self.llm.generate(coherence_prompt)
-            content = response.content
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start != -1 and end > start:
-                result = json.loads(content[start:end])
-                self.session.section_contents["_coherence_check"] = result
-                print(f"[DEBUG] Coherence check: {result.get('is_coherent', 'unknown')}")
-                if result.get("issues"):
-                    print(f"[DEBUG] Issues found: {result['issues']}")
+            result = extract_json_from_response(response.content)
+            self.session.section_contents["_coherence_check"] = result
+            print(f"[DEBUG] Coherence check: {result.get('is_coherent', 'unknown')}")
+            if result.get("issues"):
+                print(f"[DEBUG] Issues found: {result['issues']}")
         except Exception as e:
             print(f"[WARNING] Coherence check failed: {e}")
 
@@ -883,12 +998,33 @@ Return JSON:
                 f"Summary: {content.get('summary', '')[:200]}"
             )
 
-        summary_prompt = f"""Research Topic: {self.session.query}
+        if self.language == "ja":
+            summary_prompt = f"""【調査テーマ】{self.session.query}
+【調査要件】{self.session.requirements}
+
+【各セクションの要約】
+{chr(10).join(sections_summary)}
+
+上記をもとに、報告書の冒頭に置くエグゼクティブサマリーを作成してください。
+
+要件:
+- executive_summary は600〜900字程度。常体（である調）の自然な日本語で、翻訳調を避け、段落として流れるように書く（箇条書きにしない）。文末表現が単調に繰り返されないよう変化をつける。
+- 全セクションを横断する主要な発見 → 結論 → 今後の調査課題、の順で論じる。
+- key_findings は本文と重複してよいが、各項目は体言止めか短文で簡潔に。
+
+JSONで出力:
+{{"executive_summary": "...", "key_findings": ["..."], "recommendations": ["..."], "overall_confidence": "high/medium/low"}}
+
+JSONのみを出力:"""
+        else:
+            summary_prompt = f"""Research Topic: {self.session.query}
 
 Section Summaries:
 {chr(10).join(sections_summary)}
 
 Requirements: {self.session.requirements}
+
+Write in {self.language}.
 
 Create an executive summary of the research findings (300-500 words).
 Include:
@@ -903,12 +1039,8 @@ Return as JSON:
         response = self.llm.generate(summary_prompt)
 
         try:
-            content = response.content
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start != -1 and end > start:
-                synthesis = json.loads(content[start:end])
-                self.session.section_contents["_executive_summary"] = synthesis
+            synthesis = extract_json_from_response(response.content)
+            self.session.section_contents["_executive_summary"] = synthesis
         except (json.JSONDecodeError, ValueError):
             self.session.section_contents["_executive_summary"] = {
                 "executive_summary": "Summary generation failed",

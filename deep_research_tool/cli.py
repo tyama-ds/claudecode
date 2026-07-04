@@ -150,6 +150,19 @@ def cli():
     help="Max sites to crawl per search in extended mode (default: 3)"
 )
 @click.option(
+    "--crawl-mode",
+    type=click.Choice(["standard", "fast_batch", "fast_parallel", "aicrawl"]),
+    default="standard",
+    help="Crawl mode: standard, fast_batch, fast_parallel, or aicrawl "
+         "(LLM reads each page and decides which links to follow)"
+)
+@click.option(
+    "--ai-crawl-max-pages",
+    type=int,
+    default=15,
+    help="aicrawl mode: max pages fetched per section (default: 15)"
+)
+@click.option(
     "--auto-figures/--no-auto-figures",
     default=False,
     help="Auto-generate figures/tables and embed in report"
@@ -186,6 +199,8 @@ def research(
     crawl_max_pages: int,
     crawl_max_depth: int,
     crawl_max_sites: int,
+    crawl_mode: str,
+    ai_crawl_max_pages: int,
     auto_figures: bool,
     verbose: bool,
     openai_key: Optional[str],
@@ -221,6 +236,8 @@ def research(
         crawl_max_pages=crawl_max_pages,
         crawl_max_depth=crawl_max_depth,
         crawl_max_sites=crawl_max_sites,
+        crawl_mode=crawl_mode,
+        ai_crawl_max_total_pages=ai_crawl_max_pages,
         auto_figures=auto_figures,
     )
 

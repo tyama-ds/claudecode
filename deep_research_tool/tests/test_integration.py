@@ -158,6 +158,37 @@ class TestContentExtractor:
         assert result["content"] == "Synthesized content"
         assert result["confidence_level"] == "high"
 
+    def test_synthesize_section_content_delimiter_format(self):
+        """Test synthesis with the prose + delimiter + metadata format."""
+        mock_llm = Mock()
+        mock_llm.generate.return_value = Mock(
+            content=(
+                "調査の結果、市場は拡大している。[SOURCE 1]\n\n"
+                "===SECTION_META===\n"
+                '{"summary": "要約", "information_gaps": [], "confidence_level": "high"}'
+            )
+        )
+
+        extractor = ContentExtractor(mock_llm)
+        extracted = [
+            ExtractedContent(
+                source_url="https://example.com",
+                source_title="Test",
+                raw_content="Raw",
+                processed_content="Processed",
+            )
+        ]
+
+        result = extractor.synthesize_section_content(
+            section_title="Test Section",
+            section_description="Description",
+            extracted_contents=extracted,
+        )
+
+        assert result["content"] == "調査の結果、市場は拡大している。[SOURCE 1]"
+        assert result["summary"] == "要約"
+        assert result["confidence_level"] == "high"
+
 
 class TestVerifier:
     """Test Verifier with mocked LLM."""
