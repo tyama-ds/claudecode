@@ -195,6 +195,12 @@ class Handler(BaseHTTPRequestHandler):
         else:
             rounds = min(rounds, 8)
 
+        # Optional floor before DONE is honored (guards rubber-stamp approvals).
+        try:
+            session_min_rounds = max(0, min(int(body.get("min_rounds", 0) or 0), 8))
+        except (TypeError, ValueError):
+            session_min_rounds = 0
+
         # Human feedback on a previous session's result: fold it into the task
         # so the team reworks with full knowledge of what was rejected and why.
         feedback = (body.get("feedback") or "").strip()
@@ -247,6 +253,7 @@ class Handler(BaseHTTPRequestHandler):
         session = MANAGER.create(task, strategy_name, rounds, agents)
         session.personas = personas
         session.role_order = [k for k, _ in role_list]
+        session.min_rounds = session_min_rounds
         if feedback and parent:
             session.parent_id = parent.id
 

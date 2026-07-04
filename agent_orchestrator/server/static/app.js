@@ -113,6 +113,8 @@ const JA = {
   "(read a workspace file)": "（ファイルを読む）",
   "(shell commands in the workspace — trust required)": "（ワークスペースでシェル実行 — 要信頼）",
   "(fetch a URL)": "（URLを取得）",
+  "Min rounds before DONE": "DONE を許可する最低ラウンド",
+  "(0 = off — guards rubber-stamp approvals)": "（0＝無効 — 安易な完了宣言を防ぎます）",
   "Test command": "テストコマンド",
   "(auto-run after each build round)": "（各ビルドラウンド後に自動実行）",
   "e.g. pytest -q — results are fed back to the team": "例: pytest -q — 結果はチームに戻されます",
@@ -299,6 +301,7 @@ function renderRoles() {
   $("#rounds-inf-wrap").hidden = !st.supports_unlimited;
   if (!st.supports_unlimited) $("#rounds-inf").checked = false;
   $("#rounds").disabled = $("#rounds-inf").checked && !!st.supports_unlimited;
+  $("#min-rounds-wrap").hidden = !["conductor_team", "org_team"].includes(st.name);
 
   const wrap = $("#roles");
   wrap.innerHTML = "";
@@ -688,7 +691,8 @@ function rolesPayload() {
 }
 
 // -- form persistence (task, strategy, dirs survive a reload) ---------------
-const PERSIST_FIELDS = ["task", "rounds", "workspace-dir", "reference-dir", "test-cmd"];
+const PERSIST_FIELDS = ["task", "rounds", "workspace-dir", "reference-dir", "test-cmd",
+  "min-rounds"];
 
 function persistForm() {
   const data = { strategy: $("#strategy").value };
@@ -777,6 +781,10 @@ async function startRun(extra) {
   };
   if (rp.role_order) payload.role_order = rp.role_order;
   if (rp.supervisors) payload.supervisors = rp.supervisors;
+  if (!$("#min-rounds-wrap").hidden) {
+    const mr = parseInt($("#min-rounds").value, 10) || 0;
+    if (mr > 0) payload.min_rounds = mr;
+  }
   const tools = Array.from(document.querySelectorAll(".tool-check:checked"))
     .map((c) => c.value);
   if (tools.length) payload.tools = tools;
@@ -1828,7 +1836,7 @@ document.addEventListener("click", (e) => {
 });
 
 // Form values survive a reload.
-["task", "rounds", "workspace-dir", "reference-dir", "test-cmd"].forEach((id) =>
+["task", "rounds", "workspace-dir", "reference-dir", "test-cmd", "min-rounds"].forEach((id) =>
   $("#" + id).addEventListener("input", persistForm));
 $("#workspace-init").addEventListener("change", persistForm);
 

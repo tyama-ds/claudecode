@@ -337,6 +337,43 @@ def _parse_assessments(text: str, workers: List[str]) -> List[Tuple[str, str, st
     return out
 
 
+# Acceptance criteria a manager defines in round 1: "CRITERION: <statement>"
+_CRITERION_RE = re.compile(r"^\s*(?:[-*]\s*)?CRITERION\s*:\s*(.+?)\s*$",
+                           re.IGNORECASE | re.MULTILINE)
+
+
+def _extract_criteria(text: str) -> List[str]:
+    return [m.group(1).strip() for m in _CRITERION_RE.finditer(text)]
+
+
+_AUDITOR_SYS = (
+    "You are the completion AUDITOR. A manager just declared the task DONE; your job "
+    "is to try to PROVE THEM WRONG. Check the team's actual outputs in the "
+    "conversation against every acceptance criterion, hunting for unmet criteria, "
+    "missing pieces, unverified claims, and quality gaps. Managers' assertions are "
+    "not evidence — only concrete output is. Be strict: when in doubt, reject."
+)
+
+
+def _challenge_done(session: Session, challenger: str, criteria: List[str],
+                    rnd: int) -> bool:
+    """Adversarial DONE gate: a declared DONE only stands when the challenger
+    audits the work and replies CONFIRM DONE."""
+    crit_block = ("\n".join(f"- {c}" for c in criteria) if criteria
+                  else "(no explicit criteria were recorded — derive them from the task)")
+    text = _run_turn(
+        session, challenger, _AUDITOR_SYS,
+        f"Task:\n{session.task}\n\nThe manager declared the work DONE. Audit it "
+        f"adversarially against the acceptance criteria:\n{crit_block}\n\n"
+        f"If — and only if — every criterion is genuinely, verifiably met, reply "
+        f"with the single line 'CONFIRM DONE'. Otherwise reply 'REJECT' followed "
+        f"by the concrete gaps the team must close.",
+        rnd, action="review",
+    )
+    up = text.upper()
+    return "CONFIRM DONE" in up and "REJECT" not in up
+
+
 def _conductor_done(text: str) -> bool:
     """Whether the conductor declared the task complete."""
     return bool(_DONE_RE.search(text) or re.search(r"^[ \t]*DONE[ \t]*$", text, re.MULTILINE))
@@ -1200,7 +1237,10 @@ class ConductorTeam(Strategy):
         "You decompose the task, assign concrete subtasks, hold workers accountable — "
         "naming and pushing anyone who doesn't deliver — and integrate their work into the "
         "result. Be specific and demanding but fair. Always use the EXACT worker keys "
-        "(e.g. worker_1) when assigning or assessing."
+        "(e.g. worker_1) when assigning or assessing. You are STRICT about completion: "
+        "workers' claims are not evidence, only their actual output is; declaring DONE "
+        "prematurely is a serious failure on your part, and every DONE you declare is "
+        "audited adversarially."
     )
     REVIEWER_SYS = (
         "You are the REVIEWER. You inspect one worker's output at a time against the "
@@ -1234,6 +1274,7 @@ class ConductorTeam(Strategy):
             session.emit("worker_status", round=0, worker=w, name=names[w],
                          status="idle", note="awaiting assignment")
 
+        criteria: List[str] = []
         last_rnd = 1
         for rnd in _rounds_iter(session):
             last_rnd = rnd
@@ -1243,6 +1284,11 @@ class ConductorTeam(Strategy):
             instruction = self._conductor_instruction(session, workers, team, rnd)
             ctext = _run_turn(session, "conductor", self.CONDUCTOR_SYS, instruction, rnd,
                               action="assign")
+            if rnd == 1:
+                criteria = _extract_criteria(ctext)
+                if criteria:
+                    session.emit("status",
+                                 message=f"{len(criteria)} acceptance criteria defined.")
 
             for w, verdict, note in _parse_assessments(ctext, workers):
                 session.emit("worker_status", round=rnd, worker=w, name=names[w],
@@ -1255,9 +1301,17 @@ class ConductorTeam(Strategy):
                              status=("assigned" if instr else "idle"),
                              note=(instr or "no assignment from the conductor"))
 
-            if rnd > 1 and _conductor_done(ctext):
-                session.emit("status", message=f"Conductor declared the work DONE in round {rnd}.")
-                break
+            if rnd > 1 and rnd >= session.min_rounds and _conductor_done(ctext):
+                # A declared DONE must survive an adversarial audit to stand.
+                if _challenge_done(session, "reviewer", criteria, rnd):
+                    session.emit("status",
+                                 message=f"DONE declared in round {rnd} and CONFIRMED "
+                                         f"by the auditor.")
+                    break
+                session.emit("status",
+                             message=f"DONE declared in round {rnd} but REJECTED by "
+                                     f"the auditor — work continues.")
+                continue  # let the conductor react to the rejection immediately
 
             # 2. All workers carry out their assignments IN PARALLEL (also fine
             # when several workers use the same backend — separate adapters).
@@ -1302,18 +1356,30 @@ class ConductorTeam(Strategy):
         keys = ", ".join(workers)
         if rnd == 1:
             return (
-                f"Task:\n{session.task}\n\nYou lead this team: {team}. Break the task into "
-                f"concrete subtasks and assign one to each worker. Write each assignment on its "
-                f"own line as '@worker_key: instruction', using the exact keys: {keys}."
+                f"Task:\n{session.task}\n\nYou lead this team: {team}. FIRST define the "
+                f"acceptance criteria for the whole task — 3 to 7 measurable statements, "
+                f"each on its own line as 'CRITERION: <statement>'; the task is only DONE "
+                f"when every one is verifiably met. THEN break the task into concrete "
+                f"subtasks and assign one to each worker, each on its own line as "
+                f"'@worker_key: instruction', using the exact keys: {keys}."
+            )
+        if session.min_rounds and rnd < session.min_rounds:
+            verdict = (f"Declaring DONE is NOT allowed before round {session.min_rounds}; "
+                       f"write 'VERDICT: CONTINUE'.")
+        else:
+            verdict = (
+                "FINALLY: only if EVERY acceptance criterion is verifiably met by the "
+                "actual outputs (a worker saying so is not evidence), write one line "
+                "'✔ <criterion> — <evidence>' per criterion and then 'VERDICT: DONE'; "
+                "otherwise write 'VERDICT: CONTINUE'. A DONE will be audited "
+                "adversarially, and a rejected DONE reflects badly on you."
             )
         return (
             f"Task:\n{session.task}\n\nYour team: {team}. Review the previous round — each "
             f"worker's output and the reviewer's reports. FIRST assess every worker, one per "
             f"line, as '@worker_key [OK]: reason' or '@worker_key [WARN]: what they failed to "
             f"deliver' — call out anyone who slacked or ignored their assignment. THEN reassign "
-            f"with '@worker_key: instruction' lines (keys: {keys}). FINALLY write 'VERDICT: "
-            f"DONE' if the task is fully complete and the reviewer is satisfied, otherwise "
-            f"'VERDICT: CONTINUE'."
+            f"with '@worker_key: instruction' lines (keys: {keys}). {verdict}"
         )
 
 
@@ -1361,7 +1427,10 @@ class OrgTeam(Strategy):
         upward = (f"You answer to {sup_name} and report your unit's integrated progress "
                   f"upward." if sup_name else
                   "You are the TOP manager: when the whole task is truly complete, write "
-                  "'VERDICT: DONE' on its own line, otherwise 'VERDICT: CONTINUE'.")
+                  "'VERDICT: DONE' on its own line, otherwise 'VERDICT: CONTINUE'. You are "
+                  "STRICT about completion — reports' claims are not evidence, only actual "
+                  "output is, and every DONE you declare is audited adversarially; a "
+                  "premature DONE is a serious failure on your part.")
         return (
             f"You are {me} ({role}), a MANAGER in a chain of command collaborating on one "
             f"shared task. Your direct reports: {', '.join(reports)}. Delegate by writing "
@@ -1420,6 +1489,7 @@ class OrgTeam(Strategy):
                 "objective from the conversation and proceed."
             )
 
+        criteria: List[str] = []
         last_rnd = 1
         for rnd in _rounds_iter(session):
             last_rnd = rnd
@@ -1429,23 +1499,47 @@ class OrgTeam(Strategy):
             # 1. Top manager: assess previous round, (re)assign, maybe declare DONE.
             keys = ", ".join(children[top])
             if rnd == 1:
-                tinstr = (f"Task:\n{session.task}\n\nBreak the task down and assign one "
-                          f"concrete objective to each direct report, one per line as "
-                          f"'@role_key: instruction' (exact keys: {keys}).")
+                tinstr = (f"Task:\n{session.task}\n\nFIRST define the acceptance "
+                          f"criteria for the whole task — 3 to 7 measurable statements, "
+                          f"each on its own line as 'CRITERION: <statement>'; the task "
+                          f"is only DONE when every one is verifiably met. THEN break "
+                          f"the task down and assign one concrete objective to each "
+                          f"direct report, one per line as '@role_key: instruction' "
+                          f"(exact keys: {keys}).")
             else:
+                if session.min_rounds and rnd < session.min_rounds:
+                    verdict = (f"Declaring DONE is NOT allowed before round "
+                               f"{session.min_rounds}; write 'VERDICT: CONTINUE'.")
+                else:
+                    verdict = ("FINALLY: only if EVERY acceptance criterion is "
+                               "verifiably met by actual output (a report saying so is "
+                               "not evidence), write one line '✔ <criterion> — "
+                               "<evidence>' per criterion and then 'VERDICT: DONE'; "
+                               "otherwise 'VERDICT: CONTINUE'. A DONE is audited "
+                               "adversarially.")
                 tinstr = (f"Task:\n{session.task}\n\nReview the previous round (your "
                           f"reports' integrated summaries). FIRST assess each direct "
                           f"report ('@role_key [OK|WARN]: reason'). THEN reassign with "
-                          f"'@role_key: instruction' lines (keys: {keys}). FINALLY write "
-                          f"'VERDICT: DONE' if the whole task is complete, else "
-                          f"'VERDICT: CONTINUE'.")
+                          f"'@role_key: instruction' lines (keys: {keys}). {verdict}")
             ttext = _run_turn(session, top, self._mgr_sys(names[top], top, children[top], None),
                               tinstr, rnd, action="assign")
+            if rnd == 1:
+                criteria = _extract_criteria(ttext)
+                if criteria:
+                    session.emit("status",
+                                 message=f"{len(criteria)} acceptance criteria defined.")
             process_manager_text(top, ttext, rnd)
-            if rnd > 1 and _conductor_done(ttext):
+            if rnd > 1 and rnd >= session.min_rounds and _conductor_done(ttext):
+                challenger = children[top][0]  # a direct report audits the DONE
+                if _challenge_done(session, challenger, criteria, rnd):
+                    session.emit("status",
+                                 message=f"DONE declared by {names[top]} in round {rnd} "
+                                         f"and CONFIRMED by the auditor.")
+                    break
                 session.emit("status",
-                             message=f"{names[top]} declared the work DONE in round {rnd}.")
-                break
+                             message=f"DONE declared in round {rnd} but REJECTED by "
+                                     f"the auditor — work continues.")
+                continue
 
             # 2. Delegation flows down, level by level; whole levels run in parallel.
             for level in levels[1:]:

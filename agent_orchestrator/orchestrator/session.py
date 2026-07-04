@@ -89,6 +89,7 @@ class Session:
     supervisors: Dict[str, str] = field(default_factory=dict)  # role -> supervisor role (org chart)
     tools: List[str] = field(default_factory=list)           # tool names agents may call
     test_command: str = ""                                   # auto-run in the workspace each round
+    min_rounds: int = 0                                      # DONE not honored before this round
     stop_requested: bool = False
     finish_requested: bool = False                           # human asked to wrap up gracefully
     result: str = ""                                         # final deliverable (set by the engine)

@@ -121,7 +121,16 @@ instructions.
 **Run control.** Team strategies support **no round limit** (rounds = ∞): the
 run continues until the conductor/manager declares DONE — or you press the
 **Finish** button, which wraps up gracefully (final integration + deliverable),
-unlike Stop which aborts. When a run completes, a **feedback box** appears: type
+unlike Stop which aborts.
+
+**Strict completion (no rubber stamps).** Conductor/org runs no longer end just
+because the boss says so. In round 1 the conductor/top manager must define
+**acceptance criteria** (`CRITERION:` lines); a DONE is only valid alongside a
+per-criterion ✔-with-evidence check, and every declared DONE is then **audited
+adversarially** — a challenger agent re-examines the actual outputs and the DONE
+only stands on an explicit `CONFIRM DONE`; a `REJECT` (with the concrete gaps)
+sends the team straight back to work. An optional **Min rounds before DONE**
+field additionally blocks early declarations outright. When a run completes, a **feedback box** appears: type
 what's wrong and hit *Rework* — the same team re-runs the task with your
 feedback and the previous result in context (and, in a workspace, the files
 still on disk).

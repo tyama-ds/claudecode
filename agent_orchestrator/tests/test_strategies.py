@@ -102,7 +102,8 @@ class TestStrategies(unittest.TestCase):
     def _conductor_session(self, conductor_body, rounds=2, workers=2):
         agents = {
             "conductor": _FixedAdapter("Maestro", conductor_body),
-            "reviewer": _FixedAdapter("Critic", "Looks reasonable; minor gaps."),
+            # doubles as the DONE auditor, so it must confirm for early stops
+            "reviewer": _FixedAdapter("Critic", "Looks reasonable. CONFIRM DONE"),
         }
         order = ["conductor"]
         for i in range(1, workers + 1):
@@ -284,7 +285,8 @@ class TestStrategies(unittest.TestCase):
                 "@conductor_1 [OK]: good\n@conductor_2 [OK]: good\n"
                 "@conductor_1: build the backend\n@conductor_2: build the frontend\n"
                 "VERDICT: DONE"),
-            "conductor_1": _FixedAdapter("C1", "@worker_1: write the API"),
+            # conductor_1 doubles as the DONE auditor for the top manager
+            "conductor_1": _FixedAdapter("C1", "@worker_1: write the API\nCONFIRM DONE"),
             "conductor_2": _FixedAdapter("C2", "@worker_2: write the UI"),
             "worker_1": _FixedAdapter("W1", "api done"),
             "worker_2": _FixedAdapter("W2", "ui done"),
@@ -307,6 +309,46 @@ class TestStrategies(unittest.TestCase):
                             and d["status"] == "assigned" for d in ws))
         self.assertTrue(any(d.get("by") == "manager" and d["worker"] == "conductor_1"
                             for d in ws))
+
+    def test_extract_criteria(self):
+        from agent_orchestrator.orchestrator.strategies import _extract_criteria
+        text = ("CRITERION: all tests pass\n- criterion: docs updated\n"
+                "@worker_1: do it\nCRITERIA are important\n")
+        self.assertEqual(_extract_criteria(text),
+                         ["all tests pass", "docs updated"])
+
+    def test_done_rejected_by_auditor_keeps_working(self):
+        """A conductor's DONE is overturned when the auditor rejects it."""
+        body = ("CRITERION: everything works\n@worker_1 [OK]: done\n"
+                "@worker_1: x\nVERDICT: DONE")
+        agents = {
+            "conductor": _FixedAdapter("Maestro", body),
+            "worker_1": _FixedAdapter("W1", "did the thing"),
+            "reviewer": _FixedAdapter("Critic", "REJECT: the edge cases are untested."),
+        }
+        s = Session(id="rej", task="t", strategy="conductor_team", rounds=3, agents=agents)
+        s.role_order = ["conductor", "worker_1", "reviewer"]
+        get_strategy("conductor_team").run(s)
+        msgs = [e.data["message"] for e in s.bus.history if e.type == "status"]
+        self.assertTrue(any("REJECTED by the auditor" in m for m in msgs))
+        self.assertFalse(any("CONFIRMED" in m for m in msgs))
+        # ran all 3 rounds — the rejected DONEs never stopped the loop
+        self.assertEqual(max(t.round for t in s.transcript), 3)
+
+    def test_min_rounds_blocks_early_done(self):
+        """min_rounds=3: a round-2 DONE is ignored; the round-3 one stands."""
+        body = "@worker_1 [OK]: fine\n@worker_1: keep going\nVERDICT: DONE"
+        agents = {
+            "conductor": _FixedAdapter("Maestro", body),
+            "worker_1": _FixedAdapter("W1", "output"),
+            "reviewer": _FixedAdapter("Critic", "CONFIRM DONE"),
+        }
+        s = Session(id="minr", task="t", strategy="conductor_team", rounds=5, agents=agents)
+        s.role_order = ["conductor", "worker_1", "reviewer"]
+        s.min_rounds = 3
+        get_strategy("conductor_team").run(s)
+        conductor_rounds = [t.round for t in s.transcript if t.role == "conductor"]
+        self.assertEqual(max(conductor_rounds), 3)  # stopped at 3, not 2
 
     def test_org_team_rejects_bad_hierarchy(self):
         agents = {"a": _FixedAdapter("A", "x"), "b": _FixedAdapter("B", "y")}
@@ -334,7 +376,7 @@ class TestStrategies(unittest.TestCase):
 
         agents = {"conductor": CountingConductor(),
                   "worker_1": _FixedAdapter("W1", "done bit"),
-                  "reviewer": _FixedAdapter("R", "ok")}
+                  "reviewer": _FixedAdapter("R", "fine. CONFIRM DONE")}
         s = Session(id="unl", task="t", strategy="conductor_team", rounds=0, agents=agents)
         s.role_order = ["conductor", "worker_1", "reviewer"]
         get_strategy("conductor_team").run(s)
