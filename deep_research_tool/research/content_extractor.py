@@ -38,6 +38,7 @@ class ExtractedContent:
     quotes: List[Dict[str, str]] = field(default_factory=list)
     images: List[Dict[str, str]] = field(default_factory=list)
     relevance_score: float = 0.0
+    importance_score: float = 0.0  # importance to the overall research purpose
     extraction_notes: str = ""
     extracted_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
@@ -52,6 +53,7 @@ class ExtractedContent:
             "quotes": self.quotes,
             "images": self.images,
             "relevance_score": self.relevance_score,
+            "importance_score": self.importance_score,
             "extraction_notes": self.extraction_notes,
             "extracted_at": self.extracted_at,
         }
@@ -204,13 +206,16 @@ Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
         Returns:
             Dictionary with synthesized content and metadata
         """
-        # Prepare source summaries
+        # Prepare source summaries (importance = relevance to the overall
+        # research purpose, scored against the research goal upstream)
         source_summaries = []
         for i, ec in enumerate(extracted_contents, 1):
+            importance = ec.importance_score or ec.relevance_score
             summary = f"""
 [SOURCE {i}] {ec.source_title}
 URL: {ec.source_url}
 Relevance: {ec.relevance_score:.2f}
+Importance: {importance:.2f}
 
 Content:
 {ec.processed_content[:2000]}
@@ -239,8 +244,9 @@ Key Points:
 1. 情報源に基づく事実には、文末に [SOURCE N] の形式で出典番号を付けること。この表記は一字一句変えない（翻訳・省略・変形しない）。
 2. あなた自身の分析・解釈は、「〜と考えられる」「〜と推察される」「〜可能性がある」などの表現で、事実の記述と自然に区別すること。
 3. 情報源にない主張はしない。情報源の間で内容が食い違う場合は、その旨を本文中で明記する。
-4. 見出しや箇条書きの多用は避け、本文（マークダウンの段落）として書く。セクションタイトルは出力しない。
-5. JSONやコードブロックで囲まず、本文をそのまま書き始めること。
+4. 各情報源の Importance（調査目的への重要度）を考慮し、重要度の高い情報源を中心に本文を構成すること。重要度の低い情報源は補足として簡潔に扱うか、内容が薄ければ使わなくてよい。
+5. 見出しや箇条書きの多用は避け、本文（マークダウンの段落）として書く。セクションタイトルは出力しない。
+6. JSONやコードブロックで囲まず、本文をそのまま書き始めること。
 
 本文を書き終えたら、最後に次の区切り記号とメタ情報を必ず出力すること:
 
@@ -265,7 +271,9 @@ IMPORTANT:
    - Your own analysis or interpretation (phrase naturally as your assessment)
 2. Do not make claims that aren't supported by the sources
 3. Note any conflicting information between sources
-4. Write flowing paragraphs (markdown), not JSON. Do not output the section title.
+4. Build the body around high-Importance sources (importance to the research
+   purpose); treat low-importance sources as brief supplements or omit them
+5. Write flowing paragraphs (markdown), not JSON. Do not output the section title.
 
 After the body, output this delimiter followed by metadata:
 
@@ -343,8 +351,10 @@ After the body, output this delimiter followed by metadata:
         # Prepare source summaries
         source_summaries = []
         for i, ec in enumerate(extracted_contents, 1):
+            importance = ec.importance_score or ec.relevance_score
             summary = f"""[SOURCE {i}] {ec.source_title}
 URL: {ec.source_url}
+Importance: {importance:.2f}
 Content: {ec.processed_content[:1500]}
 Key Points: {', '.join(ec.key_points[:3]) if ec.key_points else 'N/A'}
 """

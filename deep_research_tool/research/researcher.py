@@ -160,9 +160,14 @@ class Researcher:
         fast_crawl_batch_size: int = 5,
         ai_crawl_max_total_pages: int = 15,
         ai_crawl_max_depth: int = 3,
+        ai_crawl_site_depth: int = 2,
         ai_crawl_max_llm_calls: int = 25,
         ai_crawl_max_pages_per_domain: int = 5,
         ai_crawl_politeness_delay: float = 1.0,
+        selenium_headless: bool = True,
+        importance_threshold: float = 0.6,
+        min_high_importance_sources: int = 2,
+        max_gap_fill_rounds: int = 1,
     ):
         """
         Initialize Researcher.
@@ -190,9 +195,17 @@ class Researcher:
             fast_crawl_batch_size: Pages per batch in batch evaluation mode
             ai_crawl_max_total_pages: aicrawl - max pages fetched per section
             ai_crawl_max_depth: aicrawl - max link depth from search-result seeds
+            ai_crawl_site_depth: aicrawl - max layers followed within one site
             ai_crawl_max_llm_calls: aicrawl - LLM decision call budget per section
             ai_crawl_max_pages_per_domain: aicrawl - max pages fetched per domain
             ai_crawl_politeness_delay: aicrawl - min seconds between same-domain fetches
+            selenium_headless: ai_crawl_selenium - run the browser headless
+            importance_threshold: min importance score to count a source as
+                high-importance for the research purpose
+            min_high_importance_sources: sections with fewer high-importance
+                sources trigger gap-fill re-search
+            max_gap_fill_rounds: max re-search rounds per section when the
+                collected information is insufficient
         """
         self.llm = llm_client
         self.search = search_client
@@ -270,11 +283,32 @@ class Researcher:
                 content_filter=self.content_filter,
                 max_total_pages=ai_crawl_max_total_pages,
                 max_depth=ai_crawl_max_depth,
+                max_site_depth=ai_crawl_site_depth,
                 max_llm_calls=ai_crawl_max_llm_calls,
                 max_pages_per_domain=ai_crawl_max_pages_per_domain,
                 politeness_delay=ai_crawl_politeness_delay,
                 language=language,
             )
+        elif crawl_mode == CrawlMode.AI_CRAWL_SELENIUM:
+            from .ai_crawler_selenium import AICrawlerSelenium
+            self.ai_crawler = AICrawlerSelenium(
+                search_client=search_client,
+                llm_client=llm_client,
+                content_filter=self.content_filter,
+                max_total_pages=ai_crawl_max_total_pages,
+                max_depth=ai_crawl_max_depth,
+                max_site_depth=ai_crawl_site_depth,
+                max_llm_calls=ai_crawl_max_llm_calls,
+                max_pages_per_domain=ai_crawl_max_pages_per_domain,
+                politeness_delay=ai_crawl_politeness_delay,
+                language=language,
+                headless=selenium_headless,
+            )
+
+        # Importance scoring / gap-fill settings
+        self.importance_threshold = importance_threshold
+        self.min_high_importance_sources = min_high_importance_sources
+        self.max_gap_fill_rounds = max_gap_fill_rounds
 
     def _report_progress(self, message: str, percentage: float) -> None:
         """Report progress to callback if available."""
@@ -369,6 +403,10 @@ class Researcher:
             self.session.error_message = str(e)
             self._report_progress(f"Error: {e}", -1)
             raise
+        finally:
+            # Release browser resources held by Selenium-based crawlers
+            if self.ai_crawler is not None and hasattr(self.ai_crawler, "close"):
+                self.ai_crawler.close()
 
         return self.session
 
@@ -416,7 +454,9 @@ class Researcher:
                     section_idx=section_idx,
                     total_sections=total_sections,
                 )
-            elif self.ai_crawler and self.crawl_mode == CrawlMode.AI_CRAWL:
+            elif self.ai_crawler and self.crawl_mode in (
+                CrawlMode.AI_CRAWL, CrawlMode.AI_CRAWL_SELENIUM
+            ):
                 # AI crawl mode: LLM decides which links to follow
                 self._process_section_with_ai_crawler(
                     section=section,
@@ -762,26 +802,73 @@ class Researcher:
         """
         Immediately generate and save content for a section.
         This is called right after research for each section completes.
+
+        Before synthesis, every collected part is scored for importance
+        (relevance to the overall research purpose) and the scores are
+        stored on the evidence locker. When too few high-importance sources
+        exist, gap-fill rounds generate follow-up queries from the collected
+        information and fetch additional sources (revisiting sites is
+        allowed when the query differs).
         """
         print(f"[DEBUG] Generating content for section {section.section}...")
 
         if section_content_parts:
-            # Use enhanced multi-pass synthesis
-            if self.use_enhanced_synthesis:
-                print(f"[DEBUG] Using enhanced multi-pass synthesis")
-                synthesized = self.content_extractor.synthesize_section_content_enhanced(
-                    section_title=section.title,
-                    section_description=section.description,
-                    extracted_contents=section_content_parts,
-                    requirements=self.session.requirements,
+            self._score_importance(section, section_content_parts)
+            section_content_parts.sort(
+                key=lambda p: (p.importance_score or p.relevance_score),
+                reverse=True,
+            )
+
+            synthesized = self._synthesize_parts(section, section_content_parts)
+
+            # Gap-fill: re-search when high-importance information is thin
+            for round_num in range(self.max_gap_fill_rounds):
+                if not self._needs_gap_fill(section_content_parts, synthesized):
+                    break
+
+                gaps = synthesized.get("information_gaps", []) or []
+                print(f"[GapFill] Section {section.section}: insufficient "
+                      f"high-importance sources, round {round_num + 1} "
+                      f"(gaps: {gaps[:3]})")
+
+                gathered_summary = "\n".join(
+                    f"- {p.source_title}: {p.processed_content[:200]}"
+                    for p in section_content_parts[:8]
                 )
-            else:
-                synthesized = self.content_extractor.synthesize_section_content(
-                    section_title=section.title,
-                    section_description=section.description,
-                    extracted_contents=section_content_parts,
-                    requirements=self.session.requirements,
+                follow_up_queries = self.query_generator.generate_follow_up_queries(
+                    section, gathered_summary, gaps,
+                )[:self.max_queries_per_iteration]
+
+                if not follow_up_queries:
+                    break
+
+                new_parts = self._collect_additional_parts(section, follow_up_queries)
+                if not new_parts:
+                    print(f"[GapFill] No new sources found for section {section.section}")
+                    break
+
+                # Deduplicate against already-collected parts (same URL AND
+                # same content = duplicate; same URL with different detail is
+                # kept, so re-crawled pages with new content survive)
+                seen = {
+                    (p.source_url, p.processed_content[:100])
+                    for p in section_content_parts
+                }
+                fresh = [
+                    p for p in new_parts
+                    if (p.source_url, p.processed_content[:100]) not in seen
+                ]
+                if not fresh:
+                    break
+
+                print(f"[GapFill] Added {len(fresh)} new sources")
+                section_content_parts.extend(fresh)
+                self._score_importance(section, section_content_parts)
+                section_content_parts.sort(
+                    key=lambda p: (p.importance_score or p.relevance_score),
+                    reverse=True,
                 )
+                synthesized = self._synthesize_parts(section, section_content_parts)
 
             content = synthesized.get("content", "")
             print(f"[DEBUG] Generated content length: {len(content)} chars")
@@ -820,6 +907,213 @@ class Researcher:
                 "gaps": [f"All content for section '{section.title}'"],
             }
             section.content = placeholder
+
+    def _synthesize_parts(
+        self,
+        section: TableOfContentsItem,
+        section_content_parts: List[ExtractedContent],
+    ) -> Dict[str, Any]:
+        """Run the configured synthesis mode over the collected parts."""
+        if self.use_enhanced_synthesis:
+            print(f"[DEBUG] Using enhanced multi-pass synthesis")
+            return self.content_extractor.synthesize_section_content_enhanced(
+                section_title=section.title,
+                section_description=section.description,
+                extracted_contents=section_content_parts,
+                requirements=self.session.requirements,
+            )
+        return self.content_extractor.synthesize_section_content(
+            section_title=section.title,
+            section_description=section.description,
+            extracted_contents=section_content_parts,
+            requirements=self.session.requirements,
+        )
+
+    def _needs_gap_fill(
+        self,
+        parts: List[ExtractedContent],
+        synthesized: Dict[str, Any],
+    ) -> bool:
+        """Decide whether a section needs a gap-fill re-search round."""
+        high_importance = [
+            p for p in parts
+            if (p.importance_score or p.relevance_score) >= self.importance_threshold
+        ]
+        if len(high_importance) < self.min_high_importance_sources:
+            return True
+        if synthesized.get("confidence_level") == "low":
+            return True
+        return False
+
+    def _score_importance(
+        self,
+        section: TableOfContentsItem,
+        parts: List[ExtractedContent],
+    ) -> None:
+        """
+        Score each collected part's importance to the research purpose.
+
+        One LLM call rates all parts (0-1) against the overall research
+        purpose (query + requirements). Scores are stored on the parts and
+        propagated to the matching evidence in the evidence locker. On
+        failure, relevance_score is used as the importance.
+        """
+        if not parts:
+            return
+
+        items_text = "\n".join(
+            f"{i}. [{p.source_title[:60]}] {p.processed_content[:300]}"
+            for i, p in enumerate(parts, 1)
+        )
+
+        if self.language == "ja":
+            prompt = f"""あなたは調査プロジェクトの編集責任者です。収集した各情報が、調査目的にとってどれだけ重要かを採点してください。
+
+【調査目的】{self.session.query}
+【調査要件】{self.session.requirements or "特になし"}
+【対象セクション】{section.section}. {section.title}
+
+【収集した情報】
+{items_text}
+
+各情報に 0.0〜1.0 の重要度を付けてください。
+- 0.8以上: 調査目的の核心に直接答える情報（具体的な数値・事実・一次情報）
+- 0.5〜0.7: 調査目的の理解に役立つ背景・補足情報
+- 0.4以下: 周辺的・重複的・一般論のみの情報
+
+JSONで出力:
+{{"scores": [{{"index": 1, "importance": 0.9}}, {{"index": 2, "importance": 0.4}}]}}
+
+JSONのみを出力:"""
+        else:
+            prompt = f"""You are the research project's editor. Score how important each collected item is to the research purpose.
+
+Research purpose: {self.session.query}
+Requirements: {self.session.requirements or "None"}
+Target section: {section.section}. {section.title}
+
+Collected items:
+{items_text}
+
+Rate each item 0.0-1.0:
+- >= 0.8: directly answers the core of the research purpose (concrete numbers, facts, primary information)
+- 0.5-0.7: background/supporting information
+- <= 0.4: peripheral, duplicated, or generic-only information
+
+Output JSON:
+{{"scores": [{{"index": 1, "importance": 0.9}}, {{"index": 2, "importance": 0.4}}]}}
+
+Output JSON only:"""
+
+        scores: Dict[int, float] = {}
+        try:
+            response = self.llm.generate(prompt)
+            data = extract_json_from_response(response.content)
+            for entry in data.get("scores", []):
+                try:
+                    idx = int(entry.get("index", 0))
+                    score = float(entry.get("importance", 0.0))
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= idx <= len(parts):
+                    scores[idx] = min(max(score, 0.0), 1.0)
+        except Exception as e:
+            print(f"[WARNING] Importance scoring failed: {e}")
+
+        for i, part in enumerate(parts, 1):
+            part.importance_score = scores.get(i, part.relevance_score)
+            if self.evidence_locker:
+                self.evidence_locker.update_importance_by_url(
+                    url=part.source_url,
+                    score=part.importance_score,
+                    section=section.section,
+                )
+
+    def _collect_additional_parts(
+        self,
+        section: TableOfContentsItem,
+        queries: List[str],
+    ) -> List[ExtractedContent]:
+        """
+        Collect additional sources for gap-fill using the active crawl mode.
+
+        Crawler visited-sets reset per call, so previously visited sites are
+        re-crawled when the new queries lead back to them.
+        """
+        parts: List[ExtractedContent] = []
+
+        crawler = self.ai_crawler or self.fast_crawler
+        if crawler:
+            try:
+                crawl_result = crawler.crawl_and_evaluate(
+                    queries=queries,
+                    section_context=f"{section.section}. {section.title}: {section.description}",
+                    research_topic=self.session.query,
+                    max_pages_per_query=self.max_pages_per_query,
+                    min_relevance_score=0.2,
+                )
+            except Exception as e:
+                print(f"[GapFill] Crawl failed: {e}")
+                return parts
+
+            for page in crawl_result.pages:
+                parts.append(ExtractedContent(
+                    source_url=page.url,
+                    source_title=page.title,
+                    raw_content=page.content,
+                    processed_content=page.processed_content or page.content[:2000],
+                    key_points=page.key_points,
+                    relevance_score=page.relevance_score,
+                    extraction_notes="gap_fill",
+                ))
+                self.evidence_locker.add_evidence(
+                    url=page.url,
+                    title=page.title,
+                    content_excerpt=(page.processed_content or "")[:500] or page.snippet,
+                    evidence_type=EvidenceType.WEB_PAGE,
+                    search_query=page.metadata.get("query", "gap_fill"),
+                    section_reference=section.section,
+                    relevance_score=page.relevance_score,
+                )
+            return parts
+
+        # Standard mode: direct search + fetch
+        for query in queries[:2]:
+            try:
+                results = self.search.search(query, max_results=self.max_pages_per_query)
+            except Exception as e:
+                print(f"[GapFill] Search failed for '{query}': {e}")
+                continue
+            for result in results[:self.max_pages_per_query]:
+                try:
+                    if self.content_filter:
+                        url_filter_result = self.content_filter.filter_url(result.url)
+                        if not url_filter_result.should_include:
+                            continue
+                    page = self.search.get_page_content(result.url)
+                    extracted = self.content_extractor.extract_relevant_content(
+                        raw_content=page.text_content,
+                        source_url=result.url,
+                        source_title=page.title or result.title,
+                        section_context=f"{section.section}. {section.title}",
+                        research_query=query,
+                    )
+                    if extracted.relevance_score >= 0.2:
+                        parts.append(extracted)
+                        self.evidence_locker.add_evidence(
+                            url=result.url,
+                            title=page.title or result.title,
+                            content_excerpt=extracted.processed_content[:500],
+                            evidence_type=EvidenceType.WEB_PAGE,
+                            search_query=query,
+                            section_reference=section.section,
+                            relevance_score=extracted.relevance_score,
+                        )
+                except Exception as e:
+                    print(f"[GapFill] Fetch failed for {result.url}: {e}")
+                    continue
+                time.sleep(0.3)
+        return parts
 
     def _create_fallback_content(
         self,

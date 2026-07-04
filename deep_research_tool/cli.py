@@ -151,16 +151,32 @@ def cli():
 )
 @click.option(
     "--crawl-mode",
-    type=click.Choice(["standard", "fast_batch", "fast_parallel", "aicrawl"]),
+    type=click.Choice([
+        "standard", "fast_batch", "fast_parallel", "aicrawl", "ai_crawl_selenium",
+    ]),
     default="standard",
-    help="Crawl mode: standard, fast_batch, fast_parallel, or aicrawl "
-         "(LLM reads each page and decides which links to follow)"
+    help="Crawl mode. aicrawl: LLM reads each page and decides which links "
+         "to follow. ai_crawl_selenium: same, fetching pages via Selenium "
+         "browser (for JavaScript-rendered sites)"
 )
 @click.option(
     "--ai-crawl-max-pages",
     type=int,
     default=15,
     help="aicrawl mode: max pages fetched per section (default: 15)"
+)
+@click.option(
+    "--ai-crawl-site-depth",
+    type=int,
+    default=2,
+    help="aicrawl mode: max layers followed within one site (default: 2)"
+)
+@click.option(
+    "--gap-fill-rounds",
+    type=int,
+    default=1,
+    help="Max re-search rounds per section when high-importance information "
+         "is insufficient (default: 1, 0 to disable)"
 )
 @click.option(
     "--auto-figures/--no-auto-figures",
@@ -201,6 +217,8 @@ def research(
     crawl_max_sites: int,
     crawl_mode: str,
     ai_crawl_max_pages: int,
+    ai_crawl_site_depth: int,
+    gap_fill_rounds: int,
     auto_figures: bool,
     verbose: bool,
     openai_key: Optional[str],
@@ -238,6 +256,8 @@ def research(
         crawl_max_sites=crawl_max_sites,
         crawl_mode=crawl_mode,
         ai_crawl_max_total_pages=ai_crawl_max_pages,
+        ai_crawl_site_depth=ai_crawl_site_depth,
+        max_gap_fill_rounds=gap_fill_rounds,
         auto_figures=auto_figures,
     )
 

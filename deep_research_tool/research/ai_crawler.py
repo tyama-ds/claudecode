@@ -73,40 +73,53 @@ class AICrawler:
         content_filter: ContentFilter = None,
         max_total_pages: int = 15,
         max_depth: int = 3,
+        max_site_depth: int = 2,
         max_llm_calls: int = 25,
         max_pages_per_domain: int = 5,
         politeness_delay: float = 1.0,
         max_link_candidates: int = DEFAULT_MAX_LINK_CANDIDATES,
         max_reseed_rounds: int = 2,
         language: str = "ja",
+        fetch_client=None,
     ):
         """
         Initialize AICrawler.
 
         Args:
-            search_client: Web search client (also used to fetch pages)
+            search_client: Web search client (used for search; also for page
+                fetching unless fetch_client is given)
             llm_client: LLM client for crawl decisions
             content_filter: Content filter for ads/spam removal
             max_total_pages: Fetch budget per crawl_and_evaluate call
             max_depth: Maximum link depth from search-result seeds
+            max_site_depth: Maximum layers followed WITHIN one site (domain);
+                resets when the crawl crosses to a different domain
             max_llm_calls: Budget of LLM decision calls per crawl
             max_pages_per_domain: Cap of fetched pages per domain
             politeness_delay: Minimum seconds between fetches to the same domain
             max_link_candidates: Max links per page offered to the LLM
             max_reseed_rounds: Max re-seeding rounds from suggested queries
             language: Language for decision prompts
+            fetch_client: Optional dedicated client for page fetching
+                (e.g. a Selenium browser); defaults to search_client
         """
         self.search = search_client
+        self.fetch = fetch_client or search_client
         self.llm = llm_client
         self.content_filter = content_filter or create_moderate_filter()
         self.max_total_pages = max_total_pages
         self.max_depth = max_depth
+        self.max_site_depth = max_site_depth
         self.max_llm_calls = max_llm_calls
         self.max_pages_per_domain = max_pages_per_domain
         self.politeness_delay = politeness_delay
         self.max_link_candidates = max_link_candidates
         self.max_reseed_rounds = max_reseed_rounds
         self.language = language
+
+    def _fetch_page(self, url: str):
+        """Fetch a page via the fetch client. Subclasses may override."""
+        return self.fetch.get_page_content(url)
 
     def crawl_and_evaluate(
         self,
@@ -131,7 +144,8 @@ class AICrawler:
 
         # Crawl state
         visited: set = set()
-        frontier: List[Tuple[float, int, str, int, str, str]] = []  # (-priority, seq, url, depth, anchor, query)
+        # Frontier entries: (-priority, seq, url, depth, site_depth, anchor, query)
+        frontier: List[Tuple[float, int, str, int, int, str, str]] = []
         seq = 0
         domain_counts: Dict[str, int] = {}
         domain_last_fetch: Dict[str, float] = {}
@@ -147,9 +161,10 @@ class AICrawler:
         pages_evaluated = 0
         total_eval_time = 0.0
 
-        def push(url: str, depth: int, priority: float, anchor: str, query: str) -> None:
+        def push(url: str, depth: int, site_depth: int, priority: float,
+                 anchor: str, query: str) -> None:
             nonlocal seq
-            heapq.heappush(frontier, (-priority, seq, url, depth, anchor, query))
+            heapq.heappush(frontier, (-priority, seq, url, depth, site_depth, anchor, query))
             seq += 1
 
         def seed_from_queries(seed_queries: List[str]) -> None:
@@ -162,7 +177,7 @@ class AICrawler:
                 for result in results[:max_pages_per_query]:
                     url = normalize_url(result.url)
                     if url and url not in visited:
-                        push(url, 0, 1.0, getattr(result, "title", "") or "", query)
+                        push(url, 0, 0, 1.0, getattr(result, "title", "") or "", query)
 
         if progress_callback:
             progress_callback("aicrawl: searching seed pages...", 0, self.max_total_pages)
@@ -170,11 +185,13 @@ class AICrawler:
         seed_from_queries(queries)
 
         while frontier and pages_fetched < self.max_total_pages:
-            neg_priority, _, url, depth, anchor, query = heapq.heappop(frontier)
+            neg_priority, _, url, depth, site_depth, anchor, query = heapq.heappop(frontier)
 
             if url in visited:
                 continue
             if depth > self.max_depth:
+                continue
+            if site_depth > self.max_site_depth:
                 continue
             if not is_valid_page_url(url):
                 continue
@@ -186,7 +203,7 @@ class AICrawler:
             self._politeness_wait(domain, domain_last_fetch)
 
             try:
-                page = self.search.get_page_content(url)
+                page = self._fetch_page(url)
             except Exception as e:
                 errors.append(f"Fetch error for {url}: {e}")
                 continue
@@ -250,15 +267,22 @@ class AICrawler:
                     metadata={
                         "query": query,
                         "depth": depth,
+                        "site_depth": site_depth,
                         "decided_by": "fallback" if decision.used_fallback else "llm",
                     },
                 ))
 
-            # Enqueue LLM-selected links with depth-dampened priority
+            # Enqueue LLM-selected links with depth-dampened priority.
+            # site_depth counts layers within the current domain and resets
+            # to 1 when the crawl crosses to a different domain.
             for link, priority in decision.follow_links:
                 if link.url not in visited:
                     dampened = priority * (self.DEPTH_DECAY ** depth)
-                    push(link.url, depth + 1, dampened, link.anchor_text, query)
+                    link_site_depth = (
+                        site_depth + 1 if get_domain(link.url) == domain else 1
+                    )
+                    push(link.url, depth + 1, link_site_depth, dampened,
+                         link.anchor_text, query)
 
             for suggested in decision.suggested_queries:
                 if suggested and suggested not in used_queries:

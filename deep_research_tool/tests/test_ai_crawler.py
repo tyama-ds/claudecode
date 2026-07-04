@@ -353,6 +353,143 @@ class TestAICrawler:
         assert "Research topic" in prompt_en
 
 
+class TestSiteDepth:
+    """Tests for the per-site layer limit (max_site_depth)."""
+
+    def _chain_pages(self, domain_urls):
+        """Build pages where each links to the next URL in the list."""
+        pages = {}
+        for i, url in enumerate(domain_urls):
+            next_links = (
+                [{"url": domain_urls[i + 1], "text": "next"}]
+                if i + 1 < len(domain_urls) else []
+            )
+            pages[url] = MockPage(title=url, text_content="content", links=next_links)
+        return pages
+
+    def test_same_site_chain_stops_at_max_site_depth(self):
+        """Following layers within one site stops at max_site_depth."""
+        chain = [
+            "https://one.com/l0",
+            "https://one.com/l1",
+            "https://one.com/l2",
+            "https://one.com/l3",
+        ]
+        search = Mock()
+        search.search = Mock(return_value=[make_search_result(chain[0])])
+        pages = self._chain_pages(chain)
+        search.get_page_content = Mock(side_effect=lambda url: pages[url])
+        llm = make_llm([
+            decision_json(follow_links=[{"index": 1, "priority": 0.9, "reason": "r"}]),
+        ])
+        crawler = make_crawler(
+            search, llm, max_site_depth=1, max_depth=10, max_pages_per_domain=10,
+        )
+
+        crawler.crawl_and_evaluate(
+            queries=["q"], section_context="ctx", research_topic="topic",
+        )
+
+        fetched = [c.args[0] for c in search.get_page_content.call_args_list]
+        assert chain[0] in fetched  # site layer 0
+        assert chain[1] in fetched  # site layer 1
+        assert chain[2] not in fetched  # site layer 2 > max_site_depth 1
+
+    def test_site_depth_resets_across_domains(self):
+        """Crossing to another domain resets the site-layer counter."""
+        search = Mock()
+        search.search = Mock(return_value=[make_search_result("https://one.com/a")])
+        pages = {
+            "https://one.com/a": MockPage(
+                title="a", text_content="c",
+                links=[{"url": "https://one.com/b", "text": "same"}],
+            ),
+            "https://one.com/b": MockPage(
+                title="b", text_content="c",
+                links=[{"url": "https://two.com/x", "text": "cross"}],
+            ),
+            # two.com/x is reached at site layer 1 (reset), so its same-site
+            # child is layer 2 and must be skipped with max_site_depth=1
+            "https://two.com/x": MockPage(
+                title="x", text_content="c",
+                links=[{"url": "https://two.com/y", "text": "same"}],
+            ),
+        }
+        search.get_page_content = Mock(side_effect=lambda url: pages[url])
+        llm = make_llm([
+            decision_json(follow_links=[{"index": 1, "priority": 0.9, "reason": "r"}]),
+        ])
+        crawler = make_crawler(
+            search, llm, max_site_depth=1, max_depth=10, max_pages_per_domain=10,
+        )
+
+        crawler.crawl_and_evaluate(
+            queries=["q"], section_context="ctx", research_topic="topic",
+        )
+
+        fetched = [c.args[0] for c in search.get_page_content.call_args_list]
+        assert "https://two.com/x" in fetched  # cross-domain: counter reset
+        assert "https://two.com/y" not in fetched  # layer 2 within two.com
+
+
+class TestAICrawlerSelenium:
+    """Tests for the Selenium-fetching variant."""
+
+    def test_fetches_pages_via_selenium_client(self):
+        from deep_research_tool.research.ai_crawler_selenium import AICrawlerSelenium
+
+        search = Mock()
+        search.search = Mock(return_value=[make_search_result("https://example.com/a")])
+        # search client's fetch must NOT be used
+        search.get_page_content = Mock(side_effect=AssertionError("should not be called"))
+
+        selenium_client = Mock()
+        selenium_client.get_page_content = Mock(return_value=MockPage(
+            title="JS Page", text_content="rendered content", links=[],
+        ))
+
+        llm = make_llm([decision_json()])
+        crawler = AICrawlerSelenium(
+            search_client=search,
+            llm_client=llm,
+            selenium_client=selenium_client,
+            politeness_delay=0,
+            content_filter=make_passthrough_filter(),
+        )
+
+        result = crawler.crawl_and_evaluate(
+            queries=["q"], section_context="ctx", research_topic="topic",
+        )
+
+        selenium_client.get_page_content.assert_called_once_with("https://example.com/a")
+        search.get_page_content.assert_not_called()
+        assert result.pages_fetched == 1
+        assert result.pages[0].title == "JS Page"
+
+    def test_close_releases_driver(self):
+        from deep_research_tool.research.ai_crawler_selenium import AICrawlerSelenium
+
+        selenium_client = Mock()
+        crawler = AICrawlerSelenium(
+            search_client=Mock(),
+            llm_client=Mock(),
+            selenium_client=selenium_client,
+        )
+        crawler.close()
+        selenium_client.close.assert_called_once()
+
+    def test_accepts_site_depth_parameter(self):
+        from deep_research_tool.research.ai_crawler_selenium import AICrawlerSelenium
+
+        crawler = AICrawlerSelenium(
+            search_client=Mock(),
+            llm_client=Mock(),
+            selenium_client=Mock(),
+            max_site_depth=4,
+        )
+        assert crawler.max_site_depth == 4
+
+
 class TestFallbackDecision:
     """Tests for the keyword fallback decision."""
 

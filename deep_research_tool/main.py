@@ -337,9 +337,14 @@ class DeepResearchTool:
             fast_crawl_batch_size=self.config.research.fast_crawl_batch_size,
             ai_crawl_max_total_pages=self.config.research.ai_crawl_max_total_pages,
             ai_crawl_max_depth=self.config.research.ai_crawl_max_depth,
+            ai_crawl_site_depth=self.config.research.ai_crawl_site_depth,
             ai_crawl_max_llm_calls=self.config.research.ai_crawl_max_llm_calls,
             ai_crawl_max_pages_per_domain=self.config.research.ai_crawl_max_pages_per_domain,
             ai_crawl_politeness_delay=self.config.research.ai_crawl_politeness_delay,
+            selenium_headless=self.config.search.headless,
+            importance_threshold=self.config.research.importance_threshold,
+            min_high_importance_sources=self.config.research.min_high_importance_sources,
+            max_gap_fill_rounds=self.config.research.max_gap_fill_rounds,
         )
 
         # Conduct research
@@ -1000,9 +1005,14 @@ def run_research(
     # AI crawl mode parameters
     ai_crawl_max_total_pages: int = 15,
     ai_crawl_max_depth: int = 3,
+    ai_crawl_site_depth: int = 2,
     ai_crawl_max_llm_calls: int = 25,
     ai_crawl_max_pages_per_domain: int = 5,
     ai_crawl_politeness_delay: float = 1.0,
+    # Evidence importance / gap-fill parameters
+    importance_threshold: float = 0.6,
+    min_high_importance_sources: int = 2,
+    max_gap_fill_rounds: int = 1,
     # Auto figure/table generation parameters
     auto_figures: bool = False,
     auto_figures_include_images: bool = True,
@@ -1051,14 +1061,19 @@ def run_research(
         content_filter_mode: Content filter strictness ('strict', 'moderate', 'minimal', 'none')
         custom_blocked_domains: List of domains to block (ads, spam, etc.)
         custom_whitelisted_domains: List of domains to always allow
-        crawl_mode: Crawl mode ('standard', 'fast_batch', 'fast_parallel', 'aicrawl')
+        crawl_mode: Crawl mode ('standard', 'fast_batch', 'fast_parallel',
+            'aicrawl', 'ai_crawl_selenium')
         fast_crawl_workers: Max parallel workers for fast crawl mode
         fast_crawl_batch_size: Pages per batch in batch evaluation mode
         ai_crawl_max_total_pages: aicrawl - max pages fetched per section
         ai_crawl_max_depth: aicrawl - max link depth from search-result seeds
+        ai_crawl_site_depth: aicrawl - max layers followed within one site
         ai_crawl_max_llm_calls: aicrawl - LLM decision call budget per section
         ai_crawl_max_pages_per_domain: aicrawl - max pages fetched per domain
         ai_crawl_politeness_delay: aicrawl - min seconds between same-domain fetches
+        importance_threshold: min importance score to count as high-importance
+        min_high_importance_sources: below this, gap-fill re-search triggers
+        max_gap_fill_rounds: max gap-fill re-search rounds per section
         auto_figures: Auto-generate figures/tables and embed in report
         auto_figures_include_images: Include images from web sources
         auto_figures_include_tables: Include extracted tables
@@ -1158,9 +1173,13 @@ def run_research(
         fast_crawl_batch_size=fast_crawl_batch_size,
         ai_crawl_max_total_pages=ai_crawl_max_total_pages,
         ai_crawl_max_depth=ai_crawl_max_depth,
+        ai_crawl_site_depth=ai_crawl_site_depth,
         ai_crawl_max_llm_calls=ai_crawl_max_llm_calls,
         ai_crawl_max_pages_per_domain=ai_crawl_max_pages_per_domain,
         ai_crawl_politeness_delay=ai_crawl_politeness_delay,
+        importance_threshold=importance_threshold,
+        min_high_importance_sources=min_high_importance_sources,
+        max_gap_fill_rounds=max_gap_fill_rounds,
         auto_figures=auto_figures,
         auto_figures_include_images=auto_figures_include_images,
         auto_figures_include_tables=auto_figures_include_tables,

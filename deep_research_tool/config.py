@@ -316,6 +316,7 @@ class CrawlMode(str, Enum):
     FAST_BATCH = "fast_batch"      # Fast parallel crawl + batch LLM evaluation
     FAST_PARALLEL = "fast_parallel"  # Fast parallel crawl + parallel LLM evaluation
     AI_CRAWL = "aicrawl"           # LLM-driven crawl (LLM decides which links to follow)
+    AI_CRAWL_SELENIUM = "ai_crawl_selenium"  # LLM-driven crawl fetching pages via Selenium browser
 
 
 @dataclass
@@ -361,9 +362,15 @@ class ResearchConfig:
     # AI crawl mode settings (LLM-driven crawling)
     ai_crawl_max_total_pages: int = 15   # Fetch budget per section
     ai_crawl_max_depth: int = 3          # Max link depth from search-result seeds
+    ai_crawl_site_depth: int = 2         # Max layers followed within one site (domain)
     ai_crawl_max_llm_calls: int = 25     # LLM decision call budget per section
     ai_crawl_max_pages_per_domain: int = 5  # Cap of fetched pages per domain
     ai_crawl_politeness_delay: float = 1.0  # Min seconds between same-domain fetches
+
+    # Evidence importance / gap-fill settings
+    importance_threshold: float = 0.6      # Min score to count as high-importance
+    min_high_importance_sources: int = 2   # Below this, gap-fill re-search triggers
+    max_gap_fill_rounds: int = 1           # Max re-search rounds per section
 
 
 @dataclass
@@ -553,9 +560,14 @@ def create_config(
     # AI crawl mode parameters
     ai_crawl_max_total_pages: int = 15,
     ai_crawl_max_depth: int = 3,
+    ai_crawl_site_depth: int = 2,
     ai_crawl_max_llm_calls: int = 25,
     ai_crawl_max_pages_per_domain: int = 5,
     ai_crawl_politeness_delay: float = 1.0,
+    # Evidence importance / gap-fill parameters
+    importance_threshold: float = 0.6,
+    min_high_importance_sources: int = 2,
+    max_gap_fill_rounds: int = 1,
     # Report generator version parameters
     report_generator_version: str = "v1",
     v2_writing_style: str = "business",
@@ -630,14 +642,21 @@ def create_config(
         content_filter_mode: Content filter strictness ('strict', 'moderate', 'minimal', 'none')
         custom_blocked_domains: List of domains to block in addition to defaults
         custom_whitelisted_domains: List of domains to always allow
-        crawl_mode: Crawl mode ('standard', 'fast_batch', 'fast_parallel', 'aicrawl')
+        crawl_mode: Crawl mode ('standard', 'fast_batch', 'fast_parallel',
+            'aicrawl', 'ai_crawl_selenium')
         fast_crawl_workers: Max parallel workers for fast crawl mode
         fast_crawl_batch_size: Pages per batch in batch evaluation mode
         ai_crawl_max_total_pages: aicrawl mode - max pages fetched per section
         ai_crawl_max_depth: aicrawl mode - max link depth from search-result seeds
+        ai_crawl_site_depth: aicrawl mode - max layers followed within one site
         ai_crawl_max_llm_calls: aicrawl mode - LLM decision call budget per section
         ai_crawl_max_pages_per_domain: aicrawl mode - max pages fetched per domain
         ai_crawl_politeness_delay: aicrawl mode - min seconds between same-domain fetches
+        importance_threshold: min importance score (0-1) to count a source as
+            high-importance for the research purpose
+        min_high_importance_sources: sections with fewer high-importance sources
+            trigger gap-fill re-search
+        max_gap_fill_rounds: max gap-fill re-search rounds per section
         report_generator_version: Report generator version ('v1' or 'v2')
         v2_writing_style: V2 writing style ('formal', 'business', 'technical', 'executive', 'casual')
         v2_target_audience: V2 target audience ('expert', 'business', 'engineer', 'general', 'student')
@@ -703,9 +722,13 @@ def create_config(
         fast_crawl_batch_size=fast_crawl_batch_size,
         ai_crawl_max_total_pages=ai_crawl_max_total_pages,
         ai_crawl_max_depth=ai_crawl_max_depth,
+        ai_crawl_site_depth=ai_crawl_site_depth,
         ai_crawl_max_llm_calls=ai_crawl_max_llm_calls,
         ai_crawl_max_pages_per_domain=ai_crawl_max_pages_per_domain,
         ai_crawl_politeness_delay=ai_crawl_politeness_delay,
+        importance_threshold=importance_threshold,
+        min_high_importance_sources=min_high_importance_sources,
+        max_gap_fill_rounds=max_gap_fill_rounds,
     )
 
     report_config = ReportConfig(
