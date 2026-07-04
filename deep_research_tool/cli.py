@@ -150,6 +150,28 @@ def cli():
     help="Max sites to crawl per search in extended mode (default: 3)"
 )
 @click.option(
+    "--browser",
+    type=click.Choice(["chrome", "edge", "firefox"]),
+    default="chrome",
+    help="Browser for Selenium (selenium search / ai_crawl_selenium mode)"
+)
+@click.option(
+    "--http-proxy",
+    default=None,
+    help="HTTP proxy URL (default: HTTP_PROXY env var)"
+)
+@click.option(
+    "--https-proxy",
+    default=None,
+    help="HTTPS proxy URL (default: HTTPS_PROXY env var)"
+)
+@click.option(
+    "--no-verify-ssl",
+    is_flag=True,
+    default=False,
+    help="Disable SSL certificate verification (self-signed proxy certs)"
+)
+@click.option(
     "--source-mode",
     type=click.Choice(["web", "local", "hybrid"]),
     default="web",
@@ -228,6 +250,10 @@ def research(
     crawl_max_pages: int,
     crawl_max_depth: int,
     crawl_max_sites: int,
+    browser: str,
+    http_proxy: Optional[str],
+    https_proxy: Optional[str],
+    no_verify_ssl: bool,
     source_mode: str,
     crawl_mode: str,
     ai_crawl_max_pages: int,
@@ -269,6 +295,10 @@ def research(
         crawl_max_pages=crawl_max_pages,
         crawl_max_depth=crawl_max_depth,
         crawl_max_sites=crawl_max_sites,
+        browser=browser,
+        http_proxy=http_proxy,
+        https_proxy=https_proxy,
+        verify_ssl=not no_verify_ssl,
         source_mode=source_mode,
         crawl_mode=crawl_mode,
         ai_crawl_max_total_pages=ai_crawl_max_pages,

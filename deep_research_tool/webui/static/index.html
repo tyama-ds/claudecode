@@ -226,6 +226,23 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
           <div><label>不足時の再調査回数</label><input type="number" id="gap_fill_rounds" value="1" min="0" max="3"></div>
           <div><label>ページ数 / クエリ</label><input type="number" id="max_pages_per_query" value="3" min="1" max="10"></div>
         </div>
+        <label>ブラウザ（Selenium使用時）</label>
+        <select id="browser">
+          <option value="chrome">Chrome</option>
+          <option value="edge">Microsoft Edge</option>
+          <option value="firefox">Firefox</option>
+        </select>
+      </div>
+    </details>
+
+    <details>
+      <summary>🔌 プロキシ設定（社内ネットワーク等）</summary>
+      <div class="body">
+        <label>HTTPSプロキシURL（空欄=環境変数 HTTPS_PROXY を使用）</label>
+        <input type="text" id="https_proxy" placeholder="http://proxy.example.com:8080">
+        <label>HTTPプロキシURL（空欄=環境変数 HTTP_PROXY を使用）</label>
+        <input type="text" id="http_proxy" placeholder="http://proxy.example.com:8080">
+        <label class="check"><input type="checkbox" id="verify_ssl" checked> SSL証明書を検証する（自己署名証明書の場合はオフ）</label>
       </div>
     </details>
 
@@ -370,6 +387,10 @@ function collectParams() {
     model: $('model').value.trim(),
     source_mode: document.querySelector('input[name=source_mode]:checked').value,
     crawl_mode: document.querySelector('input[name=crawl_mode]:checked').value,
+    browser: $('browser').value,
+    http_proxy: $('http_proxy').value.trim(),
+    https_proxy: $('https_proxy').value.trim(),
+    verify_ssl: $('verify_ssl').checked,
     ai_crawl_max_pages: parseInt($('ai_crawl_max_pages').value) || 15,
     ai_crawl_site_depth: parseInt($('ai_crawl_site_depth').value) || 2,
     gap_fill_rounds: parseInt($('gap_fill_rounds').value),

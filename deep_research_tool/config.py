@@ -228,7 +228,7 @@ class SearchConfig:
 
     # Selenium settings
     headless: bool = True
-    browser: str = "chrome"
+    browser: str = "chrome"  # chrome / edge / firefox
     page_load_timeout: int = 30
     implicit_wait: int = 10
 
@@ -632,6 +632,8 @@ def create_config(
         anthropic_api_key: Anthropic API key (optional, uses env var if not provided)
         model: Model name to use (optional, uses default for provider)
         search_method: Web search method ('duckduckgo' or 'selenium')
+        browser: Selenium browser via kwargs ('chrome', 'edge', or 'firefox';
+            used by selenium search and the ai_crawl_selenium crawl mode)
         research_iterations: Number of research iterations
         output_format: Report format ('docx', 'pdf', or 'markdown')
         output_dir: Output directory path
@@ -748,6 +750,7 @@ def create_config(
         method=SearchMethod(search_method),
         headless=kwargs.get("headless", True),
         max_results=kwargs.get("max_results", 10),
+        browser=kwargs.get("browser", "chrome"),
     )
 
     research_config = ResearchConfig(

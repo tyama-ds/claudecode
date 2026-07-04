@@ -41,6 +41,8 @@ class AICrawlerSelenium(AICrawler):
         headless: bool = True,
         browser: str = "chrome",
         page_load_timeout: int = 30,
+        proxies: dict = None,
+        verify_ssl: bool = True,
     ):
         """
         Initialize AICrawlerSelenium.
@@ -60,8 +62,11 @@ class AICrawlerSelenium(AICrawler):
             language: Language for decision prompts
             selenium_client: Pre-built Selenium client (created lazily if None)
             headless: Run the browser headless
-            browser: Browser type ("chrome" or "firefox")
+            browser: Browser type ("chrome", "edge", or "firefox")
             page_load_timeout: Page load timeout in seconds
+            proxies: Proxy dict like {"https": "http://proxy:8080"} passed
+                to the browser launch
+            verify_ssl: When False the browser ignores certificate errors
         """
         super().__init__(
             search_client=search_client,
@@ -81,6 +86,8 @@ class AICrawlerSelenium(AICrawler):
         self._headless = headless
         self._browser = browser
         self._page_load_timeout = page_load_timeout
+        self._proxies = proxies
+        self._verify_ssl = verify_ssl
 
     def _get_selenium_client(self):
         """Get or lazily create the Selenium browser client."""
@@ -90,6 +97,8 @@ class AICrawlerSelenium(AICrawler):
                 headless=self._headless,
                 browser=self._browser,
                 timeout=self._page_load_timeout,
+                proxies=self._proxies,
+                verify_ssl=self._verify_ssl,
             )
         return self._selenium_client
 

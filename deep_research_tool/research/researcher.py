@@ -166,6 +166,9 @@ class Researcher:
         ai_crawl_max_pages_per_domain: int = 5,
         ai_crawl_politeness_delay: float = 1.0,
         selenium_headless: bool = True,
+        selenium_browser: str = "chrome",
+        selenium_proxies: dict = None,
+        selenium_verify_ssl: bool = True,
         importance_threshold: float = 0.6,
         min_high_importance_sources: int = 2,
         max_gap_fill_rounds: int = 1,
@@ -206,6 +209,9 @@ class Researcher:
             ai_crawl_max_pages_per_domain: aicrawl - max pages fetched per domain
             ai_crawl_politeness_delay: aicrawl - min seconds between same-domain fetches
             selenium_headless: ai_crawl_selenium - run the browser headless
+            selenium_browser: ai_crawl_selenium - browser (chrome/edge/firefox)
+            selenium_proxies: ai_crawl_selenium - proxy dict for the browser
+            selenium_verify_ssl: ai_crawl_selenium - verify SSL certificates
             importance_threshold: min importance score to count a source as
                 high-importance for the research purpose
             min_high_importance_sources: sections with fewer high-importance
@@ -326,6 +332,9 @@ class Researcher:
                 politeness_delay=ai_crawl_politeness_delay,
                 language=language,
                 headless=selenium_headless,
+                browser=selenium_browser,
+                proxies=selenium_proxies,
+                verify_ssl=selenium_verify_ssl,
             )
 
         # Importance scoring / gap-fill settings
