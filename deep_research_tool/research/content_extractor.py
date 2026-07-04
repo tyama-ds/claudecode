@@ -62,15 +62,19 @@ class ExtractedContent:
 class ContentExtractor:
     """Extract and process content from search results using LLM."""
 
-    def __init__(self, llm_client, language: str = "ja"):
+    def __init__(self, llm_client, language: str = "ja", evaluation_llm_client=None):
         """
         Initialize ContentExtractor.
 
         Args:
-            llm_client: LLM API client instance
+            llm_client: LLM API client for prose generation (synthesis)
             language: Target language for processing
+            evaluation_llm_client: Optional separate LLM client for
+                evaluation-type calls (content extraction, source quality,
+                image relevance); defaults to llm_client
         """
         self.llm = llm_client
+        self.eval_llm = evaluation_llm_client or llm_client
         self.language = language
 
     def extract_relevant_content(
@@ -153,7 +157,7 @@ Focus on information directly relevant to the research query and section.
 Include exact quotes that could be cited in the report.
 Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
 
-        response = self.llm.generate(prompt)
+        response = self.eval_llm.generate(prompt)
 
         try:
             data = extract_json_from_response(response.content)
@@ -679,7 +683,7 @@ Analyze and return as JSON:
     "evaluation_notes": "Brief notes on source quality"
 }}"""
 
-        response = self.llm.generate(prompt)
+        response = self.eval_llm.generate(prompt)
 
         try:
             return extract_json_from_response(response.content)
@@ -751,7 +755,7 @@ Which images might be useful for illustrating this research topic?
 Return as JSON array with relevance (high/medium/low/none):
 [{{"index": 1, "relevance": "high/medium/low/none", "suggested_caption": "..."}}]"""
 
-        response = self.llm.generate(prompt)
+        response = self.eval_llm.generate(prompt)
 
         try:
             evaluations = extract_json_array_from_response(response.content)

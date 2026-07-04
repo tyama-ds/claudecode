@@ -6,7 +6,7 @@ Supports both environment variables and direct parameter passing.
 
 import os
 from enum import Enum
-from typing import Optional, List, Dict
+from typing import Any, Optional, List, Dict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -144,6 +144,11 @@ class APIConfig:
     # API parameters
     temperature: float = 0.7
     max_tokens: int = 4096
+
+    # Per-stage LLM overrides. Keys: planning / crawling / evaluation / writing.
+    # Values: {"provider": ..., "model": ..., "api_key": optional,
+    #          "base_url": optional, "backend": optional}
+    stage_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     # Available models for reference
     OPENAI_MODELS: tuple = (
@@ -405,6 +410,9 @@ class ReportConfig:
     v2_include_glossary: bool = True
     v2_enable_polish: bool = True  # Final naturalness polish pass over all chapters
 
+    # Chart rendering library ("matplotlib" or "seaborn")
+    chart_library: str = "matplotlib"
+
     # Auto figure/table generation settings
     auto_figures: bool = False  # Auto-generate figures/tables during run_research
     auto_figures_include_images: bool = True  # Include images from web sources
@@ -577,6 +585,10 @@ def create_config(
     v2_enable_two_phase: bool = True,
     v2_include_glossary: bool = True,
     v2_enable_polish: bool = True,
+    # Chart library parameter
+    chart_library: str = "matplotlib",
+    # Per-stage LLM overrides
+    stage_llm: Optional[Dict[str, Dict[str, Any]]] = None,
     # Auto figure/table generation parameters
     auto_figures: bool = False,
     auto_figures_include_images: bool = True,
@@ -665,6 +677,16 @@ def create_config(
         v2_enable_two_phase: Enable V2 two-phase generation (draft + refinement)
         v2_include_glossary: Include glossary section in V2 reports
         v2_enable_polish: Enable final naturalness polish pass over all V2 chapters
+        chart_library: Chart rendering library ('matplotlib' or 'seaborn';
+            falls back to matplotlib when seaborn is not installed)
+        stage_llm: Per-stage LLM overrides. Keys: 'planning' (research plan /
+            queries), 'crawling' (crawl decisions), 'evaluation' (importance /
+            quality / consistency scoring), 'writing' (prose generation).
+            Values: {'provider': ..., 'model': ..., 'api_key': optional}.
+            Stages without an override use the default provider/model.
+            Example: {"planning": {"provider": "openai", "model": "gpt-5-mini"},
+                      "writing": {"provider": "anthropic",
+                                  "model": "claude-3-5-sonnet-20241022"}}
         auto_figures: Auto-generate figures/tables during run_research
         auto_figures_include_images: Include images from web sources in auto figures
         auto_figures_include_tables: Include extracted tables in auto figures
@@ -685,10 +707,20 @@ def create_config(
     Returns:
         Configured Config object
     """
+    if stage_llm:
+        from .api.stage_router import LLM_STAGES
+        unknown_stages = set(stage_llm) - set(LLM_STAGES)
+        if unknown_stages:
+            raise ValueError(
+                f"Unknown LLM stages: {sorted(unknown_stages)}. "
+                f"Valid stages: {list(LLM_STAGES)}"
+            )
+
     api_config = APIConfig(
         provider=LLMProvider(provider),
         openai_api_key=openai_api_key,
         anthropic_api_key=anthropic_api_key,
+        stage_overrides=dict(stage_llm) if stage_llm else {},
     )
 
     if model:
@@ -744,6 +776,7 @@ def create_config(
         v2_enable_two_phase=v2_enable_two_phase,
         v2_include_glossary=v2_include_glossary,
         v2_enable_polish=v2_enable_polish,
+        chart_library=chart_library,
         auto_figures=auto_figures,
         auto_figures_include_images=auto_figures_include_images,
         auto_figures_include_tables=auto_figures_include_tables,

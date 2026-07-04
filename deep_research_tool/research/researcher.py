@@ -168,6 +168,10 @@ class Researcher:
         importance_threshold: float = 0.6,
         min_high_importance_sources: int = 2,
         max_gap_fill_rounds: int = 1,
+        planning_llm=None,
+        crawling_llm=None,
+        evaluation_llm=None,
+        writing_llm=None,
     ):
         """
         Initialize Researcher.
@@ -206,8 +210,19 @@ class Researcher:
                 sources trigger gap-fill re-search
             max_gap_fill_rounds: max re-search rounds per section when the
                 collected information is insufficient
+            planning_llm: LLM client for planning (research plan / queries);
+                defaults to llm_client
+            crawling_llm: LLM client for crawl decisions; defaults to llm_client
+            evaluation_llm: LLM client for importance/quality/coherence
+                evaluation; defaults to llm_client
+            writing_llm: LLM client for prose generation (synthesis,
+                executive summary); defaults to llm_client
         """
         self.llm = llm_client
+        self.planning_llm = planning_llm or llm_client
+        self.crawling_llm = crawling_llm or llm_client
+        self.evaluation_llm = evaluation_llm or llm_client
+        self.writing_llm = writing_llm or llm_client
         self.search = search_client
         self.min_iterations = min_iterations
         self.max_iterations = max_iterations
@@ -217,8 +232,11 @@ class Researcher:
         self.output_dir = output_dir or Path("./output")
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        self.query_generator = QueryGenerator(llm_client, language)
-        self.content_extractor = ContentExtractor(llm_client, language)
+        self.query_generator = QueryGenerator(self.planning_llm, language)
+        self.content_extractor = ContentExtractor(
+            self.writing_llm, language,
+            evaluation_llm_client=self.evaluation_llm,
+        )
 
         # Use enhanced multi-pass content generation for better quality
         self.use_enhanced_synthesis = use_enhanced_synthesis
@@ -233,7 +251,7 @@ class Researcher:
         if extended_mode:
             self.site_crawler = SiteCrawler(
                 search_client=search_client,
-                llm_client=llm_client,
+                llm_client=self.crawling_llm,
                 max_pages=crawl_max_pages,
                 max_depth=crawl_max_depth,
                 relevance_threshold=crawl_relevance_threshold,
@@ -266,7 +284,7 @@ class Researcher:
             )
             self.fast_crawler = FastCrawler(
                 search_client=search_client,
-                llm_client=llm_client,
+                llm_client=self.crawling_llm,
                 evaluation_mode=eval_mode,
                 content_filter=self.content_filter,
                 max_workers=fast_crawl_workers,
@@ -279,7 +297,7 @@ class Researcher:
         if crawl_mode == CrawlMode.AI_CRAWL:
             self.ai_crawler = AICrawler(
                 search_client=search_client,
-                llm_client=llm_client,
+                llm_client=self.crawling_llm,
                 content_filter=self.content_filter,
                 max_total_pages=ai_crawl_max_total_pages,
                 max_depth=ai_crawl_max_depth,
@@ -293,7 +311,7 @@ class Researcher:
             from .ai_crawler_selenium import AICrawlerSelenium
             self.ai_crawler = AICrawlerSelenium(
                 search_client=search_client,
-                llm_client=llm_client,
+                llm_client=self.crawling_llm,
                 content_filter=self.content_filter,
                 max_total_pages=ai_crawl_max_total_pages,
                 max_depth=ai_crawl_max_depth,
@@ -1007,7 +1025,7 @@ Output JSON only:"""
 
         scores: Dict[int, float] = {}
         try:
-            response = self.llm.generate(prompt)
+            response = self.evaluation_llm.generate(prompt)
             data = extract_json_from_response(response.content)
             for entry in data.get("scores", []):
                 try:
@@ -1179,7 +1197,7 @@ Return JSON:
 }}"""
 
         try:
-            response = self.llm.generate(coherence_prompt)
+            response = self.evaluation_llm.generate(coherence_prompt)
             result = extract_json_from_response(response.content)
             self.session.section_contents["_coherence_check"] = result
             print(f"[DEBUG] Coherence check: {result.get('is_coherent', 'unknown')}")
@@ -1330,7 +1348,7 @@ Include:
 Return as JSON:
 {{"executive_summary": "...", "key_findings": [...], "recommendations": [...], "overall_confidence": "high/medium/low"}}"""
 
-        response = self.llm.generate(summary_prompt)
+        response = self.writing_llm.generate(summary_prompt)
 
         try:
             synthesis = extract_json_from_response(response.content)
@@ -1587,7 +1605,7 @@ Generate 3 search queries that would find:
 Return as JSON array: ["query1", "query2", "query3"]"""
 
         try:
-            response = self.llm.generate(prompt)
+            response = self.planning_llm.generate(prompt)
             content = response.content
             start = content.find("[")
             end = content.rfind("]") + 1
@@ -1653,7 +1671,7 @@ Create a merged version that:
 Return the merged content as a single text block (no JSON, just the merged text):"""
 
         try:
-            response = self.llm.generate(merge_prompt)
+            response = self.writing_llm.generate(merge_prompt)
             merged_text = response.content.strip()
         except Exception:
             # Fallback: just append

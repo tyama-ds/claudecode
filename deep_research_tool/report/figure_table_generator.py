@@ -194,6 +194,7 @@ class FigureTableGenerator:
         download_timeout: int = 10,
         proxies: Dict[str, str] = None,
         verify_ssl: bool = True,
+        chart_library: str = "matplotlib",
     ):
         """
         Initialize FigureTableGenerator.
@@ -207,6 +208,8 @@ class FigureTableGenerator:
             download_timeout: Timeout for downloading images
             proxies: Proxy settings dict
             verify_ssl: Whether to verify SSL certificates
+            chart_library: Chart rendering library ("matplotlib" or "seaborn";
+                falls back to matplotlib when seaborn is not installed)
         """
         self.llm = llm_client
         self.output_dir = output_dir or Path("./output/figures")
@@ -217,6 +220,8 @@ class FigureTableGenerator:
         self.download_timeout = download_timeout
         self.proxies = proxies
         self.verify_ssl = verify_ssl
+        self.chart_library = (chart_library or "matplotlib").lower()
+        self._seaborn_warned = False
 
     # ========================================================================
     # Main Entry Point
@@ -365,9 +370,8 @@ class FigureTableGenerator:
             import matplotlib.pyplot as plt
             import matplotlib.font_manager as fm
 
-            # Setup fonts and style
-            self._setup_matplotlib_fonts(plt, fm)
-            self._setup_chart_style(plt)
+            # Setup fonts and style (matplotlib or seaborn theme)
+            sns = self._apply_chart_style(plt, fm)
 
             # Map recommendation chart type to our ChartType
             type_map = {
@@ -409,7 +413,11 @@ class FigureTableGenerator:
             elif chart_type == ChartType.HORIZONTAL_BAR:
                 self._render_horizontal_bar_from_recommendation(ax, data_points)
             elif chart_type == ChartType.LINE:
-                ax.plot(range(len(values)), values, marker='o', linewidth=2, color=CHART_COLORS[0])
+                if sns is not None:
+                    sns.lineplot(x=list(range(len(values))), y=values,
+                                 marker='o', linewidth=2, ax=ax)
+                else:
+                    ax.plot(range(len(values)), values, marker='o', linewidth=2, color=CHART_COLORS[0])
                 ax.set_xticks(range(len(x_labels)))
                 ax.set_xticklabels(x_labels, rotation=45, ha='right')
             elif chart_type == ChartType.AREA:
@@ -418,7 +426,11 @@ class FigureTableGenerator:
                 ax.set_xticks(range(len(x_labels)))
                 ax.set_xticklabels(x_labels, rotation=45, ha='right')
             else:  # BAR
-                bars = ax.bar(range(len(values)), values, color=CHART_COLORS[0])
+                if sns is not None:
+                    sns.barplot(x=list(range(len(values))), y=values, ax=ax)
+                    bars = ax.patches
+                else:
+                    bars = ax.bar(range(len(values)), values, color=CHART_COLORS[0])
                 ax.set_xticks(range(len(x_labels)))
                 ax.set_xticklabels(x_labels, rotation=45, ha='right')
                 # Add value labels for small datasets
@@ -1298,11 +1310,8 @@ Example: line"""
             import matplotlib.pyplot as plt
             import matplotlib.font_manager as fm
 
-            # Set up Japanese font
-            self._setup_matplotlib_fonts(plt, fm)
-
-            # Set up chart style
-            self._setup_chart_style(plt)
+            # Set up fonts and style (matplotlib or seaborn theme)
+            self._apply_chart_style(plt, fm)
 
             # Get LLM-recommended or rule-based chart type
             chart_type = self._recommend_visualization(table)
@@ -1366,6 +1375,41 @@ Example: line"""
         except Exception as e:
             print(f"[FigureTableGenerator] Error generating chart: {e}")
             return None
+
+    def _get_seaborn(self):
+        """Import seaborn if selected and available; warn once on failure."""
+        if self.chart_library != "seaborn":
+            return None
+        try:
+            import seaborn as sns
+            return sns
+        except ImportError:
+            if not self._seaborn_warned:
+                print("[FigureTableGenerator] seaborn not installed; "
+                      "falling back to matplotlib. Install with: pip install seaborn")
+                self._seaborn_warned = True
+            return None
+
+    def _apply_chart_style(self, plt, fm):
+        """
+        Apply the configured chart style (matplotlib or seaborn theme).
+
+        Seaborn's set_theme resets rcParams, so Japanese fonts are
+        re-applied afterwards in both branches.
+        """
+        sns = self._get_seaborn()
+        if sns is not None:
+            sns.set_theme(style="whitegrid", palette="deep")
+            self._setup_matplotlib_fonts(plt, fm)
+            plt.rcParams.update({
+                "axes.spines.top": False,
+                "axes.spines.right": False,
+                "figure.facecolor": "white",
+            })
+        else:
+            self._setup_matplotlib_fonts(plt, fm)
+            self._setup_chart_style(plt)
+        return sns
 
     def _setup_matplotlib_fonts(self, plt, fm):
         """Configure matplotlib for Japanese font support."""
@@ -1972,6 +2016,7 @@ def add_figures_to_report(
     language: str = "ja",
     proxies: Dict[str, str] = None,
     verify_ssl: bool = True,
+    chart_library: str = "matplotlib",
 ) -> Path:
     """
     Add figures and tables to an existing report.
@@ -1985,6 +2030,7 @@ def add_figures_to_report(
         language: Language for captions
         proxies: Proxy settings dict
         verify_ssl: Whether to verify SSL certificates
+        chart_library: Chart rendering library ("matplotlib" or "seaborn")
 
     Returns:
         Path to the updated report
@@ -1999,6 +2045,7 @@ def add_figures_to_report(
         language=language,
         proxies=proxies,
         verify_ssl=verify_ssl,
+        chart_library=chart_library,
     )
 
     collection = generator.generate_figures_and_tables(

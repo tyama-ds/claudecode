@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deep Research Tool</title>
+<style>
+:root {
+  --bg: #f4f5fb;
+  --card: #ffffff;
+  --text: #1c2033;
+  --muted: #6b7188;
+  --border: #e4e6f0;
+  --accent: #5b5fe9;
+  --accent2: #8b5cf6;
+  --accent-soft: #eef0ff;
+  --success: #16a34a;
+  --error: #dc2626;
+  --log-bg: #171a2b;
+  --log-text: #b8c0e0;
+  --radius: 14px;
+  --shadow: 0 1px 3px rgba(28,32,51,.06), 0 8px 24px rgba(28,32,51,.07);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12141f; --card: #1b1e2e; --text: #e8eaf6; --muted: #9aa1bd;
+    --border: #2a2e45; --accent-soft: #252a4a;
+    --shadow: 0 1px 3px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font-family: "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", system-ui, sans-serif;
+  font-size: 14px; line-height: 1.6;
+}
+header {
+  background: linear-gradient(120deg, var(--accent), var(--accent2));
+  color: #fff; padding: 18px 28px; display: flex; align-items: center; gap: 14px;
+}
+header .logo { font-size: 22px; }
+header h1 { font-size: 17px; margin: 0; font-weight: 700; letter-spacing: .02em; }
+header p { margin: 0; font-size: 12px; opacity: .85; }
+main {
+  display: grid; grid-template-columns: 440px 1fr; gap: 20px;
+  max-width: 1240px; margin: 24px auto; padding: 0 20px;
+}
+@media (max-width: 960px) { main { grid-template-columns: 1fr; } }
+.card {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow); padding: 20px;
+}
+h2 { font-size: 14px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+h2 .n {
+  background: var(--accent-soft); color: var(--accent); border-radius: 8px;
+  width: 24px; height: 24px; display: inline-flex; align-items: center;
+  justify-content: center; font-size: 12px; font-weight: 700;
+}
+label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; font-weight: 600; }
+input[type=text], input[type=password], input[type=number], textarea, select {
+  width: 100%; padding: 9px 12px; border: 1.5px solid var(--border);
+  border-radius: 10px; font-size: 13px; background: var(--card); color: var(--text);
+  transition: border-color .15s, box-shadow .15s; font-family: inherit;
+}
+input:focus, textarea:focus, select:focus {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+}
+textarea { resize: vertical; min-height: 64px; }
+details {
+  border: 1px solid var(--border); border-radius: 10px; margin-top: 12px;
+  padding: 0 14px; background: color-mix(in srgb, var(--card) 70%, var(--bg));
+}
+details summary {
+  cursor: pointer; padding: 11px 0; font-weight: 700; font-size: 13px;
+  list-style: none; display: flex; align-items: center; gap: 8px; user-select: none;
+}
+details summary::before { content: "▸"; color: var(--accent); transition: transform .15s; }
+details[open] summary::before { transform: rotate(90deg); }
+details .body { padding: 0 2px 14px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+.mode-cards { display: grid; gap: 8px; margin-top: 4px; }
+.mode-card {
+  border: 1.5px solid var(--border); border-radius: 10px; padding: 9px 12px;
+  cursor: pointer; transition: all .15s; display: block;
+}
+.mode-card:hover { border-color: var(--accent); }
+.mode-card input { display: none; }
+.mode-card .t { font-weight: 700; font-size: 13px; }
+.mode-card .d { font-size: 11px; color: var(--muted); }
+.mode-card.sel { border-color: var(--accent); background: var(--accent-soft); }
+.check { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 13px; cursor: pointer; }
+.check input { width: 16px; height: 16px; accent-color: var(--accent); }
+.stage-row { display: grid; grid-template-columns: 86px 1fr 1.3fr; gap: 8px; align-items: center; margin-top: 8px; }
+.stage-row .name { font-size: 12px; font-weight: 700; color: var(--muted); }
+button.primary {
+  width: 100%; margin-top: 18px; padding: 13px; border: none; border-radius: 12px;
+  background: linear-gradient(120deg, var(--accent), var(--accent2)); color: #fff;
+  font-size: 15px; font-weight: 700; cursor: pointer; letter-spacing: .04em;
+  transition: transform .1s, opacity .15s; font-family: inherit;
+}
+button.primary:hover:not(:disabled) { transform: translateY(-1px); }
+button.primary:disabled { opacity: .5; cursor: not-allowed; }
+
+/* ---- progress panel ---- */
+.stepper { display: flex; align-items: center; margin: 6px 0 18px; }
+.step { display: flex; flex-direction: column; align-items: center; flex: 1; position: relative; }
+.step .dot {
+  width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center;
+  justify-content: center; font-size: 13px; font-weight: 700;
+  background: var(--accent-soft); color: var(--muted); border: 2px solid var(--border);
+  transition: all .3s; z-index: 1;
+}
+.step .lbl { font-size: 11px; color: var(--muted); margin-top: 6px; font-weight: 600; }
+.step:not(:last-child)::after {
+  content: ""; position: absolute; top: 15px; left: calc(50% + 18px);
+  width: calc(100% - 36px); height: 2px; background: var(--border);
+}
+.step.done .dot { background: var(--success); border-color: var(--success); color: #fff; }
+.step.active .dot {
+  background: linear-gradient(120deg, var(--accent), var(--accent2));
+  border-color: var(--accent); color: #fff; animation: pulse 1.6s infinite;
+}
+.step.active .lbl, .step.done .lbl { color: var(--text); }
+@keyframes pulse {
+  0%,100% { box-shadow: 0 0 0 0 rgba(91,95,233,.45); }
+  50% { box-shadow: 0 0 0 8px rgba(91,95,233,0); }
+}
+.bar-wrap { background: var(--accent-soft); border-radius: 99px; height: 14px; overflow: hidden; }
+.bar {
+  height: 100%; width: 0%; border-radius: 99px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  transition: width .6s ease;
+  background-size: 30px 30px;
+}
+.bar.moving {
+  background-image:
+    linear-gradient(135deg, rgba(255,255,255,.25) 25%, transparent 25%,
+      transparent 50%, rgba(255,255,255,.25) 50%, rgba(255,255,255,.25) 75%, transparent 75%),
+    linear-gradient(90deg, var(--accent), var(--accent2));
+  animation: stripes 1s linear infinite;
+}
+@keyframes stripes { to { background-position: 30px 0; } }
+.pct-row { display: flex; justify-content: space-between; align-items: baseline; margin: 8px 0 2px; }
+.pct { font-size: 26px; font-weight: 800; letter-spacing: -.02em; }
+.elapsed { font-size: 12px; color: var(--muted); }
+.msg {
+  margin-top: 10px; padding: 10px 14px; background: var(--accent-soft);
+  border-radius: 10px; font-size: 13px; min-height: 20px;
+}
+.log {
+  margin-top: 14px; background: var(--log-bg); color: var(--log-text);
+  border-radius: 10px; padding: 12px 14px; height: 230px; overflow-y: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 11.5px;
+  line-height: 1.7; white-space: pre-wrap; word-break: break-all;
+}
+.log .pct-tag { color: #7f8bd9; }
+.result { margin-top: 14px; display: none; }
+.result .files { display: grid; gap: 8px; margin-top: 8px; }
+.file-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px;
+}
+.file-row .fname { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-row .actions { display: flex; gap: 6px; flex-shrink: 0; }
+.file-row a {
+  font-size: 12px; padding: 5px 12px; border-radius: 8px; text-decoration: none;
+  background: var(--accent-soft); color: var(--accent); font-weight: 700;
+}
+.banner { display:none; margin-top: 12px; padding: 12px 14px; border-radius: 10px; font-size: 13px; }
+.banner.error { background: #fee2e2; color: var(--error); display: block; white-space: pre-wrap; }
+.banner.success { background: #dcfce7; color: var(--success); display: block; font-weight: 700; }
+.idle-hint { color: var(--muted); text-align: center; padding: 40px 0; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">🔎</div>
+  <div>
+    <h1>Deep Research Tool</h1>
+    <p>調査テーマを入力するだけで、Web調査からレポート生成まで自動実行</p>
+  </div>
+</header>
+
+<main>
+  <!-- ==================== 設定フォーム ==================== -->
+  <section class="card">
+    <h2><span class="n">1</span>調査の設定</h2>
+
+    <label for="query">調査テーマ <span style="color:var(--error)">*</span></label>
+    <textarea id="query" placeholder="例: 国内の炭素繊維市場の動向と主要メーカーの戦略"></textarea>
+
+    <label for="requirements">要件・観点（任意）</label>
+    <textarea id="requirements" placeholder="例: 直近5年の市場規模データを重視。経営層向けに簡潔に。"></textarea>
+
+    <details open>
+      <summary>🌐 情報収集の設定</summary>
+      <div class="body">
+        <label>クロールモード</label>
+        <div class="mode-cards" id="crawlModes">
+          <label class="mode-card sel"><input type="radio" name="crawl_mode" value="standard" checked>
+            <span class="t">標準</span><span class="d">　検索結果を順番に取得（軽量・確実）</span></label>
+          <label class="mode-card"><input type="radio" name="crawl_mode" value="fast_batch">
+            <span class="t">高速</span><span class="d">　並列取得＋バッチ評価（速い）</span></label>
+          <label class="mode-card"><input type="radio" name="crawl_mode" value="aicrawl">
+            <span class="t">AIクロール</span><span class="d">　AIがページを読み、辿るべきリンクを判断</span></label>
+          <label class="mode-card"><input type="radio" name="crawl_mode" value="ai_crawl_selenium">
+            <span class="t">AIクロール（ブラウザ）</span><span class="d">　Seleniumで取得。JS描画サイト対応</span></label>
+        </div>
+        <div class="grid2">
+          <div><label>最大取得ページ数 / 章</label><input type="number" id="ai_crawl_max_pages" value="15" min="3" max="50"></div>
+          <div><label>サイト内の探索階層</label><input type="number" id="ai_crawl_site_depth" value="2" min="0" max="5"></div>
+          <div><label>不足時の再調査回数</label><input type="number" id="gap_fill_rounds" value="1" min="0" max="3"></div>
+          <div><label>ページ数 / クエリ</label><input type="number" id="max_pages_per_query" value="3" min="1" max="10"></div>
+        </div>
+      </div>
+    </details>
+
+    <details>
+      <summary>📝 レポートの設定</summary>
+      <div class="body">
+        <div class="grid2">
+          <div>
+            <label>生成エンジン</label>
+            <select id="report_version">
+              <option value="v1">V1（章ごとに執筆・多形式出力）</option>
+              <option value="v2">V2（一貫性重視・用語統一・推敲）</option>
+            </select>
+          </div>
+          <div>
+            <label>文体</label>
+            <select id="v2_writing_style">
+              <option value="business">ビジネス（です・ます調）</option>
+              <option value="formal">学術・フォーマル（である調）</option>
+              <option value="technical">技術文書</option>
+              <option value="executive">経営層向け</option>
+              <option value="casual">平易</option>
+            </select>
+          </div>
+          <div>
+            <label>出力形式</label>
+            <select id="output_format">
+              <option value="markdown">Markdown</option>
+              <option value="docx">Word (docx)</option>
+              <option value="pdf">PDF</option>
+              <option value="html">HTML</option>
+            </select>
+          </div>
+          <div>
+            <label>チャートライブラリ</label>
+            <select id="chart_library">
+              <option value="matplotlib">matplotlib</option>
+              <option value="seaborn">seaborn</option>
+            </select>
+          </div>
+        </div>
+        <label class="check"><input type="checkbox" id="auto_figures"> 図表を自動生成してレポートに挿入する</label>
+        <label class="check"><input type="checkbox" id="v2_enable_polish" checked> 日本語の自然さを磨く推敲パス（V2）</label>
+      </div>
+    </details>
+
+    <details>
+      <summary>🤖 AIモデルの設定</summary>
+      <div class="body">
+        <div class="grid2">
+          <div>
+            <label>既定プロバイダー</label>
+            <select id="provider">
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="local">ローカルLLM</option>
+            </select>
+          </div>
+          <div><label>既定モデル（空欄=標準）</label><input type="text" id="model" placeholder="gpt-5-mini など"></div>
+        </div>
+        <label>APIキー（空欄=環境変数を使用）</label>
+        <input type="password" id="api_key" placeholder="sk-... / sk-ant-...">
+
+        <label style="margin-top:16px">工程別のAI切り替え（空欄=既定を使用）</label>
+        <div class="stage-row"><span class="name">計画</span>
+          <select data-stage="planning" class="stage-provider"><option value="">既定</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="local">ローカル</option></select>
+          <input type="text" data-stage="planning" class="stage-model" placeholder="モデル名"></div>
+        <div class="stage-row"><span class="name">クロール判断</span>
+          <select data-stage="crawling" class="stage-provider"><option value="">既定</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="local">ローカル</option></select>
+          <input type="text" data-stage="crawling" class="stage-model" placeholder="モデル名"></div>
+        <div class="stage-row"><span class="name">評価・採点</span>
+          <select data-stage="evaluation" class="stage-provider"><option value="">既定</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="local">ローカル</option></select>
+          <input type="text" data-stage="evaluation" class="stage-model" placeholder="モデル名"></div>
+        <div class="stage-row"><span class="name">文章作成</span>
+          <select data-stage="writing" class="stage-provider"><option value="">既定</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="local">ローカル</option></select>
+          <input type="text" data-stage="writing" class="stage-model" placeholder="モデル名"></div>
+      </div>
+    </details>
+
+    <button class="primary" id="startBtn">🚀 調査を開始</button>
+    <div class="banner" id="formError"></div>
+  </section>
+
+  <!-- ==================== 進捗・結果 ==================== -->
+  <section class="card">
+    <h2><span class="n">2</span>進捗と結果</h2>
+
+    <div id="idleHint" class="idle-hint">調査テーマを入力して「調査を開始」を押してください</div>
+
+    <div id="progressPanel" style="display:none">
+      <div class="stepper">
+        <div class="step" data-step="0"><div class="dot">📋</div><div class="lbl">計画</div></div>
+        <div class="step" data-step="1"><div class="dot">🌐</div><div class="lbl">調査・収集</div></div>
+        <div class="step" data-step="2"><div class="dot">🧩</div><div class="lbl">統合・評価</div></div>
+        <div class="step" data-step="3"><div class="dot">📄</div><div class="lbl">レポート生成</div></div>
+      </div>
+
+      <div class="pct-row">
+        <span class="pct" id="pctLabel">0%</span>
+        <span class="elapsed" id="elapsed"></span>
+      </div>
+      <div class="bar-wrap"><div class="bar" id="bar"></div></div>
+      <div class="msg" id="currentMsg">待機中...</div>
+
+      <div class="log" id="log"></div>
+
+      <div class="banner" id="jobBanner"></div>
+
+      <div class="result" id="resultPanel">
+        <label>生成されたファイル</label>
+        <div class="files" id="resultFiles"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let polling = null;
+let logLength = 0;
+
+// crawl-mode card selection highlight
+document.querySelectorAll('.mode-card input').forEach(input => {
+  input.addEventListener('change', () => {
+    document.querySelectorAll('.mode-card').forEach(c => c.classList.remove('sel'));
+    input.closest('.mode-card').classList.add('sel');
+  });
+});
+
+function collectParams() {
+  const provider = $('provider').value;
+  const apiKey = $('api_key').value.trim();
+  const params = {
+    query: $('query').value.trim(),
+    requirements: $('requirements').value.trim(),
+    provider: provider,
+    model: $('model').value.trim(),
+    crawl_mode: document.querySelector('input[name=crawl_mode]:checked').value,
+    ai_crawl_max_pages: parseInt($('ai_crawl_max_pages').value) || 15,
+    ai_crawl_site_depth: parseInt($('ai_crawl_site_depth').value) || 2,
+    gap_fill_rounds: parseInt($('gap_fill_rounds').value),
+    max_pages_per_query: parseInt($('max_pages_per_query').value) || 3,
+    report_version: $('report_version').value,
+    v2_writing_style: $('v2_writing_style').value,
+    v2_enable_polish: $('v2_enable_polish').checked,
+    output_format: $('output_format').value,
+    chart_library: $('chart_library').value,
+    auto_figures: $('auto_figures').checked,
+  };
+  if (apiKey) {
+    if (provider === 'openai') params.openai_api_key = apiKey;
+    else if (provider === 'anthropic') params.anthropic_api_key = apiKey;
+  }
+  // per-stage LLM overrides
+  const stages = {};
+  document.querySelectorAll('.stage-provider').forEach(sel => {
+    const stage = sel.dataset.stage;
+    const prov = sel.value;
+    const model = document.querySelector(`.stage-model[data-stage=${stage}]`).value.trim();
+    if (prov || model) {
+      stages[stage] = {};
+      if (prov) stages[stage].provider = prov;
+      if (model) stages[stage].model = model;
+    }
+  });
+  if (Object.keys(stages).length) params.stage_llm = stages;
+  return params;
+}
+
+async function startResearch() {
+  const params = collectParams();
+  $('formError').className = 'banner';
+  if (!params.query) {
+    $('formError').className = 'banner error';
+    $('formError').textContent = '調査テーマを入力してください';
+    return;
+  }
+  $('startBtn').disabled = true;
+  try {
+    const res = await fetch('/api/research', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(params),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'failed');
+    resetProgress();
+    startPolling();
+  } catch (e) {
+    $('startBtn').disabled = false;
+    $('formError').className = 'banner error';
+    $('formError').textContent = '開始できませんでした: ' + e.message;
+  }
+}
+
+function resetProgress() {
+  $('idleHint').style.display = 'none';
+  $('progressPanel').style.display = 'block';
+  $('resultPanel').style.display = 'none';
+  $('jobBanner').className = 'banner';
+  $('log').textContent = '';
+  logLength = 0;
+}
+
+function stepIndex(pct) {
+  if (pct < 10) return 0;
+  if (pct < 85) return 1;
+  if (pct < 95) return 2;
+  return 3;
+}
+
+function render(status) {
+  const pct = status.progress || 0;
+  $('bar').style.width = pct + '%';
+  $('bar').classList.toggle('moving', status.state === 'running');
+  $('pctLabel').textContent = Math.round(pct) + '%';
+  $('currentMsg').textContent = status.message || '';
+  const min = Math.floor((status.elapsed_seconds || 0) / 60);
+  const sec = Math.round((status.elapsed_seconds || 0) % 60);
+  $('elapsed').textContent = `経過 ${min}分${sec}秒`;
+
+  const active = stepIndex(pct);
+  document.querySelectorAll('.step').forEach((el, i) => {
+    el.classList.toggle('done', status.state === 'completed' || i < active);
+    el.classList.toggle('active', status.state === 'running' && i === active);
+  });
+
+  // append new log lines
+  const log = status.log || [];
+  if (log.length !== logLength) {
+    $('log').innerHTML = log.map(l =>
+      `<span class="pct-tag">[${String(l.pct).padStart(5)}%]</span> ${escapeHtml(l.msg)}`
+    ).join('\n');
+    $('log').scrollTop = $('log').scrollHeight;
+    logLength = log.length;
+  }
+
+  if (status.state === 'completed') {
+    stopPolling();
+    $('startBtn').disabled = false;
+    $('jobBanner').className = 'banner success';
+    $('jobBanner').textContent = '✅ 調査が完了しました';
+    showResults(status.result || {});
+  } else if (status.state === 'error') {
+    stopPolling();
+    $('startBtn').disabled = false;
+    $('jobBanner').className = 'banner error';
+    $('jobBanner').textContent = '❌ エラー: ' + (status.error || '不明なエラー');
+  }
+}
+
+function showResults(result) {
+  const files = [];
+  if (result.report_path) files.push({label: '📄 レポート', path: result.report_path});
+  if (result.evidence_csv) files.push({label: '🗂 エビデンス (CSV)', path: result.evidence_csv});
+  if (result.evidence_json) files.push({label: '🗂 エビデンス (JSON)', path: result.evidence_json});
+  if (result.verification_html) files.push({label: '✅ 検証レポート', path: result.verification_html});
+  $('resultFiles').innerHTML = files.map(f => `
+    <div class="file-row">
+      <span class="fname">${f.label}　<span style="color:var(--muted);font-weight:400">${escapeHtml(f.path.split(/[\\/]/).pop())}</span></span>
+      <span class="actions">
+        <a href="/api/report-file?path=${encodeURIComponent(f.path)}" target="_blank">開く</a>
+        <a href="/api/report-file?path=${encodeURIComponent(f.path)}&download=1">保存</a>
+      </span>
+    </div>`).join('');
+  $('resultPanel').style.display = 'block';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function poll() {
+  try {
+    const res = await fetch('/api/status');
+    const status = await res.json();
+    if (status.state && status.state !== 'idle') render(status);
+  } catch (e) { /* server briefly unavailable; keep polling */ }
+}
+
+function startPolling() {
+  stopPolling();
+  poll();
+  polling = setInterval(poll, 1500);
+}
+function stopPolling() {
+  if (polling) { clearInterval(polling); polling = null; }
+}
+
+$('startBtn').addEventListener('click', startResearch);
+
+// resume view if a job is already running when the page loads
+poll().then(() => {
+  fetch('/api/status').then(r => r.json()).then(s => {
+    if (s.state === 'running') { resetProgress(); startPolling(); $('startBtn').disabled = true; }
+    else if (s.state === 'completed' || s.state === 'error') { resetProgress(); render(s); }
+  });
+});
+</script>
+</body>
+</html>

@@ -150,6 +150,7 @@ class DeepResearchTool:
 
         # Initialize components
         self.llm_client = self._create_llm_client()
+        self.stage_llm_clients = self._create_stage_llm_clients()
         self.search_client = self._create_search_client()
         self.researcher = None
         self.verifier = None
@@ -213,6 +214,41 @@ class DeepResearchTool:
             kwargs["backend"] = self.config.api.local_backend.value
 
         return get_client(**kwargs)
+
+    def _create_stage_llm_clients(self) -> dict:
+        """
+        Create per-stage LLM clients from config.api.stage_overrides.
+
+        Stages without an override are absent from the returned dict and
+        fall back to the default client.
+        """
+        clients = {}
+        for stage, spec in (self.config.api.stage_overrides or {}).items():
+            provider = spec.get("provider", self.config.api.provider.value)
+            api_key = spec.get("api_key") or {
+                "openai": self.config.api.openai_api_key,
+                "anthropic": self.config.api.anthropic_api_key,
+                "local": self.config.api.local_api_key,
+            }.get(provider)
+
+            kwargs = {
+                "provider": provider,
+                "api_key": api_key,
+                "model": spec.get("model"),
+                "http_proxy": self.config.proxy.http_proxy,
+                "https_proxy": self.config.proxy.https_proxy,
+                "verify_ssl": self.config.proxy.verify_ssl,
+            }
+            if provider == "local":
+                kwargs["base_url"] = spec.get("base_url", self.config.api.local_base_url)
+                kwargs["backend"] = spec.get(
+                    "backend",
+                    self.config.api.local_backend.value,
+                )
+
+            clients[stage] = get_client(**kwargs)
+            print(f"[StageLLM] {stage}: {provider} / {spec.get('model') or 'default model'}")
+        return clients
 
     def _create_search_client(self):
         """Create search client based on configuration."""
@@ -345,6 +381,10 @@ class DeepResearchTool:
             importance_threshold=self.config.research.importance_threshold,
             min_high_importance_sources=self.config.research.min_high_importance_sources,
             max_gap_fill_rounds=self.config.research.max_gap_fill_rounds,
+            planning_llm=self.stage_llm_clients.get("planning"),
+            crawling_llm=self.stage_llm_clients.get("crawling"),
+            evaluation_llm=self.stage_llm_clients.get("evaluation"),
+            writing_llm=self.stage_llm_clients.get("writing"),
         )
 
         # Conduct research
@@ -410,7 +450,7 @@ class DeepResearchTool:
 
         generator, is_v2 = _create_report_generator(
             config=self.config,
-            llm_client=self.llm_client,
+            llm_client=self.stage_llm_clients.get("writing", self.llm_client),
             output_dir=self.config.report.output_dir / "reports",
         )
         self.report_generator = generator
@@ -572,6 +612,7 @@ class DeepResearchTool:
                 max_images_per_section=self.config.report.auto_figures_max_images,
                 proxies=proxies,
                 verify_ssl=self.config.proxy.verify_ssl,
+                chart_library=self.config.report.chart_library,
             )
 
             # Step 5: Generate figures/tables/charts

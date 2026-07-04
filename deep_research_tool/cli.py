@@ -184,6 +184,12 @@ def cli():
     help="Auto-generate figures/tables and embed in report"
 )
 @click.option(
+    "--chart-library",
+    type=click.Choice(["matplotlib", "seaborn"]),
+    default="matplotlib",
+    help="Chart rendering library (seaborn falls back to matplotlib if not installed)"
+)
+@click.option(
     "--verbose", "-v",
     is_flag=True,
     help="Verbose output"
@@ -220,6 +226,7 @@ def research(
     ai_crawl_site_depth: int,
     gap_fill_rounds: int,
     auto_figures: bool,
+    chart_library: str,
     verbose: bool,
     openai_key: Optional[str],
     anthropic_key: Optional[str],
@@ -259,6 +266,7 @@ def research(
         ai_crawl_site_depth=ai_crawl_site_depth,
         max_gap_fill_rounds=gap_fill_rounds,
         auto_figures=auto_figures,
+        chart_library=chart_library,
     )
 
     # Validate config
@@ -790,6 +798,24 @@ def info():
         console.print("  ANTHROPIC_API_KEY: [green]Set[/green]")
     else:
         console.print("  ANTHROPIC_API_KEY: [yellow]Not set[/yellow]")
+
+
+@cli.command()
+@click.option("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
+@click.option("--port", type=int, default=8765, help="Port (default: 8765)")
+@click.option(
+    "--output-dir", default="./output",
+    help="Output directory served for report downloads (default: ./output)"
+)
+def webui(host: str, port: int, output_dir: str):
+    """Launch the browser-based Web UI.
+
+    Example:
+        deep-research webui
+        deep-research webui --port 8080
+    """
+    from .webui.server import run_server
+    run_server(host=host, port=port, output_dir=output_dir)
 
 
 def main():
