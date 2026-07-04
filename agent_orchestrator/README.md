@@ -59,7 +59,8 @@ press **Run collaboration**. Turns stream into the transcript as they happen.
 | **Doc authoring** | writer, editor | Co-write a document: the writer drafts/revises a shared **artifact**, the editor critiques each version, until approved. |
 | **Code authoring** | implementer, reviewer | Co-build code: the implementer writes/revises a single code **artifact**, the reviewer critiques each version, until approved. |
 | **Workspace build** | implementer, reviewers (1–3) | **Co-build in a real working directory**: the team first discusses and agrees on a design, then the implementer builds while one or more reviewers critique each diff (applying small fixes directly), until **all** approve. |
-| **Conductor team** | conductor, workers (2–4), reviewer | A **conductor** splits the task and assigns each worker a subtask; a reviewer checks each worker's output and reports back; the conductor evaluates the team every round — **calling out anyone who didn't deliver** — and reassigns until the work is done. |
+| **Conductor team** | conductor, workers (2–4), reviewer | A **conductor** splits the task and assigns each worker a subtask; a reviewer checks each worker's output and reports back; the conductor evaluates the team every round — **calling out anyone who didn't deliver** — and reassigns until the work is done. Workers run **in parallel**. |
+| **Org team** | your own chain of command | Design the hierarchy yourself — e.g. **one manager, two conductors, five workers**. Delegation flows down level by level (whole levels run in parallel), reports flow back up, and the top manager declares DONE. The chain of command is edited **interactively on the right-panel graph** (click a member, then its new supervisor) or via each card's *Reports to* picker. |
 | **Custom** | your own (2–5) | Define each participant from scratch — backend, model, and persona — then they discuss and close with a conclusion. |
 
 The authoring strategies build a shared **Artifact** — one evolving document or
@@ -113,7 +114,48 @@ final deliverable. The number of workers (2–4) is set in the UI.
 
 For **every role** you can independently choose the **backend, model, and
 persona** (system prompt) right in the UI — mix Claude Code, Codex, GPT, and
-local models in a single run, and override any role's instructions.
+local models in a single run (the same backend can be used by several roles at
+once — parallel phases fan out concurrently), and override any role's
+instructions.
+
+**Run control.** Team strategies support **no round limit** (rounds = ∞): the
+run continues until the conductor/manager declares DONE — or you press the
+**Finish** button, which wraps up gracefully (final integration + deliverable),
+unlike Stop which aborts.
+
+**Strict completion (no rubber stamps).** Conductor/org runs no longer end just
+because the boss says so. In round 1 the conductor/top manager must define
+**acceptance criteria** (`CRITERION:` lines); a DONE is only valid alongside a
+per-criterion ✔-with-evidence check, and every declared DONE is then **audited
+adversarially** — a challenger agent re-examines the actual outputs and the DONE
+only stands on an explicit `CONFIRM DONE`; a `REJECT` (with the concrete gaps)
+sends the team straight back to work. An optional **Min rounds before DONE**
+field additionally blocks early declarations outright. When a run completes, a **feedback box** appears: type
+what's wrong and hit *Rework* — the same team re-runs the task with your
+feedback and the previous result in context (and, in a workspace, the files
+still on disk).
+
+**Agent tools** (opt-in checkboxes): the orchestrator can expose `list_files`,
+`read_file`, `run` (shell in the workspace — only enable if you trust the run),
+and `http_get` to every agent, regardless of backend. An agent calls
+`<TOOL name="run">pytest -q</TOOL>` anywhere in a reply; the orchestrator
+executes it and hands the results straight back for the same turn (up to 3
+tool exchanges), streaming each call to the transcript as `🔧` events.
+
+**Long outputs without truncation.** In *Workspace build*, protocol-based
+backends are instructed to work **incrementally** (≤ ~3 files per reply, each
+complete) and may end a reply with `CONTINUE` to immediately get another turn
+before review — so output-token limits no longer force short, degraded code.
+Native CLI backends write files directly on disk and sidestep the problem
+entirely. Existing files in the workspace are loaded as context, so the team
+works *with* your local project instead of starting from scratch.
+
+**Automated verification.** Give *Workspace build* a **test command** (e.g.
+`pytest -q`) and the orchestrator runs it in the workspace after every build
+round (and again after reviewer fixes). The outcome streams into the UI as a
+🧪 pass/fail card with the output, and is injected into the team's prompts —
+reviewers are told not to approve while tests fail, and the implementer gets
+the failure output at the start of the next round.
 
 All strategies share a **scratchpad** — a team blackboard any agent can write to
 by adding `NOTE:` lines. It appears pinned above the transcript so the shared

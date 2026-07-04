@@ -66,7 +66,19 @@
 
       <label class="field rounds">
         <span class="field-label" data-i18n>Rounds</span>
-        <input id="rounds" type="number" min="1" max="8" value="2" />
+        <div class="rounds-row">
+          <input id="rounds" type="number" min="1" max="8" value="2" />
+          <label class="field-check" id="rounds-inf-wrap" hidden>
+            <input id="rounds-inf" type="checkbox" />
+            <span data-i18n>No limit — until declared done or you press Finish</span>
+          </label>
+        </div>
+      </label>
+
+      <label class="field rounds" id="min-rounds-wrap" hidden>
+        <span class="field-label"><span data-i18n>Min rounds before DONE</span>
+          <small data-i18n>(0 = off — guards rubber-stamp approvals)</small></span>
+        <input id="min-rounds" type="number" min="0" max="8" value="0" />
       </label>
 
       <div id="workspace-opts" class="set-group" hidden>
@@ -77,6 +89,10 @@
         <label class="field-check"><input id="workspace-init" type="checkbox" />
           <span><span data-i18n>Create the directory if it doesn't exist</span>
             <small data-i18n>(no git)</small></span></label>
+        <label class="field"><span class="field-label"><span data-i18n>Test command</span>
+          <small data-i18n>(auto-run after each build round)</small></span>
+          <input id="test-cmd" type="text" data-i18n-ph
+            placeholder="e.g. pytest -q — results are fed back to the team" /></label>
       </div>
 
       <label class="field">
@@ -86,14 +102,36 @@
           placeholder="a local folder whose files the agents may consult" />
       </label>
 
+      <details class="tools-opts" id="tools-opts">
+        <summary><span data-i18n>Agent tools</span> <small data-i18n>(optional — usable by every agent)</small></summary>
+        <label class="field-check"><input type="checkbox" class="tool-check" value="list_files" />
+          <span>list_files <small data-i18n>(list workspace files)</small></span></label>
+        <label class="field-check"><input type="checkbox" class="tool-check" value="read_file" />
+          <span>read_file <small data-i18n>(read a workspace file)</small></span></label>
+        <label class="field-check"><input type="checkbox" class="tool-check" value="run" />
+          <span>run <small data-i18n>(shell commands in the workspace — trust required)</small></span></label>
+        <label class="field-check"><input type="checkbox" class="tool-check" value="http_get" />
+          <span>http_get <small data-i18n>(fetch a URL)</small></span></label>
+      </details>
+
       <div class="actions">
         <button id="run" class="btn primary">
           <span class="btn-label" data-i18n>Run collaboration</span>
         </button>
+        <button id="finish" class="btn ghost" disabled
+          title="Wrap up gracefully: stop looping and produce the final deliverable"
+          data-i18n>Finish</button>
         <button id="stop" class="btn ghost" disabled data-i18n>Stop</button>
       </div>
       <div class="hint kbd-hint" data-i18n>Tip: Ctrl+Enter (⌘+Enter) in the task box runs it</div>
       <div id="status" class="status" role="status" aria-live="polite"></div>
+
+      <div id="feedback-wrap" class="set-group feedback-wrap" hidden>
+        <div class="set-title" data-i18n>Not satisfied? Send feedback</div>
+        <textarea id="feedback" rows="3" data-i18n-ph
+          placeholder="What should be improved? The team reworks the task with this feedback…"></textarea>
+        <button id="rework" class="btn ghost rework-btn" data-i18n>Rework with feedback</button>
+      </div>
     </section>
 
     <!-- Live feed: transcript / artifact / workspace / team as tabs -->

@@ -19,7 +19,9 @@ from __future__ import annotations
 import difflib
 import os
 import re
+import subprocess
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 
 from ..adapters.base import Message
@@ -335,14 +337,199 @@ def _parse_assessments(text: str, workers: List[str]) -> List[Tuple[str, str, st
     return out
 
 
+# Acceptance criteria a manager defines in round 1: "CRITERION: <statement>"
+_CRITERION_RE = re.compile(r"^\s*(?:[-*]\s*)?CRITERION\s*:\s*(.+?)\s*$",
+                           re.IGNORECASE | re.MULTILINE)
+
+
+def _extract_criteria(text: str) -> List[str]:
+    return [m.group(1).strip() for m in _CRITERION_RE.finditer(text)]
+
+
+_AUDITOR_SYS = (
+    "You are the completion AUDITOR. A manager just declared the task DONE; your job "
+    "is to try to PROVE THEM WRONG. Check the team's actual outputs in the "
+    "conversation against every acceptance criterion, hunting for unmet criteria, "
+    "missing pieces, unverified claims, and quality gaps. Managers' assertions are "
+    "not evidence — only concrete output is. Be strict: when in doubt, reject."
+)
+
+
+def _challenge_done(session: Session, challenger: str, criteria: List[str],
+                    rnd: int) -> bool:
+    """Adversarial DONE gate: a declared DONE only stands when the challenger
+    audits the work and replies CONFIRM DONE."""
+    crit_block = ("\n".join(f"- {c}" for c in criteria) if criteria
+                  else "(no explicit criteria were recorded — derive them from the task)")
+    text = _run_turn(
+        session, challenger, _AUDITOR_SYS,
+        f"Task:\n{session.task}\n\nThe manager declared the work DONE. Audit it "
+        f"adversarially against the acceptance criteria:\n{crit_block}\n\n"
+        f"If — and only if — every criterion is genuinely, verifiably met, reply "
+        f"with the single line 'CONFIRM DONE'. Otherwise reply 'REJECT' followed "
+        f"by the concrete gaps the team must close.",
+        rnd, action="review",
+    )
+    up = text.upper()
+    return "CONFIRM DONE" in up and "REJECT" not in up
+
+
 def _conductor_done(text: str) -> bool:
     """Whether the conductor declared the task complete."""
     return bool(_DONE_RE.search(text) or re.search(r"^[ \t]*DONE[ \t]*$", text, re.MULTILINE))
 
 
 
+# -- rounds ------------------------------------------------------------------
+
+# Safety cap when the user picks "no round limit" (rounds == 0).
+_MAX_UNLIMITED_ROUNDS = 100
+
+
+def _rounds_iter(session: Session):
+    """Round numbers 1..N; ``rounds == 0`` means unlimited (safety-capped)."""
+    limit = session.rounds if session.rounds > 0 else _MAX_UNLIMITED_ROUNDS
+    return range(1, limit + 1)
+
+
+def _wrap_up(session: Session, rnd: int) -> bool:
+    """True when a human pressed Finish — the strategy should wrap up now."""
+    if session.finish_requested:
+        session.emit("status",
+                     message=f"Finish requested by the user in round {rnd} — wrapping up.")
+        return True
+    return False
+
+
+# -- agent tools (orchestrator-provided, opt-in per session) -------------------
+
+# An agent calls a tool by writing:  <TOOL name="run">pytest -q</TOOL>
+_TOOL_RE = re.compile(r'<TOOL\s+name="([^"]+)"\s*>\n?(.*?)</TOOL>', re.DOTALL | re.IGNORECASE)
+_TOOL_MAX_OUTPUT = 8_000
+_TOOL_MAX_STEPS = 3  # tool->result follow-up turns per agent turn
+
+_TOOL_DOCS = {
+    "list_files": "list_files — input ignored; lists every file in the workspace.",
+    "read_file": "read_file — input: a workspace-relative path; returns the file's contents.",
+    "run": "run — input: a shell command; runs in the workspace (60s timeout), returns output.",
+    "http_get": "http_get — input: an http(s) URL; fetches it and returns the text body.",
+}
+
+
+def _tools_system(session: Session) -> str:
+    """The system-prompt suffix documenting the tools this session enables."""
+    docs = [_TOOL_DOCS[t] for t in session.tools if t in _TOOL_DOCS]
+    if not docs:
+        return ""
+    return (
+        "\n\n[TOOLS] You may use tools by writing, anywhere in a reply, a block like:\n"
+        '<TOOL name="tool_name">input</TOOL>\n'
+        "The orchestrator executes every call and sends you the results so you can "
+        "continue. Available tools:\n" + "\n".join(f"- {d}" for d in docs)
+    )
+
+
+def _tool_root(session: Session) -> str:
+    return session.workspace or session.reference_dir or os.getcwd()
+
+
+def _exec_tool(session: Session, name: str, arg: str) -> str:
+    """Execute one tool call; always returns text (errors included)."""
+    root = _tool_root(session)
+    try:
+        if name == "list_files":
+            files = sorted(_snapshot_workspace(root))
+            return "\n".join(files) if files else "(no files)"
+        if name == "read_file":
+            full = _safe_join(root, arg.strip())
+            with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                return fh.read()[:_TOOL_MAX_OUTPUT]
+        if name == "run":
+            proc = subprocess.run(arg, shell=True, cwd=root, capture_output=True,
+                                  text=True, timeout=60)
+            out = ((proc.stdout or "") + (proc.stderr or ""))[:_TOOL_MAX_OUTPUT]
+            return f"(exit {proc.returncode})\n{out}"
+        if name == "http_get":
+            import urllib.request
+            with urllib.request.urlopen(arg.strip(), timeout=30) as resp:
+                return resp.read(_TOOL_MAX_OUTPUT).decode("utf-8", errors="replace")
+        return f"unknown tool: {name}"
+    except Exception as exc:  # noqa: BLE001 - reported to the agent, not fatal
+        return f"tool error: {type(exc).__name__}: {exc}"
+
+
+def _run_tool_calls(session: Session, role: str, rnd: int, text: str) -> Optional[str]:
+    """Execute the enabled tool calls in ``text``; return a results block, or
+    ``None`` when there is nothing to run."""
+    calls = [(m.group(1).strip(), m.group(2).strip()) for m in _TOOL_RE.finditer(text)]
+    calls = [(n, a) for n, a in calls if n in session.tools]
+    if not calls:
+        return None
+    blocks = []
+    for name, arg in calls:
+        out = _exec_tool(session, name, arg)
+        session.emit("tool_use", role=role, agent=session.agents[role].display_name,
+                     tool=name, input=arg[:200], output=out[:400], round=rnd)
+        blocks.append(f'<TOOL_RESULT name="{name}">\n{out}\n</TOOL_RESULT>')
+    return "\n".join(blocks)
+
+
+# -- parallel turns ------------------------------------------------------------
+
+def _run_turns_parallel(session: Session, specs: List[tuple]) -> Dict[str, str]:
+    """Run several agent turns concurrently (one thread each).
+
+    ``specs``: ``(role, system, instruction, rnd, action)`` tuples — distinct
+    roles. Same-backend roles parallelise fine (each role has its own adapter).
+    Returns ``{role: text}``; the first turn failure is re-raised after all
+    turns settle.
+    """
+    results: Dict[str, str] = {}
+    errors: List[Exception] = []
+
+    def one(spec):
+        role, system, instruction, rnd, action = spec
+        try:
+            results[role] = _run_turn(session, role, system, instruction, rnd, action)
+        except (StopRequested, AgentTurnError) as exc:
+            errors.append(exc)
+
+    if len(specs) == 1:
+        one(specs[0])
+    else:
+        with ThreadPoolExecutor(max_workers=min(8, len(specs))) as pool:
+            list(pool.map(one, specs))
+    if errors:
+        raise errors[0]
+    return results
+
+
 def _run_turn(session: Session, role: str, system: str, instruction: str, rnd: int,
               action: str = "") -> str:
+    """One agent turn, plus tool follow-ups when the session enables tools.
+
+    If the reply contains ``<TOOL>`` calls, they are executed and the agent
+    immediately gets another turn with the results (up to a small cap); the
+    last reply is returned.
+    """
+    text = _run_single_turn(session, role, system, instruction, rnd, action)
+    if not session.tools:
+        return text
+    for _ in range(_TOOL_MAX_STEPS):
+        results_block = _run_tool_calls(session, role, rnd, text)
+        if results_block is None:
+            return text
+        text = _run_single_turn(
+            session, role, system,
+            f"Tool results:\n{results_block}\n\nContinue your turn using these "
+            f"results. You may call tools again, or give your final answer.",
+            rnd, action,
+        )
+    return text
+
+
+def _run_single_turn(session: Session, role: str, system: str, instruction: str, rnd: int,
+                     action: str = "") -> str:
     """Execute one agent turn: emit events, record it, return its text.
 
     ``instruction`` is the short per-turn directive; the conversation context is
@@ -361,8 +548,9 @@ def _run_turn(session: Session, role: str, system: str, instruction: str, rnd: i
     session.emit("turn_start", agent=adapter.display_name, role=role, round=rnd,
                  action=action)
 
-    # A per-role persona override from the UI wins over the strategy's default.
-    system = session.personas.get(role) or system
+    # A per-role persona override from the UI wins over the strategy's default;
+    # the tools contract (when enabled) is appended either way.
+    system = (session.personas.get(role) or system) + _tools_system(session)
 
     history = _build_history(session, role)
     use_history = bool(history) and getattr(adapter, "supports_history", True)
@@ -421,6 +609,9 @@ class Strategy(ABC):
     #: True when the role set (count/keys) is supplied per run via the request,
     #: rather than fixed by :attr:`roles` (e.g. the conductor's variable team).
     dynamic_roles: bool = False
+    #: True when ``rounds == 0`` (no limit; run until DONE / a human finishes)
+    #: makes sense for this strategy.
+    supports_unlimited: bool = False
     default_rounds: int = 2
 
     @abstractmethod
@@ -812,6 +1003,7 @@ class WorkspaceBuild(Strategy):
     # (implementer + reviewer_1..N) so several reviewers can co-create.
     roles = [("implementer", "Implementer"), ("reviewer", "Reviewer")]
     dynamic_roles = True
+    supports_unlimited = True
 
     IMPL_SYS = (
         "You are the IMPLEMENTER, co-building software with one or more reviewers in "
@@ -844,15 +1036,62 @@ class WorkspaceBuild(Strategy):
         the <FILE> protocol (everything else)."""
         if getattr(session.agents[role], "workdir", None):
             return (
-                "You are running INSIDE the workspace directory: create and edit the "
-                "files directly with your own file tools. Do not print <FILE> blocks; "
-                "after editing, summarise what you changed and why."
+                "You are running INSIDE the workspace directory: read any existing "
+                "file and create/edit files directly with your own file tools. Do not "
+                "print <FILE> blocks; after editing, summarise what you changed and why."
             )
         return (
             "Output EACH file you create or change IN FULL as a block: a line "
             '`<FILE path="relative/path.ext">`, then the complete new file contents, '
-            "then a line `</FILE>`."
+            "then a line `</FILE>`. Work in small increments so no reply is cut off "
+            "by output limits: touch at most ~3 files per reply, each written in "
+            "full. If more work remains afterwards, end your reply with a single "
+            "line reading exactly CONTINUE and you will immediately get another "
+            "turn before review."
         )
+
+    @staticmethod
+    def _existing_files_block(session: Session) -> str:
+        """Existing workspace contents, so agents work WITH the local project."""
+        refs = load_references(session.workspace)
+        if not refs:
+            return ""
+        parts = [f"### {path}\n```\n{content}\n```" for path, content in refs]
+        return ("\n\n[EXISTING WORKSPACE FILES — this is the project you are "
+                "working on; build on and modify these rather than starting over]\n"
+                + "\n\n".join(parts))
+
+    # Extra implementer turns granted within one round when it ends with CONTINUE.
+    _MAX_CONTINUES = 4
+
+    # Automated verification: run the session's test command in the workspace
+    # and stream the outcome; the text summary is fed back to the agents.
+    _TEST_TIMEOUT = 120
+    _TEST_MAX_OUTPUT = 4_000
+
+    @classmethod
+    def _run_tests(cls, session: Session, rnd: int) -> str:
+        """Run ``session.test_command`` in the workspace; returns a prompt block
+        (empty string when no command is configured)."""
+        cmd = (session.test_command or "").strip()
+        if not cmd:
+            return ""
+        try:
+            proc = subprocess.run(cmd, shell=True, cwd=session.workspace,
+                                  capture_output=True, text=True,
+                                  timeout=cls._TEST_TIMEOUT)
+            output = ((proc.stdout or "") + (proc.stderr or ""))[-cls._TEST_MAX_OUTPUT:]
+            ok, code = proc.returncode == 0, proc.returncode
+        except subprocess.TimeoutExpired:
+            output, ok, code = f"(timed out after {cls._TEST_TIMEOUT}s)", False, -1
+        except OSError as exc:
+            output, ok, code = f"(could not run: {exc})", False, -1
+        session.emit("test_result", round=rnd, command=cmd, ok=ok, exit=code,
+                     output=output[-1_500:])
+        verdict = "PASSED" if ok else f"FAILED (exit {code})"
+        return (f"\n\n[AUTOMATED TEST RUN — `{cmd}` {verdict}]\n{output}\n"
+                + ("" if ok else "Tests are failing: fixing them takes priority, and "
+                                 "reviewers must NOT approve while they fail."))
 
     def run(self, session: Session) -> str:
         if not session.workspace:
@@ -864,6 +1103,7 @@ class WorkspaceBuild(Strategy):
             raise AgentTurnError("workspace_build needs at least one reviewer")
         os.makedirs(session.workspace, exist_ok=True)
         baseline = _snapshot_workspace(session.workspace)
+        existing = self._existing_files_block(session)
 
         # Phase 1 — design consultation (round 0): agree on an approach first.
         session.emit("status",
@@ -871,69 +1111,102 @@ class WorkspaceBuild(Strategy):
                              "approach before writing any code.")
         _run_turn(
             session, "implementer", self.IMPL_SYS,
-            f"Task:\n{session.task}\n\nBefore any code is written, propose a concise "
-            f"implementation plan: the files you would create, what each is responsible "
-            f"for, and the key design decisions. Ask the reviewers about anything you "
-            f"are unsure of. Do NOT create, edit, or output any files yet.",
+            f"Task:\n{session.task}{existing}\n\nBefore any code is written, propose "
+            f"a concise implementation plan: the files you would create or modify, "
+            f"what each is responsible for, and the key design decisions. Ask the "
+            f"reviewers about anything you are unsure of. Do NOT create, edit, or "
+            f"output any files yet.",
             0, action="design",
         )
         _, baseline = _detect_native_edits(session, "implementer", 0, baseline)
+        design_specs = [(
+            rv, self.REVIEW_SYS,
+            f"Task:\n{session.task}{existing}\n\nDiscuss the implementer's proposed "
+            f"plan: point out risks, missing pieces, and simpler alternatives, answer "
+            f"their questions, then state the design you'd agree to as a short bullet "
+            f"list. Do NOT create, edit, or output any files yet.",
+            0, "design",
+        ) for rv in reviewers]
+        _run_turns_parallel(session, design_specs)
         for rv in reviewers:
-            _run_turn(
-                session, rv, self.REVIEW_SYS,
-                f"Task:\n{session.task}\n\nDiscuss the implementer's proposed plan "
-                f"(and what other reviewers said, if any): point out risks, missing "
-                f"pieces, and simpler alternatives, answer their questions, then state "
-                f"the design you'd agree to as a short bullet list. Do NOT create, "
-                f"edit, or output any files yet.",
-                0, action="design",
-            )
             _, baseline = _detect_native_edits(session, rv, 0, baseline)
 
-        # Phase 2 — build loop: implement, then every reviewer weighs in (with
-        # direct small fixes); repeat until all reviewers approve.
-        for rnd in range(1, session.rounds + 1):
+        # Phase 2 — build loop: implement (incrementally), auto-run the tests,
+        # then every reviewer weighs in concurrently (with direct small fixes);
+        # repeat until all reviewers approve, the rounds run out, or a human
+        # presses Finish.
+        test_block = ""
+        for rnd in _rounds_iter(session):
+            if _wrap_up(session, rnd):
+                break
             text = _run_turn(
                 session, "implementer", self.IMPL_SYS,
-                f"Task:\n{session.task}\n\nImplement it now, following the design the "
-                f"team agreed on and addressing all reviewer feedback. "
+                f"Task:\n{session.task}{existing if rnd == 1 else ''}{test_block}\n\n"
+                f"Implement it now, following the design the team agreed on and "
+                f"addressing all reviewer feedback. "
                 f"{self._edit_how(session, 'implementer')}",
                 rnd, action="implement",
             )
             applied = _apply_workspace_edits(session, "implementer", rnd, text)
             native, baseline = _detect_native_edits(session, "implementer", rnd, baseline)
+
+            # Incremental mode: the implementer asked to keep going this round.
+            extra = 0
+            while (extra < self._MAX_CONTINUES and not session.finish_requested
+                   and re.search(r"^\s*CONTINUE\s*$", text, re.MULTILINE)):
+                extra += 1
+                text = _run_turn(
+                    session, "implementer", self.IMPL_SYS,
+                    f"Continue implementing exactly where you left off (same round; "
+                    f"continuation {extra}/{self._MAX_CONTINUES}). "
+                    f"{self._edit_how(session, 'implementer')}",
+                    rnd, action="implement",
+                )
+                applied += _apply_workspace_edits(session, "implementer", rnd, text)
+                n2, baseline = _detect_native_edits(session, "implementer", rnd, baseline)
+                native += n2
             if applied + native == 0:
                 session.emit("status", message=f"No file changes in round {rnd}.")
 
+            # Automated verification: run the configured test command and share
+            # the outcome with the whole team.
+            test_block = self._run_tests(session, rnd)
+
+            review_specs = [(
+                rv, self.REVIEW_SYS,
+                f"Task:\n{session.task}\n\nCurrent changes:\n\n"
+                f"{_workspace_summary(session)}{test_block}\n\n"
+                f"Review them. If you spot a small, uncontroversial fix, you may "
+                f"apply it yourself: {self._edit_how(session, rv)} "
+                f"End with APPROVE or REQUEST CHANGES.",
+                rnd, "review",
+            ) for rv in reviewers]
+            reviews = _run_turns_parallel(session, review_specs)
+
             approvals = 0
+            fixes = 0
             for rv in reviewers:
-                review = _run_turn(
-                    session, rv, self.REVIEW_SYS,
-                    f"Task:\n{session.task}\n\nCurrent changes:\n\n"
-                    f"{_workspace_summary(session)}\n\n"
-                    f"Review them. If you spot a small, uncontroversial fix, you may "
-                    f"apply it yourself: {self._edit_how(session, rv)} "
-                    f"End with APPROVE or REQUEST CHANGES.",
-                    rnd, action="review",
-                )
+                review = reviews.get(rv, "")
                 r_applied = _apply_workspace_edits(session, rv, rnd, review)
                 r_native, baseline = _detect_native_edits(session, rv, rnd, baseline)
                 if r_applied + r_native:
+                    fixes += r_applied + r_native
                     session.emit("status",
                                  message=f"{session.agents[rv].display_name} ({rv}) "
                                          f"applied {r_applied + r_native} direct "
                                          f"fix(es) in round {rnd}.")
                 if "APPROVE" in review.upper() and "REQUEST CHANGES" not in review.upper():
                     approvals += 1
+            if fixes:  # reviewers touched files -> re-verify before moving on
+                test_block = self._run_tests(session, rnd)
             if approvals == len(reviewers):
                 session.emit("status",
                              message=f"All {len(reviewers)} reviewer(s) approved in "
                                      f"round {rnd}.")
                 break
-            if rnd < session.rounds:
-                session.emit("status",
-                             message=f"{approvals}/{len(reviewers)} reviewer(s) "
-                                     f"approved in round {rnd} — continuing.")
+            session.emit("status",
+                         message=f"{approvals}/{len(reviewers)} reviewer(s) "
+                                 f"approved in round {rnd} — continuing.")
         return self.finish(session, self._summary(session))
 
     @staticmethod
@@ -956,6 +1229,7 @@ class ConductorTeam(Strategy):
     )
     roles = []          # dynamic: conductor + worker_1..N + reviewer (from the request)
     dynamic_roles = True
+    supports_unlimited = True
     default_rounds = 3
 
     CONDUCTOR_SYS = (
@@ -963,7 +1237,10 @@ class ConductorTeam(Strategy):
         "You decompose the task, assign concrete subtasks, hold workers accountable — "
         "naming and pushing anyone who doesn't deliver — and integrate their work into the "
         "result. Be specific and demanding but fair. Always use the EXACT worker keys "
-        "(e.g. worker_1) when assigning or assessing."
+        "(e.g. worker_1) when assigning or assessing. You are STRICT about completion: "
+        "workers' claims are not evidence, only their actual output is; declaring DONE "
+        "prematurely is a serious failure on your part, and every DONE you declare is "
+        "audited adversarially."
     )
     REVIEWER_SYS = (
         "You are the REVIEWER. You inspect one worker's output at a time against the "
@@ -997,10 +1274,21 @@ class ConductorTeam(Strategy):
             session.emit("worker_status", round=0, worker=w, name=names[w],
                          status="idle", note="awaiting assignment")
 
-        for rnd in range(1, session.rounds + 1):
+        criteria: List[str] = []
+        last_rnd = 1
+        for rnd in _rounds_iter(session):
+            last_rnd = rnd
+            if _wrap_up(session, rnd):
+                break
             # 1. Conductor: assess the prior round (round >= 2) and assign this round.
             instruction = self._conductor_instruction(session, workers, team, rnd)
-            ctext = _run_turn(session, "conductor", self.CONDUCTOR_SYS, instruction, rnd)
+            ctext = _run_turn(session, "conductor", self.CONDUCTOR_SYS, instruction, rnd,
+                              action="assign")
+            if rnd == 1:
+                criteria = _extract_criteria(ctext)
+                if criteria:
+                    session.emit("status",
+                                 message=f"{len(criteria)} acceptance criteria defined.")
 
             for w, verdict, note in _parse_assessments(ctext, workers):
                 session.emit("worker_status", round=rnd, worker=w, name=names[w],
@@ -1013,26 +1301,36 @@ class ConductorTeam(Strategy):
                              status=("assigned" if instr else "idle"),
                              note=(instr or "no assignment from the conductor"))
 
-            if rnd > 1 and _conductor_done(ctext):
-                session.emit("status", message=f"Conductor declared the work DONE in round {rnd}.")
-                break
+            if rnd > 1 and rnd >= session.min_rounds and _conductor_done(ctext):
+                # A declared DONE must survive an adversarial audit to stand.
+                if _challenge_done(session, "reviewer", criteria, rnd):
+                    session.emit("status",
+                                 message=f"DONE declared in round {rnd} and CONFIRMED "
+                                         f"by the auditor.")
+                    break
+                session.emit("status",
+                             message=f"DONE declared in round {rnd} but REJECTED by "
+                                     f"the auditor — work continues.")
+                continue  # let the conductor react to the rejection immediately
 
-            # 2. Each worker carries out its assignment.
-            for w in workers:
+            # 2. All workers carry out their assignments IN PARALLEL (also fine
+            # when several workers use the same backend — separate adapters).
+            def worker_spec(w):
                 instr = assignments.get(w) or (
                     "You were not given a specific assignment. Contribute the single most "
                     "useful next step toward the task."
                 )
-                _run_turn(
-                    session, w, self._worker_sys(names[w], cname),
-                    f"Task:\n{session.task}\n\nThe conductor ({cname}) assigned you:\n{instr}\n\n"
-                    f"Complete your assignment concretely now.",
-                    rnd,
-                )
+                return (w, self._worker_sys(names[w], cname),
+                        f"Task:\n{session.task}\n\nThe conductor ({cname}) assigned you:\n"
+                        f"{instr}\n\nComplete your assignment concretely now.",
+                        rnd, "implement")
+            _run_turns_parallel(session, [worker_spec(w) for w in workers])
+            for w in workers:
                 session.emit("worker_status", round=rnd, worker=w, name=names[w],
                              status="delivered", note="")
 
-            # 3. Reviewer inspects each worker individually and reports to the conductor.
+            # 3. Reviewer inspects each worker individually and reports to the
+            # conductor (one reviewer agent — necessarily sequential).
             for w in workers:
                 _run_turn(
                     session, "reviewer", self.REVIEWER_SYS,
@@ -1040,7 +1338,7 @@ class ConductorTeam(Strategy):
                     f"the assignment they were given this round. Did they fulfil it? Note "
                     f"quality, gaps, and whether they pulled their weight. Address your report "
                     f"to the conductor ({cname}).",
-                    rnd,
+                    rnd, action="review",
                 )
 
         # Conductor consolidates the team's work into the final deliverable.
@@ -1049,7 +1347,7 @@ class ConductorTeam(Strategy):
             f"Task:\n{session.task}\n\nThe collaboration is complete. Consolidate the team's "
             f"work into the final deliverable, integrating the workers' contributions and the "
             f"reviewer's feedback into one coherent result.",
-            session.rounds,
+            last_rnd, action="integrate",
         )
         return self.finish(session, final)
 
@@ -1058,19 +1356,244 @@ class ConductorTeam(Strategy):
         keys = ", ".join(workers)
         if rnd == 1:
             return (
-                f"Task:\n{session.task}\n\nYou lead this team: {team}. Break the task into "
-                f"concrete subtasks and assign one to each worker. Write each assignment on its "
-                f"own line as '@worker_key: instruction', using the exact keys: {keys}."
+                f"Task:\n{session.task}\n\nYou lead this team: {team}. FIRST define the "
+                f"acceptance criteria for the whole task — 3 to 7 measurable statements, "
+                f"each on its own line as 'CRITERION: <statement>'; the task is only DONE "
+                f"when every one is verifiably met. THEN break the task into concrete "
+                f"subtasks and assign one to each worker, each on its own line as "
+                f"'@worker_key: instruction', using the exact keys: {keys}."
+            )
+        if session.min_rounds and rnd < session.min_rounds:
+            verdict = (f"Declaring DONE is NOT allowed before round {session.min_rounds}; "
+                       f"write 'VERDICT: CONTINUE'.")
+        else:
+            verdict = (
+                "FINALLY: only if EVERY acceptance criterion is verifiably met by the "
+                "actual outputs (a worker saying so is not evidence), write one line "
+                "'✔ <criterion> — <evidence>' per criterion and then 'VERDICT: DONE'; "
+                "otherwise write 'VERDICT: CONTINUE'. A DONE will be audited "
+                "adversarially, and a rejected DONE reflects badly on you."
             )
         return (
             f"Task:\n{session.task}\n\nYour team: {team}. Review the previous round — each "
             f"worker's output and the reviewer's reports. FIRST assess every worker, one per "
             f"line, as '@worker_key [OK]: reason' or '@worker_key [WARN]: what they failed to "
             f"deliver' — call out anyone who slacked or ignored their assignment. THEN reassign "
-            f"with '@worker_key: instruction' lines (keys: {keys}). FINALLY write 'VERDICT: "
-            f"DONE' if the task is fully complete and the reviewer is satisfied, otherwise "
-            f"'VERDICT: CONTINUE'."
+            f"with '@worker_key: instruction' lines (keys: {keys}). {verdict}"
         )
+
+
+def _org_levels(order: List[str], sup: Dict[str, str], agents: Dict) -> List[List[str]]:
+    """Group roles by depth in the chain of command (top level first).
+
+    Raises :class:`AgentTurnError` on cycles or supervisors that don't exist.
+    """
+    depth: Dict[str, int] = {}
+
+    def d(r: str, trail: frozenset) -> int:
+        if r in depth:
+            return depth[r]
+        p = sup.get(r)
+        if not p:
+            depth[r] = 0
+        else:
+            if p not in agents or p in trail:
+                raise AgentTurnError(f"invalid supervisor chain at {r!r}")
+            depth[r] = d(p, trail | {r}) + 1
+        return depth[r]
+
+    for r in order:
+        d(r, frozenset({r}))
+    levels: Dict[int, List[str]] = {}
+    for r in order:
+        levels.setdefault(depth[r], []).append(r)
+    return [levels[k] for k in sorted(levels)]
+
+
+class OrgTeam(Strategy):
+    name = "org_team"
+    description = (
+        "A custom chain of command you design yourself: a top manager delegates "
+        "through mid-level managers to workers; each level assigns in parallel, "
+        "reports flow back up, and the top manager declares when it's done."
+    )
+    roles = []          # dynamic: any hierarchy, defined by the request's supervisors map
+    dynamic_roles = True
+    supports_unlimited = True
+    default_rounds = 3
+
+    @staticmethod
+    def _mgr_sys(me: str, role: str, reports: List[str], sup_name: Optional[str]) -> str:
+        upward = (f"You answer to {sup_name} and report your unit's integrated progress "
+                  f"upward." if sup_name else
+                  "You are the TOP manager: when the whole task is truly complete, write "
+                  "'VERDICT: DONE' on its own line, otherwise 'VERDICT: CONTINUE'. You are "
+                  "STRICT about completion — reports' claims are not evidence, only actual "
+                  "output is, and every DONE you declare is audited adversarially; a "
+                  "premature DONE is a serious failure on your part.")
+        return (
+            f"You are {me} ({role}), a MANAGER in a chain of command collaborating on one "
+            f"shared task. Your direct reports: {', '.join(reports)}. Delegate by writing "
+            f"each assignment on its own line as '@role_key: instruction' using those EXACT "
+            f"keys; assess prior work with '@role_key [OK]: reason' or '@role_key [WARN]: "
+            f"what they failed to deliver' lines. Be specific and demanding but fair. "
+            f"{upward}"
+        )
+
+    @staticmethod
+    def _leaf_sys(me: str, role: str, sup_name: str) -> str:
+        return (
+            f"You are {me} ({role}), a WORKER reporting to {sup_name}. Carry out the exact "
+            f"assignment you are given — thoroughly and concretely, producing real output, "
+            f"not a plan to do it later."
+        )
+
+    def run(self, session: Session) -> str:
+        order = session.role_order or list(session.agents)
+        sup = {k: v for k, v in (session.supervisors or {}).items() if v}
+        tops = [r for r in order if not sup.get(r)]
+        if len(tops) != 1:
+            raise AgentTurnError(
+                "org_team needs exactly one top manager (one role without a supervisor); "
+                f"got {len(tops)}"
+            )
+        top = tops[0]
+        children = {r: [c for c in order if sup.get(c) == r] for r in order}
+        if not children[top]:
+            raise AgentTurnError("the top manager needs at least one direct report")
+        levels = _org_levels(order, sup, session.agents)
+        names = {r: session.agents[r].display_name for r in order}
+        assignments: Dict[str, Optional[str]] = {}
+
+        for r in order:  # seed the roster
+            if r != top:
+                session.emit("worker_status", round=0, worker=r, name=names[r],
+                             status="idle", note="awaiting assignment", by=sup.get(r, top))
+
+        def process_manager_text(mgr: str, text: str, rnd: int) -> None:
+            keys = children[mgr]
+            for w, verdict, note in _parse_assessments(text, keys):
+                session.emit("worker_status", round=rnd, worker=w, name=names[w],
+                             status=("ok" if verdict == "OK" else "warned"),
+                             note=note, by=mgr)
+            asg = _parse_assignments(text, keys)
+            for w in keys:
+                assignments[w] = asg.get(w)
+                session.emit("worker_status", round=rnd, worker=w, name=names[w],
+                             status=("assigned" if asg.get(w) else "idle"),
+                             note=(asg.get(w) or "no assignment this round"), by=mgr)
+
+        def own_objective(r: str) -> str:
+            return assignments.get(r) or (
+                "No explicit assignment was recorded; infer your unit's most useful "
+                "objective from the conversation and proceed."
+            )
+
+        criteria: List[str] = []
+        last_rnd = 1
+        for rnd in _rounds_iter(session):
+            last_rnd = rnd
+            if _wrap_up(session, rnd):
+                break
+
+            # 1. Top manager: assess previous round, (re)assign, maybe declare DONE.
+            keys = ", ".join(children[top])
+            if rnd == 1:
+                tinstr = (f"Task:\n{session.task}\n\nFIRST define the acceptance "
+                          f"criteria for the whole task — 3 to 7 measurable statements, "
+                          f"each on its own line as 'CRITERION: <statement>'; the task "
+                          f"is only DONE when every one is verifiably met. THEN break "
+                          f"the task down and assign one concrete objective to each "
+                          f"direct report, one per line as '@role_key: instruction' "
+                          f"(exact keys: {keys}).")
+            else:
+                if session.min_rounds and rnd < session.min_rounds:
+                    verdict = (f"Declaring DONE is NOT allowed before round "
+                               f"{session.min_rounds}; write 'VERDICT: CONTINUE'.")
+                else:
+                    verdict = ("FINALLY: only if EVERY acceptance criterion is "
+                               "verifiably met by actual output (a report saying so is "
+                               "not evidence), write one line '✔ <criterion> — "
+                               "<evidence>' per criterion and then 'VERDICT: DONE'; "
+                               "otherwise 'VERDICT: CONTINUE'. A DONE is audited "
+                               "adversarially.")
+                tinstr = (f"Task:\n{session.task}\n\nReview the previous round (your "
+                          f"reports' integrated summaries). FIRST assess each direct "
+                          f"report ('@role_key [OK|WARN]: reason'). THEN reassign with "
+                          f"'@role_key: instruction' lines (keys: {keys}). {verdict}")
+            ttext = _run_turn(session, top, self._mgr_sys(names[top], top, children[top], None),
+                              tinstr, rnd, action="assign")
+            if rnd == 1:
+                criteria = _extract_criteria(ttext)
+                if criteria:
+                    session.emit("status",
+                                 message=f"{len(criteria)} acceptance criteria defined.")
+            process_manager_text(top, ttext, rnd)
+            if rnd > 1 and rnd >= session.min_rounds and _conductor_done(ttext):
+                challenger = children[top][0]  # a direct report audits the DONE
+                if _challenge_done(session, challenger, criteria, rnd):
+                    session.emit("status",
+                                 message=f"DONE declared by {names[top]} in round {rnd} "
+                                         f"and CONFIRMED by the auditor.")
+                    break
+                session.emit("status",
+                             message=f"DONE declared in round {rnd} but REJECTED by "
+                                     f"the auditor — work continues.")
+                continue
+
+            # 2. Delegation flows down, level by level; whole levels run in parallel.
+            for level in levels[1:]:
+                mids = [r for r in level if children[r]]
+                leaves = [r for r in level if not children[r]]
+                if mids:
+                    specs = [(m, self._mgr_sys(names[m], m, children[m], names[sup[m]]),
+                              f"Task:\n{session.task}\n\nYour manager ({names[sup[m]]}) "
+                              f"assigned your unit:\n{own_objective(m)}\n\nDecompose it and "
+                              f"assign each of your reports, one per line as "
+                              f"'@role_key: instruction' (exact keys: "
+                              f"{', '.join(children[m])}). Optionally assess their previous "
+                              f"round first with '@role_key [OK|WARN]: reason' lines.",
+                              rnd, "assign") for m in mids]
+                    results = _run_turns_parallel(session, specs)
+                    for m in mids:
+                        process_manager_text(m, results.get(m, ""), rnd)
+                if leaves:
+                    specs = [(w, self._leaf_sys(names[w], w, names[sup[w]]),
+                              f"Task:\n{session.task}\n\nYour assignment from "
+                              f"{names[sup[w]]}:\n{own_objective(w)}\n\nComplete it "
+                              f"concretely now.",
+                              rnd, "implement") for w in leaves]
+                    _run_turns_parallel(session, specs)
+                    for w in leaves:
+                        session.emit("worker_status", round=rnd, worker=w, name=names[w],
+                                     status="delivered", note="", by=sup[w])
+
+            # 3. Reports flow back up: deepest managers first, each integrating
+            # their unit's work for their own manager (parallel within a level).
+            for level in reversed(levels[1:]):
+                mids = [r for r in level if children[r]]
+                if not mids:
+                    continue
+                specs = [(m, self._mgr_sys(names[m], m, children[m], names[sup[m]]),
+                          f"Integrate what your reports ({', '.join(children[m])}) produced "
+                          f"this round against your unit's objective. Report to "
+                          f"{names[sup[m]]} concisely: status, the integrated result so "
+                          f"far, and remaining gaps.",
+                          rnd, "review") for m in mids]
+                _run_turns_parallel(session, specs)
+                for m in mids:
+                    session.emit("worker_status", round=rnd, worker=m, name=names[m],
+                                 status="delivered", note="reported upward", by=sup[m])
+
+        # Top manager consolidates everything into the final deliverable.
+        final = _run_turn(
+            session, top, self._mgr_sys(names[top], top, children[top], None),
+            f"Task:\n{session.task}\n\nThe collaboration is complete. Consolidate your "
+            f"organisation's work into the final deliverable — one coherent, complete "
+            f"result integrating every unit's contribution.",
+            last_rnd, action="integrate",
+        )
+        return self.finish(session, final)
 
 
 STRATEGIES = {
@@ -1085,6 +1608,7 @@ STRATEGIES = {
         CodeAuthoring(),
         WorkspaceBuild(),
         ConductorTeam(),
+        OrgTeam(),
         CustomStrategy(),
     )
 }
@@ -1109,6 +1633,7 @@ def strategy_metadata() -> List[dict]:
             "default_rounds": s.default_rounds,
             "custom": s.custom,
             "dynamic_roles": s.dynamic_roles,
+            "supports_unlimited": s.supports_unlimited,
         }
         for s in STRATEGIES.values()
     ]

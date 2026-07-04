@@ -28,10 +28,14 @@ def run_session(session: Session) -> None:
         workspace_created=session.workspace_created,
         references=len(session.references),
         reference_dir=session.reference_dir,
+        supervisors=session.supervisors,
+        tools=session.tools,
+        rounds_unlimited=(session.rounds == 0),
     )
     try:
         result = strategy.run(session)
         session.status = "done"
+        session.result = result
         session.emit("session_end", status="done", result=result)
     except StopRequested:
         session.status = "stopped"

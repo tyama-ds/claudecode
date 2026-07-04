@@ -116,6 +116,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(self._settings_payload())
         elif path.startswith("/api/stop/"):
             self._stop(path[len("/api/stop/"):])
+        elif path.startswith("/api/finish/"):
+            self._finish(path[len("/api/finish/"):])
         else:
             self._send_json({"error": "not found"}, status=404)
 
@@ -171,7 +173,10 @@ class Handler(BaseHTTPRequestHandler):
         body = self._read_body()
         task = (body.get("task") or "").strip()
         strategy_name = body.get("strategy") or ""
-        rounds = int(body.get("rounds") or 2)
+        try:
+            rounds = int(body.get("rounds", 2))  # 0 is meaningful: unlimited
+        except (TypeError, ValueError):
+            rounds = 2
         roles_spec = body.get("roles") or {}
 
         if not task:
@@ -183,7 +188,29 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, status=400)
             return
 
-        rounds = max(1, min(rounds, 8))
+        # rounds == 0 means "no limit" (run until DONE / a human presses Finish)
+        # for strategies with a natural end; others get their default back.
+        if rounds <= 0:
+            rounds = 0 if strategy.supports_unlimited else strategy.default_rounds
+        else:
+            rounds = min(rounds, 8)
+
+        # Optional floor before DONE is honored (guards rubber-stamp approvals).
+        try:
+            session_min_rounds = max(0, min(int(body.get("min_rounds", 0) or 0), 8))
+        except (TypeError, ValueError):
+            session_min_rounds = 0
+
+        # Human feedback on a previous session's result: fold it into the task
+        # so the team reworks with full knowledge of what was rejected and why.
+        feedback = (body.get("feedback") or "").strip()
+        parent = MANAGER.get((body.get("parent_session") or "").strip())
+        if feedback:
+            prev = ""
+            if parent and parent.result:
+                prev = f"\n\n[PREVIOUS RESULT — the attempt being reworked]\n{parent.result[:4000]}"
+            task = (f"{task}\n\n[HUMAN FEEDBACK — the previous attempt was not "
+                    f"satisfactory; rework it accordingly]\n{feedback}{prev}")
 
         # Roles are fixed by the strategy, except for strategies with a dynamic
         # role set (the user-defined "custom" panel, the conductor's team) whose
@@ -226,6 +253,24 @@ class Handler(BaseHTTPRequestHandler):
         session = MANAGER.create(task, strategy_name, rounds, agents)
         session.personas = personas
         session.role_order = [k for k, _ in role_list]
+        session.min_rounds = session_min_rounds
+        if feedback and parent:
+            session.parent_id = parent.id
+
+        # Orchestrator-provided tools the agents may call (opt-in, allowlisted).
+        tools = body.get("tools") or []
+        if isinstance(tools, list):
+            session.tools = [t for t in tools
+                             if t in ("list_files", "read_file", "run", "http_get")]
+
+        # Chain of command for org_team: role -> supervisor role.
+        sups = body.get("supervisors") or {}
+        if isinstance(sups, dict):
+            roles_set = set(session.role_order)
+            session.supervisors = {
+                str(k): str(v) for k, v in sups.items()
+                if str(k) in roles_set and str(v) in roles_set and str(k) != str(v)
+            }
 
         # Optional read-only reference directory (any strategy): load its files
         # into the agents' shared context.
@@ -245,6 +290,8 @@ class Handler(BaseHTTPRequestHandler):
             session.workspace = os.path.realpath(ws)
             if body.get("create_dir"):
                 session.workspace_created = _ensure_workspace_dir(session.workspace)
+            # Optional auto-verification command, run in the workspace each round.
+            session.test_command = (body.get("test_command") or "").strip()[:400]
             # CLI backends (Claude Code / Codex) run *inside* the workspace and
             # edit files natively with their own tools; other backends keep the
             # <FILE> protocol.
@@ -261,6 +308,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "no such session"}, status=404)
             return
         session.stop_requested = True
+        self._send_json({"ok": True})
+
+    def _finish(self, session_id: str) -> None:
+        """Graceful human-initiated wrap-up: the strategy stops looping and
+        produces its final deliverable (unlike stop, which aborts)."""
+        session = MANAGER.get(session_id)
+        if not session:
+            self._send_json({"error": "no such session"}, status=404)
+            return
+        session.finish_requested = True
         self._send_json({"ok": True})
 
     def _stream(self, session_id: str) -> None:
