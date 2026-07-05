@@ -67,6 +67,7 @@ const QA = (() => {
   function detectIntent(q) {
     if (/(なぜ|理由|要因|原因|何があった|どうして|変動|急落|急騰|下がっ|上がっ|下落|上昇|動い)/.test(q) && parseDates(q).length) return "why-move";
     if (/(なぜ|理由|要因|原因)/.test(q)) return "why-general";
+    if (/(ファクター|バリュー|グロース|モメンタム|ボラティリティ|クオリティ|スタイル|偏差値)/.test(q)) return "factor";
     if (/(いくら|株価は|価格|終値)/.test(q)) return "price";
     if (/(PER|PBR|ROE|配当|利回り|財務|指標|割安|割高)/i.test(q)) return "financials";
     if (/(買い|売り|おすすめ|投資すべき|どう思う|見解|評価|アドバイス)/.test(q)) return "advice";
@@ -124,6 +125,7 @@ const QA = (() => {
     switch (intent) {
       case "why-move": return answerWhyMove(q, dates, codes, currentCode);
       case "price": return answerPrice(dates, codes);
+      case "factor": return answerFactor(q, codes, currentCode);
       case "financials": return answerFinancials(codes);
       case "advice": return answerAdvice(codes);
       case "news": return answerNews(codes);
@@ -231,6 +233,39 @@ const QA = (() => {
     for (const sec of adv.sections.slice(0, 4)) html += `<p><b>${sec.h}</b><br>${sec.p}</p>`;
     html += `<span class="qa-src">※ 参考見解であり投資助言ではありません。詳細は「財務分析」タブをご覧ください。</span>`;
     return { html };
+  }
+
+  function answerFactor(q, codes, currentCode) {
+    // 「◯◯が強い銘柄は?」のようなランキング質問
+    const rankFactor = Factor.FACTORS.find(f => q.includes(f.label));
+    const asksRanking = /(強い銘柄|高い銘柄|上位|ランキング|どの銘柄|一番|トップ)/.test(q);
+    if (rankFactor && asksRanking) {
+      const top = Factor.ranking(rankFactor.key).slice(0, 3);
+      return {
+        html: `<h4>🧮 ${rankFactor.label}ファクター 上位銘柄</h4><ul>` +
+          top.map((r, i) => `<li>${i + 1}位: <b>${r.name}</b>(${r.code}) — 偏差値 ${r[rankFactor.key]}</li>`).join("") +
+          `</ul><p>${rankFactor.desc}を全個別株横断で偏差値化した順位です。詳細は「ファクター分析」タブをご覧ください。</p>`
+      };
+    }
+    // 個別銘柄のスタイル質問(「トヨタはバリュー株?」等)
+    const code = codes[0] || currentCode;
+    const sym = STOCK_DATA.symbols[code];
+    if (!sym || sym.type === "etf") {
+      return { html: "<p>ETFはファクター分析の対象外です。個別株の銘柄名を含めて質問してください(例:「トヨタはバリュー株?」「モメンタムが強い銘柄は?」)。</p>" };
+    }
+    const style = Factor.classifyStyle(code);
+    const rows = Factor.FACTORS.map(f => {
+      const v = style.scores[f.key];
+      const mark = v == null ? "" : v >= 58 ? " 💪" : v <= 42 ? " ⤵" : "";
+      return `<li>${f.label}: <b>${v ?? "—"}</b>${mark}</li>`;
+    });
+    return {
+      html: `<h4>🧮 ${sym.name} のファクター分析</h4>
+        <p>スタイル判定: <b>${style.tags.join("・")}</b></p>
+        <ul>${rows.join("")}</ul>
+        <p>${style.comment}</p>
+        <span class="qa-src">偏差値50=収録個別株の平均。詳細は「ファクター分析」タブへ。</span>`
+    };
   }
 
   function answerNews(codes) {

@@ -82,6 +82,7 @@
     renderChart();
     renderNews();
     renderAnalysis();
+    if ($("#panel-factor").classList.contains("active")) renderFactor();
   }
 
   function renderHeader() {
@@ -223,6 +224,80 @@
     return s.market === "US" ? `$${v}B` : `${v.toLocaleString()}億円`;
   }
 
+  /* ---------- ファクター分析 ---------- */
+  const FACTOR_AXES = { x: "value", y: "momentum", rank: "momentum" };
+
+  function initFactor() {
+    const optHtml = Factor.FACTORS.map(f => `<option value="${f.key}">${f.label}</option>`).join("");
+    for (const [id, key] of [["factorX", FACTOR_AXES.x], ["factorY", FACTOR_AXES.y], ["factorRank", FACTOR_AXES.rank]]) {
+      const sel = $("#" + id);
+      sel.innerHTML = optHtml;
+      sel.value = key;
+    }
+    $("#factorX").addEventListener("change", e => { FACTOR_AXES.x = e.target.value; renderFactor(); });
+    $("#factorY").addEventListener("change", e => { FACTOR_AXES.y = e.target.value; renderFactor(); });
+    $("#factorRank").addEventListener("change", e => { FACTOR_AXES.rank = e.target.value; renderFactor(); });
+  }
+
+  function renderFactor() {
+    const s = STOCK_DATA.symbols[state.code];
+    const isEtf = s.type === "etf";
+    $("#factorStockName").textContent = s.name;
+
+    /* プロファイル(横バー) */
+    const profileEl = $("#factorProfile");
+    const styleEl = $("#factorStyle");
+    if (isEtf) {
+      profileEl.innerHTML = '<p style="color:var(--ink-muted);font-size:.8rem">ETFはインデックス連動型のためファクター分析の対象外です。個別株を選択してください。</p>';
+      styleEl.innerHTML = `<p style="font-size:.85rem;color:var(--ink-2)">📦 このETFは<b>${s.index || "指数"}</b>への分散投資商品です。下のファクターマップで構成市場の個別銘柄の位置づけを確認できます。</p>`;
+    } else {
+      const style = Factor.classifyStyle(state.code);
+      profileEl.innerHTML = Factor.FACTORS.map(f => {
+        const v = style.scores[f.key];
+        const w = v == null ? 0 : ((Math.max(20, Math.min(80, v)) - 20) / 60) * 100;
+        const strong = v != null && v >= 58, weak = v != null && v <= 42;
+        return `<div class="fbar-row" title="${f.desc}">
+          <span class="fbar-label">${f.label}</span>
+          <span class="fbar-track"><span class="fbar-mid"></span><span class="fbar-fill ${strong ? "strong" : weak ? "weak" : ""}" style="width:${w}%"></span></span>
+          <span class="fbar-value ${strong ? "strong" : weak ? "weak" : ""}">${v ?? "—"}</span>
+        </div>`;
+      }).join("");
+      styleEl.innerHTML = `
+        <div class="style-tags">${style.tags.map(t => `<span class="style-tag">${t}</span>`).join("")}</div>
+        <p style="font-size:.83rem;color:var(--ink-2);margin-top:10px">${style.comment}</p>
+        <p style="font-size:.72rem;color:var(--ink-muted);margin-top:8px">偏差値58以上を「強い」、42以下を「弱い」として判定しています。</p>`;
+    }
+
+    /* 散布図 */
+    const all = Factor.computeAll();
+    const fx = Factor.FACTORS.find(f => f.key === FACTOR_AXES.x);
+    const fy = Factor.FACTORS.find(f => f.key === FACTOR_AXES.y);
+    const points = Object.values(all).map(p => ({ code: p.code, name: p.name, x: p[FACTOR_AXES.x], y: p[FACTOR_AXES.y] }));
+    StockChart.renderScatter($("#factorScatter"), points, {
+      xLabel: fx.label, yLabel: fy.label,
+      highlightCode: isEtf ? null : state.code,
+      onPointClick: selectSymbol,
+    });
+
+    /* ランキング */
+    const rank = Factor.ranking(FACTOR_AXES.rank);
+    const fr = Factor.FACTORS.find(f => f.key === FACTOR_AXES.rank);
+    $("#factorRanking").innerHTML = `
+      <table class="rank-table">
+        <thead><tr><th>#</th><th>銘柄</th><th>${fr.label}</th><th>偏差値バー</th></tr></thead>
+        <tbody>${rank.map((r, i) => `
+          <tr class="${r.code === state.code ? "current" : ""}" data-code="${r.code}">
+            <td>${i + 1}</td>
+            <td>${r.name}<span class="rank-code">${r.code}</span></td>
+            <td class="rank-val">${r[FACTOR_AXES.rank]}</td>
+            <td><span class="rank-bar"><span style="width:${((r[FACTOR_AXES.rank] - 20) / 60) * 100}%"></span></span></td>
+          </tr>`).join("")}
+        </tbody>
+      </table>`;
+    document.querySelectorAll(".rank-table tbody tr").forEach(tr =>
+      tr.addEventListener("click", () => selectSymbol(tr.dataset.code)));
+  }
+
   /* ---------- タブ ---------- */
   function initTabs() {
     document.querySelectorAll(".tab").forEach(tab => {
@@ -232,6 +307,7 @@
         tab.classList.add("active");
         $("#panel-" + tab.dataset.tab).classList.add("active");
         if (tab.dataset.tab === "market") renderMarket();
+        if (tab.dataset.tab === "factor") renderFactor();
       });
     });
     document.querySelectorAll("#marketFilter .chip").forEach(chip => {
@@ -260,7 +336,11 @@
     let resizeTimer;
     window.addEventListener("resize", () => {
       clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => state.code && renderChart(), 150);
+      resizeTimer = setTimeout(() => {
+        if (!state.code) return;
+        renderChart();
+        if ($("#panel-factor").classList.contains("active")) renderFactor();
+      }, 150);
     });
   }
 
@@ -268,6 +348,8 @@
   const SUGGESTS = [
     "2025年12月3日ごろに株価が大きく変動しているけどこの理由は何?",
     "この銘柄は割安?",
+    "この銘柄のファクター分析をして",
+    "モメンタムが強い銘柄は?",
     "最近のニュースを教えて",
     "見解・アドバイスを教えて",
   ];
@@ -336,6 +418,7 @@
   /* ---------- 起動 ---------- */
   initTheme();
   initTabs();
+  initFactor();
   initChartControls();
   initQA();
   initMisc();

@@ -78,6 +78,7 @@
     <nav class="tabs" role="tablist">
       <button class="tab active" data-tab="news" role="tab">📰 ニュース・イベント</button>
       <button class="tab" data-tab="analysis" role="tab">📊 財務分析</button>
+      <button class="tab" data-tab="factor" role="tab">🧮 ファクター分析</button>
       <button class="tab" data-tab="market" role="tab">🌐 市場全体の動き</button>
     </nav>
 
@@ -107,6 +108,38 @@
           <p class="disclaimer">※ 本分析は収集時点の公開情報に基づく参考見解であり、投資勧誘・助言ではありません。投資判断はご自身の責任で行ってください。</p>
         </div>
       </div>
+    </section>
+
+    <!-- ファクター分析タブ -->
+    <section class="tab-panel" id="panel-factor" role="tabpanel">
+      <div class="factor-grid">
+        <div class="card">
+          <h3 class="card-title">ファクタープロファイル <span class="badge" id="factorStockName"></span></h3>
+          <p class="card-desc">個別株12銘柄横断の偏差値(50=市場平均、高いほどそのファクターが強い)。</p>
+          <div id="factorProfile" class="factor-profile"></div>
+        </div>
+        <div class="card">
+          <h3 class="card-title">スタイル判定</h3>
+          <div id="factorStyle" class="factor-style"></div>
+        </div>
+        <div class="card factor-map-card">
+          <h3 class="card-title">ファクターマップ</h3>
+          <p class="card-desc">2つのファクターで全銘柄を配置。点線が市場平均(50)、点をクリックで銘柄切替。</p>
+          <div class="factor-axes">
+            <label>X軸 <select id="factorX"></select></label>
+            <label>Y軸 <select id="factorY"></select></label>
+          </div>
+          <div id="factorScatter"></div>
+        </div>
+        <div class="card">
+          <h3 class="card-title">ファクター別ランキング</h3>
+          <div class="factor-axes">
+            <label>ファクター <select id="factorRank"></select></label>
+          </div>
+          <div id="factorRanking" class="factor-ranking"></div>
+        </div>
+      </div>
+      <p class="disclaimer" style="margin-top:4px">※ ファクター偏差値は収録12銘柄内での相対値です。ETFはインデックス連動型のため対象外です。</p>
     </section>
 
     <!-- 市場全体タブ -->
@@ -156,6 +189,7 @@
 <script src="data/stock-data.js"></script>
 <script src="js/chart.js"></script>
 <script src="js/analysis.js"></script>
+<script src="js/factor.js"></script>
 <script src="js/qa.js"></script>
 <script src="js/app.js"></script>
 </body>

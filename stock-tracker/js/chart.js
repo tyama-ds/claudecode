@@ -259,5 +259,74 @@ const StockChart = (() => {
     }
   }
 
-  return { renderPriceChart, renderRadar, fmtNum, fmtDate };
+  /* ---------- ファクター散布図 ---------- */
+  // points: [{code, name, x, y}] (偏差値20-80), highlightCode: 強調銘柄
+  function renderScatter(container, points, opts) {
+    container.innerHTML = "";
+    const W = Math.max(container.clientWidth, 320), H = 380;
+    const pad = { top: 20, right: 20, bottom: 44, left: 46 };
+    const plotW = W - pad.left - pad.right, plotH = H - pad.top - pad.bottom;
+    const LO = 18, HI = 82;
+    const x = v => pad.left + ((v - LO) / (HI - LO)) * plotW;
+    const y = v => pad.top + (1 - (v - LO) / (HI - LO)) * plotH;
+
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%" }, container);
+
+    /* grid */
+    for (let v = 20; v <= 80; v += 10) {
+      el("line", { x1: x(v), x2: x(v), y1: pad.top, y2: pad.top + plotH, stroke: "var(--grid)", "stroke-width": 1 }, svg);
+      el("line", { y1: y(v), y2: y(v), x1: pad.left, x2: pad.left + plotW, stroke: "var(--grid)", "stroke-width": 1 }, svg);
+      const tx = el("text", { x: x(v), y: H - 26, "font-size": 10, "text-anchor": "middle", fill: "var(--ink-muted)" }, svg);
+      tx.textContent = v;
+      const ty = el("text", { x: pad.left - 8, y: y(v) + 3, "font-size": 10, "text-anchor": "end", fill: "var(--ink-muted)" }, svg);
+      ty.textContent = v;
+    }
+    /* 平均線(50) */
+    el("line", { x1: x(50), x2: x(50), y1: pad.top, y2: pad.top + plotH, stroke: "var(--axis)", "stroke-width": 1.5, "stroke-dasharray": "5 4" }, svg);
+    el("line", { y1: y(50), y2: y(50), x1: pad.left, x2: pad.left + plotW, stroke: "var(--axis)", "stroke-width": 1.5, "stroke-dasharray": "5 4" }, svg);
+
+    /* 軸ラベル */
+    const xl = el("text", { x: pad.left + plotW / 2, y: H - 6, "font-size": 12, "font-weight": 700, "text-anchor": "middle", fill: "var(--ink-2)" }, svg);
+    xl.textContent = `${opts.xLabel} →`;
+    const yl = el("text", { x: 12, y: pad.top + plotH / 2, "font-size": 12, "font-weight": 700, "text-anchor": "middle", fill: "var(--ink-2)", transform: `rotate(-90 12 ${pad.top + plotH / 2})` }, svg);
+    yl.textContent = `${opts.yLabel} →`;
+
+    /* 点 + ラベル(重なる場合は下側に退避、それでも重なれば省略しホバーで表示) */
+    const placedLabels = [];
+    const drawOrder = [...points].sort((a, b) => (a.code === opts.highlightCode ? 1 : 0) - (b.code === opts.highlightCode ? 1 : 0));
+    for (const p of drawOrder) {
+      if (p.x == null || p.y == null) continue;
+      const hl = p.code === opts.highlightCode;
+      if (hl) {
+        el("circle", { cx: x(p.x), cy: y(p.y), r: 13, fill: "none", stroke: "var(--down)", "stroke-width": 2, opacity: .8 }, svg);
+      }
+      const c = el("circle", {
+        cx: x(p.x), cy: y(p.y), r: hl ? 8 : 6,
+        fill: hl ? "var(--down)" : "var(--series-1)",
+        stroke: "var(--surface)", "stroke-width": 2,
+        class: "scatter-dot", "data-code": p.code, cursor: "pointer"
+      }, svg);
+      const title = el("title", {}, c);
+      title.textContent = `${p.name}\n${opts.xLabel}: ${p.x} / ${opts.yLabel}: ${p.y}`;
+      if (opts.onPointClick) c.addEventListener("click", () => opts.onPointClick(p.code));
+
+      const label = p.name.length > 8 ? p.name.slice(0, 7) + "…" : p.name;
+      const fs = hl ? 11.5 : 10;
+      const w = label.length * fs * 0.95; // 全角想定の概算幅
+      const overlaps = (bx, by) => placedLabels.some(b =>
+        Math.abs(bx - b.x) < (w + b.w) / 2 && Math.abs(by - b.y) < fs + 3);
+      let ly = y(p.y) - (hl ? 16 : 11);            // まず上側
+      if (overlaps(x(p.x), ly)) ly = y(p.y) + (hl ? 24 : 19); // だめなら下側
+      if (overlaps(x(p.x), ly) && !hl) continue;    // それでも重なれば省略(ホバーで確認可)
+      placedLabels.push({ x: x(p.x), y: ly, w });
+      const t = el("text", {
+        x: x(p.x), y: ly, "font-size": fs,
+        "font-weight": hl ? 800 : 600, "text-anchor": "middle",
+        fill: hl ? "var(--ink)" : "var(--ink-2)", "pointer-events": "none"
+      }, svg);
+      t.textContent = label;
+    }
+  }
+
+  return { renderPriceChart, renderRadar, renderScatter, fmtNum, fmtDate };
 })();
