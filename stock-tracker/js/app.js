@@ -10,6 +10,7 @@
     showMA25: true,
     showMA75: false,
     showEvents: true,
+    showTopix: false,
     marketFilter: "all",
   };
 
@@ -108,6 +109,8 @@
     const s = STOCK_DATA.symbols[state.code];
     const days = PERIOD_DAYS[state.period];
     const data = s.prices.slice(-days);
+    const topixAvailable = !!(STOCK_DATA.topix && s.market === "JP");
+    $("#topixToggleWrap").hidden = !topixAvailable;
     StockChart.renderPriceChart($("#priceChart"), $("#volumeChart"), $("#chartTooltip"), {
       data,
       fullData: s.prices,
@@ -116,13 +119,15 @@
       showMA25: state.showMA25,
       showMA75: state.showMA75,
       showEvents: state.showEvents,
+      overlay: topixAvailable && state.showTopix ? { series: STOCK_DATA.topix } : null,
       onEventClick: showEventModal,
     });
-    renderLegend();
+    renderLegend(topixAvailable && state.showTopix);
   }
 
-  function renderLegend() {
+  function renderLegend(showTopix = false) {
     const items = [`<span class="legend-item"><span class="legend-swatch" style="background:var(--series-1)"></span>終値</span>`];
+    if (showTopix) items.push(`<span class="legend-item"><span class="legend-swatch" style="background:var(--series-2)"></span>TOPIX(表示起点で正規化・破線)</span>`);
     if (state.showMA25) items.push(`<span class="legend-item"><span class="legend-swatch" style="background:var(--series-3)"></span>MA25(25日移動平均)</span>`);
     if (state.showMA75) items.push(`<span class="legend-item"><span class="legend-swatch" style="background:var(--series-5)"></span>MA75(75日移動平均)</span>`);
     if (state.showEvents) items.push(`<span class="legend-item"><span class="legend-dot" style="background:var(--up)"></span>好材料 <span class="legend-dot" style="background:var(--down)"></span>悪材料 <span class="legend-dot" style="background:var(--ink-muted)"></span>中立イベント</span>`);
@@ -198,6 +203,7 @@
       addTile(tiles, "時価総額", f.marketCap, "", "");
       if (f.revenue != null) addTile(tiles, "売上高", fmtFin(f.revenue, s), "", `${f.asOf || ""}時点`);
       if (f.netIncome != null) addTile(tiles, "純利益", fmtFin(f.netIncome, s), "", "");
+      if (f.operatingCF != null) addTile(tiles, "営業CF", fmtFin(f.operatingCF, s), "", "本業の現金創出力", f.operatingCF > 0 ? "good" : "bad");
     }
     $("#metricTiles").innerHTML = tiles.join("");
 
@@ -208,6 +214,38 @@
       StockChart.renderRadar(radarEl, scores);
     } else {
       radarEl.innerHTML = '<p style="color:var(--ink-muted);padding:30px;text-align:center;font-size:.8rem">ETFはインデックス連動型のため<br>個別財務スコアは対象外です</p>';
+    }
+
+    // J-Quants拡張データ: 信用残トレンド(Standard以上)
+    const mi = s.marginInterest;
+    $("#marginCard").hidden = !(mi && mi.length >= 2);
+    if (mi && mi.length >= 2) {
+      const fmtShares = v => v >= 1e6 ? (v / 1e6).toFixed(1) + "百万株" : Math.round(v / 1e4) + "万株";
+      StockChart.renderMiniLines($("#marginChart"), mi.map(m => m.date), [
+        { label: "信用買残", cssVar: "--series-1", values: mi.map(m => m.long) },
+        { label: "信用売残", cssVar: "--series-2", values: mi.map(m => m.short) },
+      ], { fmt: fmtShares });
+      const last = mi[mi.length - 1];
+      const ratio = last.short > 0 ? (last.long / last.short).toFixed(2) : "—";
+      $("#marginLegend").innerHTML =
+        `<span class="legend-item"><span class="legend-swatch" style="background:var(--series-1)"></span>信用買残 ${fmtShares(last.long)}</span>` +
+        `<span class="legend-item"><span class="legend-swatch" style="background:var(--series-2)"></span>信用売残 ${fmtShares(last.short)}</span>` +
+        `<span class="legend-item">信用倍率 ${ratio}倍</span>`;
+    }
+
+    // J-Quants拡張データ: 配当推移(Premium)
+    const divs = s.dividends;
+    $("#dividendCard").hidden = !(divs && divs.length);
+    if (divs && divs.length) {
+      const maxD = Math.max(...divs.map(d => d.dividend)) || 1;
+      $("#dividendChart").innerHTML = divs.map(d => {
+        const [yy, mm] = d.recordDate.split("-");
+        return `<div class="div-bar ${d.forecast ? "forecast" : ""}" title="${d.recordDate} ${d.term}${d.forecast ? "(予想)" : ""}">
+          <span class="db-val">${d.dividend}</span>
+          <span class="db-fill" style="height:${Math.max(4, (d.dividend / maxD) * 100)}%"></span>
+          <span class="db-label">${yy.slice(2)}/${Number(mm)}<br>${d.term}${d.forecast ? "予" : ""}</span>
+        </div>`;
+      }).join("");
     }
 
     // アドバイス
@@ -337,6 +375,7 @@
     $("#toggleMA25").addEventListener("change", e => { state.showMA25 = e.target.checked; renderChart(); });
     $("#toggleMA75").addEventListener("change", e => { state.showMA75 = e.target.checked; renderChart(); });
     $("#toggleEvents").addEventListener("change", e => { state.showEvents = e.target.checked; renderChart(); });
+    $("#toggleTopix").addEventListener("change", e => { state.showTopix = e.target.checked; renderChart(); });
     let resizeTimer;
     window.addEventListener("resize", () => {
       clearTimeout(resizeTimer);

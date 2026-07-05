@@ -63,6 +63,7 @@
           <label class="chk"><input type="checkbox" id="toggleMA25" checked> MA25</label>
           <label class="chk"><input type="checkbox" id="toggleMA75"> MA75</label>
           <label class="chk"><input type="checkbox" id="toggleEvents" checked> イベント</label>
+          <label class="chk" id="topixToggleWrap" hidden><input type="checkbox" id="toggleTopix"> TOPIX比較</label>
         </div>
       </div>
       <div class="chart-wrap">
@@ -101,6 +102,17 @@
         <div class="card">
           <h3 class="card-title">財務スコア</h3>
           <div class="radar-wrap"><div id="radarChart"></div></div>
+        </div>
+        <div class="card" id="marginCard" hidden>
+          <h3 class="card-title">信用残トレンド <span class="badge">📡 J-Quants</span></h3>
+          <p class="card-desc">信用買残(青)・売残(緑)の週次推移。買残の積み上がりは将来の売り圧力、売残は買い戻し余地の目安です。</p>
+          <div id="marginChart"></div>
+          <div class="chart-legend" id="marginLegend"></div>
+        </div>
+        <div class="card" id="dividendCard" hidden>
+          <h3 class="card-title">配当推移 <span class="badge">📡 J-Quants</span></h3>
+          <p class="card-desc">1株あたり配当金の履歴(基準日ベース)。</p>
+          <div id="dividendChart" class="dividend-bars"></div>
         </div>
         <div class="card advice-card">
           <h3 class="card-title">💡 分析コメント・見解</h3>

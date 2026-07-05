@@ -60,9 +60,23 @@ const StockChart = (() => {
     const ma25 = movingAverage(opts.fullData || data, 25).slice(-(data.length));
     const ma75 = movingAverage(opts.fullData || data, 75).slice(-(data.length));
 
+    // 指数オーバーレイ(表示起点の株価に正規化して同一スケールで重ねる)
+    let overlayVals = null;
+    if (opts.overlay && opts.overlay.series && opts.overlay.series.length) {
+      const oMap = new Map(opts.overlay.series.map(p => [p.date, p.close]));
+      let lastVal = null;
+      const raw = data.map(d => { if (oMap.has(d.date)) lastVal = oMap.get(d.date); return lastVal; });
+      const firstIdx = raw.findIndex(v => v != null);
+      if (firstIdx >= 0) {
+        const factor = data[firstIdx].close / raw[firstIdx];
+        overlayVals = raw.map(v => (v == null ? null : v * factor));
+      }
+    }
+
     let lo = Math.min(...closes), hi = Math.max(...closes);
     if (opts.showMA25) { ma25.forEach(v => { if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); } }); }
     if (opts.showMA75) { ma75.forEach(v => { if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); } }); }
+    if (overlayVals) { overlayVals.forEach(v => { if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); } }); }
     const range = hi - lo || 1;
     lo -= range * 0.06; hi += range * 0.06;
 
@@ -119,6 +133,17 @@ const StockChart = (() => {
     }
     if (opts.showMA25) drawMA(ma25, "var(--series-3)");
     if (opts.showMA75) drawMA(ma75, "var(--series-5)");
+
+    /* 指数オーバーレイ(破線) */
+    if (overlayVals) {
+      let p = "", started = false;
+      for (let i = 0; i < data.length; i++) {
+        if (overlayVals[i] == null) continue;
+        p += (started ? " L" : "M") + ` ${x(i)} ${y(overlayVals[i])}`;
+        started = true;
+      }
+      if (p) el("path", { d: p, fill: "none", stroke: "var(--series-2)", "stroke-width": 1.8, "stroke-dasharray": "6 3", opacity: .95 }, svg);
+    }
 
     /* event markers */
     const dateIndex = new Map(data.map((d, i) => [d.date, i]));
@@ -328,5 +353,51 @@ const StockChart = (() => {
     }
   }
 
-  return { renderPriceChart, renderRadar, renderScatter, fmtNum, fmtDate };
+  /* ---------- ミニ複数ラインチャート(信用残など) ---------- */
+  // dates: ["YYYY-MM-DD"...], seriesList: [{label, cssVar, values:[number...]}]
+  // opts: {fmt: v=>string}
+  function renderMiniLines(container, dates, seriesList, opts = {}) {
+    container.innerHTML = "";
+    const W = Math.max(container.clientWidth, 280), H = 170;
+    const pad = { top: 12, right: 14, bottom: 22, left: 54 };
+    const plotW = W - pad.left - pad.right, plotH = H - pad.top - pad.bottom;
+    const fmt = opts.fmt || (v => v.toLocaleString());
+
+    const all = seriesList.flatMap(s => s.values).filter(v => v != null);
+    if (!all.length || dates.length < 2) {
+      container.innerHTML = '<p style="color:var(--ink-muted);font-size:.75rem">データがありません</p>';
+      return;
+    }
+    let lo = Math.min(...all), hi = Math.max(...all);
+    const range = hi - lo || 1;
+    lo -= range * 0.08; hi += range * 0.08;
+    if (lo < 0 && Math.min(...all) >= 0) lo = 0;
+
+    const x = i => pad.left + (i / (dates.length - 1)) * plotW;
+    const y = v => pad.top + (1 - (v - lo) / (hi - lo)) * plotH;
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%" }, container);
+
+    for (let t = 0; t <= 3; t++) {
+      const v = lo + ((hi - lo) * t) / 3;
+      el("line", { x1: pad.left, x2: pad.left + plotW, y1: y(v), y2: y(v), stroke: "var(--grid)", "stroke-width": 1 }, svg);
+      const tx = el("text", { x: pad.left - 6, y: y(v) + 3, "font-size": 9.5, "text-anchor": "end", fill: "var(--ink-muted)", "font-variant-numeric": "tabular-nums" }, svg);
+      tx.textContent = fmt(v);
+    }
+    for (const t of [0, dates.length - 1]) {
+      const lb = el("text", { x: x(t), y: H - 6, "font-size": 9.5, "text-anchor": t === 0 ? "start" : "end", fill: "var(--ink-muted)" }, svg);
+      const [yy, mm] = dates[t].split("-");
+      lb.textContent = `${yy}/${Number(mm)}`;
+    }
+    for (const s of seriesList) {
+      let p = "", started = false;
+      for (let i = 0; i < dates.length; i++) {
+        if (s.values[i] == null) continue;
+        p += (started ? " L" : "M") + ` ${x(i)} ${y(s.values[i])}`;
+        started = true;
+      }
+      if (p) el("path", { d: p, fill: "none", stroke: `var(${s.cssVar})`, "stroke-width": 2, "stroke-linejoin": "round" }, svg);
+    }
+  }
+
+  return { renderPriceChart, renderRadar, renderScatter, renderMiniLines, fmtNum, fmtDate };
 })();

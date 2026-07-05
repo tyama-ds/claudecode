@@ -240,6 +240,7 @@ function main() {
       : { ...(r.financials || {}), week52High: r.week52High ?? null, week52Low: r.week52Low ?? null };
     // J-Quants決算データがあれば指標を実数で上書き
     if (jqSym?.financials) Object.assign(financials, jqSym.financials);
+    if (jqSym?.extraFinancials) Object.assign(financials, jqSym.extraFinancials);
 
     symbols[code] = {
       name: r.name,
@@ -249,6 +250,8 @@ function main() {
       events,
       financials,
       prices,
+      ...(jqSym?.marginInterest ? { marginInterest: jqSym.marginInterest } : {}),
+      ...(jqSym?.dividends ? { dividends: jqSym.dividends } : {}),
     };
     delete symbols[code].baseVolume;
     console.log(`${dataSource === "jquants" ? "✦" : "✓"} ${code} ${r.name}: ${prices.length}営業日 / イベント${events.length}件${dataSource === "jquants" ? " [J-Quants実データ]" : ""}`);
@@ -265,6 +268,7 @@ function main() {
     },
     symbols,
     marketEvents,
+    ...(jq?.topix ? { topix: jq.topix } : {}),
   };
 
   const js = "// 自動生成ファイル — 編集しないでください。scripts/generate-data.js で再生成します。\n" +
