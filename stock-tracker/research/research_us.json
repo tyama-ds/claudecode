@@ -1,0 +1,217 @@
+{
+  "meta": {
+    "researchedAt": "2026-07-05",
+    "note": "価格は分割調整後・終値ベースの概算値。出典はWeb検索(CNBC, Bloomberg, Yahoo Finance, stockanalysis.com, Fortune, Al Jazeera等)。一部の月次終値は年間騰落率等からの近似値。",
+    "earlyDec2025Context": "2025年11月下旬〜12月上旬は、AIバブル懸念(非黒字テック指数-26%、ビットコイン-32%)と12月FOMC利下げ観測の急変動で市場が大きく上下した。11/25のMeta-Google TPU報道でNVIDIA売り/Alphabet買いのローテーションが発生し12月初旬まで継続。12/3のADP雇用統計(-3.2万人)で利下げ確率が約90%に上昇し株価は持ち直し、12/10にFRBは25bp利下げ(3.50-3.75%、タカ派的利下げ)を実施しダウは500ドル高。"
+  },
+  "symbols": {
+    "AAPL": {
+      "name": "Apple",
+      "priceAnchors": [
+        {"date": "2025-07-31", "close": 207.6},
+        {"date": "2025-09-30", "close": 254.6},
+        {"date": "2025-12-31", "close": 272.0},
+        {"date": "2026-05-15", "close": 300.2},
+        {"date": "2026-07-02", "close": 308.0}
+      ],
+      "week52High": 317.4,
+      "week52Low": 201.5,
+      "events": [
+        {"date": "2025-09-09", "title": "iPhone 17シリーズとiPhone Air発表", "summary": "iPhone 17シリーズと薄型の新機種iPhone Airを発表。発売後の初動販売が想定以上に好調で、その後の株価上昇サイクルの起点となった。", "impact": "up", "source": "Apple / CNBC"},
+        {"date": "2025-10-30", "title": "FY2025 Q4決算、ホリデー四半期に強気見通し", "summary": "9月期決算はiPhoneとサービスが好調で売上は約1,025億ドル。ホリデー四半期(FY26 Q1)に過去最高の売上見通しを示し、株価は上昇した。", "impact": "up", "source": "Apple / CNBC"},
+        {"date": "2025-11-05", "title": "Siri刷新にGoogleのGeminiを採用と報道", "summary": "BloombergがAppleは次期SiriにGoogleのGeminiモデルを年間約10億ドルで採用する計画と報道。AI戦略の出遅れ懸念が和らぎ、株価の支援材料となった。", "impact": "up", "source": "Bloomberg"},
+        {"date": "2025-12-03", "title": "12月上旬の市場変動の中で相対的に堅調", "summary": "12月初旬はAIバブル懸念と利下げ観測の変動で市場全体が不安定だったが、AppleはAIインフラ投資への依存が小さいことから相対的にディフェンシブな買いが入り、270〜280ドル台で底堅く推移した。", "impact": "up", "source": "Fortune / 市場コメンタリー"},
+        {"date": "2026-01-29", "title": "FY2026 Q1決算、売上+16%で過去最高", "summary": "売上1,438億ドル(+16%)、EPS2.84ドル、中華圏売上+38%と大幅な予想超え。JPモルガンが目標株価を305ドルに引き上げるなど、翌日株価は約3.7%上昇した。", "impact": "up", "source": "Apple / AppleInsider"},
+        {"date": "2026-05-15", "title": "史上最高値300ドル台へ、AI戦略を再評価", "summary": "iPhone需要の回復、サービス部門の最高売上、1,000億ドルの新規自社株買い枠を背景に過去最高値300.23ドルで終了。アナリストのAI関連の目標株価引き上げが相次いだ。", "impact": "up", "source": "AppleInsider / invezz"},
+        {"date": "2026-06-08", "title": "WWDC 2026で刷新Siri発表、52週高値317.40ドル", "summary": "WWDCで大幅に強化されたSiriとApple Intelligenceの拡張を発表。AI巻き返し期待から株価は52週高値317.40ドルを付けた。", "impact": "up", "source": "invezz / Yahoo Finance"},
+        {"date": "2026-07-03", "title": "折りたたみiPhone期待とGoogle Cloud契約報道で+5%", "summary": "折りたたみiPhone投入への期待と、AI基盤でのGoogle Cloudとの提携報道を受け株価が約5%急伸。6月の市場全体の調整から素早く回復した。", "impact": "up", "source": "FX Leaders"}
+      ],
+      "financials": {
+        "per": 37.3,
+        "pbr": 52.0,
+        "roe": 141.5,
+        "dividendYield": 0.36,
+        "equityRatio": 20.0,
+        "revenue": 416.2,
+        "operatingIncome": 127.0,
+        "netIncome": 112.0,
+        "marketCap": "$4.5T",
+        "asOf": "2026-07 (業績はFY2025=2025年9月期、TTM売上は約4,514億ドル)"
+      }
+    },
+    "NVDA": {
+      "name": "NVIDIA",
+      "priceAnchors": [
+        {"date": "2025-07-31", "close": 177.9},
+        {"date": "2025-10-31", "close": 202.8},
+        {"date": "2025-11-28", "close": 179.0},
+        {"date": "2025-12-31", "close": 187.0},
+        {"date": "2026-02-27", "close": 196.0},
+        {"date": "2026-05-14", "close": 235.7},
+        {"date": "2026-07-02", "close": 194.4}
+      ],
+      "week52High": 236.5,
+      "week52Low": 157.3,
+      "events": [
+        {"date": "2025-10-29", "title": "世界初の時価総額5兆ドル企業に", "summary": "GTCでのAIチップ受注残5,000億ドル表明などを受け株価が急伸し、世界で初めて時価総額5兆ドルを突破した。AI相場の頂点を象徴する出来事となった。", "impact": "up", "source": "CNBC"},
+        {"date": "2025-11-19", "title": "Q3 FY26決算は記録的も市場は反転下落", "summary": "売上570億ドルで予想を大きく上回り翌日は一時5%超上昇したが、AIバブル懸念の再燃で上昇分を吐き出し市場全体が急反転。決算好調でも買いが続かない地合いを露呈した。", "impact": "neutral", "source": "CNBC / NVIDIA"},
+        {"date": "2025-11-21", "title": "AIバブル懸念で52週安値圏の157ドル台に下落", "summary": "AI投資の回収可能性への懐疑やマイケル・バーリ氏の空売り開示などが重なり、11月下旬に157ドル台(52週安値157.34ドル)まで売られた。10月高値からの下落率は約25%に達した。", "impact": "down", "source": "Yahoo Finance / StockCharts"},
+        {"date": "2025-11-25", "title": "MetaがGoogle TPU採用検討との報道で-4.3%", "summary": "The InformationがMetaが2027年からGoogleのTPUをデータセンターに採用検討と報道。GPU独占への脅威と受け止められ一時-7%、終値-4.3%と急落した。NVIDIAはXで「当社は一世代先行」と異例の反論。", "impact": "down", "source": "CNBC / Fortune"},
+        {"date": "2025-12-01", "title": "12月初旬もTPU競合懸念でハイテク内ローテーション売り", "summary": "12月に入ってもGoogle製カスタムチップ台頭への警戒が続き、資金がAlphabetなどへ回転する形で軟調に推移。利下げ期待の回復で12月中旬にかけて持ち直し、年末は187ドルで終えた。", "impact": "down", "source": "Bloomberg / CNBC"},
+        {"date": "2025-12-10", "title": "FRBの25bp利下げで半導体株に買い戻し", "summary": "FOMCが政策金利を3.50-3.75%に引き下げ(タカ派的利下げ)、ダウは500ドル高。金利低下期待がグロース・半導体株の反発を後押しした。", "impact": "up", "source": "Federal Reserve / CNBC"},
+        {"date": "2026-02-26", "title": "Q4 FY26決算は予想超えも株価-5%", "summary": "売上681.3億ドル・調整後EPS1.62ドルと予想を上回り、FY26通期売上は2,159億ドル(+65%)の記録的着地。しかし上位2顧客で売上の36%を占める顧客集中や競争激化への懸念から約5%下落した。", "impact": "down", "source": "CNBC / Forbes"},
+        {"date": "2026-05-14", "title": "史上最高値235.74ドルを更新", "summary": "2月の安値から約20%上昇し、決算発表を前に過去最高値235.74ドルで終了。AIインフラ需要の持続を織り込む買いが続いた。", "impact": "up", "source": "Motley Fool / MacroTrends"},
+        {"date": "2026-05-20", "title": "Q1 FY27決算、予想を大幅超過も株価は下落", "summary": "売上・利益とも市場予想を大きく上回ったが、株価には強い期待が既に織り込まれており材料出尽くしで下落。以降は190〜200ドル台での調整が続いた。", "impact": "down", "source": "Motley Fool"},
+        {"date": "2026-06-05", "title": "米株急落(AI株売り+利上げ観測)に連れ安", "summary": "インフレ再燃によるFRBの利上げ観測浮上でナスダックとS&P500が年初来最大の下落となり、AI関連株の中心として売りが直撃。7月初旬には194ドル前後まで下落した。", "impact": "down", "source": "CNN Business"}
+      ],
+      "financials": {
+        "per": 29.8,
+        "pbr": 24.8,
+        "roe": 114.3,
+        "dividendYield": 0.02,
+        "equityRatio": 70.0,
+        "revenue": 215.9,
+        "operatingIncome": 130.0,
+        "netIncome": 117.0,
+        "marketCap": "$4.72T",
+        "asOf": "2026-07 (業績はFY2026=2026年1月期。営業利益は概算)"
+      }
+    },
+    "MSFT": {
+      "name": "Microsoft",
+      "priceAnchors": [
+        {"date": "2025-07-31", "close": 533.5},
+        {"date": "2025-10-28", "close": 538.7},
+        {"date": "2025-12-31", "close": 489.0},
+        {"date": "2026-03-31", "close": 375.0},
+        {"date": "2026-07-02", "close": 390.8}
+      ],
+      "week52High": 555.5,
+      "week52Low": 349.2,
+      "events": [
+        {"date": "2025-07-31", "title": "FY25 Q4決算が絶好調、時価総額4兆ドル到達", "summary": "Azureの高成長を受けて決算翌日に株価が急伸し、NVIDIAに次ぎ時価総額4兆ドルに到達。7月末は533ドル台で終えた。", "impact": "up", "source": "CNBC"},
+        {"date": "2025-10-28", "title": "OpenAI資本再編で27%出資が確定、史上最高値", "summary": "OpenAIの営利企業への再編合意でMicrosoftの持分27%(約1,350億ドル相当)が確定。株価は過去最高値538.66ドルを付けた。ここが以後1年間の天井となった。", "impact": "up", "source": "CNBC / Microsoft"},
+        {"date": "2025-10-29", "title": "FY26 Q1決算、capex急増を嫌気し下落", "summary": "Azure成長率は約40%と好調だったが、AIデータセンター向け設備投資の急増とOpenAI関連の持分法損失を嫌気して株価は約3%下落。AI投資回収への疑念が意識され始めた。", "impact": "down", "source": "CNBC"},
+        {"date": "2025-12-03", "title": "12月上旬、AI収益化懸念でハイテク売りの中心に", "summary": "11月下旬からのAIバブル議論でMicrosoftはOpenAIへのエクスポージャーの大きさが警戒され軟調に推移。12/3の弱いADP雇用統計による利下げ期待回復(確率約90%)で市場全体は持ち直したが、上値は重かった。", "impact": "down", "source": "Fortune / 市場コメンタリー"},
+        {"date": "2026-01-29", "title": "FY26 Q2決算で株価急落、capexガイダンス1,900億ドル", "summary": "Azure+40%・AI ARR370億ドルと好調でも、通期設備投資見通しを1,900億ドル(市場予想約1,546億ドル)に引き上げ、FCFは-22%、OpenAIがクラウド受注残の45%を占めると開示。AI投資への懐疑から株価は急落した。", "impact": "down", "source": "Al Jazeera / Yahoo Finance / TradingKey"},
+        {"date": "2026-03-13", "title": "Mag7調整でピークから約3割下落", "summary": "マグニフィセント・セブンの指数が3月中旬に調整入り(10月の最高値から10%超下落)する中、Microsoftは最も売られ10月ピークから約32%下落。AI capexと利益率悪化への懸念が主因。", "impact": "down", "source": "Bloomberg / rangvid.com"},
+        {"date": "2026-04-29", "title": "FY26 Q3決算は予想超えで一服", "summary": "EPS4.27ドル(予想4.06)、売上828.9億ドル(予想813.9億)と予想を上回り、株価はいったん下げ止まった。ただしAI投資の回収時期を巡る不透明感は残った。", "impact": "up", "source": "CNBC"},
+        {"date": "2026-06-26", "title": "AI支出懸念が再燃し1年ぶり安値349.20ドル", "summary": "6月の市場全体の急落(インフレ再燃・利上げ観測)と重なり52週安値349.20ドルまで下落。10月高値からの下落率は約37%に達した。その後7月初旬には390ドル台へ反発。", "impact": "down", "source": "Quartz / CNN Business"}
+      ],
+      "financials": {
+        "per": 23.3,
+        "pbr": 6.7,
+        "roe": 34.0,
+        "dividendYield": 0.91,
+        "equityRatio": 57.0,
+        "revenue": 281.7,
+        "operatingIncome": 128.5,
+        "netIncome": 101.8,
+        "marketCap": "$2.89T",
+        "asOf": "2026-07 (業績はFY2025=2025年6月期。TTM売上は約3,183億ドル・純利益約1,252億ドル)"
+      }
+    },
+    "GOOGL": {
+      "name": "Alphabet",
+      "priceAnchors": [
+        {"date": "2025-07-31", "close": 191.9},
+        {"date": "2025-09-30", "close": 243.0},
+        {"date": "2025-12-31", "close": 312.0},
+        {"date": "2026-03-31", "close": 310.0},
+        {"date": "2026-07-02", "close": 359.9}
+      ],
+      "week52High": 408.6,
+      "week52Low": 172.8,
+      "events": [
+        {"date": "2025-09-02", "title": "検索独禁法訴訟でChrome売却回避の判決", "summary": "連邦地裁が是正措置としてChromeやAndroidの分割売却を命じない判断を示し、最悪シナリオが回避された。翌日株価は約9%急騰し、以後の大相場の起点となった。", "impact": "up", "source": "Reuters / CNBC"},
+        {"date": "2025-11-18", "title": "Gemini 3を公開、AI競争での巻き返し評価", "summary": "最新モデルGemini 3が高いベンチマーク評価を獲得し、OpenAIに対する巻き返しと受け止められた。株価は連日上昇し時価総額が急拡大した。", "impact": "up", "source": "CNBC / Google"},
+        {"date": "2025-11-25", "title": "MetaがTPU採用検討との報道で続伸", "summary": "MetaがGoogleのTPUを2027年からデータセンターに採用検討との報道で、前日+6%超に続き+4.2%と続伸。NVIDIA一強への挑戦者として資金が流入した。", "impact": "up", "source": "Bloomberg / CNBC"},
+        {"date": "2025-12-01", "title": "12月初旬、時価総額4兆ドルに接近", "summary": "Gemini 3とTPUへの期待でAI物色の資金がNVIDIAからAlphabetへ回転し、12月初旬に株価は320ドル前後まで上昇、時価総額は4兆ドルに迫った。2025年通年の上昇率は約65%に達した。", "impact": "up", "source": "Bloomberg / Motley Fool"},
+        {"date": "2026-02-03", "title": "Q4 2025決算、史上初の年商4,000億ドル超え", "summary": "Q4売上1,138億ドル(+18%)、EPS2.82ドル(予想2.63)と全項目でビート。2025年通期売上は4,027億ドルとなり史上初の4,000億ドル超え企業に。2026年capexは1,750-1,850億ドルと発表。", "impact": "up", "source": "Capital.com / Alphabet"},
+        {"date": "2026-03-02", "title": "独禁法の不確実性が再燃(DOJ控訴・EU制裁金確定)", "summary": "米司法省などが検索独禁法の是正措置を巡り控訴、EU司法裁判所はAndroid関連の41億ユーロの制裁金を支持。3月中旬のMag7調整と重なり、2月の高値から約15%下落した。", "impact": "down", "source": "Capital.com"},
+        {"date": "2026-04-28", "title": "Q1 2026決算で株価+10%急伸", "summary": "売上1,099億ドル(+22%)、純利益626億ドル(+81%)、EPS5.17ドルと大幅ビート。Geminiアプリの月間ユーザーが7.5億人を突破し、AI収益化の進展が評価された。", "impact": "up", "source": "TIKR / Alphabet"},
+        {"date": "2026-06-05", "title": "高値408ドルから市場急落に連れ安", "summary": "5〜6月に52週高値408.61ドルまで上昇したが、6/5のインフレ再燃・利上げ観測による市場急落で反落。7月初旬は360ドル前後で推移した。", "impact": "down", "source": "CNN Business"}
+      ],
+      "financials": {
+        "per": 27.0,
+        "pbr": 9.9,
+        "roe": 38.9,
+        "dividendYield": 0.26,
+        "equityRatio": 68.0,
+        "revenue": 402.7,
+        "operatingIncome": 130.0,
+        "netIncome": 133.0,
+        "marketCap": "$4.12T",
+        "asOf": "2026-07 (業績はFY2025=2025年12月期。営業利益・純利益は四半期合算の概算)"
+      }
+    },
+    "AMZN": {
+      "name": "Amazon",
+      "priceAnchors": [
+        {"date": "2025-07-31", "close": 234.1},
+        {"date": "2025-10-31", "close": 244.2},
+        {"date": "2025-12-31", "close": 230.8},
+        {"date": "2026-04-29", "close": 257.7},
+        {"date": "2026-07-02", "close": 242.7}
+      ],
+      "week52High": 278.6,
+      "week52Low": 196.0,
+      "events": [
+        {"date": "2025-10-20", "title": "AWSで大規模障害が発生", "summary": "AWSの世界的な障害で多数のサービスが数時間停止。株価への影響は限定的だったが、クラウド依存リスクとAWSの信頼性が話題となった。", "impact": "neutral", "source": "Reuters / CNBC"},
+        {"date": "2025-10-28", "title": "約3万人の人員削減を発表", "summary": "コーポレート部門を中心に約3万人の削減計画を発表。AI活用による効率化とコスト規律の表れと受け止められ、株価には中立〜ややプラスに働いた。", "impact": "neutral", "source": "CNBC / Reuters"},
+        {"date": "2025-10-30", "title": "Q3 2025決算でAWS再加速、翌日+9.6%", "summary": "AWS成長率が+20%と約3年ぶりの水準に再加速し、利益も予想を大幅に上回った。翌日株価は9.6%急騰し過去最高値圏の244ドル台に到達した。", "impact": "up", "source": "CNBC / Amazon"},
+        {"date": "2025-12-01", "title": "年末商戦は堅調も12月は230ドル前後で伸び悩み", "summary": "サイバーマンデーを含む年末商戦は過去最高規模となったが、12月上旬の市場ではAI物色がAlphabet等に向かい、AmazonはAIバブル懸念によるcapex警戒もあって230ドル前後で方向感を欠いた。", "impact": "neutral", "source": "市場コメンタリー / Fortune"},
+        {"date": "2026-02-05", "title": "Q4 2025決算、通期売上7,169億ドル", "summary": "2025年通期は売上7,169億ドル(+12%)、営業利益800億ドル(+17%)、純利益776.7億ドル(+31%)と好調に着地。一方2026年の設備投資約2,000億ドル計画が重しとなり、株価反応は限定的だった。", "impact": "neutral", "source": "Amazon 8-K / MacroTrends"},
+        {"date": "2026-04-29", "title": "Q1 2026決算、AWS+28%で15四半期ぶりの高成長", "summary": "売上1,815億ドル、EPS2.78ドル(Anthropic投資の評価益168億ドルを含む)で全項目ビート。AWSは+28%と15四半期ぶりの伸びで営業利益率も過去最高。ただし年間約2,000億ドルのcapex継続を嫌気し時間外で小幅安。", "impact": "neutral", "source": "CNBC / TIKR"},
+        {"date": "2026-06-05", "title": "市場急落で高値278ドルから調整", "summary": "インフレ再燃と利上げ観測による6月の市場急落に連れ安し、52週高値278.56ドルから約13%調整。7月初旬は242ドル前後で推移した。", "impact": "down", "source": "CNN Business / TIKR"}
+      ],
+      "financials": {
+        "per": 28.5,
+        "pbr": 5.7,
+        "roe": 24.3,
+        "dividendYield": 0.0,
+        "equityRatio": 59.0,
+        "revenue": 716.9,
+        "operatingIncome": 80.0,
+        "netIncome": 77.7,
+        "marketCap": "$2.62T",
+        "asOf": "2026-07 (業績はFY2025=2025年12月期)"
+      }
+    },
+    "TSLA": {
+      "name": "Tesla",
+      "priceAnchors": [
+        {"date": "2025-07-31", "close": 308.3},
+        {"date": "2025-09-30", "close": 444.7},
+        {"date": "2025-12-16", "close": 489.9},
+        {"date": "2025-12-31", "close": 423.0},
+        {"date": "2026-04-08", "close": 289.0},
+        {"date": "2026-07-02", "close": 393.5}
+      ],
+      "week52High": 498.8,
+      "week52Low": 288.7,
+      "events": [
+        {"date": "2025-10-02", "title": "Q3納車が過去最高の約49.7万台", "summary": "米国EV税額控除(9月末失効)前の駆け込み需要で四半期納車台数が過去最高の約49.7万台に到達。株価は上昇した。", "impact": "up", "source": "CNBC / Tesla"},
+        {"date": "2025-10-22", "title": "Q3決算は売上最高も利益率悪化で下落", "summary": "売上は過去最高となったが、値下げやインセンティブ増で利益率が悪化しEPSは予想未達。株価は決算後に下落した。", "impact": "down", "source": "CNBC"},
+        {"date": "2025-11-06", "title": "株主総会でマスク氏の最大1兆ドル報酬案を承認", "summary": "年次株主総会で、時価総額目標等の達成を条件とするマスクCEOの最大約1兆ドル規模の新報酬パッケージが承認された。経営継続への安心感から株価は上昇した。", "impact": "up", "source": "CNBC / Reuters"},
+        {"date": "2025-12-16", "title": "上場来高値489.88ドル、ロボタクシー期待で+3.1%", "summary": "オースティンでのセーフティドライバーなしのロボタクシー試験進展や、デラウェア州最高裁による2018年報酬パッケージ復活(約1,390億ドル相当)を受け、過去最高値489.88ドルで終了。時価総額は1.63兆ドルに拡大した。", "impact": "up", "source": "CNBC / Morningstar"},
+        {"date": "2025-12-29", "title": "高値から反落、年末は423ドル前後", "summary": "最高値更新後は利益確定売りとバリュエーション警戒(モルガン・スタンレーが目標425ドルでホールドに格下げ)で反落し、年末は423ドル前後で終えた。2025年通年では小幅高。", "impact": "down", "source": "ts2.tech / Morningstar"},
+        {"date": "2026-04-08", "title": "年初来安値288ドル台、高値から約30%下落", "summary": "Mag7全体の調整に加え、ロボタクシーの実稼働台数が伸び悩んでいる(ピーク25台→約20台)との指摘やFSDの収益化懸念で売られ、最大ドローダウン-29.9%の288ドル台まで下落した。", "impact": "down", "source": "TIKR / indmoney"},
+        {"date": "2026-06-03", "title": "ロボタクシーがオースティン都市圏全域に拡大", "summary": "無監視のロボタクシーサービスがオースティン都市圏全域(約245平方マイル)をカバーしたと発表。自動運転の商用化進展として株価回復の材料となった。", "impact": "up", "source": "TIKR / Tesla"},
+        {"date": "2026-07-02", "title": "Q2納車48万台で予想+18%も株価は-7.5%", "summary": "Q2納車480,126台と市場予想(約40.6万台)を大幅に上回ったが、株価は約7.5%下落しほぼ1年ぶりの下げ幅に。台数成長だけでは現在のバリュエーションを正当化できないとの見方が広がった。", "impact": "down", "source": "CNBC"}
+      ],
+      "financials": {
+        "per": 380.6,
+        "pbr": 17.5,
+        "roe": 4.9,
+        "dividendYield": 0.0,
+        "equityRatio": 60.0,
+        "revenue": 94.8,
+        "operatingIncome": 3.9,
+        "netIncome": 4.1,
+        "marketCap": "$1.47T",
+        "asOf": "2026-07 (業績はFY2025=2025年12月期。営業利益・純利益は四半期合算の概算。予想PERは約196)"
+      }
+    }
+  }
+}
