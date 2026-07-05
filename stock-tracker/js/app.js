@@ -94,7 +94,7 @@
     $("#stockMeta").textContent = `${state.code} · ${s.marketName || s.market}${s.sector ? " · " + s.sector : ""} · 最終データ: ${StockChart.fmtDate(last.date)}`;
     $("#stockPrice").textContent = StockChart.fmtNum(last.close, s.currency);
     const chEl = $("#stockChange");
-    chEl.textContent = `${chg >= 0 ? "+" : ""}${StockChart.fmtNum(Math.abs(chg), s.currency).replace(/^[¥$]/, m => m)} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%) 前日比`;
+    chEl.textContent = `${chg >= 0 ? "+" : "-"}${StockChart.fmtNum(Math.abs(chg), s.currency)} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%) 前日比`;
     chEl.className = "stock-change " + (chg >= 0 ? "up" : "down");
   }
 

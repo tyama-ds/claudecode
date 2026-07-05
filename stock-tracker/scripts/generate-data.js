@@ -75,10 +75,6 @@ function synthesizeSeries(code, anchors, events, marketEvents, meta) {
   const sorted = [...anchors].filter(a => a && a.close != null).sort((a, b) => a.date.localeCompare(b.date));
   if (sorted.length < 2) throw new Error(`${code}: 株価アンカーが不足しています (${sorted.length}点)`);
 
-  // 端点をデータ期間端までパディング
-  if (sorted[0].date > DATA_START) sorted.unshift({ date: DATA_START, close: sorted[0].close });
-  if (sorted[sorted.length - 1].date < DATA_END) sorted.push({ date: DATA_END, close: sorted[sorted.length - 1].close });
-
   const t = iso => new Date(iso + "T00:00:00Z").getTime();
 
   // 基準パス: アンカー間を対数空間で線形補間
@@ -102,6 +98,7 @@ function synthesizeSeries(code, anchors, events, marketEvents, meta) {
     return d.toISOString().slice(0, 10);
   };
   const addJump = (date, pct) => {
+    pct = Math.max(-6, Math.min(6, pct)); // 1日のジャンプは±6%に制限
     const day = snapToTrading(date);
     jumps.set(day, (jumps.get(day) || 0) + pct);
   };
@@ -131,15 +128,29 @@ function synthesizeSeries(code, anchors, events, marketEvents, meta) {
     prices.push({ date: day, close });
   }
 
-  // アンカー日の値がアンカーに一致するよう全体を微補正
+  // アンカー日の値がアンカーに一致するよう、アンカー間で対数比を線形補間して全体を滑らかに補正
+  const anchorIdx = [];
   for (const a of sorted) {
     const idx = nearestIndex(prices, a.date);
-    if (idx < 0) continue;
-    const ratio = a.close / prices[idx].close;
-    // アンカー周辺±20営業日を滑らかに補正
-    for (let i = Math.max(0, idx - 20); i <= Math.min(prices.length - 1, idx + 20); i++) {
-      const w = 1 - Math.abs(i - idx) / 21;
-      prices[i].close *= 1 + (ratio - 1) * w;
+    if (idx >= 0) anchorIdx.push({ idx, logRatio: Math.log(a.close / prices[idx].close) });
+  }
+  anchorIdx.sort((a, b) => a.idx - b.idx);
+  if (anchorIdx.length) {
+    for (let i = 0; i < prices.length; i++) {
+      let lr;
+      if (i <= anchorIdx[0].idx) lr = anchorIdx[0].logRatio;
+      else if (i >= anchorIdx[anchorIdx.length - 1].idx) lr = anchorIdx[anchorIdx.length - 1].logRatio;
+      else {
+        for (let k = 0; k < anchorIdx.length - 1; k++) {
+          const a = anchorIdx[k], b = anchorIdx[k + 1];
+          if (i >= a.idx && i <= b.idx) {
+            const r = (i - a.idx) / Math.max(1, b.idx - a.idx);
+            lr = a.logRatio * (1 - r) + b.logRatio * r;
+            break;
+          }
+        }
+      }
+      prices[i].close *= Math.exp(lr);
     }
   }
 
