@@ -91,8 +91,12 @@
     const prev = s.prices[s.prices.length - 2];
     const chg = last.close - prev.close;
     const pct = (chg / prev.close) * 100;
-    $("#stockName").textContent = s.name;
+    const jq = s.dataSource === "jquants";
+    $("#stockName").innerHTML = `${s.name} <span class="src-badge ${jq ? "real" : ""}">${jq ? "📡 J-Quants実データ" : "📝 参考値"}</span>`;
     $("#stockMeta").textContent = `${state.code} · ${s.marketName || s.market}${s.sector ? " · " + s.sector : ""} · 最終データ: ${StockChart.fmtDate(last.date)}`;
+    $("#chartNote").textContent = jq
+      ? "株価・出来高はJ-Quants API(JPX公式)の調整済み実データです。イベントマーカー ● をクリックすると関連情報を表示します。"
+      : "出来高・株価は収集データに基づく参考値です。イベントマーカー ● をクリックすると関連情報を表示します。";
     $("#stockPrice").textContent = StockChart.fmtNum(last.close, s.currency);
     const chEl = $("#stockChange");
     chEl.textContent = `${chg >= 0 ? "+" : "-"}${StockChart.fmtNum(Math.abs(chg), s.currency)} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%) 前日比`;

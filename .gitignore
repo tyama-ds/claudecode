@@ -50,3 +50,6 @@ pipeline_output/
 # Environment variables
 .env
 .env.local
+
+# J-Quants API取得データ(利用規約により再配布不可)
+stock-tracker/research/jquants_data.json

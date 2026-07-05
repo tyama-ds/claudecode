@@ -201,6 +201,11 @@ function main() {
   const jp = loadJson("research_jp.json");
   const us = loadJson("research_us.json");
   const etf = loadJson("research_etf_market.json");
+  // J-Quants実データ(scripts/fetch-jquants.js の出力、存在すれば合成より優先)
+  const jq = fs.existsSync(path.join(RESEARCH, "jquants_data.json"))
+    ? JSON.parse(fs.readFileSync(path.join(RESEARCH, "jquants_data.json"), "utf8"))
+    : null;
+  if (jq) console.log(`✦ J-Quantsデータを検出 (${jq.fetchedAt?.slice(0, 10)}取得、${Object.keys(jq.symbols).length}銘柄) — 該当銘柄は実データの日足を使用します\n`);
 
   const marketEvents = (etf?.marketEvents || []).sort((a, b) => a.date.localeCompare(b.date));
 
@@ -215,27 +220,38 @@ function main() {
     const meta = SYMBOL_META[code];
     if (!meta) { console.warn(`⚠ 未定義の銘柄コード: ${code} — スキップ`); continue; }
     const events = (r.events || []).sort((a, b) => a.date.localeCompare(b.date));
-    let prices;
-    try {
-      prices = synthesizeSeries(code, r.priceAnchors || [], events, marketEvents, meta);
-    } catch (e) {
-      console.error(`✗ ${code}: ${e.message}`);
-      continue;
+    const jqSym = jq?.symbols?.[code];
+    let prices, dataSource;
+    if (jqSym && (jqSym.prices || []).length >= 30) {
+      // J-Quants実データの日足をそのまま使用
+      prices = jqSym.prices.map(p => ({ date: p.date, close: p.close, volume: p.volume || 0 }));
+      dataSource = "jquants";
+    } else {
+      try {
+        prices = synthesizeSeries(code, r.priceAnchors || [], events, marketEvents, meta);
+        dataSource = "synthetic";
+      } catch (e) {
+        console.error(`✗ ${code}: ${e.message}`);
+        continue;
+      }
     }
     const financials = r.isEtf
       ? { expenseRatio: r.expenseRatio ?? null, distributionYield: r.distributionYield ?? null, week52High: r.week52High ?? null, week52Low: r.week52Low ?? null }
       : { ...(r.financials || {}), week52High: r.week52High ?? null, week52Low: r.week52Low ?? null };
+    // J-Quants決算データがあれば指標を実数で上書き
+    if (jqSym?.financials) Object.assign(financials, jqSym.financials);
 
     symbols[code] = {
       name: r.name,
       ...meta,
       baseVolume: undefined,
+      dataSource,
       events,
       financials,
       prices,
     };
     delete symbols[code].baseVolume;
-    console.log(`✓ ${code} ${r.name}: ${prices.length}営業日 / イベント${events.length}件`);
+    console.log(`${dataSource === "jquants" ? "✦" : "✓"} ${code} ${r.name}: ${prices.length}営業日 / イベント${events.length}件${dataSource === "jquants" ? " [J-Quants実データ]" : ""}`);
   }
 
   const data = {

@@ -43,6 +43,27 @@ python3 -m http.server 8080
 node scripts/generate-data.js
 ```
 
+### J-Quants API 連携(日本株の実データ化)
+
+[J-Quants](https://jpx-jquants.com/)(JPX公式API、無料のFreeプランあり)のアカウントがあれば、
+日本株6銘柄+国内ETF2本の日足を**取引所公式の調整済み実データ**に置き換えられます。
+決算データからROE・自己資本比率・PER/PBR・配当利回りも実数で更新されます。
+
+```bash
+export JQUANTS_MAIL_ADDRESS="you@example.com"
+export JQUANTS_PASSWORD="********"
+# (または export JQUANTS_REFRESH_TOKEN="...")
+
+node scripts/fetch-jquants.js    # → research/jquants_data.json に保存
+node scripts/generate-data.js    # → data/stock-data.js に反映
+```
+
+- 実データ化された銘柄には画面上に「📡 J-Quants実データ」バッジが付きます
+  (それ以外は「📝 参考値」= アンカー補間の合成系列)。
+- Freeプランの日足は約12週間遅延・過去2年分です(Light以上は前営業日まで)。
+- 認証情報は環境変数でのみ渡し、取得データ(`research/jquants_data.json`)は
+  J-Quantsの利用規約(再配布制限)に基づき `.gitignore` 済みです。
+
 ## 収録銘柄
 
 - **日経225**: トヨタ(7203)、ソニーG(6758)、日本製鉄(5401)、三菱UFJ(8306)、東京エレクトロン(8035)、ファーストリテイリング(9983)
