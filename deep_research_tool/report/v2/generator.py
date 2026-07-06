@@ -145,6 +145,15 @@ class ReportGeneratorV2:
         )
     """
 
+    # Default per-chapter length target (chars) when neither target_pages
+    # nor target_characters is specified
+    DEFAULT_CHAPTER_CHARS_JA = 1500
+    DEFAULT_CHAPTER_CHARS_EN = 2500
+
+    # Short-chapter guard: a chapter below target * ratio triggers one
+    # expansion retry; if it is still below, a ResearchWarning is recorded
+    SHORT_CHAPTER_RATIO = 0.4
+
     def __init__(
         self,
         llm_client,
@@ -177,6 +186,7 @@ class ReportGeneratorV2:
         """
         self.llm = llm_client
         self.language = language
+        self._chapter_target_chars = None
         self.writing_style = writing_style
         self.target_audience = target_audience
         self.technical_level = technical_level
@@ -249,6 +259,15 @@ class ReportGeneratorV2:
             elif self.target_pages:
                 chars_per_page = 1500 if self.language == "ja" else 2500
                 self._chapter_target_chars = (self.target_pages * chars_per_page) // total_sections
+
+        # Default per-chapter target when no explicit target is given.
+        # Without a length instruction the LLM tends to write very short
+        # chapters (a few hundred characters), so always give one.
+        if self._chapter_target_chars is None:
+            self._chapter_target_chars = (
+                self.DEFAULT_CHAPTER_CHARS_JA if self.language == "ja"
+                else self.DEFAULT_CHAPTER_CHARS_EN
+            )
 
         # Phase 1: Generate drafts
         chapters: Dict[str, ChapterContent] = {}
@@ -487,6 +506,24 @@ After the body, output this delimiter followed by metadata:
             if not body or not body.strip():
                 raise ValueError("Empty chapter body in LLM response")
 
+            # Short-chapter guard: a draft far below the target usually means
+            # the LLM under-delivered, not that evidence is missing. Retry
+            # once with an explicit expansion prompt before accepting it.
+            min_chars = (
+                int(self._chapter_target_chars * self.SHORT_CHAPTER_RATIO)
+                if self._chapter_target_chars else 800
+            )
+            if len(body.strip()) < min_chars:
+                body, meta = self._expand_short_chapter(
+                    section_number=section_number,
+                    section_title=section_title,
+                    draft_body=body,
+                    draft_meta=meta,
+                    content_summary=content_summary,
+                    context=context,
+                    min_chars=min_chars,
+                )
+
             return ChapterContent(
                 section_number=section_number,
                 section_title=section_title,
@@ -508,6 +545,102 @@ After the body, output this delimiter followed by metadata:
                 word_count=0,
                 is_draft=True,
             )
+
+    def _expand_short_chapter(
+        self,
+        section_number: str,
+        section_title: str,
+        draft_body: str,
+        draft_meta: Dict[str, Any],
+        content_summary: str,
+        context: ReportContext,
+        min_chars: int,
+    ):
+        """Retry a too-short chapter once with an explicit expansion prompt.
+
+        Returns (body, meta): the expanded version when the retry produced a
+        longer chapter, otherwise the original draft. Records a
+        ResearchWarning when the chapter is still below min_chars afterwards,
+        so the shortfall is visible in the final report instead of silent.
+        """
+        target = self._chapter_target_chars or (
+            self.DEFAULT_CHAPTER_CHARS_JA if self.language == "ja"
+            else self.DEFAULT_CHAPTER_CHARS_EN
+        )
+        print(f"[ReportGeneratorV2] Section {section_number} draft is short "
+              f"({len(draft_body)} chars < {min_chars}); retrying with an "
+              f"expansion prompt")
+
+        style_instructions = context.get_style_instructions()
+
+        if self.language == "ja":
+            prompt = f"""以下はレポートの章「{section_number}. {section_title}」の草稿ですが、短すぎます（現在約{len(draft_body)}字、目標約{target}字）。
+
+【草稿】
+{draft_body}
+
+【利用可能な情報源】
+{content_summary}
+
+{style_instructions}
+
+【指示】
+1. 情報源の具体的な数値・事実・引用を活用し、目標分量まで内容を拡充して書き直す
+2. 引用番号 [SOURCE N] は維持・追加する（この表記は一字一句変えない）
+3. 情報源にない情報を捏造しない。同じ内容の水増しではなく、根拠・背景・比較・分析・示唆を加えて深める
+4. 章見出し「## {section_number}. {section_title}」から始め、本文をマークダウンでそのまま書く（JSONやコードブロックで囲まない）
+
+本文の後、最後に次の区切り記号とメタ情報を必ず出力する:
+
+{CHAPTER_META_DELIMITER}
+{{"key_points": ["要点1", "要点2"], "terms_used": ["使用した専門用語1"], "facts_stated": ["記述した事実1"]}}"""
+        else:
+            prompt = f"""The following draft of report chapter "{section_number}. {section_title}" is too short (about {len(draft_body)} chars now, target about {target} chars).
+
+[DRAFT]
+{draft_body}
+
+[AVAILABLE SOURCES]
+{content_summary}
+
+{style_instructions}
+
+[INSTRUCTIONS]
+1. Rewrite and expand the chapter toward the target length using concrete figures, facts, and quotes from the sources
+2. Keep and add [SOURCE N] citation markers exactly as-is
+3. Do not fabricate information absent from the sources; deepen with evidence, background, comparison, analysis, and implications rather than padding
+4. Start with the heading "## {section_number}. {section_title}" and write the body directly as markdown (no JSON, no code block)
+
+After the body, output this delimiter followed by metadata:
+
+{CHAPTER_META_DELIMITER}
+{{"key_points": ["point1", "point2"], "terms_used": ["technical term1"], "facts_stated": ["fact1"]}}"""
+
+        try:
+            response = self.llm.generate(prompt)
+            if response and response.content:
+                new_body, new_meta = split_prose_and_meta(
+                    response.content, CHAPTER_META_DELIMITER
+                )
+                if new_body and len(new_body.strip()) > len(draft_body.strip()):
+                    draft_body = new_body
+                    draft_meta = new_meta or draft_meta
+        except Exception as e:
+            print(f"[ReportGeneratorV2] Expansion retry failed for section "
+                  f"{section_number}: {e}")
+
+        if len(draft_body.strip()) < min_chars:
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.MEDIUM,
+                "ReportGeneratorV2",
+                f"Section {section_number} '{section_title}' remains short even "
+                f"after an expansion retry ({len(draft_body)} chars, minimum "
+                f"{min_chars}, target {target}). The gathered evidence for this "
+                f"section is likely insufficient — consider more research "
+                f"iterations, more pages per query, or gap-fill rounds.",
+            )
+
+        return draft_body, draft_meta
 
     def _extract_chapter_summary(self, chapter: ChapterContent) -> str:
         """Extract a summary from chapter content."""
