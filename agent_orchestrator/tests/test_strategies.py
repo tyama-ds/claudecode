@@ -464,6 +464,61 @@ class TestStrategies(unittest.TestCase):
         self.assertIn("SECRET-42", agent.prompts[1])         # result fed back
         self.assertIn("tool_use", [e.type for e in s.bus.history])
 
+    def test_write_file_tool_writes_and_records(self):
+        from agent_orchestrator.orchestrator.strategies import _run_turn
+
+        class Writer(AgentAdapter):
+            kind = "fixed"
+            def __init__(self):
+                super().__init__("w", display_name="w")
+                self.supports_history = False
+                self.calls = 0
+            def _generate(self, prompt, system, history):
+                self.calls += 1
+                if self.calls == 1:
+                    return '<TOOL name="write_file">pkg/mod.py\nVALUE = 42</TOOL>'
+                return "Wrote the module."
+
+        d = tempfile.mkdtemp()
+        agent = Writer()
+        s = Session(id="wf", task="t", strategy="custom", rounds=1,
+                    agents={"agent_1": agent}, workspace=d)
+        s.tools = ["write_file"]
+        out = _run_turn(s, "agent_1", "You are an agent.", "Do it.", 1)
+        self.assertEqual(out, "Wrote the module.")
+        with open(os.path.join(d, "pkg", "mod.py")) as fh:
+            self.assertEqual(fh.read(), "VALUE = 42\n")
+        edits = [e.data for e in s.bus.history if e.type == "workspace_edit"]
+        self.assertEqual(edits[0]["path"], "pkg/mod.py")
+        self.assertEqual(edits[0]["status"], "created")
+
+    def test_generic_strategy_absorbs_file_blocks(self):
+        """Any strategy with a workspace applies <FILE> blocks to disk; only a
+        file *listing* (not contents) is injected into the system prompt."""
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "already.py"), "w") as fh:
+            fh.write("x = 'long secret content that must not be injected'\n")
+        impl = _FixedAdapter("impl", '<FILE path="gen.py">\ny = 2\n</FILE> APPROVE')
+        rev = _FixedAdapter("rev", "APPROVE")
+        s = Session(id="gen", task="t", strategy="implementer_reviewer", rounds=1,
+                    agents={"implementer": impl, "reviewer": rev}, workspace=d)
+        get_strategy("implementer_reviewer").run(s)
+        self.assertTrue(os.path.isfile(os.path.join(d, "gen.py")))
+        self.assertIn("workspace_edit", [e.type for e in s.bus.history])
+
+    def test_workspace_system_lists_but_does_not_inline(self):
+        from agent_orchestrator.orchestrator.strategies import _workspace_system
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "big.py"), "w") as fh:
+            fh.write("SECRET_CONTENT = 1\n")
+        s = Session(id="ls", task="t", strategy="round_robin", rounds=1,
+                    agents={}, workspace=d)
+        block = _workspace_system(s)
+        self.assertIn("big.py", block)                 # listing present
+        self.assertNotIn("SECRET_CONTENT", block)      # contents stay out
+        s.strategy = "workspace_build"
+        self.assertEqual(_workspace_system(s), "")     # wsb has its own protocol
+
     def test_workspace_context_included_for_existing_files(self):
         d = tempfile.mkdtemp()
         with open(os.path.join(d, "existing.py"), "w") as fh:

@@ -96,6 +96,16 @@ UI (blank = the server's launch directory), and tick **Create the directory if
 it doesn't exist** to have the orchestrator `mkdir` a fresh folder to build in
 (no git involved).
 
+**Shared workspace for every strategy** (optional): the workspace directory is
+no longer exclusive to *Workspace build*. Point any strategy — conductor team,
+org team, debate, … — at a folder and the team can **read and write its files**.
+It is deliberately **context-frugal**: only a file *listing* is injected into
+prompts; agents then work on files **individually** via the auto-enabled
+`list_files` / `read_file` / `write_file` tools (or `<FILE>` blocks, or native
+CLI editing), so large projects don't blow the context window. Every change
+lands in the Workspace tab with diffs and author attribution, exactly like
+*Workspace build*.
+
 **Reference directory** (any strategy, optional): point it at a local folder and
 the orchestrator loads its text files as **read-only context** every agent can
 consult — useful for handing the team a spec, an existing codebase, or example

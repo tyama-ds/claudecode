@@ -31,6 +31,9 @@ const JA = {
   "Workspace": "ワークスペース",
   "Directory": "ディレクトリ",
   "blank = server's launch directory": "空欄＝サーバ起動ディレクトリ",
+  "a local folder the agents work in (read & write)": "エージェントが読み書きするローカルフォルダ",
+  "(optional — agents read/write its files one by one)": "（任意 — 指定するとファイルを1つずつ読み書き）",
+  "(write a workspace file — auto-on with a workspace)": "（ファイル書き込み — ワークスペース指定時は自動ON）",
   "Create the directory if it doesn't exist": "ディレクトリが無ければ作成",
   "(no git)": "（git なし）",
   "Reference directory": "参照ディレクトリ",
@@ -297,7 +300,10 @@ function renderRoles() {
   if (!st) return;
   $("#strategy-desc").textContent = st.description;
   $("#rounds").value = st.default_rounds;
-  $("#workspace-opts").hidden = st.name !== "workspace_build";
+  // The workspace is available to every strategy (read/write, file-by-file);
+  // the test command and "blank = launch dir" default are workspace_build's.
+  $("#test-cmd-wrap").hidden = st.name !== "workspace_build";
+  $("#workspace-optional").hidden = st.name === "workspace_build";
   $("#rounds-inf-wrap").hidden = !st.supports_unlimited;
   if (!st.supports_unlimited) $("#rounds-inf").checked = false;
   $("#rounds").disabled = $("#rounds-inf").checked && !!st.supports_unlimited;
@@ -790,10 +796,12 @@ async function startRun(extra) {
   if (tools.length) payload.tools = tools;
   const refDir = $("#reference-dir").value.trim();
   if (refDir) payload.reference_dir = refDir;
-  if ($("#strategy").value === "workspace_build") {
-    const ws = $("#workspace-dir").value.trim();
-    if (ws) payload.workspace = ws;
+  const ws = $("#workspace-dir").value.trim();
+  if (ws) payload.workspace = ws;
+  if (ws || $("#strategy").value === "workspace_build") {
     payload.create_dir = $("#workspace-init").checked;
+  }
+  if ($("#strategy").value === "workspace_build") {
     const testCmd = $("#test-cmd").value.trim();
     if (testCmd) payload.test_command = testCmd;
   }
@@ -1209,11 +1217,12 @@ function graphWorker(d) {
   graphCaption(`${g.names[m[0]] || m[0]} → ${g.names[m[1]] || m[1]} · ${t(m[3])}`);
 }
 
-// A file landing in the workspace: pulse author → workspace with the path.
+// A file landing in the workspace: pulse author → workspace with the path
+// (caption-only when the layout has no workspace node).
 function graphEdit(d) {
   const g = state.graph;
-  if (!g.pos || !g.pos.__ws__ || !g.pos[d.role]) return;
-  graphPulse(d.role, "__ws__", "good");
+  if (!g.pos) return;
+  if (g.pos.__ws__ && g.pos[d.role]) graphPulse(d.role, "__ws__", "good");
   graphCaption(`${d.author} → 📁 ${d.path}`);
 }
 

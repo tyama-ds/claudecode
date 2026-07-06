@@ -20,6 +20,7 @@ import difflib
 import os
 import re
 import subprocess
+import threading
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
@@ -411,6 +412,8 @@ _TOOL_MAX_STEPS = 3  # tool->result follow-up turns per agent turn
 _TOOL_DOCS = {
     "list_files": "list_files — input ignored; lists every file in the workspace.",
     "read_file": "read_file — input: a workspace-relative path; returns the file's contents.",
+    "write_file": ("write_file — input: FIRST line is a workspace-relative path, every "
+                   "following line is the complete new file content; writes the file."),
     "run": "run — input: a shell command; runs in the workspace (60s timeout), returns output.",
     "http_get": "http_get — input: an http(s) URL; fetches it and returns the text body.",
 }
@@ -433,7 +436,7 @@ def _tool_root(session: Session) -> str:
     return session.workspace or session.reference_dir or os.getcwd()
 
 
-def _exec_tool(session: Session, name: str, arg: str) -> str:
+def _exec_tool(session: Session, name: str, arg: str, role: str, rnd: int) -> str:
     """Execute one tool call; always returns text (errors included)."""
     root = _tool_root(session)
     try:
@@ -444,6 +447,26 @@ def _exec_tool(session: Session, name: str, arg: str) -> str:
             full = _safe_join(root, arg.strip())
             with open(full, "r", encoding="utf-8", errors="replace") as fh:
                 return fh.read()[:_TOOL_MAX_OUTPUT]
+        if name == "write_file":
+            if not session.workspace:
+                return "write_file requires a workspace directory for this session"
+            rel, _, content = arg.partition("\n")
+            rel = rel.strip()
+            if not rel:
+                return "write_file: missing path on the first line"
+            full = _safe_join(session.workspace, rel)
+            existed = os.path.isfile(full)
+            old = ""
+            if existed:
+                with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                    old = fh.read()
+            os.makedirs(os.path.dirname(full) or session.workspace, exist_ok=True)
+            new_content = content if content.endswith("\n") or not content else content + "\n"
+            with open(full, "w", encoding="utf-8") as fh:
+                fh.write(new_content)
+            _record_edit(session, role, rnd, rel, old, new_content,
+                         "modified" if existed else "created")
+            return f"wrote {rel} ({len(new_content)} bytes)"
         if name == "run":
             proc = subprocess.run(arg, shell=True, cwd=root, capture_output=True,
                                   text=True, timeout=60)
@@ -467,7 +490,7 @@ def _run_tool_calls(session: Session, role: str, rnd: int, text: str) -> Optiona
         return None
     blocks = []
     for name, arg in calls:
-        out = _exec_tool(session, name, arg)
+        out = _exec_tool(session, name, arg, role, rnd)
         session.emit("tool_use", role=role, agent=session.agents[role].display_name,
                      tool=name, input=arg[:200], output=out[:400], round=rnd)
         blocks.append(f'<TOOL_RESULT name="{name}">\n{out}\n</TOOL_RESULT>')
@@ -504,27 +527,76 @@ def _run_turns_parallel(session: Session, specs: List[tuple]) -> Dict[str, str]:
     return results
 
 
+# Serialises generic workspace bookkeeping across parallel turns.
+_WS_LOCK = threading.Lock()
+
+_WS_LISTING_CAP = 200
+
+
+def _workspace_listing(root: str) -> str:
+    """A cheap paths-only listing (contents stay out of the context window)."""
+    names = sorted(_snapshot_workspace(root))
+    lines = names[:_WS_LISTING_CAP]
+    if len(names) > _WS_LISTING_CAP:
+        lines.append(f"... and {len(names) - _WS_LISTING_CAP} more")
+    return "\n".join(lines) if lines else "(empty)"
+
+
+def _workspace_system(session: Session) -> str:
+    """System-prompt suffix for strategies that share a generic workspace.
+
+    Deliberately context-frugal: only the file *listing* is injected — agents
+    read and write files individually instead of receiving everything.
+    """
+    if not session.workspace or session.strategy == "workspace_build":
+        return ""  # workspace_build runs its own richer workspace protocol
+    return (
+        "\n\n[SHARED WORKSPACE] The team shares a real working directory; work on "
+        "files INDIVIDUALLY to keep context small — do not ask for everything at "
+        "once. Current files:\n" + _workspace_listing(session.workspace) + "\n"
+        "Read a file with the read_file tool (or directly, if you are a CLI running "
+        "inside the directory). Write or change a file by emitting "
+        '`<FILE path="relative/path.ext">full new content</FILE>` or via the '
+        "write_file tool — one file at a time, always the complete content. Never "
+        "use absolute paths or `..`."
+    )
+
+
+def _absorb_generic_edits(session: Session, role: str, rnd: int, text: str) -> None:
+    """Apply <FILE> blocks and pick up native edits for any strategy that has a
+    workspace (workspace_build does this itself with richer semantics)."""
+    if not session.workspace or session.strategy == "workspace_build":
+        return
+    with _WS_LOCK:
+        if session.ws_baseline is None:
+            session.ws_baseline = _snapshot_workspace(session.workspace)
+        _apply_workspace_edits(session, role, rnd, text)
+        _, session.ws_baseline = _detect_native_edits(session, role, rnd,
+                                                      session.ws_baseline)
+
+
 def _run_turn(session: Session, role: str, system: str, instruction: str, rnd: int,
               action: str = "") -> str:
     """One agent turn, plus tool follow-ups when the session enables tools.
 
     If the reply contains ``<TOOL>`` calls, they are executed and the agent
     immediately gets another turn with the results (up to a small cap); the
-    last reply is returned.
+    last reply is returned. When the session has a generic shared workspace,
+    ``<FILE>`` blocks and native file edits are absorbed after each reply.
     """
     text = _run_single_turn(session, role, system, instruction, rnd, action)
-    if not session.tools:
-        return text
-    for _ in range(_TOOL_MAX_STEPS):
-        results_block = _run_tool_calls(session, role, rnd, text)
-        if results_block is None:
-            return text
-        text = _run_single_turn(
-            session, role, system,
-            f"Tool results:\n{results_block}\n\nContinue your turn using these "
-            f"results. You may call tools again, or give your final answer.",
-            rnd, action,
-        )
+    if session.tools:
+        for _ in range(_TOOL_MAX_STEPS):
+            results_block = _run_tool_calls(session, role, rnd, text)
+            if results_block is None:
+                break
+            text = _run_single_turn(
+                session, role, system,
+                f"Tool results:\n{results_block}\n\nContinue your turn using these "
+                f"results. You may call tools again, or give your final answer.",
+                rnd, action,
+            )
+    _absorb_generic_edits(session, role, rnd, text)
     return text
 
 
@@ -549,8 +621,9 @@ def _run_single_turn(session: Session, role: str, system: str, instruction: str,
                  action=action)
 
     # A per-role persona override from the UI wins over the strategy's default;
-    # the tools contract (when enabled) is appended either way.
-    system = (session.personas.get(role) or system) + _tools_system(session)
+    # the workspace and tools contracts (when enabled) are appended either way.
+    system = ((session.personas.get(role) or system)
+              + _workspace_system(session) + _tools_system(session))
 
     history = _build_history(session, role)
     use_history = bool(history) and getattr(adapter, "supports_history", True)

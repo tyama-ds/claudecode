@@ -261,7 +261,8 @@ class Handler(BaseHTTPRequestHandler):
         tools = body.get("tools") or []
         if isinstance(tools, list):
             session.tools = [t for t in tools
-                             if t in ("list_files", "read_file", "run", "http_get")]
+                             if t in ("list_files", "read_file", "write_file",
+                                      "run", "http_get")]
 
         # Chain of command for org_team: role -> supervisor role.
         sups = body.get("supervisors") or {}
@@ -283,10 +284,13 @@ class Handler(BaseHTTPRequestHandler):
             session.reference_dir = ref_real
             session.references = load_references(ref_real)
 
-        if strategy_name == "workspace_build":
-            # Default to the directory the server was launched from; a request may
-            # override it. Edits are confined to this root (see _safe_join).
-            ws = (body.get("workspace") or "").strip() or os.getcwd()
+        # A real read/write working directory. Required (defaulting to the
+        # server's launch dir) for workspace_build; optional for every other
+        # strategy — the team then works on its files individually, keeping the
+        # context window small. Edits are confined to this root (see _safe_join).
+        ws_req = (body.get("workspace") or "").strip()
+        if strategy_name == "workspace_build" or ws_req:
+            ws = ws_req or os.getcwd()
             session.workspace = os.path.realpath(ws)
             if body.get("create_dir"):
                 session.workspace_created = _ensure_workspace_dir(session.workspace)
@@ -298,6 +302,11 @@ class Handler(BaseHTTPRequestHandler):
             for adapter in agents.values():
                 if adapter.kind == "cli":
                     adapter.workdir = session.workspace
+            # File-by-file access is the point of a shared workspace: make sure
+            # the file tools are on so agents can read/write individually.
+            for t in ("list_files", "read_file", "write_file"):
+                if t not in session.tools:
+                    session.tools.append(t)
 
         start_session(session)
         self._send_json({"session_id": session.id})

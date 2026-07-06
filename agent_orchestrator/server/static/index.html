@@ -81,15 +81,17 @@
         <input id="min-rounds" type="number" min="0" max="8" value="0" />
       </label>
 
-      <div id="workspace-opts" class="set-group" hidden>
+      <div id="workspace-opts" class="set-group">
         <div class="set-title" data-i18n>Workspace</div>
-        <label class="field"><span class="field-label" data-i18n>Directory</span>
+        <label class="field"><span class="field-label"><span data-i18n>Directory</span>
+          <small id="workspace-optional" data-i18n>(optional — agents read/write its files one by one)</small></span>
           <input id="workspace-dir" type="text" data-i18n-ph
-            placeholder="blank = server's launch directory" /></label>
+            placeholder="a local folder the agents work in (read & write)" /></label>
         <label class="field-check"><input id="workspace-init" type="checkbox" />
           <span><span data-i18n>Create the directory if it doesn't exist</span>
             <small data-i18n>(no git)</small></span></label>
-        <label class="field"><span class="field-label"><span data-i18n>Test command</span>
+        <label class="field" id="test-cmd-wrap" hidden>
+          <span class="field-label"><span data-i18n>Test command</span>
           <small data-i18n>(auto-run after each build round)</small></span>
           <input id="test-cmd" type="text" data-i18n-ph
             placeholder="e.g. pytest -q — results are fed back to the team" /></label>
@@ -108,6 +110,8 @@
           <span>list_files <small data-i18n>(list workspace files)</small></span></label>
         <label class="field-check"><input type="checkbox" class="tool-check" value="read_file" />
           <span>read_file <small data-i18n>(read a workspace file)</small></span></label>
+        <label class="field-check"><input type="checkbox" class="tool-check" value="write_file" />
+          <span>write_file <small data-i18n>(write a workspace file — auto-on with a workspace)</small></span></label>
         <label class="field-check"><input type="checkbox" class="tool-check" value="run" />
           <span>run <small data-i18n>(shell commands in the workspace — trust required)</small></span></label>
         <label class="field-check"><input type="checkbox" class="tool-check" value="http_get" />
