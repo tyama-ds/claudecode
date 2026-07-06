@@ -243,6 +243,24 @@ class Handler(BaseHTTPRequestHandler):
                 unavailable.append({"role": role_key, "id": spec.get("id", "mock"), "reason": reason})
             agents[role_key] = adapter
 
+        # Auto-loop: evaluate the finished result and rework until PASS.
+        loop_spec = body.get("loop") or {}
+        loop_evaluator = None
+        loop_iters = 0
+        if isinstance(loop_spec, dict) and loop_spec.get("iters"):
+            try:
+                loop_iters = max(2, min(int(loop_spec.get("iters", 3)), 10))
+            except (TypeError, ValueError):
+                loop_iters = 3
+            ev = loop_spec.get("evaluator") or {"id": "mock"}
+            loop_evaluator = build_adapter(
+                {"id": ev.get("id", "mock"), "name": "evaluator", "model": ev.get("model")}
+            )
+            ok, reason = loop_evaluator.available()
+            if not ok:
+                unavailable.append({"role": "evaluator", "id": ev.get("id", "mock"),
+                                    "reason": reason})
+
         if unavailable:
             self._send_json(
                 {"error": "selected agents are unavailable", "details": unavailable},
@@ -254,6 +272,8 @@ class Handler(BaseHTTPRequestHandler):
         session.personas = personas
         session.role_order = [k for k, _ in role_list]
         session.min_rounds = session_min_rounds
+        session.loop_iters = loop_iters
+        session.loop_evaluator = loop_evaluator
         if feedback and parent:
             session.parent_id = parent.id
 

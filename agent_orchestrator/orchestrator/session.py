@@ -90,6 +90,8 @@ class Session:
     tools: List[str] = field(default_factory=list)           # tool names agents may call
     test_command: str = ""                                   # auto-run in the workspace each round
     min_rounds: int = 0                                      # DONE not honored before this round
+    loop_iters: int = 0                                      # auto-loop: max iterations (0 = off)
+    loop_evaluator: Optional[AgentAdapter] = None            # judges each iteration's result
     ws_baseline: Optional[Dict[str, str]] = field(           # rolling tree snapshot used to
         default=None, repr=False)                            # detect native edits per turn
     stop_requested: bool = False

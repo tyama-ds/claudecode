@@ -60,7 +60,7 @@ press **Run collaboration**. Turns stream into the transcript as they happen.
 | **Code authoring** | implementer, reviewer | Co-build code: the implementer writes/revises a single code **artifact**, the reviewer critiques each version, until approved. |
 | **Workspace build** | implementer, reviewers (1–3) | **Co-build in a real working directory**: the team first discusses and agrees on a design, then the implementer builds while one or more reviewers critique each diff (applying small fixes directly), until **all** approve. |
 | **Conductor team** | conductor, workers (2–4), reviewer | A **conductor** splits the task and assigns each worker a subtask; a reviewer checks each worker's output and reports back; the conductor evaluates the team every round — **calling out anyone who didn't deliver** — and reassigns until the work is done. Workers run **in parallel**. |
-| **Org team** | your own chain of command | Design the hierarchy yourself — e.g. **one manager, two conductors, five workers**. Delegation flows down level by level (whole levels run in parallel), reports flow back up, and the top manager declares DONE. The chain of command is edited **interactively on the right-panel graph** (click a member, then its new supervisor) or via each card's *Reports to* picker. |
+| **Org team** | your own chain of command | Design the hierarchy yourself — e.g. **one manager, two conductors, five workers**. Delegation flows down level by level (whole levels run in parallel), reports flow back up, and the top manager declares DONE. The chain of command is edited **interactively on the right-panel graph** — a toolbar adds/removes conductors and workers, clicking a member then its new supervisor rewires it (personas/backends stay on the left-panel cards) — or via each card's *Reports to* picker. |
 | **Custom** | your own (2–5) | Define each participant from scratch — backend, model, and persona — then they discuss and close with a conclusion. |
 
 The authoring strategies build a shared **Artifact** — one evolving document or
@@ -127,6 +127,16 @@ persona** (system prompt) right in the UI — mix Claude Code, Codex, GPT, and
 local models in a single run (the same backend can be used by several roles at
 once — parallel phases fan out concurrently), and override any role's
 instructions.
+
+**Auto-loop (evaluate → rework until PASS).** Turn on *Auto-loop* and pick an
+**evaluator backend**: when the team finishes, the evaluator judges the
+deliverable (`PASS` / `FAIL` + concrete feedback). On FAIL the orchestrator
+automatically reworks — fresh conversation, same workspace files, the feedback
+and previous result folded into the task — up to the configured max iterations
+(2–10). Progress streams as 🔁 banners (fail → reworking / pass / cap reached)
+and the evaluator's turns appear in the transcript. Combine with the workspace
+test command for a fully unattended build-test-evaluate-fix loop; Stop/Finish
+still interrupt at any time.
 
 **Run control.** Team strategies support **no round limit** (rounds = ∞): the
 run continues until the conductor/manager declares DONE — or you press the

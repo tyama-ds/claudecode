@@ -124,6 +124,20 @@ const JA = {
   "tests passed": "テスト合格",
   "tests failed": "テスト失敗",
   "output": "出力",
+  // auto-loop
+  "Auto-loop": "オートループ",
+  "Evaluate the result and rework automatically until PASS": "結果を自動評価し、合格まで自動で再作業",
+  "Max iterations": "最大反復回数",
+  "Evaluator backend": "評価役のバックエンド",
+  "evaluation passed": "評価合格 ✓",
+  "evaluation failed — reworking": "評価不合格 — 再作業",
+  "iteration cap reached": "反復上限に到達",
+  "iteration": "反復",
+  // graph editor toolbar
+  "+ Conductor": "+ コンダクター",
+  "− Remove": "− 削除",
+  "select a member first": "先にノードをクリックして選択してください",
+  "the manager cannot be removed": "マネージャーは削除できません",
   "Not satisfied? Send feedback": "不満があればフィードバック",
   "What should be improved? The team reworks the task with this feedback…":
     "どこを改善してほしいですか？ このフィードバック付きでチームが再作業します…",
@@ -288,7 +302,24 @@ async function loadCatalog() {
   sel.addEventListener("change", () => { renderRoles(); persistForm(); });
   restoreForm("strategy");
   renderRoles();
+  fillLoopEval();
   restoreForm("fields");
+}
+
+// Populate the auto-loop evaluator picker with the available backends.
+function fillLoopEval() {
+  const sel = $("#loop-eval");
+  const prev = sel.value;
+  sel.innerHTML = "";
+  const preferred = defaultAgentFor("evaluator");
+  for (const ag of state.agents) {
+    const opt = document.createElement("option");
+    opt.value = ag.id;
+    opt.textContent = ag.available ? ag.label : `${ag.label} — ${ag.reason}`;
+    opt.disabled = !ag.available;
+    if (ag.id === (prev || preferred)) opt.selected = true;
+    sel.appendChild(opt);
+  }
 }
 
 function currentStrategy() {
@@ -450,10 +481,28 @@ function renderOrgPreview() {
   layoutHierarchy(order, sup);
   renderGraph();
   $("#graph").hidden = false;
+  $("#graph-tools").hidden = false;
   $("#board").hidden = false;
   document.querySelector(".console").classList.add("has-board");
   $("#board-list").innerHTML = "";
   graphCaption(t("Click a member, then its new supervisor"));
+}
+
+// Toolbar on the org-chart editor: add/remove members straight from the panel.
+function orgToolAdd(kind) {
+  const holder = $(kind === "conductor" ? "#org-mids" : "#org-workers");
+  if (holder) addOrgMember(holder, kind);
+}
+
+function orgToolRemove() {
+  const g = state.graph;
+  if (!g.edit) return;
+  if (!g.sel) { graphCaption(t("select a member first")); return; }
+  if (g.sel === "manager") { graphCaption(t("the manager cannot be removed")); g.sel = null; renderGraph(); return; }
+  const sel = document.querySelector(`#roles select[data-role="${g.sel}"]`);
+  const rm = sel && sel.closest(".role").querySelector(".role-remove");
+  g.sel = null;
+  if (rm) rm.click(); // the card's remove handler relabels + refreshes the preview
 }
 
 // Workspace build: one implementer + 1–3 reviewers (add/remove).
@@ -704,6 +753,9 @@ function persistForm() {
   const data = { strategy: $("#strategy").value };
   PERSIST_FIELDS.forEach((id) => { data[id] = $("#" + id).value; });
   data["workspace-init"] = $("#workspace-init").checked;
+  data["loop-on"] = $("#loop-on").checked;
+  data["loop-iters"] = $("#loop-iters").value;
+  data["loop-eval"] = $("#loop-eval").value;
   try { localStorage.setItem("ao-form", JSON.stringify(data)); } catch { /* ignore */ }
 }
 
@@ -718,6 +770,12 @@ function restoreForm(phase) {
   // phase "fields": after renderRoles(), which resets rounds to the default
   PERSIST_FIELDS.forEach((id) => { if (data[id] != null && data[id] !== "") $("#" + id).value = data[id]; });
   if (data["workspace-init"] != null) $("#workspace-init").checked = data["workspace-init"];
+  if (data["loop-on"] != null) {
+    $("#loop-on").checked = data["loop-on"];
+    $("#loop-cfg").hidden = !data["loop-on"];
+  }
+  if (data["loop-iters"]) $("#loop-iters").value = data["loop-iters"];
+  if (data["loop-eval"]) $("#loop-eval").value = data["loop-eval"];
 }
 
 // -- run / stream ----------------------------------------------------------
@@ -804,6 +862,12 @@ async function startRun(extra) {
   if ($("#strategy").value === "workspace_build") {
     const testCmd = $("#test-cmd").value.trim();
     if (testCmd) payload.test_command = testCmd;
+  }
+  if ($("#loop-on").checked) {
+    payload.loop = {
+      iters: parseInt($("#loop-iters").value, 10) || 3,
+      evaluator: { id: $("#loop-eval").value || "mock" },
+    };
   }
   Object.assign(payload, extra || {});
   persistForm();
@@ -905,6 +969,8 @@ function handleEvent(evt) {
   } else if (type === "test_result") {
     addTestResult(data);
     graphCaption(`🧪 ${data.command} · ${data.ok ? t("tests passed") : t("tests failed")}`);
+  } else if (type === "loop") {
+    addLoopNote(data);
   } else if (type === "artifact") {
     handleArtifact(data);
   } else if (type === "workspace_edit") {
@@ -1015,6 +1081,7 @@ function seedGraph(agents, strategy, supervisors) {
   }
   renderGraph();
   $("#graph-caption").textContent = "";
+  $("#graph-tools").hidden = true; // runtime graph: not editable
   $("#graph").hidden = false;
 }
 
@@ -1231,6 +1298,7 @@ function resetGraph() {
   state.graph = { pos: null, names: {}, edges: [], sup: {}, sustained: {},
                   strategy: "", edit: false, sel: null };
   $("#graph").hidden = true;
+  $("#graph-tools").hidden = true;
   $("#graph-svg").innerHTML = "";
   $("#graph-caption").textContent = "";
 }
@@ -1424,6 +1492,34 @@ function addNote(msg) {
   el.className = "note";
   el.textContent = msg;
   $("#stream").appendChild(el);
+}
+
+// Auto-loop progress: pass / fail-and-rework / gave-up banners.
+function addLoopNote(d) {
+  const el = document.createElement("div");
+  const cls = d.verdict === "pass" ? "ok" : d.verdict === "fail" ? "again" : "bad";
+  el.className = "loop-card " + cls;
+  const head = document.createElement("div");
+  head.className = "test-head";
+  if (d.verdict === "pass") {
+    head.textContent = `🔁 ✅ ${t("evaluation passed")} · ${t("iteration")} ${d.iteration}/${d.max}`;
+    graphCaption(`🔁 ${t("evaluation passed")}`);
+  } else if (d.verdict === "fail") {
+    head.textContent = `🔁 ${t("evaluation failed — reworking")} · ${d.iteration}/${d.max}`;
+    graphCaption(`🔁 ${t("evaluation failed — reworking")} (${d.iteration}/${d.max})`);
+  } else {
+    head.textContent = `🔁 ⚠ ${t("iteration cap reached")} (${d.max})`;
+    graphCaption(`🔁 ${t("iteration cap reached")}`);
+  }
+  el.appendChild(head);
+  if (d.feedback) {
+    const p = document.createElement("div");
+    p.className = "loop-fb";
+    p.textContent = d.feedback;
+    el.appendChild(p);
+  }
+  $("#stream").appendChild(el);
+  autoScroll(el);
 }
 
 // Automated test run result: a pass/fail card with the output on demand.
@@ -1806,6 +1902,14 @@ $("#rework").addEventListener("click", rework);
 $("#rounds-inf").addEventListener("change", () => {
   $("#rounds").disabled = $("#rounds-inf").checked;
 });
+$("#loop-on").addEventListener("change", () => {
+  $("#loop-cfg").hidden = !$("#loop-on").checked;
+  persistForm();
+});
+$("#loop-eval").addEventListener("change", persistForm);
+$("#g-add-conductor").addEventListener("click", () => orgToolAdd("conductor"));
+$("#g-add-worker").addEventListener("click", () => orgToolAdd("worker"));
+$("#g-remove").addEventListener("click", orgToolRemove);
 $("#theme-toggle").addEventListener("click", cycleTheme);
 $("#lang-toggle").addEventListener("click", toggleLang);
 $("#history-open").addEventListener("click", toggleHistory);
@@ -1845,7 +1949,8 @@ document.addEventListener("click", (e) => {
 });
 
 // Form values survive a reload.
-["task", "rounds", "workspace-dir", "reference-dir", "test-cmd", "min-rounds"].forEach((id) =>
+["task", "rounds", "workspace-dir", "reference-dir", "test-cmd", "min-rounds",
+ "loop-iters"].forEach((id) =>
   $("#" + id).addEventListener("input", persistForm));
 $("#workspace-init").addEventListener("change", persistForm);
 

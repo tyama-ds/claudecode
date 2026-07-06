@@ -131,9 +131,9 @@ body::before {
 }
 /* When a run is live, the agent board takes a third column on the right. */
 .console.has-board {
-  grid-template-columns: 372px minmax(0, 1fr) 254px;
+  grid-template-columns: 372px minmax(0, 1fr) 336px;
   grid-template-areas: "rail feed board";
-  max-width: 1580px;
+  max-width: 1700px;
 }
 .rail { grid-area: rail; }
 .feed { grid-area: feed; min-width: 0; }
@@ -567,6 +567,20 @@ html[data-theme="light"] .d-del { color: #b03048; }
   font-family: var(--mono); padding: 3px;
 }
 
+/* Auto-loop progress banner */
+.loop-card {
+  border: 1px solid rgba(169, 139, 255, 0.45); border-radius: var(--radius-sm);
+  background: linear-gradient(180deg, rgba(169, 139, 255, 0.09), rgba(169, 139, 255, 0.02));
+  padding: 10px 13px; font-family: var(--mono); font-size: 12px;
+  animation: rise 0.25s ease both;
+}
+.loop-card .test-head { color: var(--c); }
+.loop-card.ok { border-color: rgba(52, 211, 153, 0.45); }
+.loop-card.ok .test-head { color: var(--good); }
+.loop-card.bad { border-color: rgba(251, 113, 133, 0.5); }
+.loop-card.bad .test-head { color: var(--bad); }
+.loop-fb { margin-top: 6px; color: var(--text-dim); font-size: 11.5px; white-space: pre-wrap; }
+
 /* Automated test run result card */
 .test-card {
   border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
@@ -653,6 +667,19 @@ html[data-theme="light"] .history-item:hover { background: rgba(20, 30, 55, 0.06
 /* Interaction graph: nodes + animated pulses showing who talks to whom. */
 .graph { margin-bottom: 12px; }
 #graph-svg { width: 100%; height: auto; display: block; }
+
+/* Org-editor toolbar: add/remove members straight from the panel. */
+.graph-tools { display: flex; gap: 6px; margin-bottom: 9px; flex-wrap: wrap; }
+.gbtn {
+  flex: 1; min-width: 0;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border); color: var(--text-dim);
+  border-radius: 8px; font-family: var(--mono); font-size: 10.5px;
+  padding: 6px 8px; cursor: pointer; white-space: nowrap;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.gbtn:hover:not(:disabled) { color: var(--text); border-color: var(--border-strong); }
+.gbtn.danger:hover:not(:disabled) { color: var(--bad); border-color: rgba(251, 113, 133, 0.5); }
 .gedge { stroke: var(--border-strong); stroke-width: 1; opacity: 0.45; }
 .gnode .gbody { fill: rgba(255, 255, 255, 0.06); stroke: var(--border-strong); stroke-width: 1; }
 .gnode.acc-a .gbody { fill: var(--a); stroke: none; }
