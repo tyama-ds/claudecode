@@ -10,6 +10,16 @@ from datetime import datetime
 from enum import Enum
 
 
+_JA_NATURALNESS_RULES = """【自然な日本語のための共通ルール】
+- 翻訳調を避ける：「〜することが可能である」→「〜できる」、「〜という事実」→「〜こと」。「〜が行われた」の乱用を避け、能動態を基本にする。
+- 文末表現の単調な繰り返しを避け、文の長短に変化をつける（一文はおおむね60字以内を目安）。
+- 「一方」「さらに」「このため」「もっとも」などの接続表現で段落内の論理をつなぐ。ただし各段落で多用しない。
+- 箇条書きに頼らず段落の文章として論じる。箇条書きは並列的な列挙が明確に読みやすい場合のみ。
+- 見出しの直後にいきなり箇条書きを置かず、まず1〜2文で導入する。
+- 同じ語・同じ言い回しを近い場所で繰り返さない。指示語（「それ」「これ」）が何を指すか曖昧にしない。
+- 数値・固有名詞・単位は情報源の表記を正確に保つ。"""
+
+
 class WritingStyle(str, Enum):
     """Writing style for the report."""
     FORMAL = "formal"           # 学術的・フォーマル
@@ -218,11 +228,32 @@ class ReportContext:
         """Generate style instructions for chapter generation prompts."""
         prose_rule = "本文は散文パラグラフで記述し、箇条書きは比較・手順など列挙が自然な場合に限定する。"
         style_map = {
-            WritingStyle.FORMAL: f"学術的で客観的な文体。「である」調を使用。{prose_rule}",
-            WritingStyle.BUSINESS: f"ビジネス文書として適切な文体。「です・ます」調。簡潔で明確。{prose_rule}",
-            WritingStyle.TECHNICAL: f"技術文書として正確で詳細。専門用語を適切に使用。{prose_rule}",
-            WritingStyle.EXECUTIVE: f"経営層向けに簡潔。要点を先に、詳細は後に。{prose_rule}",
-            WritingStyle.CASUAL: f"読みやすく親しみやすい文体。{prose_rule}",
+            WritingStyle.FORMAL: (
+                "学術的な報告書の文体。「である」調で統一。客観的・分析的に論じ、"
+                "感情的・主観的な形容（「素晴らしい」「驚くべき」等）は使わない。"
+                "断定できない事項は「〜と考えられる」「〜が示唆される」と書く。"
+                f"{prose_rule}"
+            ),
+            WritingStyle.BUSINESS: (
+                "ビジネス報告書の文体。「です・ます」調で統一。各段落は結論を先に述べ、"
+                "根拠を後に続ける。「〜について見ていきましょう」のような話し言葉・講義調は使わない。"
+                f"{prose_rule}"
+            ),
+            WritingStyle.TECHNICAL: (
+                "技術文書の文体。「である」調。条件・数値・手順を正確に記述し、"
+                "「かなり」「非常に」などの曖昧な程度表現を避ける。専門用語は初出時に簡潔に定義する。"
+                f"{prose_rule}"
+            ),
+            WritingStyle.EXECUTIVE: (
+                "経営層向け。「です・ます」調。冒頭に要点、続けて根拠と示唆。"
+                "1段落は短く（2〜4文）、意思決定に関わる含意を明示する。"
+                f"{prose_rule}"
+            ),
+            WritingStyle.CASUAL: (
+                "平易で読みやすい書き言葉。「です・ます」調。専門用語は日常語に言い換えるか、"
+                "必ず説明を添える。ただし砕けすぎた表現・絵文字は使わない。"
+                f"{prose_rule}"
+            ),
         }
 
         audience_map = {
@@ -239,7 +270,9 @@ class ReportContext:
             return f"""【文体・スタイル指示】
 - 文体: {style_map.get(self.writing_style, "")}
 - 対象読者: {audience_map.get(self.target_audience, "")}
-- 技術レベル: {level_desc}（レベル{self.technical_level}/5）"""
+- 技術レベル: {level_desc}（レベル{self.technical_level}/5）
+
+{_JA_NATURALNESS_RULES}"""
         else:
             return f"""[Writing Style Instructions]
 - Style: {self.writing_style.value}

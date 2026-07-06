@@ -157,7 +157,8 @@ class Evidence:
 
     # Quality indicators
     reliability_score: float = 0.0  # 0-1 scale
-    relevance_score: float = 0.0  # 0-1 scale
+    relevance_score: float = 0.0  # 0-1 scale (relevance to the section)
+    importance_score: float = 0.0  # 0-1 scale (importance to the research purpose)
 
     # Quality categorization
     quality_category: QualityCategory = QualityCategory.UNVERIFIED
@@ -417,6 +418,55 @@ class EvidenceLocker:
         """Update relevance score for evidence."""
         if evidence_id in self._evidence:
             self._evidence[evidence_id].relevance_score = max(0, min(1, score))
+
+    def update_importance(self, evidence_id: str, score: float) -> None:
+        """Update importance score (relevance to the research purpose)."""
+        if evidence_id in self._evidence:
+            self._evidence[evidence_id].importance_score = max(0, min(1, score))
+
+    def update_importance_by_url(
+        self, url: str, score: float, section: str = None,
+    ) -> int:
+        """
+        Update importance for all evidence matching a URL.
+
+        Args:
+            url: Source URL to match
+            score: Importance score (0-1)
+            section: If given, only update evidence tied to this section
+
+        Returns:
+            Number of evidence items updated
+        """
+        updated = 0
+        for evidence in self._evidence.values():
+            if evidence.url != url:
+                continue
+            if section and evidence.section_reference != section:
+                continue
+            evidence.importance_score = max(0, min(1, score))
+            updated += 1
+        return updated
+
+    def get_evidence_by_importance(
+        self, min_importance: float = 0.0, section: str = None,
+    ) -> List[Evidence]:
+        """
+        Get evidence sorted by importance (descending).
+
+        Args:
+            min_importance: Minimum importance score to include
+            section: If given, restrict to evidence for this section
+
+        Returns:
+            Evidence items sorted by importance_score descending
+        """
+        items = (
+            self.get_section_evidence(section) if section
+            else self.get_all_evidence()
+        )
+        filtered = [e for e in items if e.importance_score >= min_importance]
+        return sorted(filtered, key=lambda e: e.importance_score, reverse=True)
 
     def update_quality(
         self,
@@ -689,7 +739,7 @@ class EvidenceLocker:
             "author", "publisher", "published_date", "content_excerpt",
             "extracted_text",
             "accessed_at", "search_query", "section_reference",
-            "reliability_score", "relevance_score",
+            "reliability_score", "relevance_score", "importance_score",
             "quality_category", "source_type", "quality_score", "quality_notes",
             "citation_text"
         ]
@@ -715,6 +765,7 @@ class EvidenceLocker:
                     "section_reference": evidence.section_reference,
                     "reliability_score": evidence.reliability_score,
                     "relevance_score": evidence.relevance_score,
+                    "importance_score": evidence.importance_score,
                     "quality_category": evidence.quality_category.value,
                     "source_type": evidence.source_type.value,
                     "quality_score": evidence.quality_indicators.calculate_score(),

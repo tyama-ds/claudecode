@@ -13,6 +13,101 @@ from urllib.parse import urlparse, urljoin, urldefrag
 from collections import deque
 
 
+def get_root_domain(url: str) -> str:
+    """Extract root domain (scheme + netloc) from URL."""
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def get_domain(url: str) -> str:
+    """Extract domain (netloc) from URL."""
+    return urlparse(url).netloc
+
+
+def normalize_url(url: str) -> str:
+    """Normalize URL by removing fragments and trailing slashes."""
+    url, _ = urldefrag(url)
+    return url.rstrip("/")
+
+
+def is_valid_page_url(url: str, skip_documents: bool = True) -> bool:
+    """Check if URL is a valid page URL (not a file download, etc.).
+
+    Args:
+        url: URL to check
+        skip_documents: When True, also reject PDF/DOCX/XLSX-style document
+            URLs. Callers that handle documents separately (see
+            SiteCrawler.is_document_url) should pass False.
+    """
+    # Skip common non-page URLs
+    skip_extensions = [
+        ".zip", ".rar", ".tar", ".gz", ".exe", ".dmg",
+        ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp",
+        ".mp3", ".mp4", ".avi", ".mov", ".wmv",
+        ".css", ".js", ".json", ".xml",
+    ]
+    if skip_documents:
+        skip_extensions += [
+            ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+        ]
+    lower_url = url.lower()
+    for ext in skip_extensions:
+        if lower_url.endswith(ext):
+            return False
+
+    # Skip common non-content paths
+    skip_patterns = [
+        "/login", "/signup", "/register", "/cart", "/checkout",
+        "/account", "/admin", "/wp-admin", "/api/",
+        "/search?", "/tag/", "/category/", "/author/",
+        "/page/", "/feed/", "/rss",
+    ]
+    for pattern in skip_patterns:
+        if pattern in lower_url:
+            return False
+
+    return True
+
+
+def score_relevance_simple(
+    content: str,
+    title: str,
+    research_topic: str,
+    keywords: List[str],
+) -> float:
+    """
+    Score page relevance using simple keyword matching.
+
+    Args:
+        content: Page content
+        title: Page title
+        research_topic: Main research topic
+        keywords: Related keywords
+
+    Returns:
+        Relevance score between 0 and 1
+    """
+    text = f"{title} {content}".lower()
+    topic_lower = research_topic.lower()
+
+    score = 0.0
+
+    # Check topic in title (high weight)
+    if topic_lower in title.lower():
+        score += 0.4
+
+    # Check topic in content
+    topic_words = topic_lower.split()
+    topic_matches = sum(1 for word in topic_words if word in text)
+    score += (topic_matches / max(len(topic_words), 1)) * 0.3
+
+    # Check keywords
+    keyword_matches = sum(1 for kw in keywords if kw.lower() in text)
+    score += (keyword_matches / max(len(keywords), 1)) * 0.3
+
+    return min(score, 1.0)
+
+
 @dataclass
 class CrawledPage:
     """Represents a crawled page."""
@@ -114,21 +209,19 @@ class SiteCrawler:
 
     def get_root_domain(self, url: str) -> str:
         """Extract root domain from URL."""
-        parsed = urlparse(url)
-        return f"{parsed.scheme}://{parsed.netloc}"
+        return get_root_domain(url)
 
     def get_domain(self, url: str) -> str:
         """Extract domain (netloc) from URL."""
-        return urlparse(url).netloc
+        return get_domain(url)
 
     def is_same_domain(self, url1: str, url2: str) -> bool:
         """Check if two URLs belong to the same domain."""
-        return self.get_domain(url1) == self.get_domain(url2)
+        return get_domain(url1) == get_domain(url2)
 
     def normalize_url(self, url: str) -> str:
         """Normalize URL by removing fragments and trailing slashes."""
-        url, _ = urldefrag(url)
-        return url.rstrip("/")
+        return normalize_url(url)
 
     def is_document_url(self, url: str) -> bool:
         """Check if URL is a downloadable document (PDF, XLSX, DOCX, CSV)."""
@@ -139,33 +232,10 @@ class SiteCrawler:
     def is_valid_page_url(self, url: str) -> bool:
         """Check if URL is a valid page URL (not a file download, etc.).
 
-        Note: PDF/DOCX/XLSX documents are now handled separately via
+        Note: PDF/DOCX/XLSX documents are handled separately via
         is_document_url() and are not skipped outright.
         """
-        # Skip binary/media files (but NOT PDF/DOCX/XLSX/CSV - those are now handled)
-        skip_extensions = [
-            ".zip", ".rar", ".tar", ".gz", ".exe", ".dmg",
-            ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp",
-            ".mp3", ".mp4", ".avi", ".mov", ".wmv",
-            ".css", ".js", ".json", ".xml",
-        ]
-        lower_url = url.lower()
-        for ext in skip_extensions:
-            if lower_url.endswith(ext):
-                return False
-
-        # Skip common non-content paths
-        skip_patterns = [
-            "/login", "/signup", "/register", "/cart", "/checkout",
-            "/account", "/admin", "/wp-admin", "/api/",
-            "/search?", "/tag/", "/category/", "/author/",
-            "/page/", "/feed/", "/rss",
-        ]
-        for pattern in skip_patterns:
-            if pattern in lower_url:
-                return False
-
-        return True
+        return is_valid_page_url(url, skip_documents=False)
 
     def extract_links(self, base_url: str, html_content: str) -> Tuple[List[str], List[str]]:
         """Extract links from HTML content.
@@ -215,37 +285,8 @@ class SiteCrawler:
         research_topic: str,
         keywords: List[str],
     ) -> float:
-        """
-        Score page relevance using simple keyword matching.
-
-        Args:
-            content: Page content
-            title: Page title
-            research_topic: Main research topic
-            keywords: Related keywords
-
-        Returns:
-            Relevance score between 0 and 1
-        """
-        text = f"{title} {content}".lower()
-        topic_lower = research_topic.lower()
-
-        score = 0.0
-
-        # Check topic in title (high weight)
-        if topic_lower in title.lower():
-            score += 0.4
-
-        # Check topic in content
-        topic_words = topic_lower.split()
-        topic_matches = sum(1 for word in topic_words if word in text)
-        score += (topic_matches / max(len(topic_words), 1)) * 0.3
-
-        # Check keywords
-        keyword_matches = sum(1 for kw in keywords if kw.lower() in text)
-        score += (keyword_matches / max(len(keywords), 1)) * 0.3
-
-        return min(score, 1.0)
+        """Score page relevance using simple keyword matching."""
+        return score_relevance_simple(content, title, research_topic, keywords)
 
     def score_relevance_llm(
         self,

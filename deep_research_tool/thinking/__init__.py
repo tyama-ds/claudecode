@@ -58,6 +58,17 @@ from .deep_think import (
     DeepThinkProcessor,
 )
 
+from .fermi_estimator import (
+    FermiEstimator,
+    FermiEstimate,
+    FermiFactor,
+)
+
+from .fermi_export import (
+    save_fermi_docx,
+    save_fermi_pdf,
+)
+
 from .extension_interface import (
     ExtensionConfig,
     DeepThinkExtension,
@@ -88,6 +99,12 @@ __all__ = [
     # Main processor
     "DeepThinkConfig",
     "DeepThinkProcessor",
+    # Fermi estimation
+    "FermiEstimator",
+    "FermiEstimate",
+    "FermiFactor",
+    "save_fermi_docx",
+    "save_fermi_pdf",
     # Extensions
     "ExtensionConfig",
     "DeepThinkExtension",

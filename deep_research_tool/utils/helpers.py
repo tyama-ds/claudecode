@@ -9,7 +9,7 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +437,141 @@ def extract_json_from_response(text: str) -> Dict[str, Any]:
             pass
 
     raise ValueError("No valid JSON found in response")
+
+
+def extract_json_array_from_response(text: str) -> List[Any]:
+    """
+    Extract a top-level JSON array from LLM response text.
+
+    Companion to extract_json_from_response for responses whose top-level
+    structure is a JSON array rather than an object. Handles markdown code
+    blocks and surrounding text.
+
+    Args:
+        text: Raw LLM response text
+
+    Returns:
+        Parsed JSON as a list
+
+    Raises:
+        ValueError: If no valid JSON array is found
+    """
+    if not text:
+        raise ValueError("Empty response text")
+
+    # Strip markdown code blocks first
+    code_block_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', text, re.DOTALL)
+    if code_block_match:
+        candidate = code_block_match.group(1).strip()
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    # Find JSON array by matching brackets
+    start = text.find("[")
+    if start == -1:
+        raise ValueError("No JSON array found in response")
+
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == '\\' and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '[':
+            depth += 1
+        elif ch == ']':
+            depth -= 1
+            if depth == 0:
+                candidate = text[start:i + 1]
+                try:
+                    parsed = json.loads(candidate)
+                    if isinstance(parsed, list):
+                        return parsed
+                except json.JSONDecodeError:
+                    break
+
+    # Fallback: first '[' to last ']'
+    end = text.rfind("]") + 1
+    if end > start:
+        try:
+            parsed = json.loads(text[start:end])
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError("No valid JSON array found in response")
+
+
+def split_prose_and_meta(text: str, delimiter: str) -> Tuple[str, Dict[str, Any]]:
+    """
+    Split an LLM response into (prose_body, metadata_dict).
+
+    Supports the "prose + delimiter + metadata JSON" output convention used
+    for report text generation, while remaining backward compatible with
+    legacy responses that wrap the prose in a JSON object.
+
+    Fallback chain:
+      1. If the delimiter is present: body is everything before it (code
+         fences stripped), metadata is parsed from everything after it.
+         Metadata parse failure yields an empty dict, never an error.
+      2. Else, if the whole text parses as a JSON object with a "content"
+         key: legacy JSON mode -- content becomes the body, the remaining
+         keys become the metadata.
+      3. Else: the whole text (code fences stripped) is the body, metadata
+         is empty.
+
+    Args:
+        text: Raw LLM response text
+        delimiter: Delimiter line separating prose from metadata JSON
+
+    Returns:
+        Tuple of (prose body, metadata dict)
+    """
+    if not text:
+        return "", {}
+
+    def _strip_fences(s: str) -> str:
+        s = s.strip()
+        # Remove a wrapping code fence if the entire text is fenced
+        fence_match = re.fullmatch(r'```(?:\w+)?\s*\n(.*?)\n?\s*```', s, re.DOTALL)
+        if fence_match:
+            return fence_match.group(1).strip()
+        return s
+
+    if delimiter in text:
+        body_part, _, meta_part = text.partition(delimiter)
+        body = _strip_fences(body_part)
+        try:
+            meta = extract_json_from_response(meta_part)
+        except (ValueError, json.JSONDecodeError):
+            meta = {}
+        return body, meta
+
+    # Legacy JSON mode: whole response is a JSON object with "content"
+    try:
+        data = extract_json_from_response(text)
+        if isinstance(data, dict) and "content" in data:
+            body = data.pop("content") or ""
+            return body, data
+    except (ValueError, json.JSONDecodeError):
+        pass
+
+    return _strip_fences(text), {}
 
 
 def merge_dicts(*dicts, deep: bool = True) -> dict:

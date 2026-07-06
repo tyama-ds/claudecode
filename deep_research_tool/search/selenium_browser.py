@@ -22,6 +22,8 @@ class SeleniumBrowser(BaseSearchClient):
         extract_images: bool = True,
         max_images: int = 5,
         implicit_wait: int = 10,
+        proxies: dict = None,
+        verify_ssl: bool = True,
     ):
         """
         Initialize Selenium browser client.
@@ -30,10 +32,16 @@ class SeleniumBrowser(BaseSearchClient):
             max_results: Maximum number of search results
             timeout: Page load timeout in seconds
             headless: Run browser in headless mode
-            browser: Browser type (chrome, firefox)
+            browser: Browser type (chrome, edge, firefox)
             extract_images: Whether to extract images from pages
             max_images: Maximum number of images to extract per page
             implicit_wait: Implicit wait time for elements
+            proxies: Proxy dict like {"https": "http://proxy:8080"}. The
+                browser is launched with this proxy. Note: URL-embedded
+                credentials are not supported by Chromium's --proxy-server;
+                use an unauthenticated proxy URL for the browser.
+            verify_ssl: When False, the browser ignores certificate errors
+                (for self-signed proxy certificates)
         """
         super().__init__(
             max_results=max_results,
@@ -44,7 +52,33 @@ class SeleniumBrowser(BaseSearchClient):
         self.headless = headless
         self.browser = browser
         self.implicit_wait = implicit_wait
+        self.proxies = proxies
+        self.verify_ssl = verify_ssl
         self._driver = None
+
+    def _proxy_url(self) -> str:
+        """Proxy URL for the browser (credentials stripped if present)."""
+        if not self.proxies:
+            return ""
+        url = self.proxies.get("https") or self.proxies.get("http") or ""
+        if "@" in url:
+            # Chromium/--proxy-server does not accept embedded credentials
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            host = parsed.hostname or ""
+            port = f":{parsed.port}" if parsed.port else ""
+            url = f"{parsed.scheme}://{host}{port}"
+        return url
+
+    def _chromium_proxy_args(self) -> list:
+        """Chromium (Chrome/Edge) launch arguments for proxy/SSL settings."""
+        args = []
+        proxy_url = self._proxy_url()
+        if proxy_url:
+            args.append(f"--proxy-server={proxy_url}")
+        if not self.verify_ssl:
+            args.append("--ignore-certificate-errors")
+        return args
 
     def _get_driver(self):
         """Get or create Selenium WebDriver."""
@@ -57,6 +91,8 @@ class SeleniumBrowser(BaseSearchClient):
         try:
             if self.browser.lower() == "chrome":
                 return self._create_chrome_driver()
+            elif self.browser.lower() == "edge":
+                return self._create_edge_driver()
             elif self.browser.lower() == "firefox":
                 return self._create_firefox_driver()
             else:
@@ -92,8 +128,54 @@ class SeleniumBrowser(BaseSearchClient):
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
 
+        # Proxy / SSL settings
+        for arg in self._chromium_proxy_args():
+            options.add_argument(arg)
+        if not self.verify_ssl:
+            options.set_capability("acceptInsecureCerts", True)
+
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
+
+        driver.set_page_load_timeout(self.timeout)
+        driver.implicitly_wait(self.implicit_wait)
+
+        return driver
+
+    def _create_edge_driver(self):
+        """Create Microsoft Edge WebDriver (Chromium-based)."""
+        from selenium import webdriver
+        from selenium.webdriver.edge.options import Options
+        from selenium.webdriver.edge.service import Service
+        from webdriver_manager.microsoft import EdgeChromiumDriverManager
+
+        options = Options()
+        if self.headless:
+            options.add_argument("--headless=new")
+
+        # Common options for stability (Edge is Chromium-based)
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument(
+            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 "
+            "Safari/537.36 Edg/120.0.0.0"
+        )
+
+        # Disable automation flags
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+
+        # Proxy / SSL settings
+        for arg in self._chromium_proxy_args():
+            options.add_argument(arg)
+        if not self.verify_ssl:
+            options.set_capability("acceptInsecureCerts", True)
+
+        service = Service(EdgeChromiumDriverManager().install())
+        driver = webdriver.Edge(service=service, options=options)
 
         driver.set_page_load_timeout(self.timeout)
         driver.implicitly_wait(self.implicit_wait)
@@ -110,6 +192,21 @@ class SeleniumBrowser(BaseSearchClient):
         options = Options()
         if self.headless:
             options.add_argument("--headless")
+
+        # Proxy settings via Firefox preferences
+        proxy_url = self._proxy_url()
+        if proxy_url:
+            from urllib.parse import urlparse
+            parsed = urlparse(proxy_url)
+            host = parsed.hostname or ""
+            port = parsed.port or 8080
+            options.set_preference("network.proxy.type", 1)
+            options.set_preference("network.proxy.http", host)
+            options.set_preference("network.proxy.http_port", port)
+            options.set_preference("network.proxy.ssl", host)
+            options.set_preference("network.proxy.ssl_port", port)
+        if not self.verify_ssl:
+            options.set_capability("acceptInsecureCerts", True)
 
         service = Service(GeckoDriverManager().install())
         driver = webdriver.Firefox(service=service, options=options)

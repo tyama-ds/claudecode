@@ -108,6 +108,7 @@ def _create_report_generator(
             technical_level=config.report.v2_technical_level,
             enable_consistency_check=config.report.v2_enable_consistency_check,
             enable_two_phase=config.report.v2_enable_two_phase,
+            enable_polish=config.report.v2_enable_polish,
             language=config.research.language,
             target_pages=config.report.target_pages,
             target_characters=config.report.target_characters,
@@ -181,6 +182,7 @@ class DeepResearchTool:
 
         # Initialize components
         self.llm_client = self._create_llm_client()
+        self.stage_llm_clients = self._create_stage_llm_clients()
         self.search_client = self._create_search_client()
         self.researcher = None
         self.verifier = None
@@ -262,6 +264,41 @@ class DeepResearchTool:
             kwargs["backend"] = self.config.api.local_backend.value
 
         return get_client(**kwargs)
+
+    def _create_stage_llm_clients(self) -> dict:
+        """
+        Create per-stage LLM clients from config.api.stage_overrides.
+
+        Stages without an override are absent from the returned dict and
+        fall back to the default client.
+        """
+        clients = {}
+        for stage, spec in (self.config.api.stage_overrides or {}).items():
+            provider = spec.get("provider", self.config.api.provider.value)
+            api_key = spec.get("api_key") or {
+                "openai": self.config.api.openai_api_key,
+                "anthropic": self.config.api.anthropic_api_key,
+                "local": self.config.api.local_api_key,
+            }.get(provider)
+
+            kwargs = {
+                "provider": provider,
+                "api_key": api_key,
+                "model": spec.get("model"),
+                "http_proxy": self.config.proxy.http_proxy,
+                "https_proxy": self.config.proxy.https_proxy,
+                "verify_ssl": self.config.proxy.verify_ssl,
+            }
+            if provider == "local":
+                kwargs["base_url"] = spec.get("base_url", self.config.api.local_base_url)
+                kwargs["backend"] = spec.get(
+                    "backend",
+                    self.config.api.local_backend.value,
+                )
+
+            clients[stage] = get_client(**kwargs)
+            print(f"[StageLLM] {stage}: {provider} / {spec.get('model') or 'default model'}")
+        return clients
 
     def _create_search_client(self):
         """Create search client based on configuration."""
@@ -401,6 +438,24 @@ class DeepResearchTool:
             crawl_mode=self.config.research.crawl_mode,
             fast_crawl_workers=self.config.research.fast_crawl_workers,
             fast_crawl_batch_size=self.config.research.fast_crawl_batch_size,
+            ai_crawl_max_total_pages=self.config.research.ai_crawl_max_total_pages,
+            ai_crawl_max_depth=self.config.research.ai_crawl_max_depth,
+            ai_crawl_site_depth=self.config.research.ai_crawl_site_depth,
+            ai_crawl_max_llm_calls=self.config.research.ai_crawl_max_llm_calls,
+            ai_crawl_max_pages_per_domain=self.config.research.ai_crawl_max_pages_per_domain,
+            ai_crawl_politeness_delay=self.config.research.ai_crawl_politeness_delay,
+            selenium_headless=self.config.search.headless,
+            selenium_browser=self.config.search.browser,
+            selenium_proxies=self.config.proxy.get_proxies_dict(),
+            selenium_verify_ssl=self.config.proxy.verify_ssl,
+            importance_threshold=self.config.research.importance_threshold,
+            min_high_importance_sources=self.config.research.min_high_importance_sources,
+            max_gap_fill_rounds=self.config.research.max_gap_fill_rounds,
+            planning_llm=self.stage_llm_clients.get("planning"),
+            crawling_llm=self.stage_llm_clients.get("crawling"),
+            evaluation_llm=self.stage_llm_clients.get("evaluation"),
+            writing_llm=self.stage_llm_clients.get("writing"),
+            source_mode=self.config.research.source_mode,
             multilingual_config=self.config.multilingual if self.config.multilingual.enabled else None,
             max_content_length=self.config.research.max_content_length,
             target_pages=self.config.report.target_pages,
@@ -495,7 +550,7 @@ class DeepResearchTool:
 
         generator, version_tag = _create_report_generator(
             config=self.config,
-            llm_client=self.llm_client,
+            llm_client=self.stage_llm_clients.get("writing", self.llm_client),
             output_dir=self.config.report.output_dir / "reports",
         )
         self.report_generator = generator
@@ -1482,6 +1537,7 @@ Output only the text (no JSON, no heading):"""
             max_images_per_section=self.config.report.auto_figures_max_images,
             proxies=proxies,
             verify_ssl=self.config.proxy.verify_ssl,
+            chart_library=self.config.report.chart_library,
         )
 
         # Step 5: Generate figures/tables/charts
@@ -1943,6 +1999,19 @@ def run_research(
     crawl_mode: str = "standard",
     fast_crawl_workers: int = 10,
     fast_crawl_batch_size: int = 5,
+    # AI crawl mode parameters
+    ai_crawl_max_total_pages: int = 15,
+    ai_crawl_max_depth: int = 3,
+    ai_crawl_site_depth: int = 2,
+    ai_crawl_max_llm_calls: int = 25,
+    ai_crawl_max_pages_per_domain: int = 5,
+    ai_crawl_politeness_delay: float = 1.0,
+    # Information source mode
+    source_mode: str = "web",
+    # Evidence importance / gap-fill parameters
+    importance_threshold: float = 0.6,
+    min_high_importance_sources: int = 2,
+    max_gap_fill_rounds: int = 1,
     # Auto figure/table generation parameters
     auto_figures: bool = False,
     auto_figures_include_images: bool = True,
@@ -2018,9 +2087,21 @@ def run_research(
         content_filter_mode: Content filter strictness ('strict', 'moderate', 'minimal', 'none')
         custom_blocked_domains: List of domains to block (ads, spam, etc.)
         custom_whitelisted_domains: List of domains to always allow
-        crawl_mode: Crawl mode for performance ('standard', 'fast_batch', 'fast_parallel')
+        crawl_mode: Crawl mode ('standard', 'fast_batch', 'fast_parallel',
+            'aicrawl', 'ai_crawl_selenium')
         fast_crawl_workers: Max parallel workers for fast crawl mode
         fast_crawl_batch_size: Pages per batch in batch evaluation mode
+        ai_crawl_max_total_pages: aicrawl - max pages fetched per section
+        ai_crawl_max_depth: aicrawl - max link depth from search-result seeds
+        ai_crawl_site_depth: aicrawl - max layers followed within one site
+        ai_crawl_max_llm_calls: aicrawl - LLM decision call budget per section
+        ai_crawl_max_pages_per_domain: aicrawl - max pages fetched per domain
+        ai_crawl_politeness_delay: aicrawl - min seconds between same-domain fetches
+        source_mode: Information sources: 'web' (default), 'local' (local
+            documents only; requires additional_documents), 'hybrid' (both)
+        importance_threshold: min importance score to count as high-importance
+        min_high_importance_sources: below this, gap-fill re-search triggers
+        max_gap_fill_rounds: max gap-fill re-search rounds per section
         auto_figures: Auto-generate figures/tables and embed in report
         auto_figures_include_images: Include images from web sources
         auto_figures_include_tables: Include extracted tables
@@ -2139,6 +2220,16 @@ def run_research(
         crawl_mode=crawl_mode,
         fast_crawl_workers=fast_crawl_workers,
         fast_crawl_batch_size=fast_crawl_batch_size,
+        ai_crawl_max_total_pages=ai_crawl_max_total_pages,
+        ai_crawl_max_depth=ai_crawl_max_depth,
+        ai_crawl_site_depth=ai_crawl_site_depth,
+        ai_crawl_max_llm_calls=ai_crawl_max_llm_calls,
+        ai_crawl_max_pages_per_domain=ai_crawl_max_pages_per_domain,
+        ai_crawl_politeness_delay=ai_crawl_politeness_delay,
+        source_mode=source_mode,
+        importance_threshold=importance_threshold,
+        min_high_importance_sources=min_high_importance_sources,
+        max_gap_fill_rounds=max_gap_fill_rounds,
         auto_figures=auto_figures,
         auto_figures_include_images=auto_figures_include_images,
         auto_figures_include_tables=auto_figures_include_tables,

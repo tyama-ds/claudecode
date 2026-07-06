@@ -39,6 +39,12 @@ def launch_gui():
     gui_main()
 
 
+def launch_fermi_gui():
+    """Launch the provisional Fermi estimation GUI."""
+    from .fermi_gui import main as fermi_gui_main
+    fermi_gui_main()
+
+
 __all__ = [
     "Config",
     "ResearchConfig",
@@ -53,6 +59,7 @@ __all__ = [
     "ManualResearcher",
     "load_evidence_file",
     "launch_gui",
+    "launch_fermi_gui",
     "get_token_stats",
     "reset_token_stats",
     "TokenUsageStats",

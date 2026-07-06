@@ -150,9 +150,73 @@ def cli():
     help="Max sites to crawl per search in extended mode (default: 3)"
 )
 @click.option(
+    "--browser",
+    type=click.Choice(["chrome", "edge", "firefox"]),
+    default="chrome",
+    help="Browser for Selenium (selenium search / ai_crawl_selenium mode)"
+)
+@click.option(
+    "--http-proxy",
+    default=None,
+    help="HTTP proxy URL (default: HTTP_PROXY env var)"
+)
+@click.option(
+    "--https-proxy",
+    default=None,
+    help="HTTPS proxy URL (default: HTTPS_PROXY env var)"
+)
+@click.option(
+    "--no-verify-ssl",
+    is_flag=True,
+    default=False,
+    help="Disable SSL certificate verification (self-signed proxy certs)"
+)
+@click.option(
+    "--source-mode",
+    type=click.Choice(["web", "local", "hybrid"]),
+    default="web",
+    help="Information sources: web (default), local (documents only, "
+         "requires --documents), or hybrid (documents + web)"
+)
+@click.option(
+    "--crawl-mode",
+    type=click.Choice([
+        "standard", "fast_batch", "fast_parallel", "aicrawl", "ai_crawl_selenium",
+    ]),
+    default="standard",
+    help="Crawl mode. aicrawl: LLM reads each page and decides which links "
+         "to follow. ai_crawl_selenium: same, fetching pages via Selenium "
+         "browser (for JavaScript-rendered sites)"
+)
+@click.option(
+    "--ai-crawl-max-pages",
+    type=int,
+    default=15,
+    help="aicrawl mode: max pages fetched per section (default: 15)"
+)
+@click.option(
+    "--ai-crawl-site-depth",
+    type=int,
+    default=2,
+    help="aicrawl mode: max layers followed within one site (default: 2)"
+)
+@click.option(
+    "--gap-fill-rounds",
+    type=int,
+    default=1,
+    help="Max re-search rounds per section when high-importance information "
+         "is insufficient (default: 1, 0 to disable)"
+)
+@click.option(
     "--auto-figures/--no-auto-figures",
     default=False,
     help="Auto-generate figures/tables and embed in report"
+)
+@click.option(
+    "--chart-library",
+    type=click.Choice(["matplotlib", "seaborn"]),
+    default="matplotlib",
+    help="Chart rendering library (seaborn falls back to matplotlib if not installed)"
 )
 @click.option(
     "--verbose", "-v",
@@ -186,7 +250,17 @@ def research(
     crawl_max_pages: int,
     crawl_max_depth: int,
     crawl_max_sites: int,
+    browser: str,
+    http_proxy: Optional[str],
+    https_proxy: Optional[str],
+    no_verify_ssl: bool,
+    source_mode: str,
+    crawl_mode: str,
+    ai_crawl_max_pages: int,
+    ai_crawl_site_depth: int,
+    gap_fill_rounds: int,
     auto_figures: bool,
+    chart_library: str,
     verbose: bool,
     openai_key: Optional[str],
     anthropic_key: Optional[str],
@@ -221,7 +295,17 @@ def research(
         crawl_max_pages=crawl_max_pages,
         crawl_max_depth=crawl_max_depth,
         crawl_max_sites=crawl_max_sites,
+        browser=browser,
+        http_proxy=http_proxy,
+        https_proxy=https_proxy,
+        verify_ssl=not no_verify_ssl,
+        source_mode=source_mode,
+        crawl_mode=crawl_mode,
+        ai_crawl_max_total_pages=ai_crawl_max_pages,
+        ai_crawl_site_depth=ai_crawl_site_depth,
+        max_gap_fill_rounds=gap_fill_rounds,
         auto_figures=auto_figures,
+        chart_library=chart_library,
     )
 
     # Validate config
@@ -753,6 +837,24 @@ def info():
         console.print("  ANTHROPIC_API_KEY: [green]Set[/green]")
     else:
         console.print("  ANTHROPIC_API_KEY: [yellow]Not set[/yellow]")
+
+
+@cli.command()
+@click.option("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
+@click.option("--port", type=int, default=8765, help="Port (default: 8765)")
+@click.option(
+    "--output-dir", default="./output",
+    help="Output directory served for report downloads (default: ./output)"
+)
+def webui(host: str, port: int, output_dir: str):
+    """Launch the browser-based Web UI.
+
+    Example:
+        deep-research webui
+        deep-research webui --port 8080
+    """
+    from .webui.server import run_server
+    run_server(host=host, port=port, output_dir=output_dir)
 
 
 def main():

@@ -6,7 +6,7 @@ Supports both environment variables and direct parameter passing.
 
 import os
 from enum import Enum
-from typing import Optional, List, Dict
+from typing import Any, Optional, List, Dict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -147,6 +147,11 @@ class APIConfig:
     max_tokens: int = 4096
     max_tokens_limit: int = 200_000  # Upper bound for auto-retry on truncation
 
+    # Per-stage LLM overrides. Keys: planning / crawling / evaluation / writing.
+    # Values: {"provider": ..., "model": ..., "api_key": optional,
+    #          "base_url": optional, "backend": optional}
+    stage_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
     # Available models for reference
     OPENAI_MODELS: tuple = (
         "gpt-5",
@@ -225,7 +230,7 @@ class SearchConfig:
 
     # Selenium settings
     headless: bool = True
-    browser: str = "chrome"
+    browser: str = "chrome"  # chrome / edge / firefox
     page_load_timeout: int = 30
     implicit_wait: int = 10
 
@@ -349,11 +354,20 @@ class ContentFilterMode(str, Enum):
     NONE = "none"          # No filtering
 
 
+class ResearchSourceMode(str, Enum):
+    """Which information sources the research uses."""
+    WEB = "web"        # Web search/crawl only (default)
+    LOCAL = "local"    # Local documents only (no web access)
+    HYBRID = "hybrid"  # Local documents + web
+
+
 class CrawlMode(str, Enum):
     """Crawl and evaluation mode for performance optimization."""
     STANDARD = "standard"          # Original sequential mode
     FAST_BATCH = "fast_batch"      # Fast parallel crawl + batch LLM evaluation
     FAST_PARALLEL = "fast_parallel"  # Fast parallel crawl + parallel LLM evaluation
+    AI_CRAWL = "aicrawl"           # LLM-driven crawl (LLM decides which links to follow)
+    AI_CRAWL_SELENIUM = "ai_crawl_selenium"  # LLM-driven crawl fetching pages via Selenium browser
 
 
 @dataclass
@@ -392,9 +406,25 @@ class ResearchConfig:
     custom_whitelisted_domains: List[str] = field(default_factory=list)
 
     # Fast crawl mode settings
-    crawl_mode: CrawlMode = CrawlMode.STANDARD  # standard, fast_batch, fast_parallel
+    crawl_mode: CrawlMode = CrawlMode.STANDARD  # standard, fast_batch, fast_parallel, aicrawl
     fast_crawl_workers: int = 10   # Max parallel workers for fetching
     fast_crawl_batch_size: int = 5  # Pages per batch in batch evaluation mode
+
+    # AI crawl mode settings (LLM-driven crawling)
+    ai_crawl_max_total_pages: int = 15   # Fetch budget per section
+    ai_crawl_max_depth: int = 3          # Max link depth from search-result seeds
+    ai_crawl_site_depth: int = 2         # Max layers followed within one site (domain)
+    ai_crawl_max_llm_calls: int = 25     # LLM decision call budget per section
+    ai_crawl_max_pages_per_domain: int = 5  # Cap of fetched pages per domain
+    ai_crawl_politeness_delay: float = 1.0  # Min seconds between same-domain fetches
+
+    # Information source mode (web / local documents / hybrid)
+    source_mode: ResearchSourceMode = ResearchSourceMode.WEB
+
+    # Evidence importance / gap-fill settings
+    importance_threshold: float = 0.6      # Min score to count as high-importance
+    min_high_importance_sources: int = 2   # Below this, gap-fill re-search triggers
+    max_gap_fill_rounds: int = 1           # Max re-search rounds per section
 
 
 @dataclass
@@ -431,6 +461,10 @@ class ReportConfig:
     v2_enable_consistency_check: bool = True
     v2_enable_two_phase: bool = True
     v2_include_glossary: bool = True
+    v2_enable_polish: bool = True  # Final naturalness polish pass over all chapters
+
+    # Chart rendering library ("matplotlib" or "seaborn")
+    chart_library: str = "matplotlib"
 
     # Auto figure/table generation settings
     auto_figures: bool = False  # Auto-generate figures/tables during run_research
@@ -593,6 +627,19 @@ def create_config(
     crawl_mode: str = "standard",
     fast_crawl_workers: int = 10,
     fast_crawl_batch_size: int = 5,
+    # AI crawl mode parameters
+    ai_crawl_max_total_pages: int = 15,
+    ai_crawl_max_depth: int = 3,
+    ai_crawl_site_depth: int = 2,
+    ai_crawl_max_llm_calls: int = 25,
+    ai_crawl_max_pages_per_domain: int = 5,
+    ai_crawl_politeness_delay: float = 1.0,
+    # Information source mode
+    source_mode: str = "web",
+    # Evidence importance / gap-fill parameters
+    importance_threshold: float = 0.6,
+    min_high_importance_sources: int = 2,
+    max_gap_fill_rounds: int = 1,
     # Report generator version parameters
     report_generator_version: str = "v1",
     v2_writing_style: str = "business",
@@ -601,6 +648,11 @@ def create_config(
     v2_enable_consistency_check: bool = True,
     v2_enable_two_phase: bool = True,
     v2_include_glossary: bool = True,
+    v2_enable_polish: bool = True,
+    # Chart library parameter
+    chart_library: str = "matplotlib",
+    # Per-stage LLM overrides
+    stage_llm: Optional[Dict[str, Dict[str, Any]]] = None,
     # Auto figure/table generation parameters
     auto_figures: bool = False,
     auto_figures_include_images: bool = True,
@@ -647,6 +699,8 @@ def create_config(
         anthropic_api_key: Anthropic API key (optional, uses env var if not provided)
         model: Model name to use (optional, uses default for provider)
         search_method: Web search method ('duckduckgo' or 'selenium')
+        browser: Selenium browser via kwargs ('chrome', 'edge', or 'firefox';
+            used by selenium search and the ai_crawl_selenium crawl mode)
         search_region: DuckDuckGo search region (e.g., 'wt-wt' worldwide, 'jp-jp' Japan)
         safe_search: DuckDuckGo safe search level ('off', 'moderate', 'strict')
         implicit_wait: Selenium implicit wait time in seconds
@@ -688,9 +742,24 @@ def create_config(
         content_filter_mode: Content filter strictness ('strict', 'moderate', 'minimal', 'none')
         custom_blocked_domains: List of domains to block in addition to defaults
         custom_whitelisted_domains: List of domains to always allow
-        crawl_mode: Crawl mode ('standard', 'fast_batch', 'fast_parallel')
+        crawl_mode: Crawl mode ('standard', 'fast_batch', 'fast_parallel',
+            'aicrawl', 'ai_crawl_selenium')
         fast_crawl_workers: Max parallel workers for fast crawl mode
         fast_crawl_batch_size: Pages per batch in batch evaluation mode
+        ai_crawl_max_total_pages: aicrawl mode - max pages fetched per section
+        ai_crawl_max_depth: aicrawl mode - max link depth from search-result seeds
+        ai_crawl_site_depth: aicrawl mode - max layers followed within one site
+        ai_crawl_max_llm_calls: aicrawl mode - LLM decision call budget per section
+        ai_crawl_max_pages_per_domain: aicrawl mode - max pages fetched per domain
+        ai_crawl_politeness_delay: aicrawl mode - min seconds between same-domain fetches
+        source_mode: Information sources to use: 'web' (web only, default),
+            'local' (local documents only; requires additional_documents),
+            'hybrid' (local documents + web)
+        importance_threshold: min importance score (0-1) to count a source as
+            high-importance for the research purpose
+        min_high_importance_sources: sections with fewer high-importance sources
+            trigger gap-fill re-search
+        max_gap_fill_rounds: max gap-fill re-search rounds per section
         report_generator_version: Report generator version ('v1' or 'v2')
         v2_writing_style: V2 writing style ('formal', 'business', 'technical', 'executive', 'casual')
         v2_target_audience: V2 target audience ('expert', 'business', 'engineer', 'general', 'student')
@@ -698,6 +767,17 @@ def create_config(
         v2_enable_consistency_check: Enable V2 consistency checking
         v2_enable_two_phase: Enable V2 two-phase generation (draft + refinement)
         v2_include_glossary: Include glossary section in V2 reports
+        v2_enable_polish: Enable final naturalness polish pass over all V2 chapters
+        chart_library: Chart rendering library ('matplotlib' or 'seaborn';
+            falls back to matplotlib when seaborn is not installed)
+        stage_llm: Per-stage LLM overrides. Keys: 'planning' (research plan /
+            queries), 'crawling' (crawl decisions), 'evaluation' (importance /
+            quality / consistency scoring), 'writing' (prose generation).
+            Values: {'provider': ..., 'model': ..., 'api_key': optional}.
+            Stages without an override use the default provider/model.
+            Example: {"planning": {"provider": "openai", "model": "gpt-5-mini"},
+                      "writing": {"provider": "anthropic",
+                                  "model": "claude-3-5-sonnet-20241022"}}
         auto_figures: Auto-generate figures/tables during run_research
         auto_figures_include_images: Include images from web sources in auto figures
         auto_figures_include_tables: Include extracted tables in auto figures
@@ -718,10 +798,20 @@ def create_config(
     Returns:
         Configured Config object
     """
+    if stage_llm:
+        from .api.stage_router import LLM_STAGES
+        unknown_stages = set(stage_llm) - set(LLM_STAGES)
+        if unknown_stages:
+            raise ValueError(
+                f"Unknown LLM stages: {sorted(unknown_stages)}. "
+                f"Valid stages: {list(LLM_STAGES)}"
+            )
+
     api_config = APIConfig(
         provider=LLMProvider(provider),
         openai_api_key=openai_api_key,
         anthropic_api_key=anthropic_api_key,
+        stage_overrides=dict(stage_llm) if stage_llm else {},
     )
 
     if model:
@@ -734,6 +824,7 @@ def create_config(
         method=SearchMethod(search_method),
         headless=kwargs.get("headless", True),
         max_results=kwargs.get("max_results", 10),
+        browser=kwargs.get("browser", "chrome"),
         region=search_region,
         safe_search=safe_search,
         implicit_wait=implicit_wait,
@@ -759,6 +850,16 @@ def create_config(
         crawl_mode=CrawlMode(crawl_mode),
         fast_crawl_workers=fast_crawl_workers,
         fast_crawl_batch_size=fast_crawl_batch_size,
+        ai_crawl_max_total_pages=ai_crawl_max_total_pages,
+        ai_crawl_max_depth=ai_crawl_max_depth,
+        ai_crawl_site_depth=ai_crawl_site_depth,
+        ai_crawl_max_llm_calls=ai_crawl_max_llm_calls,
+        ai_crawl_max_pages_per_domain=ai_crawl_max_pages_per_domain,
+        ai_crawl_politeness_delay=ai_crawl_politeness_delay,
+        source_mode=ResearchSourceMode(source_mode),
+        importance_threshold=importance_threshold,
+        min_high_importance_sources=min_high_importance_sources,
+        max_gap_fill_rounds=max_gap_fill_rounds,
     )
 
     report_config = ReportConfig(
@@ -774,6 +875,8 @@ def create_config(
         v2_enable_consistency_check=v2_enable_consistency_check,
         v2_enable_two_phase=v2_enable_two_phase,
         v2_include_glossary=v2_include_glossary,
+        v2_enable_polish=v2_enable_polish,
+        chart_library=chart_library,
         auto_figures=auto_figures,
         auto_figures_include_images=auto_figures_include_images,
         auto_figures_include_tables=auto_figures_include_tables,
@@ -827,7 +930,7 @@ def create_config(
 
     # Validate kwargs: warn about unrecognized keys to catch typos
     _KNOWN_KWARGS = {
-        "headless", "max_results", "max_iterations", "language",
+        "headless", "max_results", "max_iterations", "language", "browser",
         "_expansion_tolerance", "_deviation_weights",
         "dedup_threshold", "max_concurrent_searches", "include_language_stats",
     }

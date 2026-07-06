@@ -20,11 +20,14 @@ from ..evidence.content_filter import (
 from ..utils.helpers import ResearchWarnings
 from ..search.base import SearchResult
 from ..search.multilingual import MultilingualSearcher, MultilingualSearchResult
-from ..config import CrawlMode, MultilingualSearchConfig
+from ..config import CrawlMode, MultilingualSearchConfig, ResearchSourceMode
+from ..utils.helpers import extract_json_from_response
+from .local_store import LocalDocumentStore
 from .query_generator import QueryGenerator, ResearchPlan, TableOfContents, TableOfContentsItem
 from .content_extractor import ContentExtractor, ExtractedContent
 from .site_crawler import SiteCrawler, CrawlResult, extract_keywords_from_topic
 from .fast_crawler import FastCrawler, EvaluationMode, CrawlResult as FastCrawlResult
+from .ai_crawler import AICrawler
 
 
 class ResearchState(str, Enum):
@@ -158,6 +161,24 @@ class Researcher:
         crawl_mode: CrawlMode = CrawlMode.STANDARD,
         fast_crawl_workers: int = 10,
         fast_crawl_batch_size: int = 5,
+        ai_crawl_max_total_pages: int = 15,
+        ai_crawl_max_depth: int = 3,
+        ai_crawl_site_depth: int = 2,
+        ai_crawl_max_llm_calls: int = 25,
+        ai_crawl_max_pages_per_domain: int = 5,
+        ai_crawl_politeness_delay: float = 1.0,
+        selenium_headless: bool = True,
+        selenium_browser: str = "chrome",
+        selenium_proxies: dict = None,
+        selenium_verify_ssl: bool = True,
+        importance_threshold: float = 0.6,
+        min_high_importance_sources: int = 2,
+        max_gap_fill_rounds: int = 1,
+        planning_llm=None,
+        crawling_llm=None,
+        evaluation_llm=None,
+        writing_llm=None,
+        source_mode: ResearchSourceMode = ResearchSourceMode.WEB,
         multilingual_config: MultilingualSearchConfig = None,
         max_content_length: int = 50000,
         target_pages: int = None,
@@ -184,15 +205,45 @@ class Researcher:
             use_enhanced_synthesis: Use multi-pass content generation for better quality
             content_filter: Content filter instance (None to use default based on filter_mode)
             filter_mode: Filter strictness: "strict", "moderate", "minimal", or "none"
-            crawl_mode: Crawl mode (standard, fast_batch, fast_parallel)
+            crawl_mode: Crawl mode (standard, fast_batch, fast_parallel, aicrawl)
             fast_crawl_workers: Max parallel workers for fast crawl mode
             fast_crawl_batch_size: Pages per batch in batch evaluation mode
+            ai_crawl_max_total_pages: aicrawl - max pages fetched per section
+            ai_crawl_max_depth: aicrawl - max link depth from search-result seeds
+            ai_crawl_site_depth: aicrawl - max layers followed within one site
+            ai_crawl_max_llm_calls: aicrawl - LLM decision call budget per section
+            ai_crawl_max_pages_per_domain: aicrawl - max pages fetched per domain
+            ai_crawl_politeness_delay: aicrawl - min seconds between same-domain fetches
+            selenium_headless: ai_crawl_selenium - run the browser headless
+            selenium_browser: ai_crawl_selenium - browser (chrome/edge/firefox)
+            selenium_proxies: ai_crawl_selenium - proxy dict for the browser
+            selenium_verify_ssl: ai_crawl_selenium - verify SSL certificates
+            importance_threshold: min importance score to count a source as
+                high-importance for the research purpose
+            min_high_importance_sources: sections with fewer high-importance
+                sources trigger gap-fill re-search
+            max_gap_fill_rounds: max re-search rounds per section when the
+                collected information is insufficient
+            planning_llm: LLM client for planning (research plan / queries);
+                defaults to llm_client
+            crawling_llm: LLM client for crawl decisions; defaults to llm_client
+            evaluation_llm: LLM client for importance/quality/coherence
+                evaluation; defaults to llm_client
+            writing_llm: LLM client for prose generation (synthesis,
+                executive summary); defaults to llm_client
+            source_mode: Information sources: WEB (web only), LOCAL (local
+                documents only; requires additional_documents at
+                conduct_research), HYBRID (local documents + web)
             multilingual_config: Multilingual search configuration (None to disable)
             max_content_length: Maximum content length for extraction truncation
             target_pages: Target output page count (used for dynamic content sizing)
             target_characters: Target output character count (overrides target_pages)
         """
         self.llm = llm_client
+        self.planning_llm = planning_llm or llm_client
+        self.crawling_llm = crawling_llm or llm_client
+        self.evaluation_llm = evaluation_llm or llm_client
+        self.writing_llm = writing_llm or llm_client
         self.search = search_client
         self.min_iterations = min_iterations
         self.max_iterations = max_iterations
@@ -202,7 +253,7 @@ class Researcher:
         self.output_dir = output_dir or Path("./output")
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        self.query_generator = QueryGenerator(llm_client, language)
+        self.query_generator = QueryGenerator(self.planning_llm, language)
         self.max_content_length = max_content_length
 
         # Store target length info (used to calculate per-section target after plan is created)
@@ -210,7 +261,10 @@ class Researcher:
         self._target_characters = target_characters
         # ContentExtractor is created without per-section target initially;
         # it will be updated in _execute_research_loop once we know the section count.
-        self.content_extractor = ContentExtractor(llm_client, language)
+        self.content_extractor = ContentExtractor(
+            self.writing_llm, language,
+            evaluation_llm_client=self.evaluation_llm,
+        )
 
         # Use enhanced multi-pass content generation for better quality
         self.use_enhanced_synthesis = use_enhanced_synthesis
@@ -237,7 +291,7 @@ class Researcher:
         if extended_mode:
             self.site_crawler = SiteCrawler(
                 search_client=search_client,
-                llm_client=llm_client,
+                llm_client=self.crawling_llm,
                 max_pages=crawl_max_pages,
                 max_depth=crawl_max_depth,
                 relevance_threshold=crawl_relevance_threshold,
@@ -270,13 +324,56 @@ class Researcher:
             )
             self.fast_crawler = FastCrawler(
                 search_client=search_client,
-                llm_client=llm_client,
+                llm_client=self.crawling_llm,
                 evaluation_mode=eval_mode,
                 content_filter=self.content_filter,
                 max_workers=fast_crawl_workers,
                 batch_size=fast_crawl_batch_size,
                 language=language,
             )
+
+        # AI crawl mode (LLM-driven crawling)
+        self.ai_crawler: Optional[AICrawler] = None
+        if crawl_mode == CrawlMode.AI_CRAWL:
+            self.ai_crawler = AICrawler(
+                search_client=search_client,
+                llm_client=self.crawling_llm,
+                content_filter=self.content_filter,
+                max_total_pages=ai_crawl_max_total_pages,
+                max_depth=ai_crawl_max_depth,
+                max_site_depth=ai_crawl_site_depth,
+                max_llm_calls=ai_crawl_max_llm_calls,
+                max_pages_per_domain=ai_crawl_max_pages_per_domain,
+                politeness_delay=ai_crawl_politeness_delay,
+                language=language,
+            )
+        elif crawl_mode == CrawlMode.AI_CRAWL_SELENIUM:
+            from .ai_crawler_selenium import AICrawlerSelenium
+            self.ai_crawler = AICrawlerSelenium(
+                search_client=search_client,
+                llm_client=self.crawling_llm,
+                content_filter=self.content_filter,
+                max_total_pages=ai_crawl_max_total_pages,
+                max_depth=ai_crawl_max_depth,
+                max_site_depth=ai_crawl_site_depth,
+                max_llm_calls=ai_crawl_max_llm_calls,
+                max_pages_per_domain=ai_crawl_max_pages_per_domain,
+                politeness_delay=ai_crawl_politeness_delay,
+                language=language,
+                headless=selenium_headless,
+                browser=selenium_browser,
+                proxies=selenium_proxies,
+                verify_ssl=selenium_verify_ssl,
+            )
+
+        # Importance scoring / gap-fill settings
+        self.importance_threshold = importance_threshold
+        self.min_high_importance_sources = min_high_importance_sources
+        self.max_gap_fill_rounds = max_gap_fill_rounds
+
+        # Information source mode and local document store
+        self.source_mode = source_mode
+        self.local_store = LocalDocumentStore()
 
     def _report_progress(self, message: str, percentage: float) -> None:
         """Report progress to callback if available."""
@@ -303,12 +400,33 @@ class Researcher:
         Returns:
             Completed ResearchSession
         """
+        # Local source mode requires documents to work from
+        if self.source_mode == ResearchSourceMode.LOCAL and not additional_documents:
+            raise ValueError(
+                "source_mode='local' requires additional_documents "
+                "(ローカル文献モードには文書の指定が必要です)"
+            )
+
         # Initialize session
         self.session = ResearchSession(query=query, requirements=requirements)
         self.evidence_locker = EvidenceLocker(
             research_id=self.session.session_id,
             output_dir=self.output_dir / "evidence",
         )
+
+        # Register local documents for local/hybrid retrieval
+        if additional_documents and self.source_mode in (
+            ResearchSourceMode.LOCAL, ResearchSourceMode.HYBRID
+        ):
+            for doc in additional_documents:
+                self.local_store.add_document(
+                    title=doc.get("title", ""),
+                    content=doc.get("content", ""),
+                    path=str(doc.get("path", "")),
+                )
+            print(f"[LocalStore] {self.local_store.document_count} documents, "
+                  f"{self.local_store.chunk_count} chunks indexed "
+                  f"(source_mode={self.source_mode.value})")
 
         try:
             # Phase 1: Planning
@@ -373,6 +491,10 @@ class Researcher:
             self.session.error_message = str(e)
             self._report_progress(f"Error: {e}", -1)
             raise
+        finally:
+            # Release browser resources held by Selenium-based crawlers
+            if self.ai_crawler is not None and hasattr(self.ai_crawler, "close"):
+                self.ai_crawler.close()
 
         return self.session
 
@@ -423,14 +545,38 @@ class Researcher:
 
             section.status = "in_progress"
 
-            # Choose processing method based on crawl mode
-            if self.fast_crawler and self.crawl_mode in (CrawlMode.FAST_BATCH, CrawlMode.FAST_PARALLEL):
+            # Local document retrieval (local / hybrid source modes)
+            local_parts: List[ExtractedContent] = []
+            if self.source_mode in (ResearchSourceMode.LOCAL, ResearchSourceMode.HYBRID):
+                local_parts = self._collect_local_parts(section, available_queries)
+
+            if self.source_mode == ResearchSourceMode.LOCAL:
+                # Local-only: no web access at all
+                self._process_section_local_only(
+                    section=section,
+                    available_queries=available_queries,
+                    local_parts=local_parts,
+                )
+            # Web / hybrid: choose processing method based on crawl mode
+            elif self.fast_crawler and self.crawl_mode in (CrawlMode.FAST_BATCH, CrawlMode.FAST_PARALLEL):
                 # Fast crawl mode: parallel fetch + batch/parallel evaluation
                 self._process_section_with_fast_crawler(
                     section=section,
                     available_queries=available_queries,
                     section_idx=section_idx,
                     total_sections=total_sections,
+                    extra_parts=local_parts,
+                )
+            elif self.ai_crawler and self.crawl_mode in (
+                CrawlMode.AI_CRAWL, CrawlMode.AI_CRAWL_SELENIUM
+            ):
+                # AI crawl mode: LLM decides which links to follow
+                self._process_section_with_ai_crawler(
+                    section=section,
+                    available_queries=available_queries,
+                    section_idx=section_idx,
+                    total_sections=total_sections,
+                    extra_parts=local_parts,
                 )
             else:
                 # Standard mode: sequential processing
@@ -439,6 +585,7 @@ class Researcher:
                     available_queries=available_queries,
                     section_idx=section_idx,
                     total_sections=total_sections,
+                    extra_parts=local_parts,
                 )
 
             # Remove used queries
@@ -459,6 +606,7 @@ class Researcher:
         available_queries: List[str],
         section_idx: int,
         total_sections: int,
+        extra_parts: List[ExtractedContent] = None,
     ) -> None:
         """
         Process a section using fast crawler mode.
@@ -473,7 +621,7 @@ class Researcher:
                 section, available_queries, section_idx, total_sections
             )
 
-        section_content_parts: List[ExtractedContent] = []
+        section_content_parts: List[ExtractedContent] = list(extra_parts or [])
 
         # Progress callback for fast crawler
         def fast_progress(msg: str, current: int, total: int):
@@ -548,12 +696,98 @@ class Researcher:
         print(f"[FastCrawler] Section {section.section} complete. Parts: {len(section_content_parts)}")
         self._generate_and_save_section_content(section, section_content_parts)
 
+    def _process_section_with_ai_crawler(
+        self,
+        section: TableOfContentsItem,
+        available_queries: List[str],
+        section_idx: int,
+        total_sections: int,
+        extra_parts: List[ExtractedContent] = None,
+    ) -> None:
+        """
+        Process a section using AI crawl mode (LLM-driven crawling).
+
+        Seeds a crawl from search results, then lets the LLM read each page
+        and decide which links to follow next.
+        """
+        if not self.ai_crawler:
+            # Fallback to standard processing
+            return self._process_section_with_immediate_generation(
+                section, available_queries, section_idx, total_sections
+            )
+
+        section_content_parts: List[ExtractedContent] = list(extra_parts or [])
+
+        def ai_progress(msg: str, current: int, total: int):
+            self._report_progress(
+                f"{section.section}: {msg}",
+                10 + (section_idx / total_sections) * 70 + (current / max(total, 1)) * 10
+            )
+
+        queries = available_queries[:self.max_queries_per_iteration]
+        if not queries:
+            queries = self.query_generator.generate_follow_up_queries(
+                section, "", []
+            )
+
+        print(f"[AICrawler] Processing section {section.section} with {len(queries)} queries")
+
+        crawl_result: FastCrawlResult = self.ai_crawler.crawl_and_evaluate(
+            queries=queries,
+            section_context=f"{section.section}. {section.title}: {section.description}",
+            research_topic=self.session.query,
+            max_pages_per_query=self.max_pages_per_query,
+            min_relevance_score=0.2,
+            progress_callback=ai_progress,
+        )
+
+        print(f"[AICrawler] Found {len(crawl_result.pages)} relevant pages "
+              f"({crawl_result.pages_fetched} fetched, "
+              f"eval: {crawl_result.total_eval_time:.1f}s)")
+
+        for page in crawl_result.pages:
+            extracted = ExtractedContent(
+                source_url=page.url,
+                source_title=page.title,
+                raw_content=page.content,
+                processed_content=page.processed_content or page.content[:2000],
+                key_points=page.key_points,
+                relevance_score=page.relevance_score,
+                extraction_notes=f"ai_crawler (depth={page.metadata.get('depth', 0)}, "
+                                 f"decided_by={page.metadata.get('decided_by', 'llm')})",
+            )
+            section_content_parts.append(extracted)
+
+            self.evidence_locker.add_evidence(
+                url=page.url,
+                title=page.title,
+                content_excerpt=page.processed_content[:500] if page.processed_content else page.snippet,
+                evidence_type=EvidenceType.WEB_PAGE,
+                search_query=page.metadata.get("query", "aicrawl"),
+                section_reference=section.section,
+                relevance_score=page.relevance_score,
+            )
+
+        iter_record = ResearchIteration(
+            iteration_number=1,
+            section=section.section,
+            queries_executed=queries,
+            sources_found=crawl_result.pages_fetched,
+            content_extracted=len(crawl_result.pages),
+        )
+        iter_record.completed_at = datetime.now().isoformat()
+        self.session.iterations.append(iter_record)
+
+        print(f"[AICrawler] Section {section.section} complete. Parts: {len(section_content_parts)}")
+        self._generate_and_save_section_content(section, section_content_parts)
+
     def _process_section_with_immediate_generation(
         self,
         section: TableOfContentsItem,
         available_queries: List[str],
         section_idx: int,
         total_sections: int,
+        extra_parts: List[ExtractedContent] = None,
     ) -> None:
         """
         Process a section with immediate content generation after research.
@@ -563,7 +797,7 @@ class Researcher:
         2. Extracts relevant content
         3. Immediately generates section content (not waiting until the end)
         """
-        section_content_parts: List[ExtractedContent] = []
+        section_content_parts: List[ExtractedContent] = list(extra_parts or [])
 
         # Research iterations for this section
         iteration = 0
@@ -798,26 +1032,73 @@ class Researcher:
         """
         Immediately generate and save content for a section.
         This is called right after research for each section completes.
+
+        Before synthesis, every collected part is scored for importance
+        (relevance to the overall research purpose) and the scores are
+        stored on the evidence locker. When too few high-importance sources
+        exist, gap-fill rounds generate follow-up queries from the collected
+        information and fetch additional sources (revisiting sites is
+        allowed when the query differs).
         """
         print(f"[DEBUG] Generating content for section {section.section}...")
 
         if section_content_parts:
-            # Use enhanced multi-pass synthesis
-            if self.use_enhanced_synthesis:
-                print(f"[DEBUG] Using enhanced multi-pass synthesis")
-                synthesized = self.content_extractor.synthesize_section_content_enhanced(
-                    section_title=section.title,
-                    section_description=section.description,
-                    extracted_contents=section_content_parts,
-                    requirements=self.session.requirements,
+            self._score_importance(section, section_content_parts)
+            section_content_parts.sort(
+                key=lambda p: (p.importance_score or p.relevance_score),
+                reverse=True,
+            )
+
+            synthesized = self._synthesize_parts(section, section_content_parts)
+
+            # Gap-fill: re-search when high-importance information is thin
+            for round_num in range(self.max_gap_fill_rounds):
+                if not self._needs_gap_fill(section_content_parts, synthesized):
+                    break
+
+                gaps = synthesized.get("information_gaps", []) or []
+                print(f"[GapFill] Section {section.section}: insufficient "
+                      f"high-importance sources, round {round_num + 1} "
+                      f"(gaps: {gaps[:3]})")
+
+                gathered_summary = "\n".join(
+                    f"- {p.source_title}: {p.processed_content[:200]}"
+                    for p in section_content_parts[:8]
                 )
-            else:
-                synthesized = self.content_extractor.synthesize_section_content(
-                    section_title=section.title,
-                    section_description=section.description,
-                    extracted_contents=section_content_parts,
-                    requirements=self.session.requirements,
+                follow_up_queries = self.query_generator.generate_follow_up_queries(
+                    section, gathered_summary, gaps,
+                )[:self.max_queries_per_iteration]
+
+                if not follow_up_queries:
+                    break
+
+                new_parts = self._collect_additional_parts(section, follow_up_queries)
+                if not new_parts:
+                    print(f"[GapFill] No new sources found for section {section.section}")
+                    break
+
+                # Deduplicate against already-collected parts (same URL AND
+                # same content = duplicate; same URL with different detail is
+                # kept, so re-crawled pages with new content survive)
+                seen = {
+                    (p.source_url, p.processed_content[:100])
+                    for p in section_content_parts
+                }
+                fresh = [
+                    p for p in new_parts
+                    if (p.source_url, p.processed_content[:100]) not in seen
+                ]
+                if not fresh:
+                    break
+
+                print(f"[GapFill] Added {len(fresh)} new sources")
+                section_content_parts.extend(fresh)
+                self._score_importance(section, section_content_parts)
+                section_content_parts.sort(
+                    key=lambda p: (p.importance_score or p.relevance_score),
+                    reverse=True,
                 )
+                synthesized = self._synthesize_parts(section, section_content_parts)
 
             content = synthesized.get("content", "")
             print(f"[DEBUG] Generated content length: {len(content)} chars")
@@ -867,6 +1148,303 @@ class Researcher:
                 "gaps": [f"All content for section '{section.title}'"],
             }
             section.content = placeholder
+
+    def _collect_local_parts(
+        self,
+        section: TableOfContentsItem,
+        available_queries: List[str],
+        queries_override: List[str] = None,
+    ) -> List[ExtractedContent]:
+        """
+        Retrieve section-relevant content from the local document store.
+
+        Chunks are keyword-retrieved, then LLM-extracted like web pages so
+        they flow through the same relevance/importance pipeline.
+        """
+        if self.local_store.is_empty():
+            return []
+
+        queries = queries_override or available_queries[:self.max_queries_per_iteration]
+        query_text = " ".join(
+            [section.title, section.description] + list(queries)
+        ).strip()
+        keywords = extract_keywords_from_topic(
+            f"{section.title} {section.description}"
+        )
+
+        chunks = self.local_store.search(
+            query=query_text,
+            top_k=max(self.max_pages_per_query * 2, 4),
+            keywords=keywords,
+        )
+        if not chunks:
+            print(f"[LocalStore] No relevant chunks for section {section.section}")
+            return []
+
+        print(f"[LocalStore] Section {section.section}: {len(chunks)} candidate chunks")
+
+        parts: List[ExtractedContent] = []
+        for chunk in chunks:
+            extracted = self.content_extractor.extract_relevant_content(
+                raw_content=chunk.content,
+                source_url=chunk.source_url,
+                source_title=chunk.doc_title,
+                section_context=f"{section.section}. {section.title}",
+                research_query=self.session.query,
+            )
+            if extracted.relevance_score >= 0.2:
+                parts.append(extracted)
+                self.evidence_locker.add_evidence(
+                    url=chunk.source_url,
+                    title=chunk.doc_title,
+                    content_excerpt=extracted.processed_content[:500],
+                    evidence_type=EvidenceType.USER_PROVIDED,
+                    search_query="local_documents",
+                    section_reference=section.section,
+                    relevance_score=extracted.relevance_score,
+                    access_method="local",
+                )
+        return parts
+
+    def _process_section_local_only(
+        self,
+        section: TableOfContentsItem,
+        available_queries: List[str],
+        local_parts: List[ExtractedContent],
+    ) -> None:
+        """Process a section using local documents only (no web access)."""
+        queries = available_queries[:self.max_queries_per_iteration]
+
+        iter_record = ResearchIteration(
+            iteration_number=1,
+            section=section.section,
+            queries_executed=queries or ["local_documents"],
+            sources_found=len(local_parts),
+            content_extracted=len(local_parts),
+        )
+        iter_record.completed_at = datetime.now().isoformat()
+        self.session.iterations.append(iter_record)
+
+        print(f"[LocalOnly] Section {section.section}: {len(local_parts)} parts from local documents")
+        self._generate_and_save_section_content(section, local_parts)
+
+    def _synthesize_parts(
+        self,
+        section: TableOfContentsItem,
+        section_content_parts: List[ExtractedContent],
+    ) -> Dict[str, Any]:
+        """Run the configured synthesis mode over the collected parts."""
+        if self.use_enhanced_synthesis:
+            print(f"[DEBUG] Using enhanced multi-pass synthesis")
+            return self.content_extractor.synthesize_section_content_enhanced(
+                section_title=section.title,
+                section_description=section.description,
+                extracted_contents=section_content_parts,
+                requirements=self.session.requirements,
+            )
+        return self.content_extractor.synthesize_section_content(
+            section_title=section.title,
+            section_description=section.description,
+            extracted_contents=section_content_parts,
+            requirements=self.session.requirements,
+        )
+
+    def _needs_gap_fill(
+        self,
+        parts: List[ExtractedContent],
+        synthesized: Dict[str, Any],
+    ) -> bool:
+        """Decide whether a section needs a gap-fill re-search round."""
+        high_importance = [
+            p for p in parts
+            if (p.importance_score or p.relevance_score) >= self.importance_threshold
+        ]
+        if len(high_importance) < self.min_high_importance_sources:
+            return True
+        if synthesized.get("confidence_level") == "low":
+            return True
+        return False
+
+    def _score_importance(
+        self,
+        section: TableOfContentsItem,
+        parts: List[ExtractedContent],
+    ) -> None:
+        """
+        Score each collected part's importance to the research purpose.
+
+        One LLM call rates all parts (0-1) against the overall research
+        purpose (query + requirements). Scores are stored on the parts and
+        propagated to the matching evidence in the evidence locker. On
+        failure, relevance_score is used as the importance.
+        """
+        if not parts:
+            return
+
+        items_text = "\n".join(
+            f"{i}. [{p.source_title[:60]}] {p.processed_content[:300]}"
+            for i, p in enumerate(parts, 1)
+        )
+
+        if self.language == "ja":
+            prompt = f"""あなたは調査プロジェクトの編集責任者です。収集した各情報が、調査目的にとってどれだけ重要かを採点してください。
+
+【調査目的】{self.session.query}
+【調査要件】{self.session.requirements or "特になし"}
+【対象セクション】{section.section}. {section.title}
+
+【収集した情報】
+{items_text}
+
+各情報に 0.0〜1.0 の重要度を付けてください。
+- 0.8以上: 調査目的の核心に直接答える情報（具体的な数値・事実・一次情報）
+- 0.5〜0.7: 調査目的の理解に役立つ背景・補足情報
+- 0.4以下: 周辺的・重複的・一般論のみの情報
+
+JSONで出力:
+{{"scores": [{{"index": 1, "importance": 0.9}}, {{"index": 2, "importance": 0.4}}]}}
+
+JSONのみを出力:"""
+        else:
+            prompt = f"""You are the research project's editor. Score how important each collected item is to the research purpose.
+
+Research purpose: {self.session.query}
+Requirements: {self.session.requirements or "None"}
+Target section: {section.section}. {section.title}
+
+Collected items:
+{items_text}
+
+Rate each item 0.0-1.0:
+- >= 0.8: directly answers the core of the research purpose (concrete numbers, facts, primary information)
+- 0.5-0.7: background/supporting information
+- <= 0.4: peripheral, duplicated, or generic-only information
+
+Output JSON:
+{{"scores": [{{"index": 1, "importance": 0.9}}, {{"index": 2, "importance": 0.4}}]}}
+
+Output JSON only:"""
+
+        scores: Dict[int, float] = {}
+        try:
+            response = self.evaluation_llm.generate(prompt)
+            data = extract_json_from_response(response.content)
+            for entry in data.get("scores", []):
+                try:
+                    idx = int(entry.get("index", 0))
+                    score = float(entry.get("importance", 0.0))
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= idx <= len(parts):
+                    scores[idx] = min(max(score, 0.0), 1.0)
+        except Exception as e:
+            print(f"[WARNING] Importance scoring failed: {e}")
+
+        for i, part in enumerate(parts, 1):
+            part.importance_score = scores.get(i, part.relevance_score)
+            if self.evidence_locker:
+                self.evidence_locker.update_importance_by_url(
+                    url=part.source_url,
+                    score=part.importance_score,
+                    section=section.section,
+                )
+
+    def _collect_additional_parts(
+        self,
+        section: TableOfContentsItem,
+        queries: List[str],
+    ) -> List[ExtractedContent]:
+        """
+        Collect additional sources for gap-fill using the active source mode.
+
+        Local mode re-queries the document store with the new queries; web
+        and hybrid modes use the active crawl mode (crawler visited-sets
+        reset per call, so previously visited sites are re-crawled when the
+        new queries lead back to them). Hybrid also re-queries local
+        documents.
+        """
+        parts: List[ExtractedContent] = []
+
+        # Local retrieval with the NEW queries (local and hybrid modes)
+        if self.source_mode in (ResearchSourceMode.LOCAL, ResearchSourceMode.HYBRID):
+            parts.extend(self._collect_local_parts(
+                section, [], queries_override=queries,
+            ))
+            if self.source_mode == ResearchSourceMode.LOCAL:
+                return parts
+
+        crawler = self.ai_crawler or self.fast_crawler
+        if crawler:
+            try:
+                crawl_result = crawler.crawl_and_evaluate(
+                    queries=queries,
+                    section_context=f"{section.section}. {section.title}: {section.description}",
+                    research_topic=self.session.query,
+                    max_pages_per_query=self.max_pages_per_query,
+                    min_relevance_score=0.2,
+                )
+            except Exception as e:
+                print(f"[GapFill] Crawl failed: {e}")
+                return parts
+
+            for page in crawl_result.pages:
+                parts.append(ExtractedContent(
+                    source_url=page.url,
+                    source_title=page.title,
+                    raw_content=page.content,
+                    processed_content=page.processed_content or page.content[:2000],
+                    key_points=page.key_points,
+                    relevance_score=page.relevance_score,
+                    extraction_notes="gap_fill",
+                ))
+                self.evidence_locker.add_evidence(
+                    url=page.url,
+                    title=page.title,
+                    content_excerpt=(page.processed_content or "")[:500] or page.snippet,
+                    evidence_type=EvidenceType.WEB_PAGE,
+                    search_query=page.metadata.get("query", "gap_fill"),
+                    section_reference=section.section,
+                    relevance_score=page.relevance_score,
+                )
+            return parts
+
+        # Standard mode: direct search + fetch
+        for query in queries[:2]:
+            try:
+                results = self.search.search(query, max_results=self.max_pages_per_query)
+            except Exception as e:
+                print(f"[GapFill] Search failed for '{query}': {e}")
+                continue
+            for result in results[:self.max_pages_per_query]:
+                try:
+                    if self.content_filter:
+                        url_filter_result = self.content_filter.filter_url(result.url)
+                        if not url_filter_result.should_include:
+                            continue
+                    page = self.search.get_page_content(result.url)
+                    extracted = self.content_extractor.extract_relevant_content(
+                        raw_content=page.text_content,
+                        source_url=result.url,
+                        source_title=page.title or result.title,
+                        section_context=f"{section.section}. {section.title}",
+                        research_query=query,
+                    )
+                    if extracted.relevance_score >= 0.2:
+                        parts.append(extracted)
+                        self.evidence_locker.add_evidence(
+                            url=result.url,
+                            title=page.title or result.title,
+                            content_excerpt=extracted.processed_content[:500],
+                            evidence_type=EvidenceType.WEB_PAGE,
+                            search_query=query,
+                            section_reference=section.section,
+                            relevance_score=extracted.relevance_score,
+                        )
+                except Exception as e:
+                    print(f"[GapFill] Fetch failed for {result.url}: {e}")
+                    continue
+                time.sleep(0.3)
+        return parts
 
     def _create_fallback_content(
         self,
@@ -932,16 +1510,12 @@ Return JSON:
 }}"""
 
         try:
-            response = self.llm.generate(coherence_prompt)
-            content = response.content
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start != -1 and end > start:
-                result = json.loads(content[start:end])
-                self.session.section_contents["_coherence_check"] = result
-                print(f"[DEBUG] Coherence check: {result.get('is_coherent', 'unknown')}")
-                if result.get("issues"):
-                    print(f"[DEBUG] Issues found: {result['issues']}")
+            response = self.evaluation_llm.generate(coherence_prompt)
+            result = extract_json_from_response(response.content)
+            self.session.section_contents["_coherence_check"] = result
+            print(f"[DEBUG] Coherence check: {result.get('is_coherent', 'unknown')}")
+            if result.get("issues"):
+                print(f"[DEBUG] Issues found: {result['issues']}")
         except Exception as e:
             print(f"[WARNING] Coherence check failed: {e}")
             ResearchWarnings.get_instance().add(
@@ -1056,12 +1630,33 @@ Return JSON:
                 f"Summary: {content.get('summary', '')[:200]}"
             )
 
-        summary_prompt = f"""Research Topic: {self.session.query}
+        if self.language == "ja":
+            summary_prompt = f"""【調査テーマ】{self.session.query}
+【調査要件】{self.session.requirements}
+
+【各セクションの要約】
+{chr(10).join(sections_summary)}
+
+上記をもとに、報告書の冒頭に置くエグゼクティブサマリーを作成してください。
+
+要件:
+- executive_summary は600〜900字程度。常体（である調）の自然な日本語で、翻訳調を避け、段落として流れるように書く（箇条書きにしない）。文末表現が単調に繰り返されないよう変化をつける。
+- 全セクションを横断する主要な発見 → 結論 → 今後の調査課題、の順で論じる。
+- key_findings は本文と重複してよいが、各項目は体言止めか短文で簡潔に。
+
+JSONで出力:
+{{"executive_summary": "...", "key_findings": ["..."], "recommendations": ["..."], "overall_confidence": "high/medium/low"}}
+
+JSONのみを出力:"""
+        else:
+            summary_prompt = f"""Research Topic: {self.session.query}
 
 Section Summaries:
 {chr(10).join(sections_summary)}
 
 Requirements: {self.session.requirements}
+
+Write in {self.language}.
 
 Create an executive summary of the research findings (300-500 words).
 Include:
@@ -1073,15 +1668,11 @@ Include:
 Return as JSON:
 {{"executive_summary": "...", "key_findings": [...], "recommendations": [...], "overall_confidence": "high/medium/low"}}"""
 
-        response = self.llm.generate(summary_prompt)
+        response = self.writing_llm.generate(summary_prompt)
 
         try:
-            content = response.content
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start != -1 and end > start:
-                synthesis = json.loads(content[start:end])
-                self.session.section_contents["_executive_summary"] = synthesis
+            synthesis = extract_json_from_response(response.content)
+            self.session.section_contents["_executive_summary"] = synthesis
         except (json.JSONDecodeError, ValueError) as _sum_err:
             ResearchWarnings.get_instance().add(
                 ResearchWarnings.HIGH,
@@ -1372,7 +1963,7 @@ Generate 3 search queries that would find:
 Return as JSON array: ["query1", "query2", "query3"]"""
 
         try:
-            response = self.llm.generate(prompt)
+            response = self.planning_llm.generate(prompt)
             content = response.content
             start = content.find("[")
             end = content.rfind("]") + 1
@@ -1438,7 +2029,7 @@ Create a merged version that:
 Return the merged content as a single text block (no JSON, just the merged text):"""
 
         try:
-            response = self.llm.generate(merge_prompt)
+            response = self.writing_llm.generate(merge_prompt)
             merged_text = response.content.strip()
         except Exception:
             # Fallback: just append

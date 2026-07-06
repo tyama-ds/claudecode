@@ -2643,6 +2643,82 @@ print(f"トークン使用量: {result['token_usage']}")
 
 ---
 
+## 追加機能10：フェルミ推定（Fermi Estimation）
+
+### 概要
+
+統計データが存在しない定量的な問いに対して、フェルミ推定（オーダー推定）を行う機能です。質問を掛け算・割り算で組み合わせられる要素に分解し、各要素をLLMで範囲付き推定（low/mid/high）した上で、最終推定値と不確実性の範囲を算出します。
+
+```
+質問: 「日本国内のピアノ調律師の人数は？」
+    ↓ LLMで要素分解
+世帯数 × ピアノ保有率 ÷ 調律師1人あたり担当ピアノ数
+    ↓ 各要素を範囲付きで推定・合成
+推定値: 2,500人（範囲: 450 〜 11,000人、確信度: 60%）
+```
+
+### Pythonでの使用
+
+```python
+from deep_research_tool.api import get_client
+from deep_research_tool.thinking import FermiEstimator
+
+llm = get_client(provider="openai")
+estimator = FermiEstimator(llm_client=llm, language="ja")
+
+result = estimator.estimate(
+    question="日本国内のEV充電スタンドの総数は？",
+    context="調査で得た参考情報をここに渡せます（任意）",
+    known_values={"日本の人口": 125_000_000},  # 既知の値で推定を接地（任意）
+)
+
+print(f"推定値: {result.value:,.0f} {result.unit}")
+print(f"範囲: {result.low:,.0f} 〜 {result.high:,.0f}")
+print(f"確信度: {result.confidence:.0%}")
+print(result.to_markdown())  # 要素分解表・前提条件・推論過程を含むMarkdown
+
+# Word / PDF として保存（オプション依存が必要）
+result.save_docx("./output/fermi_estimate.docx")  # pip install python-docx
+result.save_pdf("./output/fermi_estimate.pdf")    # pip install reportlab（日本語フォント対応）
+```
+
+### 仮GUI（フェルミ推定ツール）
+
+フェルミ推定専用の簡易GUI（仮実装、Tkinter製）を同梱しています。
+
+```bash
+python -m deep_research_tool.fermi_gui
+```
+
+```python
+# Pythonから起動する場合
+from deep_research_tool import launch_fermi_gui
+launch_fermi_gui()
+```
+
+GUIでは以下が設定できます：
+- 質問（定量的な問い）
+- プロバイダー / モデル / APIキー / 言語
+- 既知の値（「名前=数値」形式で1行ずつ）
+- 参考情報（調査結果の抜粋など）
+
+推定完了後は「**Word保存**」「**PDF保存**」ボタンで結果をファイルに出力できます（要 `python-docx` / `reportlab`）。
+
+### 出力される情報
+
+| フィールド | 説明 |
+|-----------|------|
+| `value` / `low` / `high` | 中央推定値と上下限 |
+| `factors` | 分解された各要素（名前、範囲、演算、根拠の種別） |
+| `formula` | 計算式（例: 世帯数 × 保有率 ÷ 処理能力） |
+| `assumptions` | 推定の前提条件リスト |
+| `confidence` | 確信度（範囲の狭さと根拠の確度から算出） |
+| `to_markdown()` | レポート貼り付け用のMarkdown |
+| `save_docx(path)` | Word文書として保存（要 `python-docx`） |
+| `save_pdf(path)` | PDF文書として保存（要 `reportlab`、日本語フォント対応） |
+
+---
+
 ## 詳細ワークフロー：クエリ入力からレポート出力まで
 
 以下は、ユーザーがリサーチクエリを入力してからレポートが出力されるまでの詳細なワークフローです。
