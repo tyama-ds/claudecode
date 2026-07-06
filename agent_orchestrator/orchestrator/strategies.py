@@ -448,6 +448,7 @@ def _browser_get(url: str) -> str:
     """
     settings = get_settings()
     ua, proxy = settings.user_agent, settings.proxy
+    failures: List[str] = []
     # -- Selenium (Chrome) ------------------------------------------------
     try:
         from selenium import webdriver
@@ -469,10 +470,8 @@ def _browser_get(url: str) -> str:
         return ("[rendered by Selenium]\n" + text)[:_TOOL_MAX_OUTPUT]
     except ImportError:
         pass  # Selenium not installed — try Playwright next
-    except Exception as exc:  # noqa: BLE001 - driver/runtime issue; try fallbacks
-        selenium_err = f"{type(exc).__name__}: {exc}"
-    else:
-        selenium_err = None
+    except Exception as exc:  # noqa: BLE001 - driver/runtime issue; keep falling back
+        failures.append(f"selenium: {type(exc).__name__}: {exc}")
     # -- Playwright (Chromium) -------------------------------------------
     try:
         from playwright.sync_api import sync_playwright
@@ -488,12 +487,13 @@ def _browser_get(url: str) -> str:
         return ("[rendered by Playwright]\n" + text)[:_TOOL_MAX_OUTPUT]
     except ImportError:
         pass
-    except Exception as exc:  # noqa: BLE001
-        return (f"browser_get: headless browser failed ({type(exc).__name__}: {exc}). "
-                f"Install selenium+chromedriver or playwright for JS rendering.")
-    # -- Fallback: plain HTTP (no JavaScript) -----------------------------
-    return ("[no headless browser installed — plain HTTP fetch, JavaScript NOT "
-            "rendered]\n" + _http_get(url))
+    except Exception as exc:  # noqa: BLE001 - browser missing/broken; keep falling back
+        failures.append(f"playwright: {type(exc).__name__}: {exc}")
+    # -- Fallback: plain HTTP (no JavaScript) — the tool never dead-ends ----
+    why = ("headless browser failed: " + "; ".join(failures)[:300]
+           if failures else "no headless browser installed")
+    return (f"[{why} — plain HTTP fetch, JavaScript NOT rendered]\n"
+            + _http_get(url))
 
 
 def _tools_system(session: Session) -> str:

@@ -221,6 +221,53 @@ class TestWebTools(unittest.TestCase):
         self.assertIn("JavaScript NOT", out)
         self.assertIn("PLAINBODY", out)
 
+    def test_browser_get_falls_back_when_browser_launch_fails(self):
+        """Playwright importable but its browser binary missing/broken must
+        also fall back to plain HTTP (never a dead-end error)."""
+        import sys
+        import types
+        from agent_orchestrator.orchestrator import strategies
+
+        fake_api = types.ModuleType("playwright.sync_api")
+        def sync_playwright():
+            raise RuntimeError("Executable doesn't exist at .../chrome")
+        fake_api.sync_playwright = sync_playwright
+        fake_pkg = types.ModuleType("playwright")
+        fake_pkg.sync_api = fake_api
+
+        import builtins
+        real_import = builtins.__import__
+        def fake_imports(name, *a, **k):
+            if name.startswith("selenium"):
+                raise ImportError("not installed")
+            if name == "playwright.sync_api":
+                return fake_api  # `from X.Y import Z` expects the leaf module
+            if name == "playwright":
+                return fake_pkg
+            return real_import(name, *a, **k)
+
+        orig_http = strategies._http_get
+        saved = {n: sys.modules.get(n) for n in ("playwright", "playwright.sync_api")}
+        sys.modules["playwright"] = fake_pkg
+        sys.modules["playwright.sync_api"] = fake_api
+        builtins.__import__ = fake_imports
+        strategies._http_get = lambda url: "PLAINBODY"
+        try:
+            out = strategies._browser_get("https://example.com")
+        finally:
+            builtins.__import__ = real_import
+            strategies._http_get = orig_http
+            for n, m in saved.items():
+                if m is None:
+                    sys.modules.pop(n, None)
+                else:
+                    sys.modules[n] = m
+
+        self.assertIn("headless browser failed", out)
+        self.assertIn("Executable doesn't exist", out)
+        self.assertIn("JavaScript NOT", out)
+        self.assertIn("PLAINBODY", out)
+
 
 class TestCLIWorkspaceMode(unittest.TestCase):
     """CLI adapters gain native file-editing flags only inside a workspace."""
