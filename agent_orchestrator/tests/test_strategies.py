@@ -350,6 +350,39 @@ class TestStrategies(unittest.TestCase):
         conductor_rounds = [t.round for t in s.transcript if t.role == "conductor"]
         self.assertEqual(max(conductor_rounds), 3)  # stopped at 3, not 2
 
+    def test_org_team_mixed_kinds_producers_before_evaluators(self):
+        """Reviewers/critics run AFTER the workers/researchers of their unit,
+        with kind-specific actions on the turn events."""
+        agents = {
+            "manager": _FixedAdapter(
+                "Boss",
+                "@worker_1: build it\n@researcher_1: research it\n"
+                "@reviewer_1: check quality\n@critic_1: find flaws\nVERDICT: CONTINUE"),
+            "worker_1": _FixedAdapter("W1", "built the thing"),
+            "researcher_1": _FixedAdapter("R1", "findings: ..."),
+            "reviewer_1": _FixedAdapter("Rev", "solid. APPROVE"),
+            "critic_1": _FixedAdapter("Cri", "risk: no tests"),
+        }
+        s = Session(id="mix", task="t", strategy="org_team", rounds=1, agents=agents)
+        s.role_order = list(agents)
+        s.supervisors = {k: "manager" for k in agents if k != "manager"}
+        get_strategy("org_team").run(s)
+        r1 = [t.role for t in s.transcript if t.round == 1 and t.role != "manager"]
+        # both producers precede both evaluators within the round
+        self.assertLess(max(r1.index("worker_1"), r1.index("researcher_1")),
+                        min(r1.index("reviewer_1"), r1.index("critic_1")))
+        actions = {e.data["role"]: e.data["action"] for e in s.bus.history
+                   if e.type == "turn_start" and e.data["round"] == 1}
+        self.assertEqual(actions["worker_1"], "implement")
+        self.assertEqual(actions["researcher_1"], "research")
+        self.assertEqual(actions["reviewer_1"], "review")
+        self.assertEqual(actions["critic_1"], "review")
+        delivered = {d["worker"] for d in
+                     (e.data for e in s.bus.history if e.type == "worker_status")
+                     if d["status"] == "delivered"}
+        self.assertEqual(delivered,
+                         {"worker_1", "researcher_1", "reviewer_1", "critic_1"})
+
     def test_org_team_rejects_bad_hierarchy(self):
         agents = {"a": _FixedAdapter("A", "x"), "b": _FixedAdapter("B", "y")}
         s = Session(id="bad", task="t", strategy="org_team", rounds=1, agents=agents)

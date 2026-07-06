@@ -239,8 +239,9 @@
       </div>
       <div id="graph" class="graph" hidden>
         <div id="graph-tools" class="graph-tools" hidden>
-          <button id="g-add-conductor" class="gbtn" type="button" data-i18n>+ Conductor</button>
-          <button id="g-add-worker" class="gbtn" type="button" data-i18n>+ Worker</button>
+          <div class="select-wrap g-kind-wrap"><select id="g-kind"
+            aria-label="Member kind"></select></div>
+          <button id="g-add" class="gbtn" type="button" data-i18n>+ Add</button>
           <button id="g-remove" class="gbtn danger" type="button" data-i18n>− Remove</button>
         </div>
         <svg id="graph-svg" viewBox="0 0 220 196" role="img"

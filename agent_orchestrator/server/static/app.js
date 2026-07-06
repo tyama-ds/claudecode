@@ -133,8 +133,13 @@ const JA = {
   "evaluation failed — reworking": "評価不合格 — 再作業",
   "iteration cap reached": "反復上限に到達",
   "iteration": "反復",
-  // graph editor toolbar
+  // graph editor toolbar / org kinds
   "+ Conductor": "+ コンダクター",
+  "+ Add": "+ 追加",
+  "+ Add member": "+ メンバーを追加",
+  "Critic": "批評役",
+  "Researcher": "調査役",
+  "researching…": "調査中…",
   "− Remove": "− 削除",
   "select a member first": "先にノードをクリックして選択してください",
   "the manager cannot be removed": "マネージャーは削除できません",
@@ -221,6 +226,8 @@ function accentFor(role) {
   const rv = /^reviewer_(\d+)$/.exec(role); // workspace_build review panel
   if (rv) return ["acc-b", "acc-c"][(parseInt(rv[1], 10) - 1) % 2];
   if (/^conductor_\d+$/.test(role)) return "acc-c"; // org_team mid-managers
+  if (/^critic_\d+$/.test(role)) return "acc-b";    // org_team critics
+  if (/^researcher_\d+$/.test(role)) return "acc-a"; // org_team researchers
   const m = /^(?:agent|worker)_(\d+)$/.exec(role); // custom / team members
   if (m) return ["acc-a", "acc-b", "acc-c"][(parseInt(m[1], 10) - 1) % 3];
   return "acc-c"; // synthesizer / judge / anything else
@@ -350,47 +357,80 @@ function renderRoles() {
   st.roles.forEach((role) => wrap.appendChild(roleCard(role.key, role.label, role.system || "", false)));
 }
 
-// -- org_team builder: manager + conductors + workers, with a chain of command --
+// -- org_team builder: manager + a mixed team with a chain of command ---------
+// Member kinds: producers (worker, researcher) act first each round, then the
+// evaluative kinds (reviewer, critic) check what the unit produced.
+const ORG_KINDS = [
+  { kind: "conductor", label: "Conductor", max: 3 },
+  { kind: "worker", label: "Worker", max: 8 },
+  { kind: "researcher", label: "Researcher", max: 4 },
+  { kind: "reviewer", label: "Reviewer", max: 4 },
+  { kind: "critic", label: "Critic", max: 3 },
+];
+
 const ORG_DEFAULTS = {
   manager: "Top manager: decomposes the task, directs the units, integrates results, "
     + "and declares DONE when the whole task is complete.",
   conductor: "Mid-level manager: decomposes the unit's objective for their reports, "
     + "holds them accountable, integrates their work, and reports upward.",
   worker: "Carries out the exact assignment given, concretely and in full.",
+  researcher: "Gathers and structures the information the unit needs — facts, options, "
+    + "prior art, constraints — concrete and clearly sourced.",
+  reviewer: "Reviews the unit's output each round against the assignments and reports "
+    + "specific, actionable findings upward; ends with APPROVE or REQUEST CHANGES.",
+  critic: "The unit's devil's advocate: attacks plans and outputs to expose flaws, "
+    + "risks, and missed requirements before they ship. Never rubber-stamps.",
 };
+
+function orgKindLabel(kind) {
+  const meta = ORG_KINDS.find((k) => k.kind === kind);
+  return t(meta ? meta.label : kind);
+}
 
 function renderOrgBuilder(wrap) {
   wrap.appendChild(roleCard("manager", t("Manager"), ORG_DEFAULTS.manager, false));
 
-  const mids = document.createElement("div");
-  mids.id = "org-mids"; mids.className = "roles";
-  wrap.appendChild(mids);
-  const addC = document.createElement("button");
-  addC.type = "button"; addC.className = "btn ghost add-conductor";
-  addC.textContent = t("+ Add conductor");
-  addC.addEventListener("click", () => addOrgMember(mids, "conductor"));
-  wrap.appendChild(addC);
+  for (const { kind } of ORG_KINDS) {
+    const holder = document.createElement("div");
+    holder.id = "org-kind-" + kind;
+    holder.className = "roles org-holder";
+    holder.dataset.kind = kind;
+    wrap.appendChild(holder);
+  }
 
-  const workers = document.createElement("div");
-  workers.id = "org-workers"; workers.className = "roles";
-  wrap.appendChild(workers);
-  const addW = document.createElement("button");
-  addW.type = "button"; addW.className = "btn ghost add-org-worker";
-  addW.textContent = t("+ Add worker");
-  addW.addEventListener("click", () => addOrgMember(workers, "worker"));
-  wrap.appendChild(addW);
+  const addRow = document.createElement("div");
+  addRow.className = "org-add-row";
+  const sw = document.createElement("div");
+  sw.className = "select-wrap org-add-kind-wrap";
+  const kindSel = document.createElement("select");
+  kindSel.id = "org-add-kind";
+  for (const { kind } of ORG_KINDS) {
+    const opt = document.createElement("option");
+    opt.value = kind; opt.textContent = orgKindLabel(kind);
+    kindSel.appendChild(opt);
+  }
+  kindSel.value = "worker";
+  sw.appendChild(kindSel);
+  addRow.appendChild(sw);
+  const addBtn = document.createElement("button");
+  addBtn.type = "button"; addBtn.className = "btn ghost org-add-btn";
+  addBtn.textContent = t("+ Add member");
+  addBtn.addEventListener("click", () => addOrgMember(kindSel.value));
+  addRow.appendChild(addBtn);
+  wrap.appendChild(addRow);
 
-  addOrgMember(mids, "conductor");
-  addOrgMember(workers, "worker");
-  addOrgMember(workers, "worker");
+  addOrgMember("conductor");
+  addOrgMember("worker");
+  addOrgMember("worker");
 }
 
-function addOrgMember(holder, kind) {
-  const max = kind === "conductor" ? 3 : 8;
-  if (holder.children.length >= max) return;
+function addOrgMember(kind) {
+  const meta = ORG_KINDS.find((k) => k.kind === kind);
+  const holder = $("#org-kind-" + kind);
+  if (!meta || !holder || holder.children.length >= meta.max) return;
   const i = holder.children.length + 1;
-  const label = (kind === "conductor" ? t("Conductor") : t("Worker")) + " " + i;
-  const card = roleCard(kind + "_" + i, label, ORG_DEFAULTS[kind], true);
+  const card = roleCard(kind + "_" + i, orgKindLabel(kind) + " " + i,
+                        ORG_DEFAULTS[kind] || "", true);
   attachSupSelect(card);
   holder.appendChild(card);
   relabelOrg(holder, kind);
@@ -403,11 +443,9 @@ function relabelOrg(holder, kind) {
     const bucket = accentFor(key);
     card.className = "role " + (bucket === "acc-b" ? "b" : bucket === "acc-c" ? "c" : "");
     card.querySelector(".role-name").childNodes[0].nodeValue =
-      (kind === "conductor" ? t("Conductor") : t("Worker")) + " " + (i + 1);
+      orgKindLabel(kind) + " " + (i + 1);
     card.querySelector("select").dataset.role = key;
   });
-  const btn = document.querySelector(kind === "conductor" ? ".add-conductor" : ".add-org-worker");
-  if (btn) btn.disabled = holder.children.length >= (kind === "conductor" ? 3 : 8);
 }
 
 function attachSupSelect(card) {
@@ -426,9 +464,10 @@ function attachSupSelect(card) {
 
 // Rebuild every "Reports to" dropdown after membership changes.
 function refreshOrgSup() {
-  const conductors = Array.from(document.querySelectorAll("#org-mids > .role select[data-role]"))
+  const conductors = Array.from(
+    document.querySelectorAll("#org-kind-conductor > .role select[data-role]"))
     .map((s) => s.dataset.role);
-  document.querySelectorAll("#org-mids > .role, #org-workers > .role").forEach((card) => {
+  document.querySelectorAll(".org-holder > .role").forEach((card) => {
     const key = card.querySelector("select").dataset.role;
     const sel = card.querySelector(".sup-in");
     if (!sel) return;
@@ -451,7 +490,7 @@ function refreshOrgSup() {
 function orgBuilderHierarchy() {
   const order = ["manager"];
   const sup = {};
-  document.querySelectorAll("#org-mids > .role, #org-workers > .role").forEach((card) => {
+  document.querySelectorAll(".org-holder > .role").forEach((card) => {
     const key = card.querySelector("select").dataset.role;
     order.push(key);
     const sel = card.querySelector(".sup-in");
@@ -472,7 +511,7 @@ function orgBuilderHierarchy() {
 // Live editable org-chart preview in the right panel (before the run starts).
 function renderOrgPreview() {
   const st = currentStrategy();
-  if (!st || st.name !== "org_team" || document.querySelector("#org-mids") === null) return;
+  if (!st || st.name !== "org_team" || document.querySelector(".org-holder") === null) return;
   const { order, sup } = orgBuilderHierarchy();
   const names = {};
   order.forEach((r) => { names[r] = r; });
@@ -480,6 +519,7 @@ function renderOrgPreview() {
                             strategy: "org_team", edit: true, sel: null };
   layoutHierarchy(order, sup);
   renderGraph();
+  fillGKind();
   $("#graph").hidden = false;
   $("#graph-tools").hidden = false;
   $("#board").hidden = false;
@@ -489,9 +529,16 @@ function renderOrgPreview() {
 }
 
 // Toolbar on the org-chart editor: add/remove members straight from the panel.
-function orgToolAdd(kind) {
-  const holder = $(kind === "conductor" ? "#org-mids" : "#org-workers");
-  if (holder) addOrgMember(holder, kind);
+function fillGKind() {
+  const sel = $("#g-kind");
+  const prev = sel.value;
+  sel.innerHTML = "";
+  for (const { kind } of ORG_KINDS) {
+    const opt = document.createElement("option");
+    opt.value = kind; opt.textContent = orgKindLabel(kind);
+    sel.appendChild(opt);
+  }
+  sel.value = prev || "worker";
 }
 
 function orgToolRemove() {
@@ -600,12 +647,12 @@ function roleCard(key, label, defaultSystem, removable) {
     rm.addEventListener("click", () => {
       const h = box.parentElement;
       if (h && h.id === "reviewers" && h.children.length <= 1) return; // keep ≥1 reviewer
-      if (h && h.id === "org-workers" && h.children.length <= 1) return; // keep ≥1 worker
+      if (h && h.id === "org-kind-worker" && h.children.length <= 1) return; // keep ≥1 worker
       box.remove();
       if (h && h.id === "workers") relabelWorkers(h);
       else if (h && h.id === "reviewers") relabelReviewers(h);
-      else if (h && (h.id === "org-mids" || h.id === "org-workers")) {
-        relabelOrg(h, h.id === "org-mids" ? "conductor" : "worker");
+      else if (h && h.classList.contains("org-holder")) {
+        relabelOrg(h, h.dataset.kind);
         refreshOrgSup();
       } else relabelParticipants(h);
     });
@@ -1094,6 +1141,14 @@ function renderGraph() {
     x1: g.pos[a].x, y1: g.pos[a].y, x2: g.pos[b].x, y2: g.pos[b].y, class: "gedge",
   })));
   const crowded = roles.length > 6;
+  // stagger labels within a crowded row so they don't overlap
+  const rows = {};
+  roles.forEach((r) => { (rows[g.pos[r].y] = rows[g.pos[r].y] || []).push(r); });
+  const labelDrop = {};
+  Object.values(rows).forEach((row) => {
+    row.sort((a, b) => g.pos[a].x - g.pos[b].x)
+      .forEach((r, i) => { labelDrop[r] = row.length > 3 ? (i % 2) * 9 : 0; });
+  });
   roles.forEach((role) => {
     const p = g.pos[role];
     const isWs = role === "__ws__";
@@ -1109,7 +1164,8 @@ function renderGraph() {
       "text-anchor": "middle", dy: isWs ? "4.5" : "3.5" });
     txt.textContent = isWs ? "📁" : initials(g.names[role]);
     grp.appendChild(txt);
-    const lbl = svgEl("text", { class: "glabel", "text-anchor": "middle", y: r + 15 });
+    const lbl = svgEl("text", { class: "glabel", "text-anchor": "middle",
+      y: r + 15 + (labelDrop[role] || 0) });
     lbl.textContent = isWs ? "workspace" : role;
     grp.appendChild(lbl);
     if (g.edit) grp.addEventListener("click", () => orgNodeClick(role));
@@ -1231,6 +1287,8 @@ function graphTurnStart(d) {
   } else if (d.action === "design") {
     graphPulse(d.role, others, "soft");
     graphCaption(`${name} · ${t("designing…")}`);
+  } else if (d.action === "research") {
+    graphCaption(`${name} · ${t("researching…")}`);
   } else {
     graphPulse(d.role, others, "soft");
     graphCaption(`${name} · ${t("working…")}`);
@@ -1907,8 +1965,7 @@ $("#loop-on").addEventListener("change", () => {
   persistForm();
 });
 $("#loop-eval").addEventListener("change", persistForm);
-$("#g-add-conductor").addEventListener("click", () => orgToolAdd("conductor"));
-$("#g-add-worker").addEventListener("click", () => orgToolAdd("worker"));
+$("#g-add").addEventListener("click", () => addOrgMember($("#g-kind").value));
 $("#g-remove").addEventListener("click", orgToolRemove);
 $("#theme-toggle").addEventListener("click", cycleTheme);
 $("#lang-toggle").addEventListener("click", toggleLang);

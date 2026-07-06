@@ -1483,12 +1483,24 @@ def _org_levels(order: List[str], sup: Dict[str, str], agents: Dict) -> List[Lis
     return [levels[k] for k in sorted(levels)]
 
 
+def _org_kind(role: str) -> str:
+    """Member kind from the role key: worker_2 -> worker, manager -> manager."""
+    return role.split("_", 1)[0]
+
+
+# Which leaf kinds produce work vs. evaluate the unit's work afterwards.
+_ORG_PRODUCERS = ("worker", "researcher")
+_ORG_EVALUATORS = ("reviewer", "critic")
+
+
 class OrgTeam(Strategy):
     name = "org_team"
     description = (
         "A custom chain of command you design yourself: a top manager delegates "
-        "through mid-level managers to workers; each level assigns in parallel, "
-        "reports flow back up, and the top manager declares when it's done."
+        "through mid-level managers to a mixed team — workers, researchers, "
+        "reviewers, critics; each level runs in parallel, evaluators check the "
+        "producers' output, reports flow back up, and the top manager declares "
+        "when it's done."
     )
     roles = []          # dynamic: any hierarchy, defined by the request's supervisors map
     dynamic_roles = True
@@ -1515,11 +1527,60 @@ class OrgTeam(Strategy):
 
     @staticmethod
     def _leaf_sys(me: str, role: str, sup_name: str) -> str:
+        kind = _org_kind(role)
+        if kind == "researcher":
+            return (
+                f"You are {me} ({role}), a RESEARCHER reporting to {sup_name}. Gather and "
+                f"structure the concrete information your assignment asks for — facts, "
+                f"options, prior art, constraints — so the rest of the unit can build on "
+                f"it. Use tools when available; state what is verified vs. assumed."
+            )
+        if kind == "reviewer":
+            return (
+                f"You are {me} ({role}), the unit REVIEWER reporting to {sup_name}. Each "
+                f"round you review what your unit produced against the assignments: "
+                f"correctness, completeness, edge cases, quality. Be specific and "
+                f"actionable; end every review with APPROVE or REQUEST CHANGES."
+            )
+        if kind == "critic":
+            return (
+                f"You are {me} ({role}), the unit's CRITIC (devil's advocate) reporting "
+                f"to {sup_name}. Attack the unit's current output and direction: hunt for "
+                f"flaws, risks, missed requirements, and weak assumptions others are too "
+                f"polite to raise. Be constructive but merciless; never rubber-stamp."
+            )
         return (
             f"You are {me} ({role}), a WORKER reporting to {sup_name}. Carry out the exact "
             f"assignment you are given — thoroughly and concretely, producing real output, "
             f"not a plan to do it later."
         )
+
+    _LEAF_ACTIONS = {"worker": "implement", "researcher": "research",
+                     "reviewer": "review", "critic": "review"}
+
+    def _leaf_instruction(self, session: Session, w: str, names: Dict[str, str],
+                          sup: Dict[str, str], siblings: List[str],
+                          objective: str) -> str:
+        kind = _org_kind(w)
+        boss = names[sup[w]]
+        if kind == "reviewer":
+            return (f"Task:\n{session.task}\n\nYour unit ({', '.join(siblings)}) has "
+                    f"delivered this round's work (see the conversation). "
+                    f"{('Your focus from ' + boss + ': ' + objective) if objective else ''}\n"
+                    f"Review the unit's output against the assignments: correctness, "
+                    f"completeness, quality. Address your report to {boss}. End with "
+                    f"APPROVE or REQUEST CHANGES.")
+        if kind == "critic":
+            return (f"Task:\n{session.task}\n\nYour unit ({', '.join(siblings)}) has "
+                    f"delivered this round's work (see the conversation). "
+                    f"{('Your focus from ' + boss + ': ' + objective) if objective else ''}\n"
+                    f"Critique it adversarially: the flaws, risks, missed requirements, "
+                    f"and weak assumptions that matter most. Report your top issues to "
+                    f"{boss}, most severe first.")
+        verb = ("Investigate it and deliver structured findings now."
+                if kind == "researcher" else "Complete it concretely now.")
+        return (f"Task:\n{session.task}\n\nYour assignment from {boss}:\n{objective}\n\n"
+                f"{verb}")
 
     def run(self, session: Session) -> str:
         order = session.role_order or list(session.agents)
@@ -1614,10 +1675,14 @@ class OrgTeam(Strategy):
                                      f"the auditor — work continues.")
                 continue
 
-            # 2. Delegation flows down, level by level; whole levels run in parallel.
+            # 2. Delegation flows down, level by level; whole levels run in
+            # parallel — producers (workers/researchers) first, then the
+            # evaluative members (reviewers/critics) check what they made.
             for level in levels[1:]:
                 mids = [r for r in level if children[r]]
                 leaves = [r for r in level if not children[r]]
+                producers = [r for r in leaves if _org_kind(r) not in _ORG_EVALUATORS]
+                evaluators = [r for r in leaves if _org_kind(r) in _ORG_EVALUATORS]
                 if mids:
                     specs = [(m, self._mgr_sys(names[m], m, children[m], names[sup[m]]),
                               f"Task:\n{session.task}\n\nYour manager ({names[sup[m]]}) "
@@ -1630,14 +1695,25 @@ class OrgTeam(Strategy):
                     results = _run_turns_parallel(session, specs)
                     for m in mids:
                         process_manager_text(m, results.get(m, ""), rnd)
-                if leaves:
-                    specs = [(w, self._leaf_sys(names[w], w, names[sup[w]]),
-                              f"Task:\n{session.task}\n\nYour assignment from "
-                              f"{names[sup[w]]}:\n{own_objective(w)}\n\nComplete it "
-                              f"concretely now.",
-                              rnd, "implement") for w in leaves]
-                    _run_turns_parallel(session, specs)
-                    for w in leaves:
+
+                def leaf_specs(group):
+                    out = []
+                    for w in group:
+                        siblings = [c for c in children[sup[w]] if c != w]
+                        # evaluators need no assignment to act; producers do
+                        obj = ((assignments.get(w) or "")
+                               if _org_kind(w) in _ORG_EVALUATORS else own_objective(w))
+                        out.append((w, self._leaf_sys(names[w], w, names[sup[w]]),
+                                    self._leaf_instruction(session, w, names, sup,
+                                                           siblings, obj),
+                                    rnd, self._LEAF_ACTIONS.get(_org_kind(w), "implement")))
+                    return out
+
+                for group in (producers, evaluators):
+                    if not group:
+                        continue
+                    _run_turns_parallel(session, leaf_specs(group))
+                    for w in group:
                         session.emit("worker_status", round=rnd, worker=w, name=names[w],
                                      status="delivered", note="", by=sup[w])
 

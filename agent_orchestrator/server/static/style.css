@@ -680,6 +680,19 @@ html[data-theme="light"] .history-item:hover { background: rgba(20, 30, 55, 0.06
 }
 .gbtn:hover:not(:disabled) { color: var(--text); border-color: var(--border-strong); }
 .gbtn.danger:hover:not(:disabled) { color: var(--bad); border-color: rgba(251, 113, 133, 0.5); }
+.g-kind-wrap { flex: 1.4; min-width: 90px; }
+#g-kind {
+  padding: 6px 24px 6px 9px !important;
+  font-family: var(--mono) !important; font-size: 10.5px !important;
+}
+
+/* org builder: kind picker + add button row */
+.org-add-row { display: flex; gap: 8px; margin-bottom: 18px; align-items: stretch; }
+.org-add-kind-wrap { flex: 1; }
+.org-add-btn { flex: 1; }
+.org-holder:empty { display: none; }
+.org-holder { margin-bottom: 11px; }
+.org-holder:empty + .org-holder { margin-top: 0; }
 .gedge { stroke: var(--border-strong); stroke-width: 1; opacity: 0.45; }
 .gnode .gbody { fill: rgba(255, 255, 255, 0.06); stroke: var(--border-strong); stroke-width: 1; }
 .gnode.acc-a .gbody { fill: var(--a); stroke: none; }
