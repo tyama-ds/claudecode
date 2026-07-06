@@ -79,6 +79,12 @@ class Settings:
     # usually on localhost, so they default to a direct connection.
     local_use_proxy: bool = False
 
+    # User-Agent sent by the http_get / browser_get agent tools.
+    user_agent: str = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+    )
+
     # Generation limits.
     max_tokens: int = 4096
     # Per-agent-turn timeout (seconds) for subprocess/CLI adapters.
@@ -109,6 +115,7 @@ class Settings:
             in ("1", "true", "yes", "on"),
             max_tokens=int(os.environ.get("ORCHESTRATOR_MAX_TOKENS", "4096")),
             cli_timeout=int(os.environ.get("ORCHESTRATOR_CLI_TIMEOUT", "600")),
+            user_agent=os.environ.get("ORCHESTRATOR_USER_AGENT") or cls.user_agent,
         )
 
     def apply_overrides(self, data: dict) -> None:
@@ -132,6 +139,9 @@ class Settings:
             self.proxy = p or None
         if "local_use_proxy" in data:
             self.local_use_proxy = bool(data.get("local_use_proxy"))
+        ua = data.get("user_agent")
+        if ua and ua.strip():
+            self.user_agent = ua.strip()
 
 
 # A process-wide settings instance, lazily initialised.

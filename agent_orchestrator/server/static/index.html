@@ -115,7 +115,9 @@
         <label class="field-check"><input type="checkbox" class="tool-check" value="run" />
           <span>run <small data-i18n>(shell commands in the workspace — trust required)</small></span></label>
         <label class="field-check"><input type="checkbox" class="tool-check" value="http_get" />
-          <span>http_get <small data-i18n>(fetch a URL)</small></span></label>
+          <span>http_get <small data-i18n>(fetch a URL — proxy + User-Agent)</small></span></label>
+        <label class="field-check"><input type="checkbox" class="tool-check" value="browser_get" />
+          <span>browser_get <small data-i18n>(headless browser — renders JavaScript)</small></span></label>
       </details>
 
       <div class="set-group" id="loop-opts">
@@ -276,6 +278,11 @@
           <label class="field">
             <span class="field-label" data-i18n>HTTP(S) proxy</span>
             <input id="set-proxy" type="text" placeholder="http://proxy.corp:8080 (blank = direct)" />
+          </label>
+          <label class="field">
+            <span class="field-label"><span data-i18n>User-Agent</span>
+              <small data-i18n>(used by http_get / browser_get)</small></span>
+            <input id="set-ua" type="text" />
           </label>
         </div>
 

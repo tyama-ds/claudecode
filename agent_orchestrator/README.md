@@ -156,8 +156,13 @@ feedback and the previous result in context (and, in a workspace, the files
 still on disk).
 
 **Agent tools** (opt-in checkboxes): the orchestrator can expose `list_files`,
-`read_file`, `run` (shell in the workspace — only enable if you trust the run),
-and `http_get` to every agent, regardless of backend. An agent calls
+`read_file`, `write_file`, `run` (shell in the workspace — only enable if you
+trust the run), `http_get`, and `browser_get` to every agent, regardless of
+backend. Web tools honor the configured **HTTP(S) proxy** and **User-Agent**
+(both set in Settings): `http_get` is a fast stdlib fetch (no JavaScript);
+`browser_get` renders the page in a **real headless browser** (Selenium →
+Playwright → plain-HTTP fallback if neither is installed), so JS-heavy sites
+work. See `requirements.txt` for the optional browser install. An agent calls
 `<TOOL name="run">pytest -q</TOOL>` anywhere in a reply; the orchestrator
 executes it and hands the results straight back for the same turn (up to 3
 tool exchanges), streaming each call to the transcript as `🔧` events.

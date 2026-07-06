@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 
 from ..adapters.base import Message
+from ..config import get_settings
 from .session import Session, Turn, WorkspaceFile
 
 
@@ -415,8 +416,84 @@ _TOOL_DOCS = {
     "write_file": ("write_file — input: FIRST line is a workspace-relative path, every "
                    "following line is the complete new file content; writes the file."),
     "run": "run — input: a shell command; runs in the workspace (60s timeout), returns output.",
-    "http_get": "http_get — input: an http(s) URL; fetches it and returns the text body.",
+    "http_get": ("http_get — input: an http(s) URL; fetches it (via the configured proxy "
+                 "and User-Agent) and returns the text body. Fast, but no JavaScript."),
+    "browser_get": ("browser_get — input: an http(s) URL; loads it in a real headless "
+                    "browser (JavaScript rendered) and returns the visible text. Use for "
+                    "dynamic/JS-heavy pages."),
 }
+
+
+def _http_get(url: str) -> str:
+    """Fetch a URL as text, honoring the configured proxy and User-Agent."""
+    import urllib.request
+    settings = get_settings()
+    req = urllib.request.Request(url, headers={"User-Agent": settings.user_agent})
+    if settings.proxy:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": settings.proxy, "https": settings.proxy}))
+    else:
+        opener = urllib.request.build_opener()
+    with opener.open(req, timeout=30) as resp:
+        raw = resp.read(_TOOL_MAX_OUTPUT * 4)
+    return raw.decode("utf-8", errors="replace")[:_TOOL_MAX_OUTPUT]
+
+
+def _browser_get(url: str) -> str:
+    """Render a URL in a real headless browser and return its visible text.
+
+    Tries Selenium first, then Playwright; both honor the configured proxy and
+    User-Agent. Falls back to a plain HTTP GET when neither is installed, so the
+    tool is always usable (just without JavaScript in that case).
+    """
+    settings = get_settings()
+    ua, proxy = settings.user_agent, settings.proxy
+    # -- Selenium (Chrome) ------------------------------------------------
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        opts = Options()
+        for flag in ("--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+                     "--disable-gpu"):
+            opts.add_argument(flag)
+        opts.add_argument(f"--user-agent={ua}")
+        if proxy:
+            opts.add_argument(f"--proxy-server={proxy}")
+        driver = webdriver.Chrome(options=opts)
+        try:
+            driver.set_page_load_timeout(45)
+            driver.get(url)
+            text = driver.find_element("tag name", "body").text
+        finally:
+            driver.quit()
+        return ("[rendered by Selenium]\n" + text)[:_TOOL_MAX_OUTPUT]
+    except ImportError:
+        pass  # Selenium not installed — try Playwright next
+    except Exception as exc:  # noqa: BLE001 - driver/runtime issue; try fallbacks
+        selenium_err = f"{type(exc).__name__}: {exc}"
+    else:
+        selenium_err = None
+    # -- Playwright (Chromium) -------------------------------------------
+    try:
+        from playwright.sync_api import sync_playwright
+        launch = {"headless": True}
+        if proxy:
+            launch["proxy"] = {"server": proxy}
+        with sync_playwright() as p:
+            browser = p.chromium.launch(**launch)
+            page = browser.new_page(user_agent=ua)
+            page.goto(url, timeout=45000, wait_until="networkidle")
+            text = page.inner_text("body")
+            browser.close()
+        return ("[rendered by Playwright]\n" + text)[:_TOOL_MAX_OUTPUT]
+    except ImportError:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        return (f"browser_get: headless browser failed ({type(exc).__name__}: {exc}). "
+                f"Install selenium+chromedriver or playwright for JS rendering.")
+    # -- Fallback: plain HTTP (no JavaScript) -----------------------------
+    return ("[no headless browser installed — plain HTTP fetch, JavaScript NOT "
+            "rendered]\n" + _http_get(url))
 
 
 def _tools_system(session: Session) -> str:
@@ -473,9 +550,9 @@ def _exec_tool(session: Session, name: str, arg: str, role: str, rnd: int) -> st
             out = ((proc.stdout or "") + (proc.stderr or ""))[:_TOOL_MAX_OUTPUT]
             return f"(exit {proc.returncode})\n{out}"
         if name == "http_get":
-            import urllib.request
-            with urllib.request.urlopen(arg.strip(), timeout=30) as resp:
-                return resp.read(_TOOL_MAX_OUTPUT).decode("utf-8", errors="replace")
+            return _http_get(arg.strip())
+        if name == "browser_get":
+            return _browser_get(arg.strip())
         return f"unknown tool: {name}"
     except Exception as exc:  # noqa: BLE001 - reported to the agent, not fatal
         return f"tool error: {type(exc).__name__}: {exc}"

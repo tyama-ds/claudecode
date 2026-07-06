@@ -115,7 +115,10 @@ const JA = {
   "(list workspace files)": "（ワークスペースのファイル一覧）",
   "(read a workspace file)": "（ファイルを読む）",
   "(shell commands in the workspace — trust required)": "（ワークスペースでシェル実行 — 要信頼）",
-  "(fetch a URL)": "（URLを取得）",
+  "(fetch a URL — proxy + User-Agent)": "（URL取得 — プロキシ＋UA対応）",
+  "(headless browser — renders JavaScript)": "（ヘッドレスブラウザ — JS描画対応）",
+  "User-Agent": "ユーザーエージェント",
+  "(used by http_get / browser_get)": "（http_get / browser_get で使用）",
   "Min rounds before DONE": "DONE を許可する最低ラウンド",
   "(0 = off — guards rubber-stamp approvals)": "（0＝無効 — 安易な完了宣言を防ぎます）",
   "Test command": "テストコマンド",
@@ -1894,6 +1897,7 @@ async function loadSettings() {
     $("#set-proxy").value = d.proxy || "";
     $("#set-proxy").placeholder = d.proxy_from_env
       ? "set via environment" : "http://proxy.corp:8080 (blank = direct)";
+    $("#set-ua").value = d.user_agent || "";
     for (const [prov, [keyId, modelId, baseId]] of Object.entries(SET_FIELDS)) {
       const p = d.providers[prov];
       $("#" + modelId).value = p.model || "";
@@ -1911,6 +1915,7 @@ async function saveSettings() {
   const v = (id) => $("#" + id).value;
   const payload = {
     proxy: v("set-proxy"),
+    user_agent: v("set-ua"),
     anthropic_api_key: v("set-anthropic-key"), anthropic_model: v("set-anthropic-model"),
     anthropic_base_url: v("set-anthropic-base"),
     openai_api_key: v("set-openai-key"), openai_model: v("set-openai-model"),

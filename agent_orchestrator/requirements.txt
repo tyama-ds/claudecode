@@ -11,3 +11,11 @@
 #   - Claude (API)   -> ANTHROPIC_API_KEY
 #   - GPT (API)      -> OPENAI_API_KEY
 #   - Local LLM      -> a running OpenAI-compatible server (e.g. Ollama)
+#
+# OPTIONAL — only for the browser_get agent tool's JavaScript rendering. Without
+# either, browser_get still works but falls back to a plain HTTP fetch (no JS).
+# Install ONE of:
+#   pip install selenium         # + a Chrome/Chromium and matching chromedriver
+#   pip install playwright && playwright install chromium
+# The http_get tool needs nothing extra (stdlib), and honors the proxy + the
+# configured User-Agent.

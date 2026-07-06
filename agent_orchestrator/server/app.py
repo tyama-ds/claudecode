@@ -155,6 +155,7 @@ class Handler(BaseHTTPRequestHandler):
         return {
             "proxy": s.proxy or "",
             "proxy_from_env": proxy_env,
+            "user_agent": s.user_agent,
             "providers": {
                 "anthropic": prov(s.anthropic_model, s.anthropic_base_url,
                                   s.anthropic_api_key, "ANTHROPIC_API_KEY"),
@@ -282,7 +283,7 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(tools, list):
             session.tools = [t for t in tools
                              if t in ("list_files", "read_file", "write_file",
-                                      "run", "http_get")]
+                                      "run", "http_get", "browser_get")]
 
         # Chain of command for org_team: role -> supervisor role.
         sups = body.get("supervisors") or {}
