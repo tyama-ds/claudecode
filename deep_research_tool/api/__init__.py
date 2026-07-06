@@ -22,6 +22,7 @@ def get_client(
     provider: str,
     api_key: str = None,
     model: str = None,
+    max_tokens_limit: int = 200_000,
     http_proxy: str = None,
     https_proxy: str = None,
     verify_ssl: bool = True,
@@ -35,6 +36,7 @@ def get_client(
         provider: 'openai', 'anthropic', or 'local'
         api_key: API key (optional, uses env var if not provided)
         model: Model name (optional, uses default if not provided)
+        max_tokens_limit: Upper bound for auto-retry on truncation (default: 200000)
         http_proxy: HTTP proxy URL
         https_proxy: HTTPS proxy URL
         verify_ssl: Verify SSL certificates
@@ -48,6 +50,7 @@ def get_client(
         return OpenAIClient(
             api_key=api_key,
             model=model,
+            max_tokens_limit=max_tokens_limit,
             http_proxy=http_proxy,
             https_proxy=https_proxy,
             verify_ssl=verify_ssl,
@@ -56,6 +59,7 @@ def get_client(
         return AnthropicClient(
             api_key=api_key,
             model=model,
+            max_tokens_limit=max_tokens_limit,
             http_proxy=http_proxy,
             https_proxy=https_proxy,
             verify_ssl=verify_ssl,
@@ -66,6 +70,7 @@ def get_client(
             backend=backend,
             base_url=base_url,
             api_key=api_key,
+            max_tokens_limit=max_tokens_limit,
             http_proxy=http_proxy,
             https_proxy=https_proxy,
             verify_ssl=verify_ssl,

@@ -26,6 +26,16 @@ class EvidenceType(str, Enum):
     USER_PROVIDED = "user_provided"
     OTHER = "other"
 
+    # Patent research specific types
+    PATENT_DOCUMENT = "patent_document"
+    PATENT_CLAIM = "patent_claim"
+    ACADEMIC_PAPER_JST = "academic_paper_jst"
+    ACADEMIC_PAPER_CINII = "academic_paper_cinii"
+    ACADEMIC_PAPER_SCHOLAR = "academic_paper_scholar"
+    EXAMINATION_DOCUMENT = "examination_document"
+    BUSINESS_REPORT = "business_report"
+    TECHNICAL_STANDARD = "technical_standard"
+
 
 class QualityCategory(str, Enum):
     """Information quality categories."""
@@ -130,6 +140,7 @@ class Evidence:
 
     # Content
     content_excerpt: str = ""
+    extracted_text: str = ""  # Full extracted text before summarization
     content_hash: str = ""
 
     # Access information
@@ -726,6 +737,7 @@ class EvidenceLocker:
         fieldnames = [
             "id", "citation_key", "evidence_type", "url", "title",
             "author", "publisher", "published_date", "content_excerpt",
+            "extracted_text",
             "accessed_at", "search_query", "section_reference",
             "reliability_score", "relevance_score", "importance_score",
             "quality_category", "source_type", "quality_score", "quality_notes",
@@ -747,6 +759,7 @@ class EvidenceLocker:
                     "publisher": evidence.publisher,
                     "published_date": evidence.published_date,
                     "content_excerpt": evidence.content_excerpt[:500],
+                    "extracted_text": evidence.extracted_text,
                     "accessed_at": evidence.accessed_at,
                     "search_query": evidence.search_query,
                     "section_reference": evidence.section_reference,

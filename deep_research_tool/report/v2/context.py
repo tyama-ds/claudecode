@@ -226,27 +226,33 @@ class ReportContext:
 
     def get_style_instructions(self) -> str:
         """Generate style instructions for chapter generation prompts."""
+        prose_rule = "本文は散文パラグラフで記述し、箇条書きは比較・手順など列挙が自然な場合に限定する。"
         style_map = {
             WritingStyle.FORMAL: (
                 "学術的な報告書の文体。「である」調で統一。客観的・分析的に論じ、"
                 "感情的・主観的な形容（「素晴らしい」「驚くべき」等）は使わない。"
                 "断定できない事項は「〜と考えられる」「〜が示唆される」と書く。"
+                f"{prose_rule}"
             ),
             WritingStyle.BUSINESS: (
                 "ビジネス報告書の文体。「です・ます」調で統一。各段落は結論を先に述べ、"
                 "根拠を後に続ける。「〜について見ていきましょう」のような話し言葉・講義調は使わない。"
+                f"{prose_rule}"
             ),
             WritingStyle.TECHNICAL: (
                 "技術文書の文体。「である」調。条件・数値・手順を正確に記述し、"
                 "「かなり」「非常に」などの曖昧な程度表現を避ける。専門用語は初出時に簡潔に定義する。"
+                f"{prose_rule}"
             ),
             WritingStyle.EXECUTIVE: (
                 "経営層向け。「です・ます」調。冒頭に要点、続けて根拠と示唆。"
                 "1段落は短く（2〜4文）、意思決定に関わる含意を明示する。"
+                f"{prose_rule}"
             ),
             WritingStyle.CASUAL: (
                 "平易で読みやすい書き言葉。「です・ます」調。専門用語は日常語に言い換えるか、"
                 "必ず説明を添える。ただし砕けすぎた表現・絵文字は使わない。"
+                f"{prose_rule}"
             ),
         }
 

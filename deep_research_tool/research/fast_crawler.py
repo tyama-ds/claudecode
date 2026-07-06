@@ -321,7 +321,8 @@ Output only JSON:"""
         """
         # First, execute all searches to get URLs
         all_results = []
-        for query in queries:
+        for qi, query in enumerate(queries, 1):
+            print(f"[FastCrawler] ({qi}/{len(queries)}) Query: {query}")
             try:
                 results = self.search.search(query, max_results=max_pages_per_query)
                 for result in results[:max_pages_per_query]:

@@ -17,8 +17,10 @@ from ..evidence.content_filter import (
     ContentFilterConfig,
     create_moderate_filter,
 )
+from ..utils.helpers import ResearchWarnings
 from ..search.base import SearchResult
-from ..config import CrawlMode, ResearchSourceMode
+from ..search.multilingual import MultilingualSearcher, MultilingualSearchResult
+from ..config import CrawlMode, MultilingualSearchConfig, ResearchSourceMode
 from ..utils.helpers import extract_json_from_response
 from .local_store import LocalDocumentStore
 from .query_generator import QueryGenerator, ResearchPlan, TableOfContents, TableOfContentsItem
@@ -177,6 +179,10 @@ class Researcher:
         evaluation_llm=None,
         writing_llm=None,
         source_mode: ResearchSourceMode = ResearchSourceMode.WEB,
+        multilingual_config: MultilingualSearchConfig = None,
+        max_content_length: int = 50000,
+        target_pages: int = None,
+        target_characters: int = None,
     ):
         """
         Initialize Researcher.
@@ -228,6 +234,10 @@ class Researcher:
             source_mode: Information sources: WEB (web only), LOCAL (local
                 documents only; requires additional_documents at
                 conduct_research), HYBRID (local documents + web)
+            multilingual_config: Multilingual search configuration (None to disable)
+            max_content_length: Maximum content length for extraction truncation
+            target_pages: Target output page count (used for dynamic content sizing)
+            target_characters: Target output character count (overrides target_pages)
         """
         self.llm = llm_client
         self.planning_llm = planning_llm or llm_client
@@ -244,6 +254,13 @@ class Researcher:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.query_generator = QueryGenerator(self.planning_llm, language)
+        self.max_content_length = max_content_length
+
+        # Store target length info (used to calculate per-section target after plan is created)
+        self._target_pages = target_pages
+        self._target_characters = target_characters
+        # ContentExtractor is created without per-section target initially;
+        # it will be updated in _execute_research_loop once we know the section count.
         self.content_extractor = ContentExtractor(
             self.writing_llm, language,
             evaluation_llm_client=self.evaluation_llm,
@@ -255,6 +272,18 @@ class Researcher:
         self.session: Optional[ResearchSession] = None
         self.evidence_locker: Optional[EvidenceLocker] = None
         self.progress_callback = progress_callback
+
+        # Multilingual search settings
+        self.multilingual_config = multilingual_config
+        self.multilingual_searcher: Optional[MultilingualSearcher] = None
+        if multilingual_config and multilingual_config.enabled:
+            self.multilingual_searcher = MultilingualSearcher(
+                config=multilingual_config,
+                search_client=search_client,
+                llm_client=llm_client,
+                progress_callback=progress_callback,
+            )
+            print(f"[Researcher] Multilingual search enabled: languages={multilingual_config.search_languages}")
 
         # Extended mode settings
         self.extended_mode = extended_mode
@@ -410,10 +439,12 @@ class Researcher:
                 doc_summaries = []
                 for doc in additional_documents:
                     # Add to evidence locker as user-provided
+                    full_content = doc.get("content", "")
                     self.evidence_locker.add_evidence(
                         url=doc.get("path", ""),
                         title=doc.get("title", Path(doc.get("path", "")).name),
-                        content_excerpt=doc.get("content", "")[:1000],
+                        content_excerpt=full_content[:1000],
+                        extracted_text=full_content,
                         evidence_type=EvidenceType.USER_PROVIDED,
                     )
                     doc_summaries.append(
@@ -484,6 +515,18 @@ class Researcher:
         if total_sections == 0:
             print("[ERROR] No sections found in table of contents!")
             return
+
+        # Calculate per-section character target and propagate to ContentExtractor
+        if total_sections > 0 and (self._target_pages or self._target_characters):
+            if self._target_characters:
+                total_target = self._target_characters
+            else:
+                chars_per_page = 1500 if self.language == "ja" else 2500
+                total_target = self._target_pages * chars_per_page
+            target_per_section = total_target // total_sections
+            self.content_extractor.target_chars_per_section = target_per_section
+            print(f"[DEBUG] Dynamic content sizing: {total_target:,} total chars / "
+                  f"{total_sections} sections = {target_per_section:,} chars/section")
 
         # Initial queries from plan
         available_queries = list(self.session.research_plan.search_queries)
@@ -592,7 +635,8 @@ class Researcher:
         if not queries:
             # Generate queries if none available
             queries = self.query_generator.generate_follow_up_queries(
-                section, "", []
+                section, "", [],
+                research_topic=self.session.query,
             )
 
         print(f"[FastCrawler] Processing section {section.section} with {len(queries)} queries")
@@ -625,10 +669,12 @@ class Researcher:
             section_content_parts.append(extracted)
 
             # Add to evidence locker
+            full_text = page.content or page.processed_content or ""
             self.evidence_locker.add_evidence(
                 url=page.url,
                 title=page.title,
                 content_excerpt=page.processed_content[:500] if page.processed_content else page.snippet,
+                extracted_text=full_text,
                 evidence_type=EvidenceType.WEB_PAGE,
                 search_query=page.metadata.get("query", ""),
                 section_reference=section.section,
@@ -774,7 +820,8 @@ class Researcher:
                 )
                 iter_record.gaps_identified = gaps
                 queries = self.query_generator.generate_follow_up_queries(
-                    section, current_content, gaps
+                    section, current_content, gaps,
+                    research_topic=self.session.query,
                 )
 
             if not queries:
@@ -782,13 +829,36 @@ class Researcher:
                 break
 
             iter_record.queries_executed = queries
-            print(f"[DEBUG] Section {section.section} iteration {iteration}: executing {len(queries[:self.max_queries_per_iteration])} queries")
+            queries_to_run = queries[:self.max_queries_per_iteration]
+            print(f"\n[Search] Section {section.section} - {len(queries_to_run)} queries to execute")
 
             # Execute searches and extract content
-            for query in queries[:self.max_queries_per_iteration]:
-                print(f"[DEBUG] Searching: {query[:50]}...")
+            for qi, query in enumerate(queries_to_run, 1):
+                print(f"[Search] ({qi}/{len(queries_to_run)}) Query: {query}")
                 try:
-                    results = self.search.search(query)
+                    # Use multilingual search if enabled, otherwise standard search
+                    if self.multilingual_searcher:
+                        ml_results, ml_stats = self.multilingual_searcher.search_parallel(query)
+                        # Convert MultilingualSearchResult to SearchResult for unified processing
+                        results = [
+                            SearchResult(
+                                title=mr.title,
+                                url=mr.url,
+                                snippet=mr.snippet,
+                                metadata={
+                                    "source_language": mr.source_language,
+                                    "is_translated": mr.is_translated,
+                                    "translation_confidence": mr.translation_confidence,
+                                    "relevance_score": mr.relevance_score,
+                                },
+                            )
+                            for mr in ml_results
+                        ]
+                        print(f"[DEBUG] Multilingual search returned {len(results)} results "
+                              f"(deduped from {ml_stats.total_results + ml_stats.duplicates_removed}, "
+                              f"languages: {ml_stats.results_by_language})")
+                    else:
+                        results = self.search.search(query)
                     print(f"[DEBUG] Search returned {len(results)} results")
                     iter_record.sources_found += len(results)
 
@@ -817,13 +887,78 @@ class Researcher:
                                     continue
                                 print(f"[FILTER] Quality score: {content_filter_result.quality_score:.2f}")
 
+                            # Apply max_content_length truncation
+                            raw_content = page.text_content
+                            if len(raw_content) > self.max_content_length:
+                                raw_content = raw_content[:self.max_content_length]
+
                             extracted = self.content_extractor.extract_relevant_content(
-                                raw_content=page.text_content,
+                                raw_content=raw_content,
                                 source_url=result.url,
                                 source_title=result.title,
                                 section_context=f"{section.section}. {section.title}",
                                 research_query=query,
                             )
+
+                            # Capture images from page content and attach to ExtractedContent
+                            page_images = getattr(page, 'images', []) or []
+                            if page_images and not extracted.images:
+                                extracted.images = [
+                                    {"src": img.get("src", ""), "alt": img.get("alt", ""),
+                                     "title": img.get("title", ""), "page_title": result.title}
+                                    for img in page_images[:5]
+                                    if img.get("src", "")
+                                ]
+
+                            # Follow links to PDF/XLSX/DOCX documents on the page
+                            page_links = getattr(page, 'links', []) or []
+                            doc_links = [
+                                link for link in page_links
+                                if any(link.get("url", "").lower().endswith(ext)
+                                       for ext in ('.pdf', '.xlsx', '.xls', '.docx', '.csv'))
+                            ]
+                            for doc_link in doc_links[:2]:  # Limit to 2 document links per page
+                                doc_url = doc_link.get("url", "")
+                                if doc_url:
+                                    try:
+                                        print(f"[DEBUG] Following document link: {doc_url[:60]}...")
+                                        doc_page = self.search.get_page_content(doc_url)
+                                        if doc_page.text_content and len(doc_page.text_content) > 50:
+                                            doc_extracted = self.content_extractor.extract_relevant_content(
+                                                raw_content=doc_page.text_content[:self.max_content_length],
+                                                source_url=doc_url,
+                                                source_title=doc_link.get("text", "") or doc_page.title,
+                                                section_context=f"{section.section}. {section.title}",
+                                                research_query=query,
+                                            )
+                                            if doc_extracted.relevance_score >= 0.2:
+                                                section_content_parts.append(doc_extracted)
+                                                iter_record.content_extracted += 1
+                                                # Determine evidence type from extension
+                                                doc_url_lower = doc_url.lower()
+                                                if doc_url_lower.endswith('.pdf'):
+                                                    ev_type = EvidenceType.PDF_DOCUMENT
+                                                else:
+                                                    ev_type = EvidenceType.WEB_PAGE
+                                                self.evidence_locker.add_evidence(
+                                                    url=doc_url,
+                                                    title=doc_link.get("text", "") or doc_page.title,
+                                                    content_excerpt=doc_extracted.processed_content[:500],
+                                                    extracted_text=doc_page.text_content or doc_extracted.processed_content,
+                                                    evidence_type=ev_type,
+                                                    search_query=query,
+                                                    section_reference=section.section,
+                                                    relevance_score=doc_extracted.relevance_score,
+                                                )
+                                                print(f"[DEBUG] Document content added from {doc_url[:50]}")
+                                    except Exception as doc_e:
+                                        print(f"[DEBUG] Failed to extract document link {doc_url[:50]}: {doc_e}")
+                                        ResearchWarnings.get_instance().add(
+                                            ResearchWarnings.HIGH,
+                                            "Researcher",
+                                            f"Document extraction failed: {doc_url[:80]}. "
+                                            f"PDF/XLSX/DOCX content lost. Error: {doc_e}",
+                                        )
 
                             print(f"[DEBUG] Extracted relevance_score: {extracted.relevance_score}")
 
@@ -833,15 +968,23 @@ class Researcher:
                                 iter_record.content_extracted += 1
                                 print(f"[DEBUG] Content added. Total parts: {len(section_content_parts)}")
 
-                                self.evidence_locker.add_evidence(
-                                    url=result.url,
-                                    title=result.title,
-                                    content_excerpt=extracted.processed_content[:500],
-                                    evidence_type=EvidenceType.WEB_PAGE,
-                                    search_query=query,
-                                    section_reference=section.section,
-                                    relevance_score=extracted.relevance_score,
-                                )
+                                # Build evidence kwargs with multilingual metadata
+                                evidence_kwargs = {
+                                    "url": result.url,
+                                    "title": result.title,
+                                    "content_excerpt": extracted.processed_content[:500],
+                                    "extracted_text": raw_content,
+                                    "evidence_type": EvidenceType.WEB_PAGE,
+                                    "search_query": query,
+                                    "section_reference": section.section,
+                                    "relevance_score": extracted.relevance_score,
+                                }
+                                if result.metadata.get("source_language"):
+                                    evidence_kwargs["source_language"] = result.metadata["source_language"]
+                                    evidence_kwargs["is_translated"] = result.metadata.get("is_translated", False)
+                                    evidence_kwargs["translation_confidence"] = result.metadata.get("translation_confidence", 1.0)
+
+                                self.evidence_locker.add_evidence(**evidence_kwargs)
                             else:
                                 # Even low relevance content can be useful - add with note
                                 if extracted.processed_content and len(extracted.processed_content) > 100:
@@ -850,12 +993,24 @@ class Researcher:
 
                         except Exception as e:
                             print(f"[ERROR] Content extraction error for {result.url}: {e}")
+                            ResearchWarnings.get_instance().add(
+                                ResearchWarnings.HIGH,
+                                "Researcher",
+                                f"Content extraction failed for {result.url[:80]}. "
+                                f"All evidence from this page lost. Error: {e}",
+                            )
                             continue
 
                     time.sleep(0.3)
 
                 except Exception as e:
                     print(f"[ERROR] Search error for query '{query}': {e}")
+                    ResearchWarnings.get_instance().add(
+                        ResearchWarnings.HIGH,
+                        "Researcher",
+                        f"Search query failed: '{query[:60]}'. "
+                        f"All results for this query lost. Error: {e}",
+                    )
                     continue
 
             iter_record.completed_at = datetime.now().isoformat()
@@ -961,6 +1116,17 @@ class Researcher:
                 "sources": [ec.source_url for ec in section_content_parts],
                 "images": [img for ec in section_content_parts for img in ec.images][:5],
                 "gaps": synthesized.get("information_gaps", []),
+                "extracted_content": [
+                    {
+                        "title": ec.source_title,
+                        "url": ec.source_url,
+                        "content": ec.processed_content,
+                        "raw_content": ec.raw_content,
+                        "key_points": ec.key_points,
+                        "relevance_score": ec.relevance_score,
+                    }
+                    for ec in section_content_parts
+                ],
             }
 
             section.content = content
@@ -1352,6 +1518,12 @@ Return JSON:
                 print(f"[DEBUG] Issues found: {result['issues']}")
         except Exception as e:
             print(f"[WARNING] Coherence check failed: {e}")
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.HIGH,
+                "Researcher",
+                f"Cross-section coherence check failed entirely. "
+                f"Logical inconsistencies may exist between sections. Error: {e}",
+            )
 
     def _conduct_extended_research(
         self,
@@ -1433,6 +1605,7 @@ Return JSON:
                             url=crawled_page.url,
                             title=crawled_page.title,
                             content_excerpt=extracted.processed_content[:500],
+                            extracted_text=crawled_page.content,
                             evidence_type=EvidenceType.WEB_PAGE,
                             search_query=f"crawled from {crawl_result.root_domain}",
                             section_reference=section.section,
@@ -1500,7 +1673,14 @@ Return as JSON:
         try:
             synthesis = extract_json_from_response(response.content)
             self.session.section_contents["_executive_summary"] = synthesis
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError) as _sum_err:
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.HIGH,
+                "Researcher",
+                f"Executive summary generation failed (JSON parse error). "
+                f"Summary, key_findings, and recommendations are empty placeholders. "
+                f"Error: {_sum_err}",
+            )
             self.session.section_contents["_executive_summary"] = {
                 "executive_summary": "Summary generation failed",
                 "key_findings": [],
@@ -1621,7 +1801,8 @@ Return as JSON:
                 # Generate queries focusing on gaps or expanding content
                 if focus_on_gaps and gaps:
                     queries = self.query_generator.generate_follow_up_queries(
-                        section, existing_text, gaps
+                        section, existing_text, gaps,
+                        research_topic=self.session.query,
                     )
                     iter_record.gaps_identified = gaps
                 else:
@@ -1635,7 +1816,23 @@ Return as JSON:
                 # Execute searches
                 for query in queries[:self.max_queries_per_iteration]:
                     try:
-                        results = self.search.search(query)
+                        # Use multilingual search if enabled
+                        if self.multilingual_searcher:
+                            ml_results, _ = self.multilingual_searcher.search_parallel(query)
+                            results = [
+                                SearchResult(
+                                    title=mr.title,
+                                    url=mr.url,
+                                    snippet=mr.snippet,
+                                    metadata={
+                                        "source_language": mr.source_language,
+                                        "is_translated": mr.is_translated,
+                                    },
+                                )
+                                for mr in ml_results
+                            ]
+                        else:
+                            results = self.search.search(query)
                         iter_record.sources_found += len(results)
 
                         for result in results[:self.max_pages_per_query]:
@@ -1663,8 +1860,13 @@ Return as JSON:
                                     if not content_filter_result.should_include:
                                         continue
 
+                                # Apply max_content_length truncation
+                                raw_content = page.text_content
+                                if len(raw_content) > self.max_content_length:
+                                    raw_content = raw_content[:self.max_content_length]
+
                                 extracted = self.content_extractor.extract_relevant_content(
-                                    raw_content=page.text_content,
+                                    raw_content=raw_content,
                                     source_url=result.url,
                                     source_title=result.title,
                                     section_context=f"{section.section}. {section.title}",
@@ -1679,6 +1881,7 @@ Return as JSON:
                                         url=result.url,
                                         title=result.title,
                                         content_excerpt=extracted.processed_content[:500],
+                                        extracted_text=raw_content,
                                         evidence_type=EvidenceType.WEB_PAGE,
                                         search_query=query,
                                         section_reference=section_id,
@@ -1736,8 +1939,16 @@ Return as JSON:
         Returns:
             List of expansion queries
         """
-        prompt = f"""Based on this section and its existing content, generate search queries to find additional detailed information.
+        research_topic = self.session.query
 
+        topic_anchor = ""
+        if research_topic:
+            topic_anchor = f"""
+Original Research Topic: {research_topic}
+IMPORTANT: All queries must stay within the context of this research topic. Do not generate generic queries."""
+
+        prompt = f"""Based on this section and its existing content, generate search queries to find additional detailed information.
+{topic_anchor}
 Section: {section.section}. {section.title}
 Description: {section.description}
 

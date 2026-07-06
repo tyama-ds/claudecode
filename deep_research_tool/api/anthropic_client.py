@@ -30,7 +30,8 @@ class AnthropicClient(BaseLLMClient):
         api_key: Optional[str] = None,
         model: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
+        max_tokens_limit: int = 200_000,
         http_proxy: Optional[str] = None,
         https_proxy: Optional[str] = None,
         verify_ssl: bool = True,
@@ -43,6 +44,7 @@ class AnthropicClient(BaseLLMClient):
             model: Model name or alias (default: claude-3-5-sonnet)
             temperature: Sampling temperature
             max_tokens: Maximum tokens in response
+            max_tokens_limit: Upper bound for auto-retry on truncation (default: 200000)
             http_proxy: HTTP proxy URL (e.g., "http://proxy:8080")
             https_proxy: HTTPS proxy URL
             verify_ssl: Verify SSL certificates
@@ -55,6 +57,7 @@ class AnthropicClient(BaseLLMClient):
             model=resolved_model,
             temperature=temperature,
             max_tokens=max_tokens,
+            max_tokens_limit=max_tokens_limit,
         )
         self._http_proxy = http_proxy
         self._https_proxy = https_proxy

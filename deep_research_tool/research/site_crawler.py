@@ -8,7 +8,7 @@ discovering and extracting relevant content from related pages within the same d
 import re
 import time
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Set, Callable
+from typing import List, Dict, Any, Optional, Set, Callable, Tuple
 from urllib.parse import urlparse, urljoin, urldefrag
 from collections import deque
 
@@ -30,16 +30,26 @@ def normalize_url(url: str) -> str:
     return url.rstrip("/")
 
 
-def is_valid_page_url(url: str) -> bool:
-    """Check if URL is a valid page URL (not a file download, etc.)."""
+def is_valid_page_url(url: str, skip_documents: bool = True) -> bool:
+    """Check if URL is a valid page URL (not a file download, etc.).
+
+    Args:
+        url: URL to check
+        skip_documents: When True, also reject PDF/DOCX/XLSX-style document
+            URLs. Callers that handle documents separately (see
+            SiteCrawler.is_document_url) should pass False.
+    """
     # Skip common non-page URLs
     skip_extensions = [
-        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
         ".zip", ".rar", ".tar", ".gz", ".exe", ".dmg",
         ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp",
         ".mp3", ".mp4", ".avi", ".mov", ".wmv",
         ".css", ".js", ".json", ".xml",
     ]
+    if skip_documents:
+        skip_extensions += [
+            ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+        ]
     lower_url = url.lower()
     for ext in skip_extensions:
         if lower_url.endswith(ext):
@@ -213,13 +223,29 @@ class SiteCrawler:
         """Normalize URL by removing fragments and trailing slashes."""
         return normalize_url(url)
 
-    def is_valid_page_url(self, url: str) -> bool:
-        """Check if URL is a valid page URL (not a file download, etc.)."""
-        return is_valid_page_url(url)
+    def is_document_url(self, url: str) -> bool:
+        """Check if URL is a downloadable document (PDF, XLSX, DOCX, CSV)."""
+        doc_extensions = [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".ppt", ".pptx"]
+        lower_url = url.lower()
+        return any(lower_url.endswith(ext) for ext in doc_extensions)
 
-    def extract_links(self, base_url: str, html_content: str) -> List[str]:
-        """Extract links from HTML content."""
-        links = []
+    def is_valid_page_url(self, url: str) -> bool:
+        """Check if URL is a valid page URL (not a file download, etc.).
+
+        Note: PDF/DOCX/XLSX documents are handled separately via
+        is_document_url() and are not skipped outright.
+        """
+        return is_valid_page_url(url, skip_documents=False)
+
+    def extract_links(self, base_url: str, html_content: str) -> Tuple[List[str], List[str]]:
+        """Extract links from HTML content.
+
+        Returns:
+            Tuple of (page_links, document_links) where document_links
+            are URLs to PDF/XLSX/DOCX/CSV files.
+        """
+        page_links = []
+        document_links = []
 
         # Simple regex to find href attributes
         href_pattern = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
@@ -240,13 +266,17 @@ class SiteCrawler:
             else:
                 full_url = urljoin(base_url, href)
 
-            # Only include same-domain URLs
-            if self.is_same_domain(full_url, base_url):
-                normalized = self.normalize_url(full_url)
-                if self.is_valid_page_url(normalized) and normalized not in links:
-                    links.append(normalized)
+            normalized = self.normalize_url(full_url)
 
-        return links
+            # Categorize: document link vs page link
+            if self.is_document_url(normalized):
+                if normalized not in document_links:
+                    document_links.append(normalized)
+            elif self.is_same_domain(full_url, base_url):
+                if self.is_valid_page_url(normalized) and normalized not in page_links:
+                    page_links.append(normalized)
+
+        return page_links, document_links
 
     def score_relevance_simple(
         self,
@@ -428,13 +458,17 @@ Focus on specific, actionable topics and queries. Limit to 5 each."""
                 )
 
             try:
-                # Fetch page
+                # Fetch page (handle both regular pages and document URLs)
+                is_doc = self.is_document_url(current_url)
                 page = self.search.get_page_content(current_url)
                 pages_crawled += 1
                 self._total_pages_crawled += 1
 
-                # Extract links for further crawling
-                links = self.extract_links(current_url, page.html_content or "")
+                # Extract links for further crawling (only for HTML pages)
+                page_links = []
+                doc_links = []
+                if not is_doc and page.html_content:
+                    page_links, doc_links = self.extract_links(current_url, page.html_content)
 
                 # Score relevance
                 if self.llm:
@@ -457,7 +491,7 @@ Focus on specific, actionable topics and queries. Limit to 5 each."""
                     url=current_url,
                     title=page.title or "",
                     content=page.text_content,
-                    links=links,
+                    links=page_links,
                     relevance_score=relevance,
                     depth=depth,
                     images=[{"url": img.get("src", ""), "alt": img.get("alt", "")}
@@ -468,8 +502,36 @@ Focus on specific, actionable topics and queries. Limit to 5 each."""
                 if relevance >= self.relevance_threshold:
                     crawled_pages.append(crawled_page)
 
-                # Add links to queue (prioritize links with topic keywords in URL)
-                for link in links:
+                # Process discovered document links (PDF/XLSX/DOCX/CSV)
+                for doc_url in doc_links[:3]:  # Limit document downloads per page
+                    if doc_url not in visited and self._total_pages_crawled < self.GLOBAL_MAX_PAGES:
+                        visited.add(doc_url)
+                        try:
+                            doc_page = self.search.get_page_content(doc_url)
+                            self._total_pages_crawled += 1
+                            if doc_page.text_content and len(doc_page.text_content) > 50:
+                                doc_relevance = self.score_relevance_simple(
+                                    doc_page.text_content,
+                                    doc_page.title or "",
+                                    research_topic,
+                                    keywords,
+                                )
+                                doc_crawled = CrawledPage(
+                                    url=doc_url,
+                                    title=doc_page.title or "",
+                                    content=doc_page.text_content,
+                                    links=[],
+                                    relevance_score=doc_relevance,
+                                    depth=depth + 1,
+                                )
+                                if doc_relevance >= self.relevance_threshold:
+                                    crawled_pages.append(doc_crawled)
+                                    print(f"[SiteCrawler] Extracted document: {doc_url[:60]} (relevance: {doc_relevance:.2f})")
+                        except Exception as doc_e:
+                            print(f"[SiteCrawler] Failed to extract document {doc_url[:60]}: {doc_e}")
+
+                # Add page links to queue (prioritize links with topic keywords in URL)
+                for link in page_links:
                     if link not in visited:
                         # Prioritize URLs containing topic keywords
                         priority_boost = any(
@@ -576,33 +638,18 @@ def extract_keywords_from_topic(topic: str) -> List[str]:
     """
     Extract keywords from a research topic.
 
+    Uses janome morphological analysis for proper Japanese word segmentation.
+    Falls back to regex splitting when janome is unavailable.
+
+    Example:
+        "炭素繊維市場の動向" -> ["炭素", "繊維", "市場", "動向"]
+        (instead of the whole string as one token with simple space-based split)
+
     Args:
         topic: Research topic string
 
     Returns:
         List of keywords
     """
-    # Remove common stop words
-    stop_words = {
-        "the", "a", "an", "is", "are", "was", "were", "be", "been",
-        "being", "have", "has", "had", "do", "does", "did", "will",
-        "would", "could", "should", "may", "might", "must", "shall",
-        "can", "of", "to", "in", "for", "on", "with", "at", "by",
-        "from", "as", "into", "through", "during", "before", "after",
-        "above", "below", "between", "under", "again", "further",
-        "then", "once", "and", "or", "but", "if", "than", "too",
-        "very", "just", "only", "own", "same", "so", "more", "most",
-        "other", "some", "such", "no", "nor", "not", "about", "what",
-        # Japanese particles and common words
-        "の", "に", "は", "を", "が", "と", "で", "も", "や", "から",
-        "まで", "より", "など", "について", "における", "として",
-    }
-
-    # Split and filter
-    words = re.split(r'[\s、。，．・]+', topic)
-    keywords = [
-        word for word in words
-        if len(word) > 1 and word.lower() not in stop_words
-    ]
-
-    return keywords
+    from deep_research_tool.utils.japanese_text import extract_keywords
+    return extract_keywords(topic, max_keywords=30)

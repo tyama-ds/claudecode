@@ -8,6 +8,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 from ..utils.helpers import (
+    ResearchWarnings,
     extract_json_array_from_response,
     extract_json_from_response,
     split_prose_and_meta,
@@ -62,7 +63,18 @@ class ExtractedContent:
 class ContentExtractor:
     """Extract and process content from search results using LLM."""
 
-    def __init__(self, llm_client, language: str = "ja", evaluation_llm_client=None):
+    # Chunked extraction settings
+    CHUNK_SIZE = 6000          # Characters per chunk for LLM processing
+    CHUNK_OVERLAP = 500        # Overlap between chunks to preserve context
+    MIN_CHUNK_RATIO = 0.2      # Runt chunks smaller than this ratio merge into previous
+
+    def __init__(
+        self,
+        llm_client,
+        language: str = "ja",
+        evaluation_llm_client=None,
+        target_chars_per_section: Optional[int] = None,
+    ):
         """
         Initialize ContentExtractor.
 
@@ -72,75 +84,55 @@ class ContentExtractor:
             evaluation_llm_client: Optional separate LLM client for
                 evaluation-type calls (content extraction, source quality,
                 image relevance); defaults to llm_client
+            target_chars_per_section: Target characters per section (for dynamic output sizing)
         """
         self.llm = llm_client
         self.eval_llm = evaluation_llm_client or llm_client
         self.language = language
+        self.target_chars_per_section = target_chars_per_section
 
-    def extract_relevant_content(
+    def _split_into_chunks(self, text: str) -> List[str]:
+        """Split text into overlapping chunks, merging runt tails."""
+        if len(text) <= self.CHUNK_SIZE:
+            return [text]
+
+        chunks = []
+        pos = 0
+        while pos < len(text):
+            end = pos + self.CHUNK_SIZE
+            chunk = text[pos:end]
+            chunks.append(chunk)
+            pos = end - self.CHUNK_OVERLAP
+
+        # Merge runt last chunk into previous
+        if len(chunks) > 1 and len(chunks[-1]) < self.CHUNK_SIZE * self.MIN_CHUNK_RATIO:
+            chunks[-2] += chunks[-1][self.CHUNK_OVERLAP:]  # append non-overlapping part
+            chunks.pop()
+
+        return chunks
+
+    def _extract_single_chunk(
         self,
-        raw_content: str,
+        chunk_text: str,
         source_url: str,
         source_title: str,
         section_context: str,
         research_query: str,
-    ) -> ExtractedContent:
-        """
-        Extract relevant content from raw source material.
-
-        Args:
-            raw_content: Raw text content from the source
-            source_url: URL of the source
-            source_title: Title of the source
-            section_context: The section this content is for
-            research_query: The original research query
-
-        Returns:
-            ExtractedContent with processed information
-        """
-        # Truncate content if too long
-        max_content_length = 8000
-        truncated_content = raw_content[:max_content_length]
-        if len(raw_content) > max_content_length:
-            truncated_content += "\n... [content truncated]"
-
-        if self.language == "ja":
-            prompt = f"""情報源URL: {source_url}
-情報源タイトル: {source_title}
-
-【調査の文脈】
-- 調査テーマ: {research_query}
-- 対象セクション: {section_context}
-
-【情報源の内容】
-{truncated_content}
-
-この内容を分析し、調査テーマに関連する情報を抽出してください。JSONで回答:
-{{
-    "processed_content": "関連する内容の要約（500〜1000字）。翻訳調を避け、自然な日本語の文章として書く",
-    "key_points": ["要点1", "要点2", ...],
-    "quotes": [
-        {{"text": "情報源からの正確な引用", "context": "この引用が重要な理由"}}
-    ],
-    "relevance_score": 0.0から1.0の数値,
-    "extraction_notes": "この情報源の品質・限界に関するメモ"
-}}
-
-調査テーマとセクションに直接関連する情報に絞ること。
-レポートで引用できる正確な引用文を含めること。
-relevance_score は 0（無関係）〜1（きわめて関連が高い）で評価すること。"""
-        else:
-            prompt = f"""Source URL: {source_url}
+        lang_instruction: str,
+        chunk_label: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """Extract relevant information from a single chunk of content."""
+        prompt = f"""Source URL: {source_url}
 Source Title: {source_title}
-
+{chunk_label}
 Research Context:
 - Query: {research_query}
 - Section: {section_context}
 
 Source Content:
-{truncated_content}
+{chunk_text}
 
-Respond in {self.language}.
+{lang_instruction}
 
 Analyze this content and extract relevant information. Return as JSON:
 {{
@@ -157,38 +149,167 @@ Focus on information directly relevant to the research query and section.
 Include exact quotes that could be cited in the report.
 Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
 
-        response = self.eval_llm.generate(prompt)
-
         try:
+            response = self.eval_llm.generate(prompt)
             data = extract_json_from_response(response.content)
-
-            # Use processed_content from LLM, fall back to truncated raw content if empty
-            processed = data.get("processed_content", "")
-            if not processed or len(processed.strip()) < 10:
-                # LLM returned empty or very short content, use raw content
-                processed = truncated_content[:2000]
-
-            return ExtractedContent(
-                source_url=source_url,
-                source_title=source_title,
-                raw_content=raw_content,
-                processed_content=processed,
-                key_points=data.get("key_points", []),
-                quotes=data.get("quotes", []),
-                relevance_score=float(data.get("relevance_score", 0.5)),
-                extraction_notes=data.get("extraction_notes", ""),
-            )
+            if data is not None:
+                return data
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
+        return None
 
-        # Fallback: return basic extraction
+    @staticmethod
+    def _jaccard_bigram(a: str, b: str) -> float:
+        """Character-bigram Jaccard similarity (works for CJK text without spaces)."""
+        if len(a) < 2 or len(b) < 2:
+            return 1.0 if a == b else 0.0
+        sa = {a[i:i+2] for i in range(len(a) - 1)}
+        sb = {b[i:i+2] for i in range(len(b) - 1)}
+        inter = sa & sb
+        union = sa | sb
+        return len(inter) / len(union) if union else 0.0
+
+    def _merge_chunk_results(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Merge extraction results from multiple chunks with deduplication."""
+        all_content = []
+        all_key_points = []
+        all_quotes = []
+        relevance_scores = []
+        all_notes = []
+
+        for r in results:
+            pc = r.get("processed_content", "")
+            if pc and len(pc.strip()) >= 10:
+                all_content.append(pc.strip())
+
+            for kp in r.get("key_points", []):
+                # Deduplicate by bigram similarity
+                if not any(self._jaccard_bigram(kp, existing) > 0.6 for existing in all_key_points):
+                    all_key_points.append(kp)
+
+            for q in r.get("quotes", []):
+                q_text = q.get("text", "")
+                if q_text and not any(
+                    self._jaccard_bigram(q_text, eq.get("text", "")) > 0.6
+                    for eq in all_quotes
+                ):
+                    all_quotes.append(q)
+
+            try:
+                relevance_scores.append(float(r.get("relevance_score", 0.5)))
+            except (TypeError, ValueError):
+                relevance_scores.append(0.5)
+
+            notes = r.get("extraction_notes", "")
+            if notes:
+                all_notes.append(notes)
+
+        return {
+            "processed_content": "\n\n".join(all_content),
+            "key_points": all_key_points,
+            "quotes": all_quotes,
+            "relevance_score": max(relevance_scores) if relevance_scores else 0.5,
+            "extraction_notes": " | ".join(all_notes) if all_notes else "",
+        }
+
+    def extract_relevant_content(
+        self,
+        raw_content: str,
+        source_url: str,
+        source_title: str,
+        section_context: str,
+        research_query: str,
+    ) -> ExtractedContent:
+        """
+        Extract relevant content from raw source material.
+
+        For short content (<= CHUNK_SIZE), processes in a single LLM call.
+        For longer content, splits into overlapping chunks, extracts from each,
+        and merges results with bigram-Jaccard deduplication.
+
+        Args:
+            raw_content: Raw text content from the source
+            source_url: URL of the source
+            source_title: Title of the source
+            section_context: The section this content is for
+            research_query: The original research query
+
+        Returns:
+            ExtractedContent with processed information
+        """
+        lang_instruction = (
+            "Respond in Japanese." if self.language == "ja"
+            else f"Respond in {self.language}."
+        )
+
+        chunks = self._split_into_chunks(raw_content)
+
+        if len(chunks) == 1:
+            # Single chunk – direct extraction (same as before but without truncation loss)
+            data = self._extract_single_chunk(
+                chunks[0], source_url, source_title,
+                section_context, research_query, lang_instruction,
+            )
+            if data:
+                processed = data.get("processed_content", "")
+                if not processed or len(processed.strip()) < 10:
+                    processed = raw_content[:2000]
+                return ExtractedContent(
+                    source_url=source_url,
+                    source_title=source_title,
+                    raw_content=raw_content,
+                    processed_content=processed,
+                    key_points=data.get("key_points", []),
+                    quotes=data.get("quotes", []),
+                    relevance_score=float(data.get("relevance_score", 0.5)),
+                    extraction_notes=data.get("extraction_notes", ""),
+                )
+        else:
+            # Multi-chunk extraction
+            print(f"[ContentExtractor] Chunked extraction: {len(chunks)} chunks "
+                  f"for '{source_title[:40]}' ({len(raw_content):,} chars)")
+
+            chunk_results = []
+            for i, chunk in enumerate(chunks):
+                label = f"(Chunk {i+1}/{len(chunks)})"
+                result = self._extract_single_chunk(
+                    chunk, source_url, source_title,
+                    section_context, research_query, lang_instruction,
+                    chunk_label=label,
+                )
+                if result:
+                    chunk_results.append(result)
+
+            if chunk_results:
+                merged = self._merge_chunk_results(chunk_results)
+                processed = merged.get("processed_content", "")
+                if not processed or len(processed.strip()) < 10:
+                    processed = raw_content[:2000]
+                return ExtractedContent(
+                    source_url=source_url,
+                    source_title=source_title,
+                    raw_content=raw_content,
+                    processed_content=processed,
+                    key_points=merged.get("key_points", []),
+                    quotes=merged.get("quotes", []),
+                    relevance_score=float(merged.get("relevance_score", 0.5)),
+                    extraction_notes=merged.get("extraction_notes", ""),
+                )
+
+        # Fallback: all chunks failed
+        ResearchWarnings.get_instance().add(
+            ResearchWarnings.CRITICAL,
+            "ContentExtractor",
+            f"All chunk extractions failed for '{source_title[:60]}' ({source_url[:80]}). "
+            f"Using raw text.",
+        )
         return ExtractedContent(
             source_url=source_url,
             source_title=source_title,
             raw_content=raw_content,
-            processed_content=truncated_content[:2000],
+            processed_content=raw_content[:2000],
             relevance_score=0.5,
-            extraction_notes="LLM extraction failed, returning raw content",
+            extraction_notes="LLM extraction failed for all chunks, returning raw content",
         )
 
     def synthesize_section_content(
@@ -267,7 +388,7 @@ Available Sources:
 
 Write in {self.language}.
 
-Synthesize the information from these sources into well-written section content.
+Synthesize the information from these sources into well-written section content using continuous prose paragraphs. Avoid bullet points except for comparisons, specifications, or steps where enumeration is inherently appropriate.
 
 IMPORTANT:
 1. Clearly distinguish between:
@@ -310,8 +431,15 @@ After the body, output this delimiter followed by metadata:
                 "information_gaps": meta.get("information_gaps", []),
                 "confidence_level": meta.get("confidence_level", "medium"),
             }
-        except Exception:
-            pass
+        except Exception as _parse_err:
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.CRITICAL,
+                "ContentExtractor",
+                f"Section synthesis parse failed for '{section_title}'. "
+                f"Using concatenated raw content (confidence=low). "
+                f"Analysis points and structured source references lost. "
+                f"Error: {_parse_err}",
+            )
 
         # Fallback
         return {
@@ -379,12 +507,18 @@ Key Points: {', '.join(ec.key_points[:3]) if ec.key_points else 'N/A'}
             )
 
         # Phase 2: Generate detailed content for each outline point
-        print(f"[DEBUG] Phase 2: Generating content for {len(outline)} outline points")
+        # Calculate dynamic per-point character target
+        num_points = len(outline) if outline else 1
+        target_per_point = self._calc_target_per_point(num_points)
+        print(f"[DEBUG] Phase 2: Generating content for {num_points} outline points "
+              f"(target {target_per_point} chars/point)")
+
         detailed_sections = []
         for i, point in enumerate(outline):
             print(f"[DEBUG] Generating content for point {i+1}: {point.get('title', '')[:30]}...")
             point_content = self._generate_point_content(
-                section_title, point, sources_text, lang_instruction
+                section_title, point, sources_text, lang_instruction,
+                target_chars=target_per_point,
             )
             detailed_sections.append({
                 "title": point.get("title", f"Point {i+1}"),
@@ -488,14 +622,32 @@ Output JSON only:"""
             {"title": "Analysis", "description": "Analysis and interpretation", "key_facts": []},
         ]
 
+    # Default per-point target when no page target is specified
+    DEFAULT_SECTION_CHARS = 3000
+
+    def _calc_target_per_point(self, num_points: int) -> int:
+        """Calculate target characters per outline point.
+
+        Uses target_chars_per_section when available, otherwise falls back
+        to DEFAULT_SECTION_CHARS.  Result is clamped to [500, 3000].
+        """
+        section_target = self.target_chars_per_section or self.DEFAULT_SECTION_CHARS
+        raw = section_target // max(num_points, 1)
+        return max(500, min(3000, raw))
+
     def _generate_point_content(
         self,
         section_title: str,
         point: Dict[str, Any],
         sources_text: str,
         lang_instruction: str,
+        target_chars: int = 600,
     ) -> str:
         """Generate detailed content for a single outline point."""
+        # Build a natural range string: target ± 20%
+        char_lo = int(target_chars * 0.8)
+        char_hi = int(target_chars * 1.2)
+
         if self.language == "ja":
             prompt = f"""【セクション】{section_title}
 【執筆する論点】{point.get('title', '')}
@@ -505,7 +657,7 @@ Output JSON only:"""
 【情報源】
 {sources_text[:5000]}
 
-この論点について、400〜600字程度の本文を執筆してください。
+この論点について、{char_lo}〜{char_hi}字程度の本文を執筆してください。
 
 【執筆ルール】
 1. 常体（である調）で、翻訳調を避けた自然な日本語の段落として書く。文末表現が単調に繰り返されないよう変化をつける。
@@ -525,13 +677,14 @@ Available Sources:
 
 {lang_instruction}
 
-Write detailed content (300-500 characters) for this specific point.
+Write detailed content ({char_lo}-{char_hi} characters) for this specific point.
 
 IMPORTANT:
 1. Use factual information from the sources
 2. Cite sources as [SOURCE N] where appropriate
 3. Be specific and informative
 4. Do not include a title or heading, just the content paragraph(s)
+5. Write in prose paragraphs, not bullet points
 
 Write the content directly (no JSON):"""
 
@@ -600,6 +753,7 @@ Requirements:
 3. Remove the "### heading" fragment markers; connect paragraphs with transitions
 4. Do not add information not present in the original parts
 5. Open with 1-2 sentences introducing the section's theme, close with a brief wrap-up
+6. Write in continuous prose paragraphs. Use bullet lists or tables only for comparisons, specifications, or steps where enumeration is inherently appropriate
 
 Write the integrated content directly (no JSON, no section title):"""
 

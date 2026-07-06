@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prompt Optimization Agent</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-inner">
+                <h1 class="logo">Prompt Optimization Agent</h1>
+                <p class="subtitle">Select PE techniques and optimize your prompts with AI</p>
+            </div>
+        </header>
+
+        <main class="main">
+            <!-- Left Panel: Configuration -->
+            <section class="panel panel-config">
+                <h2 class="panel-title">Configuration</h2>
+
+                <!-- API Settings -->
+                <div class="section">
+                    <h3 class="section-title">API Settings</h3>
+
+                    <div class="field">
+                        <label for="provider">Provider</label>
+                        <select id="provider">
+                            <option value="openai">OpenAI</option>
+                            <option value="anthropic">Anthropic</option>
+                        </select>
+                    </div>
+
+                    <div class="field">
+                        <label for="model">Model</label>
+                        <select id="model"></select>
+                    </div>
+
+                    <div class="field">
+                        <label for="api-key">API Key</label>
+                        <div class="input-group">
+                            <input type="password" id="api-key" placeholder="sk-... or sk-ant-...">
+                            <button type="button" class="btn-icon" id="toggle-key" title="Show/Hide">
+                                <span class="eye-icon">&#128065;</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <label for="language">Output Language</label>
+                        <select id="language">
+                            <option value="ja">Japanese</option>
+                            <option value="en">English</option>
+                        </select>
+                    </div>
+
+                    <div class="field-row">
+                        <div class="field">
+                            <label for="temperature">Temperature</label>
+                            <div class="range-group">
+                                <input type="range" id="temperature" min="0" max="1" step="0.1" value="0.7">
+                                <span id="temp-value">0.7</span>
+                            </div>
+                        </div>
+                        <div class="field">
+                            <label>
+                                <input type="checkbox" id="include-analysis" checked>
+                                Include analysis
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Technique Selection -->
+                <div class="section">
+                    <h3 class="section-title">
+                        PE Techniques
+                        <span class="technique-count" id="technique-count">0 selected</span>
+                    </h3>
+                    <div class="technique-actions">
+                        <button type="button" class="btn-sm" id="select-all">Select All</button>
+                        <button type="button" class="btn-sm" id="select-none">Clear</button>
+                    </div>
+                    <div class="technique-list" id="technique-list">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Panel: Prompt I/O -->
+            <section class="panel panel-prompt">
+                <h2 class="panel-title">Prompt Workspace</h2>
+
+                <!-- Input -->
+                <div class="section">
+                    <h3 class="section-title">Original Prompt</h3>
+                    <textarea id="original-prompt" rows="8"
+                        placeholder="Enter the prompt you want to optimize..."></textarea>
+                </div>
+
+                <!-- Action -->
+                <div class="action-bar">
+                    <button type="button" class="btn-primary" id="optimize-btn">
+                        <span class="btn-text">Optimize Prompt</span>
+                        <span class="btn-loading" style="display:none;">Optimizing...</span>
+                    </button>
+                </div>
+
+                <!-- Output -->
+                <div class="section" id="output-section" style="display:none;">
+                    <h3 class="section-title">
+                        Optimized Prompt
+                        <button type="button" class="btn-sm btn-copy" id="copy-btn">Copy</button>
+                    </h3>
+                    <div class="output-box" id="optimized-output"></div>
+
+                    <div id="analysis-section" style="display:none;">
+                        <h3 class="section-title" style="margin-top:1.5rem;">Analysis</h3>
+                        <div class="analysis-box" id="analysis-output"></div>
+                    </div>
+
+                    <div class="meta-info" id="meta-info"></div>
+                </div>
+
+                <!-- Error -->
+                <div class="error-box" id="error-box" style="display:none;"></div>
+            </section>
+        </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agent Orchestrator — Codex × Claude Code</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20width='32'%20height='32'%20rx='8'%20fill='%230a0e16'/%3E%3Ccircle%20cx='11'%20cy='12'%20r='4.5'%20fill='%23f2a63c'/%3E%3Ccircle%20cx='21'%20cy='20'%20r='4.5'%20fill='%232bd4c0'/%3E%3Cpath%20d='M13.5%2014l5%204'%20stroke='%23a98bff'%20stroke-width='2'%20stroke-linecap='round'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">
+        <span class="node a"></span>
+        <span class="node b"></span>
+      </span>
+      <div class="brand-text">
+        <span class="wordmark">agent<span class="slash">//</span>orchestrator</span>
+        <span class="sub">Codex&nbsp;×&nbsp;Claude&nbsp;Code · live collaboration</span>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <button id="lang-toggle" class="theme-toggle wide" type="button"
+        title="Switch language" aria-label="Switch language">JA</button>
+      <button id="history-open" class="theme-toggle" type="button"
+        title="Session history" aria-label="Session history">▤</button>
+      <button id="settings-open" class="theme-toggle" type="button"
+        title="Settings" aria-label="Open settings">⚙</button>
+      <button id="theme-toggle" class="theme-toggle" type="button"
+        title="Theme: auto" aria-label="Cycle theme (auto / light / dark)">◐</button>
+      <div id="conn" class="conn idle" role="status" aria-live="polite">
+        <span class="conn-dot"></span>
+        <span class="conn-label">idle</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Session history dropdown (reopen any past or running session) -->
+  <div id="history-pop" class="history-pop" hidden>
+    <div class="history-head" data-i18n>Recent sessions</div>
+    <ul id="history-list"></ul>
+  </div>
+
+  <main class="console">
+    <!-- Compose rail -->
+    <section class="panel rail" aria-label="Compose">
+      <div class="panel-head">
+        <span class="eyebrow" data-i18n>Compose</span>
+      </div>
+
+      <label class="field">
+        <span class="field-label" data-i18n>Task</span>
+        <textarea id="task" rows="5" data-i18n-ph
+          placeholder="Describe the task for the agents to collaborate on…"></textarea>
+      </label>
+
+      <label class="field">
+        <span class="field-label" data-i18n>Strategy</span>
+        <div class="select-wrap">
+          <select id="strategy"></select>
+        </div>
+        <span id="strategy-desc" class="hint"></span>
+      </label>
+
+      <div id="roles" class="roles"></div>
+
+      <label class="field rounds">
+        <span class="field-label" data-i18n>Rounds</span>
+        <div class="rounds-row">
+          <input id="rounds" type="number" min="1" max="8" value="2" />
+          <label class="field-check" id="rounds-inf-wrap" hidden>
+            <input id="rounds-inf" type="checkbox" />
+            <span data-i18n>No limit — until declared done or you press Finish</span>
+          </label>
+        </div>
+      </label>
+
+      <label class="field rounds" id="min-rounds-wrap" hidden>
+        <span class="field-label"><span data-i18n>Min rounds before DONE</span>
+          <small data-i18n>(0 = off — guards rubber-stamp approvals)</small></span>
+        <input id="min-rounds" type="number" min="0" max="8" value="0" />
+      </label>
+
+      <div id="workspace-opts" class="set-group" hidden>
+        <div class="set-title" data-i18n>Workspace</div>
+        <label class="field"><span class="field-label" data-i18n>Directory</span>
+          <input id="workspace-dir" type="text" data-i18n-ph
+            placeholder="blank = server's launch directory" /></label>
+        <label class="field-check"><input id="workspace-init" type="checkbox" />
+          <span><span data-i18n>Create the directory if it doesn't exist</span>
+            <small data-i18n>(no git)</small></span></label>
+        <label class="field"><span class="field-label"><span data-i18n>Test command</span>
+          <small data-i18n>(auto-run after each build round)</small></span>
+          <input id="test-cmd" type="text" data-i18n-ph
+            placeholder="e.g. pytest -q — results are fed back to the team" /></label>
+      </div>
+
+      <label class="field">
+        <span class="field-label"><span data-i18n>Reference directory</span>
+          <small data-i18n>(optional, read-only)</small></span>
+        <input id="reference-dir" type="text" data-i18n-ph
+          placeholder="a local folder whose files the agents may consult" />
+      </label>
+
+      <details class="tools-opts" id="tools-opts">
+        <summary><span data-i18n>Agent tools</span> <small data-i18n>(optional — usable by every agent)</small></summary>
+        <label class="field-check"><input type="checkbox" class="tool-check" value="list_files" />
+          <span>list_files <small data-i18n>(list workspace files)</small></span></label>
+        <label class="field-check"><input type="checkbox" class="tool-check" value="read_file" />
+          <span>read_file <small data-i18n>(read a workspace file)</small></span></label>
+        <label class="field-check"><input type="checkbox" class="tool-check" value="run" />
+          <span>run <small data-i18n>(shell commands in the workspace — trust required)</small></span></label>
+        <label class="field-check"><input type="checkbox" class="tool-check" value="http_get" />
+          <span>http_get <small data-i18n>(fetch a URL)</small></span></label>
+      </details>
+
+      <div class="actions">
+        <button id="run" class="btn primary">
+          <span class="btn-label" data-i18n>Run collaboration</span>
+        </button>
+        <button id="finish" class="btn ghost" disabled
+          title="Wrap up gracefully: stop looping and produce the final deliverable"
+          data-i18n>Finish</button>
+        <button id="stop" class="btn ghost" disabled data-i18n>Stop</button>
+      </div>
+      <div class="hint kbd-hint" data-i18n>Tip: Ctrl+Enter (⌘+Enter) in the task box runs it</div>
+      <div id="status" class="status" role="status" aria-live="polite"></div>
+
+      <div id="feedback-wrap" class="set-group feedback-wrap" hidden>
+        <div class="set-title" data-i18n>Not satisfied? Send feedback</div>
+        <textarea id="feedback" rows="3" data-i18n-ph
+          placeholder="What should be improved? The team reworks the task with this feedback…"></textarea>
+        <button id="rework" class="btn ghost rework-btn" data-i18n>Rework with feedback</button>
+      </div>
+    </section>
+
+    <!-- Live feed: transcript / artifact / workspace / team as tabs -->
+    <section class="panel feed" aria-label="Live transcript">
+      <div class="panel-head feed-head">
+        <div class="feed-tabs" role="tablist">
+          <button class="ftab active" data-tab="stream" role="tab" data-i18n>Transcript</button>
+          <button class="ftab" data-tab="artifact" role="tab" hidden data-i18n>Artifact</button>
+          <button class="ftab" data-tab="workspace" role="tab" hidden data-i18n>Workspace</button>
+          <button class="ftab" data-tab="team" role="tab" hidden data-i18n>Team</button>
+        </div>
+        <div class="feed-right">
+          <button id="export-md" class="copy-btn" type="button" hidden data-i18n>Export</button>
+          <div id="meta" class="meta"></div>
+        </div>
+      </div>
+
+      <div id="tab-artifact" class="tabpane" hidden>
+        <div id="artifact" class="artifact-panel">
+          <div class="artifact-head">
+            <span class="eyebrow" data-i18n>Artifact</span>
+            <span id="artifact-meta" class="meta"></span>
+          </div>
+          <div class="artifact-actions">
+            <button id="artifact-view-preview" class="seg active" type="button" data-i18n>Preview</button>
+            <button id="artifact-view-diff" class="seg" type="button" data-i18n>Diff</button>
+            <span class="seg-spacer"></span>
+            <select id="artifact-ext" title="File type" aria-label="File type">
+              <option>.md</option><option>.txt</option><option>.py</option>
+              <option>.js</option><option>.ts</option><option>.json</option>
+              <option>.html</option><option>.css</option><option>.sh</option>
+            </select>
+            <button id="artifact-copy" class="copy-btn" type="button" data-i18n>Copy</button>
+            <button id="artifact-download" class="copy-btn" type="button" data-i18n>Download</button>
+          </div>
+          <div id="artifact-body" class="artifact-body"></div>
+        </div>
+      </div>
+
+      <div id="tab-workspace" class="tabpane" hidden>
+        <div id="workspace" class="artifact-panel">
+          <div class="artifact-head">
+            <span class="eyebrow" data-i18n>Workspace</span>
+            <span id="workspace-path" class="meta"></span>
+          </div>
+          <div class="ws-grid">
+            <ul id="ws-files" class="ws-files"></ul>
+            <div id="ws-diff" class="artifact-body diff"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="tab-team" class="tabpane" hidden>
+        <div id="team" class="artifact-panel">
+          <div class="artifact-head">
+            <span class="eyebrow" data-i18n>Team</span>
+            <span id="team-meta" class="meta"></span>
+          </div>
+          <ul id="team-roster" class="team-roster"></ul>
+        </div>
+      </div>
+
+      <div id="tab-stream" class="tabpane">
+        <div id="scratchpad" class="scratchpad" hidden>
+          <div class="sp-head"><span class="sp-dot"></span><span data-i18n>Shared scratchpad</span></div>
+          <ul id="sp-list" class="sp-list"></ul>
+        </div>
+        <div id="stream" class="stream">
+          <div class="empty">
+            <div class="empty-motif" aria-hidden="true">
+              <span class="chip a">A</span>
+              <span class="link-line"></span>
+              <span class="chip b">B</span>
+            </div>
+            <h2 class="empty-title" data-i18n>Two agents, one task.</h2>
+            <p class="empty-copy" id="empty-copy">
+              Configure the collaboration on the left and press
+              <em>Run</em>. Each agent's turn streams in here as it happens.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Live agent board: who's doing what, right now -->
+    <aside class="panel board" id="board" hidden aria-label="Agent board">
+      <div class="panel-head">
+        <span class="eyebrow" data-i18n>Agents</span>
+      </div>
+      <div id="graph" class="graph" hidden>
+        <svg id="graph-svg" viewBox="0 0 220 196" role="img"
+          aria-label="Live interaction graph"></svg>
+        <div id="graph-caption" class="graph-caption"></div>
+      </div>
+      <ul id="board-list" class="board-list"></ul>
+    </aside>
+  </main>
+
+  <button id="jump-latest" class="jump-latest" type="button" hidden>↓ <span data-i18n>Latest</span></button>
+
+  <footer class="foot" data-i18n>
+    Runs on the Python standard library — no installs, no telemetry.
+  </footer>
+
+  <div id="settings-overlay" class="overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Settings">
+      <div class="modal-head">
+        <h2 data-i18n>Settings</h2>
+        <button id="settings-close" class="theme-toggle" type="button" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-note" data-i18n>
+          Used when the matching environment variable isn't set. Keys are held in
+          memory for this local server only and are never shown back. Works with any
+          OpenAI-compatible provider via its base URL.
+        </p>
+
+        <div class="set-group">
+          <div class="set-title" data-i18n>Network</div>
+          <label class="field">
+            <span class="field-label" data-i18n>HTTP(S) proxy</span>
+            <input id="set-proxy" type="text" placeholder="http://proxy.corp:8080 (blank = direct)" />
+          </label>
+        </div>
+
+        <div class="set-group">
+          <div class="set-title">Claude · Anthropic</div>
+          <label class="field"><span class="field-label" data-i18n>API key</span>
+            <input id="set-anthropic-key" type="password" autocomplete="off" /></label>
+          <label class="field"><span class="field-label" data-i18n>Model</span>
+            <input id="set-anthropic-model" type="text" /></label>
+          <label class="field"><span class="field-label" data-i18n>Base URL</span>
+            <input id="set-anthropic-base" type="text" /></label>
+        </div>
+
+        <div class="set-group">
+          <div class="set-title">GPT · OpenAI-compatible</div>
+          <label class="field"><span class="field-label" data-i18n>API key</span>
+            <input id="set-openai-key" type="password" autocomplete="off" /></label>
+          <label class="field"><span class="field-label" data-i18n>Model</span>
+            <input id="set-openai-model" type="text" /></label>
+          <label class="field"><span class="field-label" data-i18n>Base URL</span>
+            <input id="set-openai-base" type="text" placeholder="https://api.openai.com/v1" /></label>
+        </div>
+
+        <div class="set-group">
+          <div class="set-title">Local LLM</div>
+          <label class="field"><span class="field-label" data-i18n>API key (optional)</span>
+            <input id="set-local-key" type="password" autocomplete="off" /></label>
+          <label class="field"><span class="field-label" data-i18n>Model</span>
+            <input id="set-local-model" type="text" /></label>
+          <label class="field"><span class="field-label" data-i18n>Base URL</span>
+            <input id="set-local-base" type="text" placeholder="http://localhost:11434/v1" /></label>
+          <label class="field-check"><input id="set-local-proxy" type="checkbox" />
+            <span><span data-i18n>Send via proxy</span>
+              <small data-i18n>(off = direct connection)</small></span></label>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <span id="settings-status" class="status"></span>
+        <button id="settings-save" class="btn primary" type="button" data-i18n>Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

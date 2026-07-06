@@ -48,8 +48,7 @@ def main():
     # モデレーター: ChatGPT (OpenAI)
     moderator_llm = LLMConfig(
         provider=LLMProvider.OPENAI,
-        openai_model="gpt-4o-mini",
-        temperature=0.5,  # Lower temperature for moderation
+        openai_model="gpt-5-mini",
     )
 
     # 参加者1: Claude (Anthropic)
@@ -85,7 +84,7 @@ def main():
     agents = [
         # モデレーター (ChatGPT)
         AgentConfig(
-            name="司会者 (GPT-4)",
+            name="司会者 (GPT-5)",
             role=AgentRole.MODERATOR,
             llm_config=moderator_llm,
         ),
@@ -171,7 +170,7 @@ def simple_multi_provider_example():
     # ChatGPT用のLLM設定
     openai_llm = LLMConfig(
         provider=LLMProvider.OPENAI,
-        openai_model="gpt-4o-mini",
+        openai_model="gpt-5-mini",
     )
 
     # Claude用のLLM設定

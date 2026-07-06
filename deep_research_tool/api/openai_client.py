@@ -12,14 +12,15 @@ from .base import BaseLLMClient, Message, MessageRole, LLMResponse, TokenUsage, 
 class OpenAIClient(BaseLLMClient):
     """OpenAI API client for GPT models."""
 
-    DEFAULT_MODEL = "gpt-4o-mini"
+    DEFAULT_MODEL = "gpt-5-mini"
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
+        max_tokens_limit: int = 200_000,
         http_proxy: Optional[str] = None,
         https_proxy: Optional[str] = None,
         verify_ssl: bool = True,
@@ -33,6 +34,7 @@ class OpenAIClient(BaseLLMClient):
             model: Model name (default: gpt-4o-mini)
             temperature: Sampling temperature
             max_tokens: Maximum tokens in response
+            max_tokens_limit: Upper bound for auto-retry on truncation (default: 200000)
             http_proxy: HTTP proxy URL (e.g., "http://proxy:8080")
             https_proxy: HTTPS proxy URL
             verify_ssl: Verify SSL certificates
@@ -43,6 +45,7 @@ class OpenAIClient(BaseLLMClient):
             model=model or self.DEFAULT_MODEL,
             temperature=temperature,
             max_tokens=max_tokens,
+            max_tokens_limit=max_tokens_limit,
         )
         self._http_proxy = http_proxy
         self._https_proxy = https_proxy
@@ -189,28 +192,91 @@ class OpenAIClient(BaseLLMClient):
         supports_temp = self._supports_temperature(model)
         print(f"[DEBUG OpenAI] Model: {model}, max_completion_tokens: {token_limit}, temperature_supported: {supports_temp}")
 
-        # Make API call
-        response = self._client.chat.completions.create(**api_params)
+        # Make API call with auto-retry on truncation with empty content
+        current_token_limit = token_limit
+        token_param_key = "max_completion_tokens" if self._requires_max_completion_tokens(model) else "max_tokens"
 
-        # Extract response
-        choice = response.choices[0]
+        while True:
+            response = self._client.chat.completions.create(**api_params)
+
+            # Extract response - handle missing/empty choices
+            if not response.choices:
+                print(f"[WARNING OpenAI] API returned no choices. Model: {model}")
+                return LLMResponse(
+                    content="",
+                    model=response.model if response else model,
+                    usage={},
+                    finish_reason="error",
+                    raw_response=response,
+                )
+
+            choice = response.choices[0]
+
+            # Handle None content - OpenAI can return content=None in several cases:
+            # - Content filter triggered (finish_reason="content_filter")
+            # - Reasoning models (o1/o3) with certain configs
+            # - Token limit exhausted before any output (finish_reason="length")
+            content = choice.message.content
+            if content is None:
+                # Check for refusal (newer OpenAI models)
+                refusal = getattr(choice.message, "refusal", None)
+                if refusal:
+                    print(f"[WARNING OpenAI] Model refused request: {refusal}")
+                    content = ""
+                else:
+                    print(f"[WARNING OpenAI] Response content is None. "
+                          f"finish_reason={choice.finish_reason}, model={response.model}")
+                    content = ""
+
+            if choice.finish_reason == "length":
+                print(f"[WARNING OpenAI] Response truncated (finish_reason=length). "
+                      f"max_completion_tokens was {current_token_limit}.")
+
+                # Auto-retry: if content is empty and we haven't hit the limit, double and retry
+                if not content.strip() and current_token_limit < self.max_tokens_limit:
+                    new_limit = min(current_token_limit * 2, self.max_tokens_limit)
+                    print(f"[OpenAI] Empty content after truncation — retrying with "
+                          f"max_tokens={new_limit} (was {current_token_limit}, "
+                          f"limit={self.max_tokens_limit})")
+                    current_token_limit = new_limit
+                    api_params[token_param_key] = new_limit
+                    # Record token usage from the failed attempt before retrying
+                    if response.usage:
+                        token_usage = TokenUsage(
+                            prompt_tokens=response.usage.prompt_tokens,
+                            completion_tokens=response.usage.completion_tokens,
+                            total_tokens=response.usage.total_tokens,
+                            model=response.model,
+                        )
+                        get_token_stats().add_usage(token_usage)
+                    continue  # Retry with higher limit
+
+                if not content.strip():
+                    print(f"[WARNING OpenAI] Reached max_tokens_limit ({self.max_tokens_limit}). "
+                          f"Giving up retry. Consider increasing api.max_tokens_limit in config.")
+            elif choice.finish_reason == "content_filter":
+                print(f"[WARNING OpenAI] Content was filtered by OpenAI safety system.")
+
+            break  # No retry needed, exit loop
+
         usage = {
-            "prompt_tokens": response.usage.prompt_tokens,
-            "completion_tokens": response.usage.completion_tokens,
-            "total_tokens": response.usage.total_tokens,
+            "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
+            "completion_tokens": response.usage.completion_tokens if response.usage else 0,
+            "total_tokens": response.usage.total_tokens if response.usage else 0,
         }
 
         # Record token usage to global tracker
-        token_usage = TokenUsage(
-            prompt_tokens=response.usage.prompt_tokens,
-            completion_tokens=response.usage.completion_tokens,
-            total_tokens=response.usage.total_tokens,
-            model=response.model,
-        )
-        get_token_stats().add_usage(token_usage)
+        if response.usage:
+            token_usage = TokenUsage(
+                prompt_tokens=response.usage.prompt_tokens,
+                completion_tokens=response.usage.completion_tokens,
+                total_tokens=response.usage.total_tokens,
+                model=response.model,
+            )
+            get_token_stats().add_usage(token_usage)
 
         return LLMResponse(
-            content=choice.message.content,
+            content=content,
             model=response.model,
             usage=usage,
             finish_reason=choice.finish_reason,

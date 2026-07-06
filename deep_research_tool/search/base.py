@@ -149,6 +149,80 @@ class BaseSearchClient(ABC):
 
         return results
 
+    @staticmethod
+    def simplify_query(query: str, level: int = 1) -> str:
+        """
+        Simplify a search query by progressively removing detail.
+
+        Level 1: Remove text inside brackets/parentheses and after colons.
+        Level 2: Strip stop-words, keep keywords only.
+        Level 3: Keep at most 3 keywords (broadest).
+
+        Args:
+            query: Original query string
+            level: Simplification level (1-3)
+
+        Returns:
+            Simplified query string. Returns original if simplification
+            produces an empty string.
+        """
+        import re
+
+        if not query or not query.strip():
+            return query
+
+        text = query
+
+        # ---- Level 1: remove parenthesized / bracketed content & colon-suffix ----
+        if level >= 1:
+            # Remove content inside various bracket types (including brackets)
+            text = re.sub(r'[（(][^）)]*[）)]', ' ', text)
+            text = re.sub(r'[「][^」]*[」]', ' ', text)
+            text = re.sub(r'[『][^』]*[』]', ' ', text)
+            text = re.sub(r'[【][^】]*[】]', ' ', text)
+            # Remove everything after a colon (often a subtitle/detail)
+            text = re.sub(r'[：:].*', '', text)
+
+        # ---- Level 2: extract keywords only ----
+        if level >= 2:
+            # Split on punctuation and whitespace
+            tokens = re.split(r'[\s、。・／/,;，；\-–—]+', text)
+            tokens = [t.strip() for t in tokens if t.strip()]
+
+            # Japanese / English stop-words
+            stop_words = {
+                # Japanese particles & connectors
+                'の', 'を', 'に', 'は', 'が', 'と', 'で', 'から', 'まで', 'より',
+                'へ', 'も', 'や', 'な', 'だ', 'です', 'ます', 'する', 'ある',
+                'について', 'に関する', 'における', 'および', 'ならびに',
+                'または', 'もしくは', 'および', 'ただし',
+                'その', 'この', 'あの', 'どの', 'それ', 'これ', 'あれ',
+                'よる', 'よって', 'おける', 'つい', 'ため',
+                # Common filler words in queries
+                'まとめ', '一覧', '概要', '詳細', '比較', '解説', '紹介',
+                '主要', '主な', '各種', '基本', '基礎',
+                # English stop-words
+                'the', 'a', 'an', 'of', 'in', 'to', 'and', 'for', 'on',
+                'about', 'with', 'by', 'from', 'as', 'at', 'or', 'but',
+                'is', 'are', 'was', 'were', 'be', 'been',
+                'summary', 'overview', 'comparison', 'introduction',
+            }
+
+            tokens = [t for t in tokens if t.lower() not in stop_words and len(t) > 1]
+            text = ' '.join(tokens)
+
+        # ---- Level 3: keep at most 3 keywords ----
+        if level >= 3:
+            tokens = text.split()
+            tokens = tokens[:3]
+            text = ' '.join(tokens)
+
+        # Normalize whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        # Never return empty — fall back to original
+        return text if text else query
+
     def _clean_text(self, text: str) -> str:
         """Clean extracted text content."""
         if not text:

@@ -96,7 +96,8 @@ class LocalLLMClient(BaseLLMClient):
         base_url: str = None,
         api_key: str = None,  # Some local servers may require auth
         temperature: float = 0.7,
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
+        max_tokens_limit: int = 200_000,
         timeout: int = 120,
         http_proxy: str = None,
         https_proxy: str = None,
@@ -112,6 +113,7 @@ class LocalLLMClient(BaseLLMClient):
             api_key: Optional API key for authentication
             temperature: Sampling temperature
             max_tokens: Maximum tokens in response
+            max_tokens_limit: Upper bound for auto-retry on truncation (default: 200000)
             timeout: Request timeout in seconds
             http_proxy: HTTP proxy URL
             https_proxy: HTTPS proxy URL
@@ -141,6 +143,7 @@ class LocalLLMClient(BaseLLMClient):
         self.api_key = api_key or os.getenv("LOCAL_LLM_API_KEY", "")
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.max_tokens_limit = max_tokens_limit
         self.timeout = timeout
         self._http_proxy = http_proxy
         self._https_proxy = https_proxy

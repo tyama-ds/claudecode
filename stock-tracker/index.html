@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>StockLens — 株価チェック &amp; 情報収集</title>
+<link rel="stylesheet" href="css/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-icon">📈</span>
+    <div class="brand-text">
+      <h1>StockLens</h1>
+      <span class="brand-sub">株価チェック &amp; 情報収集・整理</span>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <span class="data-asof" id="dataAsOf"></span>
+    <button class="icon-btn" id="themeToggle" title="テーマ切替" aria-label="テーマ切替">🌙</button>
+  </div>
+</header>
+
+<div class="layout">
+
+  <!-- ==== 銘柄サイドバー ==== -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="symbolSearch" placeholder="銘柄名・コードで検索…" aria-label="銘柄検索">
+    </div>
+    <nav class="symbol-list" id="symbolList" aria-label="銘柄一覧"></nav>
+  </aside>
+
+  <!-- ==== メイン ==== -->
+  <main class="main">
+
+    <!-- 銘柄ヘッダー -->
+    <section class="card stock-header" id="stockHeader">
+      <div class="stock-title">
+        <div>
+          <h2 id="stockName">—</h2>
+          <span class="stock-meta" id="stockMeta"></span>
+        </div>
+        <div class="stock-price-block">
+          <span class="stock-price" id="stockPrice">—</span>
+          <span class="stock-change" id="stockChange"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- チャートカード -->
+    <section class="card chart-card">
+      <div class="chart-toolbar">
+        <div class="period-btns" id="periodBtns" role="group" aria-label="表示期間">
+          <button data-period="1M">1M</button>
+          <button data-period="3M">3M</button>
+          <button data-period="6M">6M</button>
+          <button data-period="1Y" class="active">1Y</button>
+        </div>
+        <div class="chart-opts">
+          <label class="chk"><input type="checkbox" id="toggleMA25" checked> MA25</label>
+          <label class="chk"><input type="checkbox" id="toggleMA75"> MA75</label>
+          <label class="chk"><input type="checkbox" id="toggleEvents" checked> イベント</label>
+          <label class="chk" id="topixToggleWrap" hidden><input type="checkbox" id="toggleTopix"> TOPIX比較</label>
+        </div>
+      </div>
+      <div class="chart-wrap">
+        <div id="priceChart" class="price-chart" role="img" aria-label="株価チャート"></div>
+        <div id="volumeChart" class="volume-chart" role="img" aria-label="出来高チャート"></div>
+        <div class="chart-tooltip" id="chartTooltip" hidden></div>
+      </div>
+      <div class="chart-legend" id="chartLegend"></div>
+      <p class="chart-note" id="chartNote"></p>
+    </section>
+
+    <!-- タブ -->
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="news" role="tab">📰 ニュース・イベント</button>
+      <button class="tab" data-tab="analysis" role="tab">📊 財務分析</button>
+      <button class="tab" data-tab="factor" role="tab">🧮 ファクター分析</button>
+      <button class="tab" data-tab="market" role="tab">🌐 市場全体の動き</button>
+    </nav>
+
+    <!-- ニュースタブ -->
+    <section class="tab-panel active" id="panel-news" role="tabpanel">
+      <div class="card">
+        <h3 class="card-title">収集済みニュース・イベント <span class="badge" id="newsCount"></span></h3>
+        <p class="card-desc">LLMクローラー(Claude)がWeb上から収集・要約・整理した、この銘柄に関する重要イベントの時系列です。</p>
+        <div class="timeline" id="newsTimeline"></div>
+      </div>
+    </section>
+
+    <!-- 財務分析タブ -->
+    <section class="tab-panel" id="panel-analysis" role="tabpanel">
+      <div class="analysis-grid">
+        <div class="card">
+          <h3 class="card-title">主要指標</h3>
+          <div class="metric-tiles" id="metricTiles"></div>
+        </div>
+        <div class="card">
+          <h3 class="card-title">財務スコア</h3>
+          <div class="radar-wrap"><div id="radarChart"></div></div>
+        </div>
+        <div class="card" id="marginCard" hidden>
+          <h3 class="card-title">信用残トレンド <span class="badge">📡 J-Quants</span></h3>
+          <p class="card-desc">信用買残(青)・売残(緑)の週次推移。買残の積み上がりは将来の売り圧力、売残は買い戻し余地の目安です。</p>
+          <div id="marginChart"></div>
+          <div class="chart-legend" id="marginLegend"></div>
+        </div>
+        <div class="card" id="dividendCard" hidden>
+          <h3 class="card-title">配当推移 <span class="badge">📡 J-Quants</span></h3>
+          <p class="card-desc">1株あたり配当金の履歴(基準日ベース)。</p>
+          <div id="dividendChart" class="dividend-bars"></div>
+        </div>
+        <div class="card advice-card">
+          <h3 class="card-title">💡 分析コメント・見解</h3>
+          <div id="adviceBox" class="advice-box"></div>
+          <p class="disclaimer">※ 本分析は収集時点の公開情報に基づく参考見解であり、投資勧誘・助言ではありません。投資判断はご自身の責任で行ってください。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ファクター分析タブ -->
+    <section class="tab-panel" id="panel-factor" role="tabpanel">
+      <div class="factor-grid">
+        <div class="card">
+          <h3 class="card-title">ファクタープロファイル <span class="badge" id="factorStockName"></span></h3>
+          <p class="card-desc">個別株12銘柄横断の偏差値(50=市場平均、高いほどそのファクターが強い)。</p>
+          <div id="factorProfile" class="factor-profile"></div>
+        </div>
+        <div class="card">
+          <h3 class="card-title">スタイル判定</h3>
+          <div id="factorStyle" class="factor-style"></div>
+        </div>
+        <div class="card factor-map-card">
+          <h3 class="card-title">ファクターマップ</h3>
+          <p class="card-desc">2つのファクターで全銘柄を配置。点線が市場平均(50)、点をクリックで銘柄切替。</p>
+          <div class="factor-axes">
+            <label>X軸 <select id="factorX"></select></label>
+            <label>Y軸 <select id="factorY"></select></label>
+          </div>
+          <div id="factorScatter"></div>
+        </div>
+        <div class="card">
+          <h3 class="card-title">ファクター別ランキング</h3>
+          <div class="factor-axes">
+            <label>ファクター <select id="factorRank"></select></label>
+          </div>
+          <div id="factorRanking" class="factor-ranking"></div>
+        </div>
+      </div>
+      <p class="disclaimer" style="margin-top:4px">※ ファクター偏差値は収録12銘柄内での相対値です。ETFはインデックス連動型のため対象外です。</p>
+    </section>
+
+    <!-- 市場全体タブ -->
+    <section class="tab-panel" id="panel-market" role="tabpanel">
+      <div class="card">
+        <h3 class="card-title">市場全体の重要イベント</h3>
+        <p class="card-desc">日本・米国市場の大きな変動と、その背景をまとめています。</p>
+        <div class="market-filter" id="marketFilter">
+          <button class="chip active" data-market="all">すべて</button>
+          <button class="chip" data-market="JP">🇯🇵 日本</button>
+          <button class="chip" data-market="US">🇺🇸 米国</button>
+        </div>
+        <div class="timeline" id="marketTimeline"></div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- ==== Q&A パネル ==== -->
+<button class="qa-fab" id="qaFab" title="質問する" aria-label="Q&Aパネルを開く">💬</button>
+<div class="qa-panel" id="qaPanel" aria-hidden="true">
+  <div class="qa-header">
+    <div>
+      <h3>💬 マーケットQ&amp;A</h3>
+      <span class="qa-sub">収集済みデータから質問に答えます</span>
+    </div>
+    <button class="icon-btn" id="qaClose" aria-label="閉じる">✕</button>
+  </div>
+  <div class="qa-messages" id="qaMessages"></div>
+  <div class="qa-suggests" id="qaSuggests"></div>
+  <form class="qa-input" id="qaForm">
+    <input type="text" id="qaText" placeholder="例: 2025年12月3日ごろに株価が大きく変動した理由は?" autocomplete="off">
+    <button type="submit">送信</button>
+  </form>
+</div>
+<div class="qa-backdrop" id="qaBackdrop" hidden></div>
+
+<!-- イベント詳細モーダル -->
+<div class="modal-backdrop" id="modalBackdrop" hidden>
+  <div class="modal" role="dialog" aria-modal="true">
+    <button class="icon-btn modal-close" id="modalClose" aria-label="閉じる">✕</button>
+    <div id="modalBody"></div>
+  </div>
+</div>
+
+<script src="data/stock-data.js"></script>
+<script src="js/chart.js"></script>
+<script src="js/analysis.js"></script>
+<script src="js/factor.js"></script>
+<script src="js/qa.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

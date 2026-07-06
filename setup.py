@@ -62,6 +62,7 @@ setup(
     entry_points={
         "console_scripts": [
             "deep-research=deep_research_tool.cli:main",
+            "patent-research=patent_research.cli:main",
         ],
     },
     include_package_data=True,

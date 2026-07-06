@@ -19,6 +19,7 @@ class AgentRole(str, Enum):
     """Roles that agents can take in a discussion."""
     MODERATOR = "moderator"
     PARTICIPANT = "participant"
+    RESEARCH_PARTICIPANT = "research_participant"
     EVALUATOR = "evaluator"
 
 
@@ -41,19 +42,21 @@ class LLMConfig:
     google_api_key: Optional[str] = None
     xai_api_key: Optional[str] = None
     # Model names
-    openai_model: str = "gpt-4o-mini"
+    openai_model: str = "gpt-5-mini"
     anthropic_model: str = "claude-3-5-sonnet-20241022"
     google_model: str = "gemini-1.5-flash"
     ollama_model: str = "llama3.2"
     xai_model: str = "grok-beta"
     # Ollama settings
     ollama_base_url: str = "http://localhost:11434"
+    # Proxy settings
+    proxy_url: Optional[str] = None  # e.g., "http://proxy.example.com:8080"
     # Common settings
     temperature: float = 0.7
     max_tokens: int = 2048
 
     def __post_init__(self):
-        """Load API keys from environment if not provided."""
+        """Load API keys and proxy from environment if not provided."""
         if self.openai_api_key is None:
             self.openai_api_key = os.getenv("OPENAI_API_KEY")
         if self.anthropic_api_key is None:
@@ -62,6 +65,9 @@ class LLMConfig:
             self.google_api_key = os.getenv("GOOGLE_API_KEY")
         if self.xai_api_key is None:
             self.xai_api_key = os.getenv("XAI_API_KEY")
+        # Load proxy from environment if not provided
+        if self.proxy_url is None:
+            self.proxy_url = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
 
     def get_api_key(self) -> Optional[str]:
         """Get the API key for the current provider."""
@@ -94,6 +100,7 @@ class AgentConfig:
     persona: str = ""
     system_prompt: str = ""
     llm_config: Optional[LLMConfig] = None
+    search_config: Optional[dict] = None  # For RESEARCH_PARTICIPANT role
 
     def __post_init__(self):
         """Set default system prompt based on role if not provided."""
@@ -112,6 +119,11 @@ class AgentConfig:
                 "あなたは議論の参加者です。"
                 "与えられたペルソナに基づいて、自分の意見や視点を述べてください。"
                 "他の参加者の意見にも耳を傾け、建設的な議論に貢献してください。"
+            ),
+            AgentRole.RESEARCH_PARTICIPANT: (
+                "あなたは調査能力を持つ議論の参加者です。"
+                "与えられたペルソナに基づいて、ウェブ検索で情報を収集しながら意見を述べてください。"
+                "具体的なデータや情報源を引用して、根拠のある議論に貢献してください。"
             ),
             AgentRole.EVALUATOR: (
                 "あなたは議論の評価者です。"
@@ -165,8 +177,11 @@ class Config:
         if not has_moderator:
             errors.append("At least one moderator agent is required.")
 
-        # Check for participants
-        participants = [a for a in self.agents if a.role == AgentRole.PARTICIPANT]
+        # Check for participants (including research participants)
+        participants = [
+            a for a in self.agents
+            if a.role in (AgentRole.PARTICIPANT, AgentRole.RESEARCH_PARTICIPANT)
+        ]
         if len(participants) < 2:
             errors.append("At least two participant agents are required for discussion.")
 
@@ -181,6 +196,8 @@ def create_config(
     max_rounds: int = 5,
     output_language: str = "ja",
     ollama_base_url: Optional[str] = None,
+    enable_search: bool = False,
+    search_config: Optional[dict] = None,
 ) -> Config:
     """
     Create a configuration with sensible defaults.
@@ -193,6 +210,8 @@ def create_config(
         max_rounds: Maximum number of discussion rounds
         output_language: Output language code
         ollama_base_url: Base URL for Ollama (default: http://localhost:11434)
+        enable_search: If True, use RESEARCH_PARTICIPANT role with web search
+        search_config: Optional search configuration dict for research participants
 
     Returns:
         Configured Config object
@@ -229,13 +248,17 @@ def create_config(
         role=AgentRole.MODERATOR,
     ))
 
+    # Determine participant role based on enable_search flag
+    participant_role = AgentRole.RESEARCH_PARTICIPANT if enable_search else AgentRole.PARTICIPANT
+
     # Add participants
     if participant_personas:
         for p in participant_personas:
             agents.append(AgentConfig(
                 name=p.get("name", "参加者"),
-                role=AgentRole.PARTICIPANT,
+                role=participant_role,
                 persona=p.get("persona", ""),
+                search_config=search_config if enable_search else None,
             ))
     else:
         # Default participants with different perspectives
@@ -247,8 +270,9 @@ def create_config(
         for p in default_personas:
             agents.append(AgentConfig(
                 name=p["name"],
-                role=AgentRole.PARTICIPANT,
+                role=participant_role,
                 persona=p["persona"],
+                search_config=search_config if enable_search else None,
             ))
 
     # Add evaluator

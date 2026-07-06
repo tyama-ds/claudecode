@@ -64,6 +64,7 @@ class ReportGeneratorVersion(str, Enum):
     """Report generator version selection."""
     V1 = "v1"  # Original report generator
     V2 = "v2"  # Enhanced with consistency features
+    V3 = "v3"  # DOCX-native generator (python-docx direct API)
 
 
 @dataclass
@@ -144,6 +145,7 @@ class APIConfig:
     # API parameters
     temperature: float = 0.7
     max_tokens: int = 4096
+    max_tokens_limit: int = 200_000  # Upper bound for auto-retry on truncation
 
     # Per-stage LLM overrides. Keys: planning / crawling / evaluation / writing.
     # Values: {"provider": ..., "model": ..., "api_key": optional,
@@ -236,6 +238,10 @@ class SearchConfig:
     extract_images: bool = True
     max_images_per_page: int = 5
 
+    # Query simplification retry settings
+    query_simplify_min_results: int = 3      # Trigger simplification when results <= this
+    query_simplify_max_retries: int = 3      # Max simplification levels (1-3)
+
 
 @dataclass
 class MultilingualSearchConfig:
@@ -305,6 +311,39 @@ class DeepThinkConfig:
     # Hidden parameters (internal use)
     _expansion_tolerance: float = 0.2
     _deviation_weights: tuple = (0.4, 0.4, 0.2)  # semantic, logical, contradiction
+
+
+@dataclass
+class FermiEstimationConfig:
+    """Configuration for Fermi estimation module."""
+
+    # Main toggle
+    enabled: bool = False
+
+    # Target metrics (empty = auto-detect)
+    target_metrics: List[str] = field(default_factory=list)
+    auto_detect_targets: bool = True
+
+    # Decomposition settings
+    max_tree_depth: int = 4
+    max_leaf_nodes: int = 10
+
+    # Calculation settings
+    monte_carlo_iterations: int = 1000
+
+    # Validation settings
+    validate_with_llm: bool = True
+    min_confidence_threshold: float = 0.3
+
+    # Output settings
+    write_to_data_store: bool = True
+    include_sensitivity: bool = True
+
+    # Sub-decomposition settings
+    enable_sub_decomposition: bool = True
+    sub_decomposition_confidence_threshold: float = 0.65
+    sub_decomposition_max_iterations: int = 3
+    sub_decomposition_min_sensitivity_pct: float = 10.0
 
 
 class ContentFilterMode(str, Enum):
@@ -394,6 +433,10 @@ class ReportConfig:
 
     format: ReportFormat = ReportFormat.MARKDOWN
 
+    # Format strictness: if True, never fall back to markdown when DOCX/PDF/HTML fails.
+    # Raises ReportFormatError instead.
+    strict_format: bool = False
+
     # Output settings
     output_dir: Path = field(default_factory=lambda: Path("./output"))
     include_images: bool = True
@@ -459,6 +502,7 @@ class Config:
     report: ReportConfig = field(default_factory=ReportConfig)
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
     deep_think: DeepThinkConfig = field(default_factory=DeepThinkConfig)
+    fermi_estimation: FermiEstimationConfig = field(default_factory=FermiEstimationConfig)
     multilingual: MultilingualSearchConfig = field(default_factory=MultilingualSearchConfig)
 
     # Additional document settings
@@ -532,12 +576,16 @@ def create_config(
     anthropic_api_key: Optional[str] = None,
     model: Optional[str] = None,
     search_method: str = "duckduckgo",
+    search_region: str = "wt-wt",
+    safe_search: str = "moderate",
+    implicit_wait: int = 10,
     research_iterations: int = 3,
     output_format: str = "markdown",
     output_dir: str = "./output",
     additional_documents: Optional[List[str]] = None,
     enable_verification: bool = True,
     verbose: bool = False,
+    log_file: Optional[str] = None,
     target_pages: Optional[int] = None,
     target_characters: Optional[int] = None,
     extended_mode: bool = False,
@@ -564,6 +612,10 @@ def create_config(
     translate_results: bool = True,
     # Enhanced synthesis
     use_enhanced_synthesis: bool = True,
+    # Research content settings
+    max_content_length: int = 50000,
+    save_evidence: bool = True,
+    evidence_format: str = "json",
     # Search depth parameters
     max_queries_per_iteration: int = 3,
     max_pages_per_query: int = 3,
@@ -621,6 +673,21 @@ def create_config(
     intelligent_charts: bool = True,
     chart_insights: bool = True,
     chart_max_per_section: int = 3,
+    # Format strictness
+    strict_format: bool = False,
+    # Fermi estimation parameters
+    fermi_estimation: bool = False,
+    fermi_target_metrics: Optional[List[str]] = None,
+    fermi_auto_detect: bool = True,
+    fermi_max_tree_depth: int = 4,
+    fermi_max_leaf_nodes: int = 10,
+    fermi_monte_carlo: int = 1000,
+    fermi_validate: bool = True,
+    fermi_include_sensitivity: bool = True,
+    fermi_enable_sub_decomposition: bool = True,
+    fermi_sub_decomposition_max_iterations: int = 3,
+    fermi_sub_decomposition_confidence_threshold: float = 0.65,
+    fermi_sub_decomposition_min_sensitivity_pct: float = 10.0,
     **kwargs
 ) -> Config:
     """
@@ -634,12 +701,16 @@ def create_config(
         search_method: Web search method ('duckduckgo' or 'selenium')
         browser: Selenium browser via kwargs ('chrome', 'edge', or 'firefox';
             used by selenium search and the ai_crawl_selenium crawl mode)
+        search_region: DuckDuckGo search region (e.g., 'wt-wt' worldwide, 'jp-jp' Japan)
+        safe_search: DuckDuckGo safe search level ('off', 'moderate', 'strict')
+        implicit_wait: Selenium implicit wait time in seconds
         research_iterations: Number of research iterations
         output_format: Report format ('docx', 'pdf', or 'markdown')
         output_dir: Output directory path
         additional_documents: List of additional document paths
         enable_verification: Enable hallucination verification
         verbose: Enable verbose logging
+        log_file: Path to log file (optional, logs to file if specified)
         target_pages: Target page count for output (approximate)
         target_characters: Target character count for output
         extended_mode: Enable extended mode (deep site crawling)
@@ -663,6 +734,9 @@ def create_config(
         query_translation: Query translation method ('llm' or 'none')
         translate_results: Whether to translate results to output language
         use_enhanced_synthesis: Use multi-pass content generation for better quality
+        max_content_length: Maximum content length for extraction truncation (default: 50000)
+        save_evidence: Whether to save evidence exports (default: True)
+        evidence_format: Evidence export format: 'json', 'csv', or 'both' (default: 'json')
         max_queries_per_iteration: Max queries to execute per research iteration (default: 3)
         max_pages_per_query: Max pages to process per search query (default: 3)
         content_filter_mode: Content filter strictness ('strict', 'moderate', 'minimal', 'none')
@@ -751,6 +825,9 @@ def create_config(
         headless=kwargs.get("headless", True),
         max_results=kwargs.get("max_results", 10),
         browser=kwargs.get("browser", "chrome"),
+        region=search_region,
+        safe_search=safe_search,
+        implicit_wait=implicit_wait,
     )
 
     research_config = ResearchConfig(
@@ -758,7 +835,10 @@ def create_config(
         max_iterations=kwargs.get("max_iterations", research_iterations + 5),
         max_queries_per_iteration=max_queries_per_iteration,
         max_pages_per_query=max_pages_per_query,
+        max_content_length=max_content_length,
         language=kwargs.get("language", "ja"),
+        save_evidence=save_evidence,
+        evidence_format=evidence_format,
         extended_mode=extended_mode,
         crawl_max_pages=crawl_max_pages,
         crawl_max_depth=crawl_max_depth,
@@ -784,6 +864,7 @@ def create_config(
 
     report_config = ReportConfig(
         format=ReportFormat(output_format),
+        strict_format=strict_format,
         output_dir=Path(output_dir),
         target_pages=target_pages,
         target_characters=target_characters,
@@ -847,6 +928,37 @@ def create_config(
     if additional_documents:
         docs = [Path(doc) for doc in additional_documents]
 
+    # Validate kwargs: warn about unrecognized keys to catch typos
+    _KNOWN_KWARGS = {
+        "headless", "max_results", "max_iterations", "language", "browser",
+        "_expansion_tolerance", "_deviation_weights",
+        "dedup_threshold", "max_concurrent_searches", "include_language_stats",
+    }
+    _unknown_kwargs = set(kwargs.keys()) - _KNOWN_KWARGS
+    if _unknown_kwargs:
+        import warnings
+        warnings.warn(
+            f"create_config() received unrecognized keyword arguments: "
+            f"{sorted(_unknown_kwargs)}. These will be ignored. "
+            f"Check for typos or use explicit parameters instead.",
+            stacklevel=2,
+        )
+
+    fermi_config = FermiEstimationConfig(
+        enabled=fermi_estimation,
+        target_metrics=fermi_target_metrics or [],
+        auto_detect_targets=fermi_auto_detect,
+        max_tree_depth=fermi_max_tree_depth,
+        max_leaf_nodes=fermi_max_leaf_nodes,
+        monte_carlo_iterations=fermi_monte_carlo,
+        validate_with_llm=fermi_validate,
+        include_sensitivity=fermi_include_sensitivity,
+        enable_sub_decomposition=fermi_enable_sub_decomposition,
+        sub_decomposition_max_iterations=fermi_sub_decomposition_max_iterations,
+        sub_decomposition_confidence_threshold=fermi_sub_decomposition_confidence_threshold,
+        sub_decomposition_min_sensitivity_pct=fermi_sub_decomposition_min_sensitivity_pct,
+    )
+
     return Config(
         api=api_config,
         search=search_config,
@@ -854,9 +966,11 @@ def create_config(
         report=report_config,
         proxy=proxy_config,
         deep_think=deep_think_config,
+        fermi_estimation=fermi_config,
         multilingual=multilingual_config,
         additional_documents=docs,
         process_additional_documents=bool(additional_documents),
         enable_verification=enable_verification,
         verbose=verbose,
+        log_file=Path(log_file) if log_file else None,
     )

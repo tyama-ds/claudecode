@@ -3,7 +3,7 @@ Utility modules for Deep Research Tool.
 """
 
 from .document_reader import DocumentReader, DocumentContent
-from .helpers import setup_logging, format_timestamp, truncate_text, chunk_text
+from .helpers import setup_logging, format_timestamp, truncate_text, chunk_text, ResearchWarnings
 
 __all__ = [
     "DocumentReader",
@@ -12,4 +12,5 @@ __all__ = [
     "format_timestamp",
     "truncate_text",
     "chunk_text",
+    "ResearchWarnings",
 ]

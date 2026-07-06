@@ -11,8 +11,13 @@ Version 2.0 adds:
 """
 
 import json
+import re
+import logging
+import time
+from ...utils.helpers import ResearchWarnings
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Any, Callable
+from pathlib import Path
+from typing import List, Dict, Optional, Any, Callable, Tuple
 from datetime import datetime
 
 from .context import ReportContext, WritingStyle, TargetAudience, ChapterSummary
@@ -22,6 +27,76 @@ from ...utils.helpers import split_prose_and_meta
 
 # Delimiter between chapter prose and metadata JSON in generation responses
 CHAPTER_META_DELIMITER = "===CHAPTER_META==="
+
+logger = logging.getLogger(__name__)
+
+
+def _section_sort_key(item) -> Tuple:
+    """
+    Natural sort key for section numbers like "1", "1.1", "2", "10", "10.1".
+
+    Converts section number strings into tuples of integers for proper
+    numerical ordering:
+        "1"    -> (1,)
+        "1.1"  -> (1, 1)
+        "2"    -> (2,)
+        "10"   -> (10,)
+        "10.1" -> (10, 1)
+
+    This ensures "2" comes before "10" (numerical order), not after "1.9"
+    and before "10" (lexicographic order).
+    """
+    key = item[0] if isinstance(item, tuple) else item
+    parts = []
+    for part in str(key).split('.'):
+        try:
+            parts.append(int(part))
+        except ValueError:
+            # Non-numeric parts (e.g., "A", "_executive") sort after numbers
+            parts.append(float('inf'))
+    return tuple(parts)
+
+
+class ReportFormatError(Exception):
+    """Raised when report cannot be saved in the requested format (strict_format mode)."""
+
+    def __init__(self, message: str, debug_md_path: str = None, original_error: Exception = None):
+        super().__init__(message)
+        self.debug_md_path = debug_md_path
+        self.original_error = original_error
+
+
+# Pre-compiled regex for XML sanitization (covers ALL illegal XML 1.0 characters)
+# XML 1.0 legal chars: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+# Everything else is illegal and must be removed.
+_XML_ILLEGAL_CHARS_RE = re.compile(
+    '['
+    '\x00-\x08'          # C0 control chars (except TAB \x09)
+    '\x0b\x0c'           # VT, FF (except LF \x0a, CR \x0d)
+    '\x0e-\x1f'          # C0 control chars (cont.)
+    '\x7f'               # DEL
+    '\x80-\x84'          # C1 control chars
+    '\x86-\x9f'          # C1 control chars (except NEL \x85)
+    '\ud800-\udfff'      # Surrogate pairs (isolated)
+    '\ufdd0-\ufdef'      # Non-characters
+    '\ufffe\uffff'        # Non-characters (BOM reverse, etc.)
+    ']',
+)
+
+
+def _sanitize_for_xml(text: str) -> str:
+    """
+    Remove characters illegal in XML 1.0 from text.
+
+    DOCX files are XML internally. XML 1.0 spec defines legal chars as:
+        #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+
+    All other characters (control chars, surrogates, non-characters, DEL, C1 range)
+    are stripped to prevent doc.save() XML serialization errors.
+    """
+    if not text:
+        return text
+    return _XML_ILLEGAL_CHARS_RE.sub('', text)
 
 
 @dataclass
@@ -81,6 +156,8 @@ class ReportGeneratorV2:
         enable_two_phase: bool = True,
         enable_polish: bool = True,
         progress_callback: Callable[[str, int, int], None] = None,
+        target_pages: Optional[int] = None,
+        target_characters: Optional[int] = None,
     ):
         """
         Initialize ReportGeneratorV2.
@@ -95,6 +172,8 @@ class ReportGeneratorV2:
             enable_two_phase: Enable two-phase generation (draft + refinement)
             enable_polish: Run a final naturalness polish pass over all chapters
             progress_callback: Progress callback function
+            target_pages: Target page count (approximate, 1 page ≈ 1500 chars ja / 500 words en)
+            target_characters: Target character count (overrides target_pages if set)
         """
         self.llm = llm_client
         self.language = language
@@ -105,6 +184,8 @@ class ReportGeneratorV2:
         self.enable_two_phase = enable_two_phase
         self.enable_polish = enable_polish
         self.progress_callback = progress_callback
+        self.target_pages = target_pages
+        self.target_characters = target_characters
 
         # Initialize components
         self.glossary_manager = GlossaryManager(llm_client, language)
@@ -159,6 +240,15 @@ class ReportGeneratorV2:
         # Get sections from plan
         sections = self._get_sections_from_plan(research_plan)
         total_sections = len(sections)
+
+        # Calculate per-chapter target length
+        self._chapter_target_chars = None
+        if total_sections > 0:
+            if self.target_characters:
+                self._chapter_target_chars = self.target_characters // total_sections
+            elif self.target_pages:
+                chars_per_page = 1500 if self.language == "ja" else 2500
+                self._chapter_target_chars = (self.target_pages * chars_per_page) // total_sections
 
         # Phase 1: Generate drafts
         chapters: Dict[str, ChapterContent] = {}
@@ -255,18 +345,30 @@ class ReportGeneratorV2:
         # Build the prompt with full context
         context_prompt = context.get_full_context_prompt()
 
-        # Format content data. The Researcher stores section_contents entries
-        # with keys title/content/summary/sources; extracted_content is kept
-        # as a preferred source when a caller provides per-source material.
+        # Format content data — include both summary and raw content per source.
+        # The Researcher stores section_contents entries with keys
+        # title/content/summary/sources; extracted_content is preferred when
+        # a caller provides per-source material.
         no_info = "情報なし" if self.language == "ja" else "No information"
         if isinstance(content_data, dict):
             sources = content_data.get("sources", [])
             extracted = content_data.get("extracted_content", [])
             if extracted:
-                content_summary = "\n".join([
-                    f"- {e.get('title', 'N/A')}: {e.get('content', '')[:1200]}"
-                    for e in extracted[:12]
-                ])
+                source_blocks = []
+                for i, e in enumerate(extracted[:10]):
+                    title = e.get("title", "N/A")
+                    summary = e.get("content", "")
+                    raw = e.get("raw_content", "")
+                    key_pts = e.get("key_points", [])
+                    block = f"[SOURCE {i+1}] {title}\n"
+                    if summary:
+                        block += f"【要約】\n{summary}\n"
+                    if key_pts:
+                        block += f"【要点】{', '.join(key_pts[:5])}\n"
+                    if raw:
+                        block += f"【原文】\n{raw}\n"
+                    source_blocks.append(block)
+                content_summary = "\n---\n".join(source_blocks)
             else:
                 parts = []
                 body = content_data.get("content", "")
@@ -285,6 +387,12 @@ class ReportGeneratorV2:
         else:
             sources = []
             content_summary = str(content_data)[:4000] if content_data else no_info
+
+        length_instruction_ja = ""
+        length_instruction_en = ""
+        if self._chapter_target_chars:
+            length_instruction_ja = f"\n8. このセクションは約{self._chapter_target_chars}文字を目安に執筆する"
+            length_instruction_en = f"\n8. Target approximately {self._chapter_target_chars} characters for this section"
 
         if self.language == "ja":
             prompt = f"""{context_prompt}
@@ -306,6 +414,8 @@ class ReportGeneratorV2:
 3. 文体・スタイル指示に従う
 4. 事実に基づいた記述を行い、推測は「〜と考えられる」などの表現で明示する
 5. 必要に応じて前章を参照する
+6. 情報の出典を示すため、該当箇所に [SOURCE N] の形式で引用番号を付与する（Nは上記情報のSOURCE番号）
+7. 本文は散文パラグラフで記述する。箇条書き（-、*、1.）や表は、比較一覧・手順・仕様など列挙が本質的に適切な場合のみ使用し、通常の説明・分析・考察は必ず文章で書く{length_instruction_ja}
 
 【出力形式】
 まず本文をマークダウンでそのまま書く（章見出し「## {section_number}. {section_title}」から始める）。
@@ -335,6 +445,8 @@ Important notes:
 3. Follow style instructions
 4. Base writing on facts; phrase speculation naturally as your assessment
 5. Reference previous chapters when appropriate
+6. Include citation markers [SOURCE N] in the text where information from sources is used (N corresponds to the SOURCE number above)
+7. Write in continuous prose paragraphs. Use bullet lists or tables only for comparisons, specifications, or steps where enumeration is inherently appropriate{length_instruction_en}
 
 [OUTPUT FORMAT]
 Write the body directly as markdown (start with the heading "## {section_number}. {section_title}").
@@ -347,6 +459,29 @@ After the body, output this delimiter followed by metadata:
 
         try:
             response = self.llm.generate(prompt)
+
+            # Guard against None/empty response (OpenAI API can return content=None)
+            if not response or not response.content:
+                _msg = (f"LLM returned empty response for section {section_number} "
+                        f"'{section_title}'. This chapter has placeholder content only.")
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.CRITICAL, "ReportGeneratorV2", _msg)
+                if self.language == "ja":
+                    placeholder = (f"## {section_number}. {section_title}\n\n"
+                                   f"**[警告]** このセクションの内容を生成できませんでした"
+                                   f"（LLM応答が空でした）。")
+                else:
+                    placeholder = (f"## {section_number}. {section_title}\n\n"
+                                   f"**[WARNING]** Content generation failed for this section "
+                                   f"(LLM returned empty response).")
+                return ChapterContent(
+                    section_number=section_number,
+                    section_title=section_title,
+                    content=placeholder,
+                    word_count=0,
+                    is_draft=True,
+                )
+
             body, meta = split_prose_and_meta(response.content, CHAPTER_META_DELIMITER)
 
             if not body or not body.strip():
@@ -360,16 +495,16 @@ After the body, output this delimiter followed by metadata:
                 key_points=meta.get("key_points", []),
                 terms_used=meta.get("terms_used", []),
                 facts_stated=meta.get("facts_stated", []),
+                citations=sources,
                 is_draft=True,
             )
 
         except Exception as e:
-            print(f"[ReportGeneratorV2] Chapter generation failed: {e}")
-            # Return minimal chapter
+            print(f"[ReportGeneratorV2] Chapter generation failed for section {section_number}: {e}")
             return ChapterContent(
                 section_number=section_number,
                 section_title=section_title,
-                content=f"# {section_number}. {section_title}\n\n（生成エラー: {e}）",
+                content=f"## {section_number}. {section_title}\n\n（生成エラー: {e}）",
                 word_count=0,
                 is_draft=True,
             )
@@ -459,6 +594,13 @@ Output only the revised content (no JSON):"""
 
             except Exception as e:
                 print(f"[ReportGeneratorV2] Refinement failed for {section_num}: {e}")
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.MEDIUM,
+                    "ReportGeneratorV2",
+                    f"Consistency refinement failed for section {section_num}. "
+                    f"Chapter remains as draft with potential consistency issues. "
+                    f"Error: {e}",
+                )
 
         return chapters
 
@@ -575,6 +717,7 @@ Output only the polished body (no preamble, no JSON, no code block):"""
         result: GenerationResult,
         include_glossary: bool = True,
         include_consistency_summary: bool = False,
+        evidence_locker=None,
     ) -> str:
         """
         Generate the final document from generation result.
@@ -583,10 +726,19 @@ Output only the polished body (no preamble, no JSON, no code block):"""
             result: GenerationResult from generate_report
             include_glossary: Include glossary section
             include_consistency_summary: Include consistency check summary
+            evidence_locker: EvidenceLocker for generating references section
 
         Returns:
             Complete document as markdown string
         """
+        # Build URL-to-reference mapping for citation renumbering
+        evidence_list = []
+        url_to_ref = {}
+        if evidence_locker is not None:
+            evidence_list = evidence_locker.get_all_evidence()
+            for i, evidence in enumerate(evidence_list, 1):
+                url_to_ref[evidence.url] = i
+
         lines = []
 
         # Title
@@ -595,16 +747,20 @@ Output only the polished body (no preamble, no JSON, no code block):"""
         lines.append(f"*Generated: {datetime.now().strftime('%Y-%m-%d')}*")
         lines.append("")
 
-        # Table of Contents
+        # Table of Contents (use natural sort for proper section ordering)
         lines.append("## 目次" if self.language == "ja" else "## Table of Contents")
         lines.append("")
-        for section_num, chapter in sorted(result.chapters.items()):
+        for section_num, chapter in sorted(result.chapters.items(), key=_section_sort_key):
             lines.append(f"- {section_num}. {chapter.section_title}")
         lines.append("")
 
-        # Chapters
-        for section_num, chapter in sorted(result.chapters.items()):
-            lines.append(chapter.content)
+        # Chapters (use natural sort: 1, 1.1, 2, 2.1, ... 10, 10.1)
+        for section_num, chapter in sorted(result.chapters.items(), key=_section_sort_key):
+            content = chapter.content
+            # Renumber [SOURCE N] citations to final reference numbers
+            if url_to_ref and chapter.citations:
+                content = self._renumber_citations(content, chapter.citations, url_to_ref)
+            lines.append(content)
             lines.append("")
 
         # Glossary
@@ -624,4 +780,513 @@ Output only the polished body (no preamble, no JSON, no code block):"""
             summary = self.consistency_checker.generate_summary(result.consistency_report)
             lines.append(summary)
 
+        # References section
+        if evidence_list:
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+            lines.append("## 参考文献" if self.language == "ja" else "## References")
+            lines.append("")
+            for i, evidence in enumerate(evidence_list, 1):
+                quality_badge = self._get_quality_badge(evidence.quality_category)
+                lines.append(f"{i}. {quality_badge} {evidence.citation_text}")
+            lines.append("")
+
         return "\n".join(lines)
+
+    @staticmethod
+    def _get_quality_badge(quality) -> str:
+        """Get quality badge string for a citation."""
+        # Import here to avoid circular imports
+        try:
+            from ...evidence.locker import QualityCategory
+            badges = {
+                QualityCategory.AUTHORITATIVE: "[A]",
+                QualityCategory.HIGH: "[H]",
+                QualityCategory.MEDIUM: "[M]",
+                QualityCategory.LOW: "[L]",
+                QualityCategory.UNVERIFIED: "[?]",
+            }
+            return badges.get(quality, "")
+        except (ImportError, AttributeError):
+            return ""
+
+    @staticmethod
+    def _renumber_citations(
+        content: str,
+        section_sources: List[str],
+        url_to_ref: Dict[str, int],
+    ) -> str:
+        """Renumber [SOURCE N] citations to final reference numbers [N].
+
+        Args:
+            content: Chapter content with [SOURCE N] markers
+            section_sources: List of source URLs used for this chapter
+            url_to_ref: Mapping from URL to final reference number
+
+        Returns:
+            Content with renumbered citation markers
+        """
+        if not content or not section_sources:
+            return content
+
+        def replace_citation(match):
+            original_num = int(match.group(1))
+            source_index = original_num - 1
+            if 0 <= source_index < len(section_sources):
+                source_url = section_sources[source_index]
+                if source_url in url_to_ref:
+                    return f"[{url_to_ref[source_url]}]"
+            return f"[?{original_num}]"
+
+        return re.sub(r'\[SOURCE:?\s*(\d+)\]', replace_citation, content)
+
+    def save_report(
+        self,
+        markdown_content: str,
+        output_dir: Path,
+        filename: str,
+        format: str = "markdown",
+        strict_format: bool = False,
+    ) -> Path:
+        """
+        Save the generated report in the specified format.
+
+        Args:
+            markdown_content: The report content as markdown string
+            output_dir: Directory to save the report
+            filename: Base filename (without extension)
+            format: Output format ('markdown', 'docx', 'pdf', 'html')
+            strict_format: If True, raise ReportFormatError instead of falling
+                          back to markdown when DOCX generation fails.
+
+        Returns:
+            Path to the saved report file
+
+        Raises:
+            ReportFormatError: When strict_format=True and DOCX generation fails.
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        format_lower = format.lower() if isinstance(format, str) else format.value.lower()
+
+        if format_lower == "docx":
+            return self._save_as_docx(markdown_content, output_dir, filename, strict_format=strict_format)
+        elif format_lower == "html":
+            return self._save_as_html(markdown_content, output_dir, filename)
+        elif format_lower == "pdf":
+            # PDF: save as markdown with note (PDF generation requires additional setup)
+            md_path = self._save_as_markdown(markdown_content, output_dir, filename)
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.CRITICAL,
+                "ReportGeneratorV2",
+                "PDF format requested but not supported in V2 generator. "
+                "Report saved as markdown (.md) instead. "
+                "Use report_generator_version='v1' for PDF support.",
+            )
+            return md_path
+        else:
+            return self._save_as_markdown(markdown_content, output_dir, filename)
+
+    def _save_as_markdown(self, content: str, output_dir: Path, filename: str) -> Path:
+        """Save report as markdown file."""
+        filepath = output_dir / f"{filename}.md"
+        filepath.write_text(content, encoding="utf-8")
+        return filepath
+
+    def _save_as_docx(
+        self,
+        markdown_content: str,
+        output_dir: Path,
+        filename: str,
+        strict_format: bool = False,
+    ) -> Path:
+        """Convert markdown content to DOCX and save.
+
+        Uses 3-layer defense against XML illegal characters:
+        1. Pre-sanitize the entire markdown content
+        2. Sanitize every text insertion into the Document
+        3. BytesIO pre-validation before writing to disk
+
+        Args:
+            markdown_content: Markdown text to convert
+            output_dir: Output directory
+            filename: Base filename (without extension)
+            strict_format: If True, raise ReportFormatError on failure instead
+                          of falling back to markdown.
+
+        Returns:
+            Path to the saved DOCX file.
+
+        Raises:
+            ReportFormatError: When strict_format=True and DOCX generation fails.
+        """
+        try:
+            from docx import Document
+            from docx.shared import Pt, Inches, Cm
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
+        except ImportError:
+            if strict_format:
+                raise ReportFormatError(
+                    "python-docx is not installed. Cannot generate DOCX in strict_format mode. "
+                    "Install with: pip install python-docx"
+                )
+            logger.error("[ReportGeneratorV2] python-docx not installed. Falling back to markdown.")
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.CRITICAL,
+                "ReportGeneratorV2",
+                "DOCX format requested but python-docx is not installed. "
+                "Report saved as markdown (.md) instead. "
+                "Install with: pip install python-docx",
+            )
+            return self._save_as_markdown(markdown_content, output_dir, filename)
+
+        # Layer 1: Pre-sanitize the entire markdown content
+        markdown_content = _sanitize_for_xml(markdown_content)
+
+        doc = Document()
+        lines = markdown_content.split("\n")
+        i = 0
+
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+
+            # Empty line
+            if not stripped:
+                i += 1
+                continue
+
+            # Layer 2: Sanitize every text fragment before insertion
+            stripped = _sanitize_for_xml(stripped)
+
+            # Headings
+            if stripped.startswith("#"):
+                level, text = self._parse_heading(stripped)
+                text = _sanitize_for_xml(text)
+                try:
+                    doc.add_heading(text, level=level)
+                except Exception as e:
+                    logger.warning(f"[DOCX] Heading add failed: {e}, adding as paragraph")
+                    doc.add_paragraph(text)
+                i += 1
+                continue
+
+            # Markdown table detection (lines starting with |)
+            if stripped.startswith("|") and "|" in stripped[1:]:
+                table_lines = []
+                while i < len(lines) and lines[i].strip().startswith("|"):
+                    table_lines.append(_sanitize_for_xml(lines[i].strip()))
+                    i += 1
+                if table_lines:
+                    self._add_markdown_table_to_docx(doc, table_lines)
+                continue
+
+            # Unordered list items
+            if re.match(r'^[-*+]\s', stripped):
+                text = _sanitize_for_xml(re.sub(r'^[-*+]\s+', '', stripped))
+                try:
+                    para = doc.add_paragraph(style='List Bullet')
+                except KeyError:
+                    para = doc.add_paragraph()
+                    text = "- " + text
+                self._add_formatted_runs(para, text)
+                i += 1
+                continue
+
+            # Ordered list items
+            if re.match(r'^\d+\.\s', stripped):
+                text = _sanitize_for_xml(re.sub(r'^\d+\.\s+', '', stripped))
+                try:
+                    para = doc.add_paragraph(style='List Number')
+                except KeyError:
+                    para = doc.add_paragraph()
+                    text = stripped  # Keep the number prefix
+                self._add_formatted_runs(para, text)
+                i += 1
+                continue
+
+            # Italic metadata line (e.g., *Generated: 2024-01-01*)
+            if stripped.startswith("*") and stripped.endswith("*") and not stripped.startswith("**"):
+                para = doc.add_paragraph()
+                run = para.add_run(_sanitize_for_xml(stripped.strip("*")))
+                run.italic = True
+                run.font.size = Pt(9)
+                para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                i += 1
+                continue
+
+            # Image reference: ![alt](path)
+            img_match = re.match(r'!\[([^\]]*)\]\(([^)]+)\)', stripped)
+            if img_match:
+                alt_text = _sanitize_for_xml(img_match.group(1))
+                img_path = img_match.group(2)
+                self._add_image_to_docx(doc, img_path, alt_text)
+                i += 1
+                continue
+
+            # Regular paragraph: collect consecutive non-empty, non-special lines
+            para_lines = []
+            start_i = i  # Track starting position to prevent infinite loop
+            while i < len(lines):
+                l = lines[i].strip()
+                if not l or l.startswith("#") or re.match(r'^[-*+]\s', l) or re.match(r'^\d+\.\s', l) or l.startswith("|"):
+                    break
+                # Check for image reference
+                if re.match(r'!\[([^\]]*)\]\(([^)]+)\)', l):
+                    break
+                para_lines.append(_sanitize_for_xml(l))
+                i += 1
+
+            # Safety: if no lines were consumed, force advance to avoid infinite loop
+            if i == start_i:
+                i += 1
+
+            if para_lines:
+                para = doc.add_paragraph()
+                self._add_formatted_runs(para, " ".join(para_lines))
+            continue
+
+        # Layer 3: BytesIO pre-validation - test XML serialization before writing to disk
+        filepath = output_dir / f"{filename}.docx"
+        from io import BytesIO
+
+        try:
+            buf = BytesIO()
+            doc.save(buf)
+            # Serialization succeeded - write to disk
+            buf.seek(0)
+            with open(filepath, 'wb') as f:
+                f.write(buf.read())
+        except Exception as save_error:
+            logger.error(f"[ReportGeneratorV2] BytesIO pre-validation failed: {save_error}")
+            # Retry: aggressive per-paragraph sanitization
+            try:
+                logger.info("[ReportGeneratorV2] Retrying with per-paragraph sanitization...")
+                self._sanitize_docx_paragraphs(doc)
+                self._sanitize_docx_tables(doc)
+                buf2 = BytesIO()
+                doc.save(buf2)
+                buf2.seek(0)
+                with open(filepath, 'wb') as f:
+                    f.write(buf2.read())
+                logger.info("[ReportGeneratorV2] Retry succeeded after per-element sanitization.")
+            except Exception as retry_error:
+                if strict_format:
+                    # Save debug markdown so content is not lost
+                    debug_md_path = self._save_as_markdown(markdown_content, output_dir, f"{filename}_debug")
+                    raise ReportFormatError(
+                        f"DOCX generation failed even after sanitization. "
+                        f"Original error: {save_error} / Retry error: {retry_error}. "
+                        f"Debug markdown saved to: {debug_md_path}",
+                        debug_md_path=str(debug_md_path),
+                        original_error=retry_error,
+                    )
+                logger.error(
+                    f"[ReportGeneratorV2] Retry also failed: {retry_error}. "
+                    f"Falling back to markdown."
+                )
+                return self._save_as_markdown(markdown_content, output_dir, filename)
+        return filepath
+
+    @staticmethod
+    def _sanitize_docx_paragraphs(doc):
+        """Sanitize all paragraph text in a Document to remove illegal XML chars."""
+        for paragraph in doc.paragraphs:
+            for run in paragraph.runs:
+                if run.text:
+                    run.text = _sanitize_for_xml(run.text)
+
+    @staticmethod
+    def _sanitize_docx_tables(doc):
+        """Sanitize all table cell text in a Document to remove illegal XML chars."""
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for paragraph in cell.paragraphs:
+                        for run in paragraph.runs:
+                            if run.text:
+                                run.text = _sanitize_for_xml(run.text)
+
+    def _add_markdown_table_to_docx(self, doc, table_lines: list):
+        """Convert markdown table lines to a DOCX table."""
+        try:
+            from docx.shared import Pt
+
+            # Parse header row
+            rows_data = []
+            for line in table_lines:
+                cells = [c.strip() for c in line.strip("|").split("|")]
+                # Skip separator row (contains only -, :, spaces)
+                if all(re.match(r'^[-:]+$', c.strip()) for c in cells if c.strip()):
+                    continue
+                rows_data.append(cells)
+
+            if not rows_data:
+                return
+
+            num_cols = max(len(row) for row in rows_data)
+            table = doc.add_table(rows=len(rows_data), cols=num_cols)
+            table.style = "Table Grid"
+
+            for row_idx, row_data in enumerate(rows_data):
+                for col_idx, cell_text in enumerate(row_data):
+                    if col_idx < num_cols:
+                        cell = table.rows[row_idx].cells[col_idx]
+                        cell.text = _sanitize_for_xml(cell_text.strip())
+                        # Bold header row
+                        if row_idx == 0:
+                            for paragraph in cell.paragraphs:
+                                for run in paragraph.runs:
+                                    run.bold = True
+                                    run.font.size = Pt(9)
+
+            doc.add_paragraph()  # Spacing after table
+        except Exception as e:
+            print(f"[ReportGeneratorV2] Table insertion failed: {e}")
+
+    def _add_image_to_docx(self, doc, img_path: str, alt_text: str = ""):
+        """Add an image to the DOCX document."""
+        try:
+            from docx.shared import Inches
+            import os
+
+            # Check if file exists (handle both absolute and relative paths)
+            if os.path.exists(img_path):
+                doc.add_picture(img_path, width=Inches(5.5))
+            elif os.path.exists(os.path.join(str(self.output_dir if hasattr(self, 'output_dir') else '.'), img_path)):
+                full_path = os.path.join(str(self.output_dir if hasattr(self, 'output_dir') else '.'), img_path)
+                doc.add_picture(full_path, width=Inches(5.5))
+
+            if alt_text:
+                para = doc.add_paragraph()
+                run = para.add_run(alt_text)
+                run.italic = True
+                from docx.shared import Pt
+                run.font.size = Pt(9)
+        except Exception as e:
+            # If image can't be added, add alt text as placeholder
+            if alt_text:
+                doc.add_paragraph(f"[Image: {alt_text}]")
+
+    def _save_as_html(self, markdown_content: str, output_dir: Path, filename: str) -> Path:
+        """Convert markdown content to HTML and save."""
+        # Simple markdown to HTML conversion
+        html_body = self._markdown_to_html(markdown_content)
+        html_doc = f"""<!DOCTYPE html>
+<html lang="{self.language}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+body {{ font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', sans-serif; max-width: 900px; margin: 0 auto; padding: 2em; line-height: 1.8; }}
+h1 {{ border-bottom: 2px solid #333; padding-bottom: 0.3em; }}
+h2 {{ border-bottom: 1px solid #ccc; padding-bottom: 0.2em; }}
+ul, ol {{ padding-left: 1.5em; }}
+</style>
+</head>
+<body>
+{html_body}
+</body>
+</html>"""
+        filepath = output_dir / f"{filename}.html"
+        filepath.write_text(html_doc, encoding="utf-8")
+        return filepath
+
+    @staticmethod
+    def _parse_heading(line: str) -> tuple:
+        """Parse a markdown heading line into (level, text)."""
+        match = re.match(r'^(#{1,6})\s+(.*)', line)
+        if match:
+            level = min(len(match.group(1)), 4)  # docx supports levels 0-4
+            return level - 1, match.group(2).strip()
+        return 0, line.strip("#").strip()
+
+    @staticmethod
+    def _add_formatted_runs(paragraph, text: str):
+        """Add text with bold/italic formatting as runs to a paragraph."""
+        text = _sanitize_for_xml(text)
+        # Split by bold (**text**) and italic (*text*) markers
+        parts = re.split(r'(\*\*[^*]+\*\*|\*[^*]+\*)', text)
+        for part in parts:
+            if not part:
+                continue
+            if part.startswith("**") and part.endswith("**"):
+                run = paragraph.add_run(_sanitize_for_xml(part[2:-2]))
+                run.bold = True
+            elif part.startswith("*") and part.endswith("*"):
+                run = paragraph.add_run(_sanitize_for_xml(part[1:-1]))
+                run.italic = True
+            else:
+                paragraph.add_run(_sanitize_for_xml(part))
+
+    @staticmethod
+    def _markdown_to_html(markdown_text: str) -> str:
+        """Simple markdown to HTML conversion."""
+        lines = markdown_text.split("\n")
+        html_lines = []
+        in_list = False
+        list_type = None
+
+        for line in lines:
+            stripped = line.strip()
+
+            if not stripped:
+                if in_list:
+                    html_lines.append(f"</{list_type}>")
+                    in_list = False
+                    list_type = None
+                html_lines.append("")
+                continue
+
+            # Headings
+            heading_match = re.match(r'^(#{1,6})\s+(.*)', stripped)
+            if heading_match:
+                if in_list:
+                    html_lines.append(f"</{list_type}>")
+                    in_list = False
+                level = len(heading_match.group(1))
+                text = heading_match.group(2)
+                html_lines.append(f"<h{level}>{text}</h{level}>")
+                continue
+
+            # Unordered list
+            if re.match(r'^[-*+]\s', stripped):
+                text = re.sub(r'^[-*+]\s+', '', stripped)
+                if not in_list or list_type != "ul":
+                    if in_list:
+                        html_lines.append(f"</{list_type}>")
+                    html_lines.append("<ul>")
+                    in_list = True
+                    list_type = "ul"
+                html_lines.append(f"  <li>{text}</li>")
+                continue
+
+            # Ordered list
+            ol_match = re.match(r'^\d+\.\s+(.*)', stripped)
+            if ol_match:
+                text = ol_match.group(1)
+                if not in_list or list_type != "ol":
+                    if in_list:
+                        html_lines.append(f"</{list_type}>")
+                    html_lines.append("<ol>")
+                    in_list = True
+                    list_type = "ol"
+                html_lines.append(f"  <li>{text}</li>")
+                continue
+
+            # Regular paragraph
+            if in_list:
+                html_lines.append(f"</{list_type}>")
+                in_list = False
+                list_type = None
+            # Apply inline formatting
+            formatted = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', stripped)
+            formatted = re.sub(r'\*([^*]+)\*', r'<em>\1</em>', formatted)
+            html_lines.append(f"<p>{formatted}</p>")
+
+        if in_list:
+            html_lines.append(f"</{list_type}>")
+
+        return "\n".join(html_lines)

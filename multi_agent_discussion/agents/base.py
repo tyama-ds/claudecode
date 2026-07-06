@@ -62,30 +62,50 @@ class BaseAgent(ABC):
             self._client = self._create_client()
         return self._client
 
+    def _get_http_client(self):
+        """Create an HTTP client with proxy support if configured."""
+        proxy_url = self.llm_config.proxy_url
+        if proxy_url:
+            try:
+                import httpx
+                return httpx.Client(proxy=proxy_url)
+            except ImportError:
+                raise ImportError("httpx package is required for proxy support")
+        return None
+
     def _create_client(self):
         """Create LLM client based on configuration."""
         from ..config import LLMProvider
 
         provider = self.llm_config.provider
         api_key = self.llm_config.get_api_key()
+        http_client = self._get_http_client()
 
         if provider == LLMProvider.OPENAI:
             try:
                 from openai import OpenAI
-                return OpenAI(api_key=api_key)
+                kwargs = {"api_key": api_key}
+                if http_client:
+                    kwargs["http_client"] = http_client
+                return OpenAI(**kwargs)
             except ImportError:
                 raise ImportError("openai package is required for OpenAI provider")
 
         elif provider == LLMProvider.ANTHROPIC:
             try:
                 from anthropic import Anthropic
-                return Anthropic(api_key=api_key)
+                kwargs = {"api_key": api_key}
+                if http_client:
+                    kwargs["http_client"] = http_client
+                return Anthropic(**kwargs)
             except ImportError:
                 raise ImportError("anthropic package is required for Anthropic provider")
 
         elif provider == LLMProvider.GOOGLE:
             try:
                 import google.generativeai as genai
+                # Google uses environment variables for proxy (HTTP_PROXY/HTTPS_PROXY)
+                # or request_options for per-request proxy
                 genai.configure(api_key=api_key)
                 return genai
             except ImportError:
@@ -95,10 +115,13 @@ class BaseAgent(ABC):
             try:
                 from openai import OpenAI
                 # Ollama provides OpenAI-compatible API
-                return OpenAI(
-                    base_url=f"{self.llm_config.ollama_base_url}/v1",
-                    api_key="ollama",  # Ollama doesn't require API key
-                )
+                kwargs = {
+                    "base_url": f"{self.llm_config.ollama_base_url}/v1",
+                    "api_key": "ollama",  # Ollama doesn't require API key
+                }
+                if http_client:
+                    kwargs["http_client"] = http_client
+                return OpenAI(**kwargs)
             except ImportError:
                 raise ImportError("openai package is required for Ollama provider")
 
@@ -106,15 +129,31 @@ class BaseAgent(ABC):
             try:
                 from openai import OpenAI
                 # xAI provides OpenAI-compatible API
-                return OpenAI(
-                    base_url="https://api.x.ai/v1",
-                    api_key=api_key,
-                )
+                kwargs = {
+                    "base_url": "https://api.x.ai/v1",
+                    "api_key": api_key,
+                }
+                if http_client:
+                    kwargs["http_client"] = http_client
+                return OpenAI(**kwargs)
             except ImportError:
                 raise ImportError("openai package is required for xAI provider")
 
         else:
             raise ValueError(f"Unsupported provider: {provider}")
+
+    # Model prefixes that do not support custom temperature
+    _NO_TEMPERATURE_PREFIXES = ("o1", "o3", "o4", "gpt-5", "gpt-6")
+
+    def _supports_temperature(self, model: str) -> bool:
+        """Check if a model supports custom temperature parameter."""
+        model_lower = model.lower()
+        for prefix in self._NO_TEMPERATURE_PREFIXES:
+            if (model_lower == prefix or
+                model_lower.startswith(prefix + "-") or
+                model_lower.startswith(prefix + ".")):
+                return False
+        return True
 
     def _call_llm(self, messages: List[dict], system_prompt: str = None) -> str:
         """
@@ -138,12 +177,15 @@ class BaseAgent(ABC):
                 full_messages.append({"role": "system", "content": system_prompt})
             full_messages.extend(messages)
 
-            response = self.client.chat.completions.create(
-                model=model,
-                messages=full_messages,
-                temperature=self.llm_config.temperature,
-                max_tokens=self.llm_config.max_tokens,
-            )
+            params = {
+                "model": model,
+                "messages": full_messages,
+                "max_completion_tokens": self.llm_config.max_tokens,
+            }
+            if self._supports_temperature(model):
+                params["temperature"] = self.llm_config.temperature
+
+            response = self.client.chat.completions.create(**params)
             return response.choices[0].message.content
 
         elif provider == LLMProvider.ANTHROPIC:
@@ -179,12 +221,15 @@ class BaseAgent(ABC):
                 full_messages.append({"role": "system", "content": system_prompt})
             full_messages.extend(messages)
 
-            response = self.client.chat.completions.create(
-                model=model,
-                messages=full_messages,
-                temperature=self.llm_config.temperature,
-                max_tokens=self.llm_config.max_tokens,
-            )
+            params = {
+                "model": model,
+                "messages": full_messages,
+                "max_tokens": self.llm_config.max_tokens,
+            }
+            if self._supports_temperature(model):
+                params["temperature"] = self.llm_config.temperature
+
+            response = self.client.chat.completions.create(**params)
             return response.choices[0].message.content
 
         else:

@@ -23,7 +23,11 @@ AIを活用した自動リサーチツール。OpenAI/Anthropic APIとWeb検索�
 - **データサルベージ**: エラー時のデータ復旧とCSVエクスポート（日本語エンコーディング対応）
 - **高速クロールモード**: 並列フェッチとバッチ/並列LLM評価で情報収集を高速化
 - **レポート生成V2**: 章間の一貫性を保証する用語統一・コンテキスト引き継ぎ・自動修正機能
-- **フェルミ推定**: 統計がない定量的な問いを要素分解して範囲付きで推定（仮GUI同梱）
+- **フェルミ推定**: 分解木ベースの定量推定。エビデンス自動照合、感度分析、モンテカルロシミュレーション、低信頼度リーフの再帰的サブ分解に対応
+- **レポート生成V3 (DOCX-Native)**: python-docx APIでDOCXを直接構築。Markdown中間変換を排除し、図表・引用の高精度な配置を実現
+- **検索クエリ最適化**: 複合クエリの自動分割（Split）とフォローアップクエリのテーマアンカリング（Anchor）で後半セクションの検索精度を向上
+- **ResearchWarnings**: パイプライン実行中のフォールバックやエラーを重要度別に収集し、レポート末尾に透過的に表示
+- **情報収集付きマルチエージェント議論**: Web検索機能を持つ`ResearchParticipantAgent`で、根拠に基づいた議論を実現
 
 ## インストール
 
@@ -1878,7 +1882,7 @@ config = create_config(
     research_iterations=5,
 
     # V2レポート生成の設定
-    report_generator_version="v2",      # v1 または v2
+    report_generator_version="v2",      # v1 / v2 / v3 (v3はDOCX-Native)
     v2_writing_style="business",        # 文体スタイル
     v2_target_audience="business",      # 想定読者
     v2_technical_level=3,               # 技術レベル (1-5)
@@ -2049,6 +2053,463 @@ for issue in report.issues:
 
 ---
 
+## 追加機能10：レポート生成 V3（DOCX-Native Generator）
+
+### 概要
+
+Report Generator V3は、DOCX出力をpython-docx APIで直接構築するジェネレーターです。V2ではMarkdown→DOCX変換を行っていたため、図表の配置や書式が意図通りにならないケースがありました。V3はMarkdown中間表現を経由せず、LLMが生成したコンテンツをそのままpython-docxのDocument オブジェクトに書き込みます。
+
+### V2との違い
+
+| 項目 | V2 | V3 |
+|------|-----|-----|
+| DOCX生成方式 | Markdown → python-docx変換 | python-docx API直接構築 |
+| 図表挿入 | Markdownタグ経由 | `doc.add_picture()` / `doc.add_table()` |
+| 引用・脚注 | Markdown記法 | DOCXネイティブ要素 |
+| 一貫性機能（用語集・コンテキスト） | あり | V2を継承 |
+| Markdown出力 | メイン | フォールバック対応 |
+| 推奨用途 | Markdown/HTML/PDF出力 | DOCX出力に特化 |
+
+### 処理フロー
+
+```
+【V3の処理フロー】
+┌─────────────────────────────────────────────────────┐
+│  コンテンツ生成（V2エンジンを再利用）                  │
+│    ├─ 用語集管理（Glossary）                          │
+│    ├─ コンテキスト引き継ぎ                            │
+│    ├─ 2フェーズ生成（ドラフト → 一貫性チェック）       │
+│    └─ 自動修正                                        │
+└─────────────────────────────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────┐
+│  DOCX直接構築（V3固有）                               │
+│    ├─ doc.add_heading()      → 見出し                │
+│    ├─ doc.add_paragraph()    → 本文（スタイル付き）   │
+│    ├─ doc.add_table()        → 表データ              │
+│    ├─ doc.add_picture()      → 図・グラフ            │
+│    ├─ XML sanitization       → 不正文字の除去        │
+│    └─ ResearchWarnings       → 警告セクション追加     │
+└─────────────────────────────────────────────────────┘
+                         ↓
+                    output.docx
+```
+
+### Pythonでの使用
+
+```python
+from deep_research_tool import run_research
+
+# V3でリサーチ実行（DOCX出力時に自動適用）
+result = run_research(
+    query="次世代半導体の技術動向",
+    provider="anthropic",
+    output_format="docx",
+    report_generator_version="v3",   # ★ V3を指定
+)
+```
+
+### V3ジェネレーターの直接使用
+
+```python
+from deep_research_tool.report.v3 import (
+    DocxReportGeneratorV3,
+    WritingStyle,
+    TargetAudience,
+)
+from deep_research_tool.api import get_client
+
+llm_client = get_client(provider="anthropic")
+
+generator = DocxReportGeneratorV3(
+    llm_client=llm_client,
+    writing_style=WritingStyle.TECHNICAL,
+    target_audience=TargetAudience.ENGINEER,
+    technical_level=4,
+    enable_consistency_check=True,
+    enable_two_phase=True,
+    language="ja",
+)
+
+# コンテンツ生成（V2エンジン）
+result = generator.generate_report(
+    research_topic="量子コンピュータの技術動向",
+    research_plan=research_plan,
+    section_contents=section_contents,
+)
+
+# DOCX保存（V3固有）
+report_path = generator.generate_and_save(
+    result,
+    output_dir=Path("./output"),
+    filename="report",
+    evidence_locker=evidence_locker,
+)
+```
+
+### 注意事項
+
+- V3は`python-docx`パッケージが必須です（`pip install python-docx`）
+- Markdown/HTML/PDF出力にはV1またはV2を使用してください
+- V2の全設定パラメータ（`v2_writing_style`等）がそのまま利用可能です
+
+---
+
+## 追加機能11：検索クエリ最適化（Query Optimization）
+
+### 概要
+
+リサーチの後半セクションで検索クエリがテーマから逸脱する問題（クエリドリフト）を解決するための2段階の最適化機能です。
+
+### 問題の背景
+
+```
+初期クエリ（25個） ÷ 3クエリ/セクション = 約8セクションで枯渇
+セクション9以降 → フォローアップクエリをLLMで動的生成
+  → セクションタイトルしか参照しない
+  → テーマから離れた一般論クエリが生成される（ドリフト）
+
+例: テーマ「炭素繊維の技術動向調査」
+  セクション9.2「インタビュー・現地調査とデータ検証フロー」
+  ✗ ドリフト: "リモートインタビュー 対面調査 比較 信頼性"（一般論）
+  ✓ 期待値: "炭素繊維メーカー 工場視察 調査手法"（テーマ紐付き）
+```
+
+### 対策A：複合クエリの自動分割（Split）
+
+LLMが生成する検索クエリには、複数のキーワードを1つに詰め込んだ長い複合クエリが含まれることがあります。これを検索エンジンが扱いやすい短いクエリに自動分割します。
+
+```
+分割ルール:
+1. 35文字以下 → そのまま維持
+2. 括弧付き列挙 → 個別クエリに展開
+   "炭素繊維メーカー（東レ・帝人・三菱等）の生産能力"
+   → "炭素繊維メーカー 東レ の生産能力"
+   → "炭素繊維メーカー 帝人 の生産能力"
+   → "炭素繊維メーカー 三菱 の生産能力"
+
+3. 中黒区切りの列挙 → 個別クエリに展開
+   "IR収集 年度別売上・CF比率・CAPEX"
+   → "IR収集 年度別売上"
+   → "IR収集 CF比率"
+   → "IR収集 CAPEX"
+
+4. 読点区切りの長文クエリ（50文字超） → 分割
+```
+
+### 対策B：フォローアップクエリのテーマアンカリング（Anchor）
+
+フォローアップクエリ生成時に、元の調査テーマをプロンプトに注入し、さらに生成後のクエリにキーワード重複チェックを適用します。
+
+```
+【プロンプト注入（A案）】
+generate_follow_up_queries() のプロンプトに追加:
+  "元の調査テーマ: 炭素繊維の技術動向調査
+   検索クエリは必ずこの調査テーマの文脈内で生成してください。"
+
+【キーワード安全網（B案）】
+_anchor_queries_to_topic() で事後チェック:
+  topic_words = {"炭素繊維", "技術動向", "調査", ...}
+  query_words = {"リモート", "インタビュー", "対面", ...}
+  overlap = query_words ∩ topic_words
+
+  空の場合 → 主要キーワードを先頭に付与:
+  "リモートインタビュー 対面調査" → "炭素繊維 リモートインタビュー 対面調査"
+```
+
+### テーマの性質による挙動
+
+| テーマの性質 | Split効果 | Anchor効果 | 結果 |
+|---|---|---|---|
+| 具体的テーマ（炭素繊維の技術動向） | 長いクエリを分割 | ドリフト抑制 | 効果大 |
+| 一般的テーマ（インタビュー調査） | 同様に分割 | 実質no-op（無害） | 既存挙動を壊さない |
+
+### 使用方法
+
+クエリ最適化は自動的に適用されるため、特別な設定は不要です。`run_research()` や `FastCrawler` を通常通り使用するだけで有効になります。
+
+ログで動作を確認できます:
+
+```
+[QueryGenerator] Split compound query (1→3): 'メーカー（東レ・帝人・三菱等）生産能力'
+[QueryGenerator] Anchored drifting query: 'インタビュー手法 比較' → '炭素繊維 インタビュー手法 比較'
+```
+
+---
+
+## 追加機能12：ResearchWarnings（パイプライン警告の可視化）
+
+### 概要
+
+リサーチパイプラインの実行中に発生するフォールバックやエラーを、スレッドセーフなシングルトンコレクターに収集し、レポート末尾に自動表示する機能です。
+
+### 背景
+
+従来、パイプライン内でエラーが発生してフォールバック処理が実行された場合（例：画像ダウンロード失敗、図表生成スキップ等）、ユーザーはその情報を知る手段がありませんでした。ResearchWarningsはこれらの情報をレポートに透過的に含めます。
+
+### 重要度レベル
+
+| レベル | 意味 | 例 |
+|--------|------|-----|
+| `CRITICAL` | 出力が不正確または不完全な可能性 | データ消失、致命的なパース失敗 |
+| `HIGH` | オプション機能全体がスキップ | フェルミ推定全体の失敗、V3フォールバック |
+| `MEDIUM` | 機能内の部分的データ欠落 | 一部の図表生成失敗、画像ダウンロード失敗 |
+| `LOW` | 見た目・書式の劣化 | フォント不足、マイナーな書式崩れ |
+
+### 使用方法
+
+ResearchWarningsは `run_research()` 実行時に自動的に有効化されます。
+
+```python
+from deep_research_tool.utils.helpers import ResearchWarnings
+
+# シングルトンインスタンスを取得
+warnings = ResearchWarnings.get_instance()
+
+# 警告を追加（パイプライン内部で自動的に呼ばれる）
+warnings.add("MEDIUM", "image_download", "Failed to download 2 images from source")
+
+# 警告一覧を取得
+for w in warnings.get_all():
+    print(f"[{w['severity']}] {w['category']}: {w['message']}")
+
+# レポート用のMarkdown出力
+md = warnings.to_markdown()
+```
+
+---
+
+## 追加機能13：フェルミ推定（Fermi Estimation）
+
+### 概要
+
+直接的なデータが得られない定量指標（市場規模、需要量、コスト等）を、分解木（Decomposition Tree）ベースで推定する機能です。収集済みの数値データを自動的に照合し、エビデンスがないパラメータはLLMで推定します。さらに、低信頼度のリーフノードを自動的に再分解（サブ分解）して、より細かい統計データから組み立て直すことで推定精度を向上させます。
+
+### ワークフロー全体像
+
+```
+NumericalDataStore ──┐
+                     ├─→ Step 1: データ要約
+LLM Client ──────────┤
+                     ├─→ Step 2: 問題分解（Decompose）──→ DecompositionTree
+                     │
+                     ├─→ Step 3: 仮定の解決（Resolve）──→ Assumption[]
+                     │       エビデンス検索 → LLMフォールバック
+                     │
+                     ├─→ Step 4: 3シナリオ計算 ──→ base / pessimistic / optimistic
+                     ├─→ Step 5: 感度分析 ──→ SensitivityAnalysis
+                     │
+                     ├─→ Step 5b: サブ分解ループ（低信頼度リーフの再分解）
+                     │       Decomposer.sub_decompose()
+                     │       AssumptionManager.resolve_leaf_node()
+                     │       → 信頼度未改善時はロールバック
+                     │
+                     ├─→ Step 6: モンテカルロシミュレーション ──→ {mean, p5, p95, ...}
+                     └─→ Step 7: 検証（Validate）──→ ValidationResult
+                                                          │
+                                                          v
+                                               FermiEstimationResult
+                                                   ├─→ .to_dict()  (JSON)
+                                                   └─→ .to_summary()  (Markdown → レポート追記)
+```
+
+### 各ステップの詳細
+
+#### Step 1: データ要約
+
+`NumericalDataStore` 内の信頼度上位20件を `"- メトリック名 (主題): 値 [日付]"` 形式のテキストにまとめ、以降のLLMプロンプトに渡します。
+
+#### Step 2: 問題分解（Decompose）
+
+LLMに `DECOMPOSITION_PROMPT` を送信し、ターゲット指標を推定可能なサブコンポーネントに分解します。
+
+```
+例: 「日本のペットフード市場規模」
+    └─→ [MULTIPLY]
+        ├── 日本の世帯数
+        ├── ペット飼育率
+        ├── 1世帯あたりペット数
+        └── 年間フード費用/匹
+```
+
+各ノードは `TreeNode` オブジェクトとして管理され、`multiply` / `add` / `subtract` / `divide` の演算で親ノードの値を構成します。分解の深さは2〜4階層が推奨です。
+
+#### Step 3: 仮定の解決（Resolve Assumptions）
+
+各リーフノードに対して以下の優先順位で値を決定します：
+
+1. **エビデンス検索**: `NumericalDataStore` からキーワードマッチング（スコア >= 0.3）で数値データを検索。見つかった場合は `EVIDENCE_DIRECT` として採用し、レンジは ±20%
+2. **LLM推定**: エビデンスが見つからない場合、`ESTIMATION_PROMPT` でLLMに3シナリオ（base/low/high）+ 信頼度を推定させる
+
+#### Step 4: 3シナリオ計算
+
+分解木を再帰的に評価し、base（ベースケース）、pessimistic（悲観）、optimistic（楽観）の3シナリオで最終値を計算します。
+
+#### Step 5: 感度分析
+
+各リーフの値を一つずつ low/high に置き換えて再計算し、最終結果への影響度（%）を算出します。最も感度の高いパラメータが推定精度のボトルネックです。
+
+#### Step 5b: サブ分解ループ（再帰的リーフ分解）
+
+低信頼度かつ高感度のリーフノードを自動的に検出し、さらに細かいサブコンポーネントに分解します。
+
+**候補選定の3条件**（すべてAND）：
+1. `confidence < sub_decomposition_confidence_threshold`（デフォルト: 0.65）
+2. `sensitivity_pct >= sub_decomposition_min_sensitivity_pct`（デフォルト: 10.0%）
+3. ツリー内の深さ < `max_tree_depth - 1`（子ノードの余地がある）
+
+**サブ分解の流れ**：
+1. 元のノード状態を保存（ロールバック用）
+2. LLMにサブ分解プロンプトを送信し、新しいサブツリーを取得
+3. 新しいリーフノードの値をエビデンス/LLMで解決
+4. 新リーフの平均信頼度が元より高ければ採用、**低ければロールバック**
+
+```
+サブ分解の例:
+Before: 1世帯あたりペット数 = 1.3 (LLM推定, confidence=0.60)
+
+After:  1世帯あたりペット数 = [ADD]
+        ├── 犬の寄与 = [MULTIPLY]
+        │   ├── 犬飼育世帯の比率: 0.55 (Evidence, confidence=0.85)
+        │   └── 犬の平均飼育頭数: 1.24 (Evidence, confidence=0.90)
+        └── 猫の寄与 = [MULTIPLY]
+            ├── 猫飼育世帯の比率: 0.45 (Evidence, confidence=0.85)
+            └── 猫の平均飼育頭数: 1.74 (Evidence, confidence=0.90)
+
+結果: 0.55×1.24 + 0.45×1.74 = 1.465 (エビデンス裏付け、高信頼度)
+```
+
+このループは最大 `sub_decomposition_max_iterations` 回（デフォルト: 3）繰り返されます。
+
+#### Step 6: モンテカルロシミュレーション
+
+各リーフに三角分布（low, base, high）でランダムサンプリングし、デフォルト1000回反復で信頼区間を算出します。出力統計量: mean, median, std, min, max, p5, p25, p75, p95
+
+#### Step 7: 検証（Validate）
+
+3段階の検証を実施します：
+1. **サニティチェック**: low ≤ base ≤ high、有限値、レンジ幅の妥当性
+2. **クロスチェック**: DataStore内の既知データとオーダー（桁数）比較
+3. **LLM検証**: 推定結果全体の妥当性をLLMに問う
+
+最終的な `overall_confidence` = 仮定平均信頼度 × 0.6 + 検証信頼度 × 0.4
+
+#### Step 8: レポート出力
+
+`run_research` パイプライン経由の場合、推定結果がMarkdown形式でレポートファイルに自動追記されます（推定結果テーブル、分解構造、前提条件、感度分析、検証結果）。
+
+### `run_research` での使用
+
+```python
+from deep_research_tool import run_research
+
+result = run_research(
+    query="日本のペットフード市場規模を推定",
+    provider="anthropic",
+    api_key="sk-ant-xxx",
+
+    # フェルミ推定を有効化
+    fermi_estimation=True,
+
+    # 推定対象の指定（省略時はLLMが自動検出）
+    fermi_target_metrics=["日本のペットフード市場規模（年間、円）"],
+
+    # サブ分解の設定
+    fermi_enable_sub_decomposition=True,
+    fermi_sub_decomposition_max_iterations=3,
+    fermi_sub_decomposition_confidence_threshold=0.65,
+    fermi_sub_decomposition_min_sensitivity_pct=10.0,
+)
+```
+
+### 独立実行（`run_research` 不要）
+
+フェルミ推定モジュールは単体でも利用可能です。
+
+```python
+from deep_research_tool.estimation.fermi_estimator import FermiEstimator, FermiEstimationConfig
+from deep_research_tool.evidence.numerical_extractor import NumericalDataStore
+
+# 1. 設定
+config = FermiEstimationConfig(
+    enabled=True,
+    max_tree_depth=4,
+    monte_carlo_iterations=1000,
+    include_sensitivity=True,
+    enable_sub_decomposition=True,
+    sub_decomposition_max_iterations=3,
+    sub_decomposition_confidence_threshold=0.65,
+)
+
+# 2. LLMクライアントとデータストアを準備
+llm_client = ...  # OpenAI/Anthropicクライアント
+data_store = NumericalDataStore(research_topic="ペットフード市場")
+
+# （任意）既知の数値データをデータストアに追加
+# data_store.add(NumericalDataPoint(value=5340, unit="万世帯", ...))
+
+# 3. 推定実行
+estimator = FermiEstimator(llm_client=llm_client, config=config, language="ja")
+result = estimator.estimate(
+    target_metric="日本のペットフード市場規模（年間、円）",
+    data_store=data_store,
+    context="2024年時点の日本国内市場",
+)
+
+# 4. 結果の利用
+print(f"ベースケース: {result.base_estimate:,.0f} {result.unit}")
+print(f"悲観〜楽観: {result.low_estimate:,.0f} 〜 {result.high_estimate:,.0f}")
+print(f"信頼度: {result.overall_confidence:.0%}")
+print(f"エビデンス率: {result.evidence_backed_ratio:.0%}")
+
+# Markdownサマリー
+print(result.to_summary(language="ja"))
+
+# JSON出力
+import json
+print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+```
+
+### フェルミ推定パラメータ
+
+| パラメータ | 説明 | デフォルト |
+|-----------|------|----------|
+| `fermi_estimation` | フェルミ推定の有効化 | `False` |
+| `fermi_target_metrics` | 推定対象の指標リスト（空の場合はLLMが自動検出） | `[]` |
+| `fermi_auto_detect_targets` | LLMによる推定対象の自動検出 | `True` |
+| `fermi_max_tree_depth` | 分解木の最大深さ（1〜6） | `4` |
+| `fermi_max_leaf_nodes` | リーフノードの最大数（2〜20） | `10` |
+| `fermi_monte_carlo_iterations` | モンテカルロの反復回数 | `1000` |
+| `fermi_validate_with_llm` | LLMによる検証 | `True` |
+| `fermi_min_confidence_threshold` | 最低信頼度閾値 | `0.3` |
+| `fermi_include_sensitivity` | 感度分析の実施 | `True` |
+| `fermi_enable_sub_decomposition` | サブ分解の有効化 | `True` |
+| `fermi_sub_decomposition_confidence_threshold` | サブ分解対象の信頼度閾値 | `0.65` |
+| `fermi_sub_decomposition_max_iterations` | サブ分解の最大反復回数（0〜10） | `3` |
+| `fermi_sub_decomposition_min_sensitivity_pct` | サブ分解対象の最小感度（%） | `10.0` |
+
+### モジュール構成
+
+```
+estimation/
+├── __init__.py
+├── decomposer.py          # 問題分解（DecompositionTree, TreeNode, Decomposer）
+├── assumptions.py          # 仮定管理（AssumptionManager, Assumption）
+├── calculator.py           # 計算エンジン（3シナリオ評価、感度分析、モンテカルロ）
+├── validator.py            # 結果検証（サニティ、クロスチェック、LLM検証）
+└── fermi_estimator.py      # オーケストレーター（FermiEstimator, FermiEstimationConfig）
+```
+
+### 注意事項
+
+- **APIコスト**: 分解 + 各リーフの推定 + サブ分解 + 検証で複数回のLLM呼び出しが発生します。リーフ数が多いほどコストが増加します
+- **サブ分解の深さ**: `max_tree_depth` を超えるサブ分解は行われません。深すぎる分解は推定精度の低下を招く場合があります
+- **ロールバック**: サブ分解で信頼度が改善しない場合は自動的に元の状態に戻ります
+- **データストアの品質**: エビデンスの質が推定精度に直結します。事前に高品質な数値データをデータストアに格納しておくことを推奨します
+- **独立実行時**: `run_research` を経由せずに使用する場合、LLMクライアントと `NumericalDataStore` を自前で用意する必要があります
+
+---
+
 ## 全機能フルカスタマイズ例（Maximum Customized run_research）
 
 `run_research()` の全パラメータを使いこなした最大構成の例です。V2レポート生成、DeepThink推論、多言語検索、高速クロール、自動図表生成、数値データ抽出、単位変換など、全機能を有効にしています。
@@ -2133,6 +2594,18 @@ result = run_research(
     # === ファクト検証 ===
     enable_verification=True,                # ハルシネーション検証
     use_enhanced_synthesis=True,             # Multi-Pass Synthesis
+
+    # === フェルミ推定 ===
+    fermi_estimation=True,                                    # フェルミ推定有効化
+    fermi_target_metrics=["世界の半導体材料市場規模（年間、USD）"],  # 推定対象（空なら自動検出）
+    fermi_auto_detect_targets=True,                           # LLMによる指標自動検出
+    fermi_max_tree_depth=4,                                   # 分解木の最大深さ
+    fermi_monte_carlo_iterations=1000,                        # モンテカルロ反復回数
+    fermi_include_sensitivity=True,                           # 感度分析の実施
+    fermi_enable_sub_decomposition=True,                      # サブ分解（再帰的リーフ分解）
+    fermi_sub_decomposition_max_iterations=3,                 # サブ分解の最大回数
+    fermi_sub_decomposition_confidence_threshold=0.65,        # サブ分解対象の信頼度閾値
+    fermi_sub_decomposition_min_sensitivity_pct=10.0,         # サブ分解対象の最小感度(%)
 )
 
 # === 結果の取得 ===
@@ -2151,6 +2624,7 @@ print(f"トークン使用量: {result['token_usage']}")
 | **基本** | `provider`, `model`, `iterations` | LLM選択、調査深度 |
 | **出力** | `output_format`, `target_pages` | レポート形式・長さ |
 | **V2レポート** | `report_generator_version="v2"`, `v2_*` | 一貫性保証、用語統一 |
+| **V3レポート** | `report_generator_version="v3"` | DOCX-Native出力 |
 | **DeepThink** | `deep_think=True`, `deep_think_level` | 推論品質の強化 |
 | **多言語** | `multilingual=True`, `search_languages` | 複数言語で情報収集 |
 | **クロール** | `crawl_mode`, `extended_mode` | 深層・高速情報収集 |
@@ -2158,6 +2632,7 @@ print(f"トークン使用量: {result['token_usage']}")
 | **数値抽出** | `numerical_extraction=True`, `intelligent_charts` | データ抽出・可視化 |
 | **単位変換** | `enable_unit_conversion=True` | SI単位正規化・変換 |
 | **検証** | `enable_verification=True` | ファクトチェック |
+| **フェルミ推定** | `fermi_estimation=True`, `fermi_enable_sub_decomposition` | 定量推定・サブ分解 |
 
 ### 注意事項
 
@@ -2539,6 +3014,16 @@ GUIでは以下が設定できます：
 | `crawl_mode` | 高速クロールモード (standard/fast_batch/fast_parallel) | standard |
 | `fast_crawl_workers` | 並列HTTPフェッチのワーカー数 | 10 |
 | `fast_crawl_batch_size` | バッチ評価時の1バッチあたりページ数 | 5 |
+| `fermi_estimation` | フェルミ推定の有効化 | False |
+| `fermi_target_metrics` | 推定対象の指標リスト | [] |
+| `fermi_auto_detect_targets` | LLMによる推定対象の自動検出 | True |
+| `fermi_max_tree_depth` | 分解木の最大深さ (1-6) | 4 |
+| `fermi_max_leaf_nodes` | リーフノードの最大数 (2-20) | 10 |
+| `fermi_monte_carlo_iterations` | モンテカルロシミュレーション反復回数 | 1000 |
+| `fermi_enable_sub_decomposition` | 低信頼度リーフの再帰的サブ分解 | True |
+| `fermi_sub_decomposition_max_iterations` | サブ分解の最大反復回数 (0-10) | 3 |
+| `fermi_sub_decomposition_confidence_threshold` | サブ分解対象の信頼度閾値 | 0.65 |
+| `fermi_sub_decomposition_min_sensitivity_pct` | サブ分解対象の最小感度(%) | 10.0 |
 
 ---
 
@@ -2643,18 +3128,55 @@ deep_research_tool/
 │   └── fast_crawler.py  # 高速クロールモード用並列クローラー
 ├── verification/        # ハルシネーション検証
 │   └── verifier.py
+├── estimation/          # フェルミ推定エンジン
+│   ├── decomposer.py          # 問題分解（分解木構築）
+│   ├── assumptions.py          # 仮定管理（エビデンス照合・LLM推定）
+│   ├── calculator.py           # 計算エンジン（3シナリオ・感度・モンテカルロ）
+│   ├── validator.py            # 結果検証
+│   └── fermi_estimator.py      # オーケストレーター
 ├── evidence/            # Evidence Locker
 │   ├── locker.py
 │   └── quality_evaluator.py
 ├── report/              # レポート生成
 │   ├── generator.py
 │   ├── length_controller.py
-│   └── figure_table_generator.py
+│   ├── figure_table_generator.py
+│   ├── chart_analyzer.py
+│   ├── v2/              # V2（一貫性保証）
+│   │   ├── generator.py
+│   │   ├── context.py
+│   │   ├── consistency.py
+│   │   └── glossary.py
+│   └── v3/              # V3（DOCX-Native）
+│       ├── __init__.py
+│       └── docx_generator.py
 ├── utils/               # ユーティリティ
 │   ├── document_reader.py
-│   └── helpers.py
+│   ├── helpers.py       # ResearchWarnings, extract_content_words_set 等
+│   └── japanese_text.py # 日本語テキスト処理
 └── salvage.ipynb        # データサルベージ用ノートブック
 ```
+
+---
+
+## 更新履歴
+
+### 2026-02-20
+
+- 検索クエリ最適化: 複合クエリの自動分割（`split_complex_queries`）を追加
+- 検索クエリ最適化: フォローアップクエリのテーマアンカリング（`_anchor_queries_to_topic`）を追加
+
+### 2026-02-19
+
+- レポート生成V3（DOCX-Native Generator）を追加（`DocxReportGeneratorV3`）
+- `run_research()` V3ブロックのパラメータ不足を修正
+- ResearchWarnings（パイプライン警告可視化）を追加
+- フェルミ推定モジュールを追加（分解木・エビデンス照合・モンテカルロ・サブ分解）
+- マルチエージェント議論に情報収集付き参加者エージェント（`ResearchParticipantAgent`）を追加
+- 画像ダウンロードエラー（base64、`_image_exists`スコープバグ）を修正
+- DOCX出力の修正: フェルミ推定セクション、引用、図表配置
+- 表キャプションと`extracted_text`フィールドをエビデンスに追加
+- 7件の機能間コンフリクトを解消
 
 ---
 
