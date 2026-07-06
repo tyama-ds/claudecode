@@ -43,6 +43,7 @@ class AICrawlerSelenium(AICrawler):
         page_load_timeout: int = 30,
         proxies: dict = None,
         verify_ssl: bool = True,
+        driver_path: str = None,
     ):
         """
         Initialize AICrawlerSelenium.
@@ -67,6 +68,9 @@ class AICrawlerSelenium(AICrawler):
             proxies: Proxy dict like {"https": "http://proxy:8080"} passed
                 to the browser launch
             verify_ssl: When False the browser ignores certificate errors
+            driver_path: Path to a local WebDriver executable (chromedriver /
+                msedgedriver / geckodriver); None lets webdriver-manager /
+                Selenium Manager resolve one
         """
         super().__init__(
             search_client=search_client,
@@ -88,6 +92,7 @@ class AICrawlerSelenium(AICrawler):
         self._page_load_timeout = page_load_timeout
         self._proxies = proxies
         self._verify_ssl = verify_ssl
+        self._driver_path = driver_path
 
     def _get_selenium_client(self):
         """Get or lazily create the Selenium browser client."""
@@ -99,6 +104,7 @@ class AICrawlerSelenium(AICrawler):
                 timeout=self._page_load_timeout,
                 proxies=self._proxies,
                 verify_ssl=self._verify_ssl,
+                driver_path=self._driver_path,
             )
         return self._selenium_client
 

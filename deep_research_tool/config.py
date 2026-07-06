@@ -132,6 +132,11 @@ class APIConfig:
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
 
+    # Custom API endpoints (None = official endpoint). Needed when requests
+    # must go through a corporate API gateway / OpenAI-compatible server.
+    openai_base_url: Optional[str] = None  # e.g., "https://gateway.example.com/v1"
+    anthropic_base_url: Optional[str] = None
+
     # Model settings (updated with GPT-5 series)
     openai_model: str = "gpt-5-mini"
     anthropic_model: str = "claude-3-5-sonnet-20241022"
@@ -195,6 +200,10 @@ class APIConfig:
             self.openai_api_key = os.getenv("OPENAI_API_KEY")
         if self.anthropic_api_key is None:
             self.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+        if self.openai_base_url is None:
+            self.openai_base_url = os.getenv("OPENAI_BASE_URL")
+        if self.anthropic_base_url is None:
+            self.anthropic_base_url = os.getenv("ANTHROPIC_BASE_URL")
         if self.local_base_url is None:
             self.local_base_url = os.getenv("LOCAL_LLM_BASE_URL")
         if self.local_api_key is None:
@@ -216,6 +225,22 @@ class APIConfig:
             return self.local_model
         return self.anthropic_model
 
+    def get_active_base_url(self) -> Optional[str]:
+        """Get the custom API endpoint for the active provider (None = official)."""
+        if self.provider == LLMProvider.OPENAI:
+            return self.openai_base_url
+        elif self.provider == LLMProvider.LOCAL:
+            return self.local_base_url
+        return self.anthropic_base_url
+
+    def get_base_url_for(self, provider: str) -> Optional[str]:
+        """Get the configured base URL for a provider name string."""
+        return {
+            "openai": self.openai_base_url,
+            "anthropic": self.anthropic_base_url,
+            "local": self.local_base_url,
+        }.get(provider)
+
 
 @dataclass
 class SearchConfig:
@@ -233,6 +258,15 @@ class SearchConfig:
     browser: str = "chrome"  # chrome / edge / firefox
     page_load_timeout: int = 30
     implicit_wait: int = 10
+    # Path to a local WebDriver executable (chromedriver / msedgedriver /
+    # geckodriver). When None, webdriver-manager tries to download one, which
+    # fails in offline / proxy-restricted environments. Falls back to the
+    # SELENIUM_DRIVER_PATH environment variable.
+    driver_path: Optional[str] = None
+
+    def __post_init__(self):
+        if self.driver_path is None:
+            self.driver_path = os.getenv("SELENIUM_DRIVER_PATH")
 
     # Content extraction settings
     extract_images: bool = True
@@ -574,11 +608,16 @@ def create_config(
     provider: str = "openai",
     openai_api_key: Optional[str] = None,
     anthropic_api_key: Optional[str] = None,
+    openai_base_url: Optional[str] = None,
+    anthropic_base_url: Optional[str] = None,
+    local_base_url: Optional[str] = None,
+    local_backend: str = "ollama",
     model: Optional[str] = None,
     search_method: str = "duckduckgo",
     search_region: str = "wt-wt",
     safe_search: str = "moderate",
     implicit_wait: int = 10,
+    driver_path: Optional[str] = None,
     research_iterations: int = 3,
     output_format: str = "markdown",
     output_dir: str = "./output",
@@ -697,6 +736,16 @@ def create_config(
         provider: LLM provider ('openai' or 'anthropic')
         openai_api_key: OpenAI API key (optional, uses env var if not provided)
         anthropic_api_key: Anthropic API key (optional, uses env var if not provided)
+        openai_base_url: Custom OpenAI API endpoint (optional; falls back to
+            OPENAI_BASE_URL env var, then the official endpoint). Use for
+            corporate gateways / OpenAI-compatible APIs
+        anthropic_base_url: Custom Anthropic API endpoint (optional; falls back
+            to ANTHROPIC_BASE_URL env var, then the official endpoint)
+        local_base_url: Local LLM server URL for provider='local' (optional;
+            falls back to LOCAL_LLM_BASE_URL env var, then the backend default,
+            e.g. http://localhost:11434 for Ollama)
+        local_backend: Local LLM backend type ('ollama', 'vllm', or
+            'openai_compatible')
         model: Model name to use (optional, uses default for provider)
         search_method: Web search method ('duckduckgo' or 'selenium')
         browser: Selenium browser via kwargs ('chrome', 'edge', or 'firefox';
@@ -704,6 +753,10 @@ def create_config(
         search_region: DuckDuckGo search region (e.g., 'wt-wt' worldwide, 'jp-jp' Japan)
         safe_search: DuckDuckGo safe search level ('off', 'moderate', 'strict')
         implicit_wait: Selenium implicit wait time in seconds
+        driver_path: Path to a local WebDriver executable (chromedriver /
+            msedgedriver / geckodriver). Required in offline or
+            proxy-restricted environments where webdriver-manager cannot
+            download drivers. Falls back to SELENIUM_DRIVER_PATH env var
         research_iterations: Number of research iterations
         output_format: Report format ('docx', 'pdf', or 'markdown')
         output_dir: Output directory path
@@ -811,12 +864,18 @@ def create_config(
         provider=LLMProvider(provider),
         openai_api_key=openai_api_key,
         anthropic_api_key=anthropic_api_key,
+        openai_base_url=openai_base_url,
+        anthropic_base_url=anthropic_base_url,
+        local_base_url=local_base_url,
+        local_backend=LocalLLMBackend(local_backend),
         stage_overrides=dict(stage_llm) if stage_llm else {},
     )
 
     if model:
         if provider == "openai":
             api_config.openai_model = model
+        elif provider == "local":
+            api_config.local_model = model
         else:
             api_config.anthropic_model = model
 
@@ -828,6 +887,7 @@ def create_config(
         region=search_region,
         safe_search=safe_search,
         implicit_wait=implicit_wait,
+        driver_path=driver_path,
     )
 
     research_config = ResearchConfig(

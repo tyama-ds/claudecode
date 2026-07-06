@@ -171,6 +171,7 @@ class Researcher:
         selenium_browser: str = "chrome",
         selenium_proxies: dict = None,
         selenium_verify_ssl: bool = True,
+        selenium_driver_path: str = None,
         importance_threshold: float = 0.6,
         min_high_importance_sources: int = 2,
         max_gap_fill_rounds: int = 1,
@@ -218,6 +219,9 @@ class Researcher:
             selenium_browser: ai_crawl_selenium - browser (chrome/edge/firefox)
             selenium_proxies: ai_crawl_selenium - proxy dict for the browser
             selenium_verify_ssl: ai_crawl_selenium - verify SSL certificates
+            selenium_driver_path: ai_crawl_selenium - local WebDriver
+                executable path (None lets webdriver-manager / Selenium
+                Manager resolve one)
             importance_threshold: min importance score to count a source as
                 high-importance for the research purpose
             min_high_importance_sources: sections with fewer high-importance
@@ -364,6 +368,7 @@ class Researcher:
                 browser=selenium_browser,
                 proxies=selenium_proxies,
                 verify_ssl=selenium_verify_ssl,
+                driver_path=selenium_driver_path,
             )
 
         # Importance scoring / gap-fill settings

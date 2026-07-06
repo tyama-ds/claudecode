@@ -258,9 +258,11 @@ class DeepResearchTool:
             "verify_ssl": self.config.proxy.verify_ssl,
         }
 
+        # Custom endpoint (corporate gateway / local server); None = official
+        kwargs["base_url"] = self.config.api.get_active_base_url()
+
         # Add local LLM specific settings
         if self.config.api.provider == LLMProvider.LOCAL:
-            kwargs["base_url"] = self.config.api.local_base_url
             kwargs["backend"] = self.config.api.local_backend.value
 
         return get_client(**kwargs)
@@ -288,9 +290,12 @@ class DeepResearchTool:
                 "http_proxy": self.config.proxy.http_proxy,
                 "https_proxy": self.config.proxy.https_proxy,
                 "verify_ssl": self.config.proxy.verify_ssl,
+                "base_url": spec.get(
+                    "base_url",
+                    self.config.api.get_base_url_for(provider),
+                ),
             }
             if provider == "local":
-                kwargs["base_url"] = spec.get("base_url", self.config.api.local_base_url)
                 kwargs["backend"] = spec.get(
                     "backend",
                     self.config.api.local_backend.value,
@@ -318,6 +323,7 @@ class DeepResearchTool:
             kwargs["headless"] = self.config.search.headless
             kwargs["browser"] = self.config.search.browser
             kwargs["implicit_wait"] = self.config.search.implicit_wait
+            kwargs["driver_path"] = self.config.search.driver_path
         elif self.config.search.method == SearchMethod.DUCKDUCKGO:
             kwargs["region"] = self.config.search.region
             kwargs["safe_search"] = self.config.search.safe_search
@@ -448,6 +454,7 @@ class DeepResearchTool:
             selenium_browser=self.config.search.browser,
             selenium_proxies=self.config.proxy.get_proxies_dict(),
             selenium_verify_ssl=self.config.proxy.verify_ssl,
+            selenium_driver_path=self.config.search.driver_path,
             importance_threshold=self.config.research.importance_threshold,
             min_high_importance_sources=self.config.research.min_high_importance_sources,
             max_gap_fill_rounds=self.config.research.max_gap_fill_rounds,

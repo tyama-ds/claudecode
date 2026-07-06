@@ -57,6 +57,7 @@ h2 .n {
   justify-content: center; font-size: 12px; font-weight: 700;
 }
 label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; font-weight: 600; }
+.hint { font-size: 11px; color: var(--muted); margin: 4px 0 0; line-height: 1.5; }
 input[type=text], input[type=password], input[type=number], textarea, select {
   width: 100%; padding: 9px 12px; border: 1.5px solid var(--border);
   border-radius: 10px; font-size: 13px; background: var(--card); color: var(--text);
@@ -232,6 +233,9 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
           <option value="edge">Microsoft Edge</option>
           <option value="firefox">Firefox</option>
         </select>
+        <label>WebDriverのパス（Selenium使用時。空欄=自動ダウンロードを試行）</label>
+        <input type="text" id="driver_path" placeholder="C:\tools\msedgedriver.exe / /usr/local/bin/chromedriver">
+        <p class="hint">社内ネットワーク等でドライバの自動ダウンロードが失敗する場合は、ブラウザのバージョンに合ったWebDriver（msedgedriver / chromedriver / geckodriver）を手動配置し、そのフルパスを指定してください。環境変数 SELENIUM_DRIVER_PATH でも指定できます。</p>
       </div>
     </details>
 
@@ -305,6 +309,9 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
         </div>
         <label>APIキー（空欄=環境変数を使用）</label>
         <input type="password" id="api_key" placeholder="sk-... / sk-ant-...">
+        <label>APIエンドポイント（空欄=公式API / 環境変数を使用）</label>
+        <input type="text" id="base_url" placeholder="https://gateway.example.com/v1 （社内ゲートウェイ・互換API・Ollama等）">
+        <p class="hint">社内APIゲートウェイやOpenAI互換サーバー経由で利用する場合に指定します。ローカルLLMの場合はサーバーURL（例: http://localhost:11434）を入力してください。</p>
 
         <label style="margin-top:16px">工程別のAI切り替え（空欄=既定を使用）</label>
         <div class="stage-row"><span class="name">計画</span>
@@ -388,6 +395,7 @@ function collectParams() {
     source_mode: document.querySelector('input[name=source_mode]:checked').value,
     crawl_mode: document.querySelector('input[name=crawl_mode]:checked').value,
     browser: $('browser').value,
+    driver_path: $('driver_path').value.trim(),
     http_proxy: $('http_proxy').value.trim(),
     https_proxy: $('https_proxy').value.trim(),
     verify_ssl: $('verify_ssl').checked,
@@ -405,6 +413,12 @@ function collectParams() {
   if (apiKey) {
     if (provider === 'openai') params.openai_api_key = apiKey;
     else if (provider === 'anthropic') params.anthropic_api_key = apiKey;
+  }
+  const baseUrl = $('base_url').value.trim();
+  if (baseUrl) {
+    if (provider === 'openai') params.openai_base_url = baseUrl;
+    else if (provider === 'anthropic') params.anthropic_base_url = baseUrl;
+    else if (provider === 'local') params.local_base_url = baseUrl;
   }
   const docsText = $('local_documents').value.trim();
   if (docsText && params.source_mode !== 'web') {

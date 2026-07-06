@@ -2,6 +2,7 @@
 Selenium browser-based web search and content extraction.
 """
 
+import os
 import time
 from typing import List, Optional
 from pathlib import Path
@@ -24,6 +25,7 @@ class SeleniumBrowser(BaseSearchClient):
         implicit_wait: int = 10,
         proxies: dict = None,
         verify_ssl: bool = True,
+        driver_path: str = None,
     ):
         """
         Initialize Selenium browser client.
@@ -42,6 +44,11 @@ class SeleniumBrowser(BaseSearchClient):
                 use an unauthenticated proxy URL for the browser.
             verify_ssl: When False, the browser ignores certificate errors
                 (for self-signed proxy certificates)
+            driver_path: Path to a local WebDriver executable (chromedriver /
+                msedgedriver / geckodriver). When None, falls back to the
+                SELENIUM_DRIVER_PATH env var, then webdriver-manager download,
+                then Selenium Manager. Set this explicitly in offline or
+                proxy-restricted environments.
         """
         super().__init__(
             max_results=max_results,
@@ -54,6 +61,7 @@ class SeleniumBrowser(BaseSearchClient):
         self.implicit_wait = implicit_wait
         self.proxies = proxies
         self.verify_ssl = verify_ssl
+        self.driver_path = driver_path or os.getenv("SELENIUM_DRIVER_PATH")
         self._driver = None
 
     def _proxy_url(self) -> str:
@@ -85,6 +93,24 @@ class SeleniumBrowser(BaseSearchClient):
         if self._driver is None:
             self._driver = self._create_driver()
         return self._driver
+
+    def _make_service(self, service_cls, manager_factory):
+        """Build a WebDriver Service.
+
+        Priority: explicit driver_path > webdriver-manager download >
+        None (Selenium Manager, built into Selenium 4.6+, resolves the
+        driver itself when no Service is passed).
+        """
+        if self.driver_path:
+            return service_cls(executable_path=self.driver_path)
+        try:
+            return service_cls(manager_factory())
+        except Exception as e:
+            print(f"[SeleniumBrowser] webdriver-manager could not provide a "
+                  f"driver ({e}); falling back to Selenium Manager. If this "
+                  f"fails too, set driver_path (or SELENIUM_DRIVER_PATH) to a "
+                  f"local WebDriver executable.")
+            return None
 
     def _create_driver(self):
         """Create a new Selenium WebDriver."""
@@ -134,8 +160,11 @@ class SeleniumBrowser(BaseSearchClient):
         if not self.verify_ssl:
             options.set_capability("acceptInsecureCerts", True)
 
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
+        service = self._make_service(Service, lambda: ChromeDriverManager().install())
+        if service:
+            driver = webdriver.Chrome(service=service, options=options)
+        else:
+            driver = webdriver.Chrome(options=options)
 
         driver.set_page_load_timeout(self.timeout)
         driver.implicitly_wait(self.implicit_wait)
@@ -174,8 +203,11 @@ class SeleniumBrowser(BaseSearchClient):
         if not self.verify_ssl:
             options.set_capability("acceptInsecureCerts", True)
 
-        service = Service(EdgeChromiumDriverManager().install())
-        driver = webdriver.Edge(service=service, options=options)
+        service = self._make_service(Service, lambda: EdgeChromiumDriverManager().install())
+        if service:
+            driver = webdriver.Edge(service=service, options=options)
+        else:
+            driver = webdriver.Edge(options=options)
 
         driver.set_page_load_timeout(self.timeout)
         driver.implicitly_wait(self.implicit_wait)
@@ -208,8 +240,11 @@ class SeleniumBrowser(BaseSearchClient):
         if not self.verify_ssl:
             options.set_capability("acceptInsecureCerts", True)
 
-        service = Service(GeckoDriverManager().install())
-        driver = webdriver.Firefox(service=service, options=options)
+        service = self._make_service(Service, lambda: GeckoDriverManager().install())
+        if service:
+            driver = webdriver.Firefox(service=service, options=options)
+        else:
+            driver = webdriver.Firefox(options=options)
 
         driver.set_page_load_timeout(self.timeout)
         driver.implicitly_wait(self.implicit_wait)

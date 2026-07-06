@@ -25,6 +25,7 @@ class OpenAIClient(BaseLLMClient):
         https_proxy: Optional[str] = None,
         verify_ssl: bool = True,
         timeout: int = 120,
+        base_url: Optional[str] = None,
     ):
         """
         Initialize OpenAI client.
@@ -39,6 +40,10 @@ class OpenAIClient(BaseLLMClient):
             https_proxy: HTTPS proxy URL
             verify_ssl: Verify SSL certificates
             timeout: Request timeout in seconds (default: 120)
+            base_url: Custom API endpoint URL (uses OPENAI_BASE_URL env var if
+                not provided; None uses the official https://api.openai.com/v1).
+                Use for corporate API gateways, Azure-style deployments, or any
+                OpenAI-compatible endpoint.
         """
         super().__init__(
             api_key=api_key or os.getenv("OPENAI_API_KEY"),
@@ -51,6 +56,7 @@ class OpenAIClient(BaseLLMClient):
         self._https_proxy = https_proxy
         self._verify_ssl = verify_ssl
         self._timeout = timeout
+        self._base_url = base_url or os.getenv("OPENAI_BASE_URL")
         self._initialize_client()
 
     def _initialize_client(self) -> None:
@@ -72,10 +78,14 @@ class OpenAIClient(BaseLLMClient):
                 except ImportError:
                     print("Warning: httpx not installed, proxy settings ignored")
 
+            client_kwargs = {"api_key": self.api_key}
+            if self._base_url:
+                client_kwargs["base_url"] = self._base_url
             if http_client:
-                self._client = OpenAI(api_key=self.api_key, http_client=http_client)
+                client_kwargs["http_client"] = http_client
             else:
-                self._client = OpenAI(api_key=self.api_key, timeout=self._timeout)
+                client_kwargs["timeout"] = self._timeout
+            self._client = OpenAI(**client_kwargs)
 
         except ImportError:
             raise ImportError(
