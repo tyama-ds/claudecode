@@ -671,7 +671,7 @@ $('planReviseBtn').addEventListener('click', () => {
 // resume view if a job is already running when the page loads
 poll().then(() => {
   fetch('/api/status').then(r => r.json()).then(s => {
-    if (s.state === 'running') { resetProgress(); startPolling(); $('startBtn').disabled = true; }
+    if (s.state === 'running' || s.state === 'plan_review') { resetProgress(); startPolling(); $('startBtn').disabled = true; }
     else if (s.state === 'completed' || s.state === 'error') { resetProgress(); render(s); }
   });
 });
