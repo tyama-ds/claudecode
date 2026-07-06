@@ -424,6 +424,12 @@ class ResearchConfig:
     save_evidence: bool = True
     evidence_format: str = "json"
 
+    # Plan review: pause after the research plan (title / ToC / queries) is
+    # generated so the user can inspect or revise it. Research starts
+    # automatically when there is no response within the timeout.
+    plan_review: bool = True
+    plan_review_timeout: int = 60  # seconds
+
     # Extended mode settings (deep site crawling)
     extended_mode: bool = False
     crawl_max_pages: int = 10  # Max pages to crawl per site
@@ -655,6 +661,8 @@ def create_config(
     max_content_length: int = 50000,
     save_evidence: bool = True,
     evidence_format: str = "json",
+    plan_review: bool = True,
+    plan_review_timeout: int = 60,
     # Search depth parameters
     max_queries_per_iteration: int = 3,
     max_pages_per_query: int = 3,
@@ -790,6 +798,13 @@ def create_config(
         max_content_length: Maximum content length for extraction truncation (default: 50000)
         save_evidence: Whether to save evidence exports (default: True)
         evidence_format: Evidence export format: 'json', 'csv', or 'both' (default: 'json')
+        plan_review: Pause after the research plan (title / ToC / queries) is
+            generated so the user can inspect or revise it before research
+            starts. Console runs prompt on stdin; the Web UI shows a review
+            panel. Auto-continues after plan_review_timeout with no response.
+            Non-interactive console sessions skip the pause entirely
+        plan_review_timeout: Seconds to wait for plan review input before
+            starting research automatically (default: 60)
         max_queries_per_iteration: Max queries to execute per research iteration (default: 3)
         max_pages_per_query: Max pages to process per search query (default: 3)
         content_filter_mode: Content filter strictness ('strict', 'moderate', 'minimal', 'none')
@@ -899,6 +914,8 @@ def create_config(
         language=kwargs.get("language", "ja"),
         save_evidence=save_evidence,
         evidence_format=evidence_format,
+        plan_review=plan_review,
+        plan_review_timeout=plan_review_timeout,
         extended_mode=extended_mode,
         crawl_max_pages=crawl_max_pages,
         crawl_max_depth=crawl_max_depth,

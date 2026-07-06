@@ -58,6 +58,17 @@ h2 .n {
 }
 label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; font-weight: 600; }
 .hint { font-size: 11px; color: var(--muted); margin: 4px 0 0; line-height: 1.5; }
+.plan-review { margin-top: 14px; border: 2px solid var(--accent); border-radius: 12px; padding: 14px; }
+.pr-head { display: flex; justify-content: space-between; align-items: center; }
+.pr-title { font-weight: 700; font-size: 14px; }
+.pr-count { font-size: 13px; font-weight: 700; color: var(--accent); }
+.pr-plan { max-height: 320px; overflow-y: auto; font-size: 12.5px; line-height: 1.7;
+  background: var(--bg); border-radius: 8px; padding: 10px 12px; margin: 10px 0; }
+.pr-plan .sec { font-weight: 700; }
+.pr-plan .sub { color: var(--muted); margin-left: 14px; }
+.pr-plan .q { color: var(--muted); }
+.pr-actions { display: flex; gap: 10px; margin-top: 10px; }
+.pr-actions button { flex: 1; }
 input[type=text], input[type=password], input[type=number], textarea, select {
   width: 100%; padding: 9px 12px; border: 1.5px solid var(--border);
   border-radius: 10px; font-size: 13px; background: var(--card); color: var(--text);
@@ -329,6 +340,7 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
       </div>
     </details>
 
+    <label class="check"><input type="checkbox" id="plan_review" checked> 調査開始前に計画（目次・検索クエリ）を確認する（60秒で自動開始）</label>
     <button class="primary" id="startBtn">🚀 調査を開始</button>
     <div class="banner" id="formError"></div>
   </section>
@@ -353,6 +365,20 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
       </div>
       <div class="bar-wrap"><div class="bar" id="bar"></div></div>
       <div class="msg" id="currentMsg">待機中...</div>
+
+      <div class="plan-review" id="planReviewPanel" style="display:none">
+        <div class="pr-head">
+          <span class="pr-title">📋 調査計画のレビュー</span>
+          <span class="pr-count" id="planCountdown"></span>
+        </div>
+        <p class="hint">計画を確認してください。修正指示を書いて「修正を依頼」するか、「この計画で開始」を押してください。残り時間内に操作がなければ、この計画のまま自動で調査を開始します。</p>
+        <div class="pr-plan" id="planContent"></div>
+        <textarea id="planInstructions" rows="3" placeholder="修正指示（例: 3章を価格動向の章に差し替えて。競合比較の章を追加して。）"></textarea>
+        <div class="pr-actions">
+          <button class="primary" id="planApproveBtn">▶ この計画で開始</button>
+          <button id="planReviseBtn">✏ 修正を依頼</button>
+        </div>
+      </div>
 
       <div class="log" id="log"></div>
 
@@ -409,6 +435,8 @@ function collectParams() {
     output_format: $('output_format').value,
     chart_library: $('chart_library').value,
     auto_figures: $('auto_figures').checked,
+    plan_review: $('plan_review').checked,
+    plan_review_timeout: 60,
   };
   if (apiKey) {
     if (provider === 'openai') params.openai_api_key = apiKey;
@@ -487,6 +515,62 @@ function stepIndex(pct) {
   return 3;
 }
 
+let lastPlanJson = null;
+let planBusy = false;
+
+function formatPlan(plan) {
+  let html = `<div class="sec">📌 ${escapeHtml(plan.title || '')}</div>`;
+  if (plan.summary) html += `<div>${escapeHtml(plan.summary)}</div>`;
+  const toc = (plan.table_of_contents && plan.table_of_contents.items) || [];
+  html += '<div style="margin-top:8px" class="sec">目次</div>';
+  toc.forEach(item => {
+    html += `<div>${escapeHtml(item.section)}. ${escapeHtml(item.title)}</div>`;
+    (item.subsections || []).forEach(sub => {
+      html += `<div class="sub">${escapeHtml(sub.section)} ${escapeHtml(sub.title)}</div>`;
+    });
+  });
+  const qs = plan.search_queries || [];
+  html += `<div style="margin-top:8px" class="sec">検索クエリ（全${qs.length}件）</div>`;
+  qs.slice(0, 20).forEach(q => { html += `<div class="q">・${escapeHtml(q)}</div>`; });
+  if (qs.length > 20) html += `<div class="q">…ほか${qs.length - 20}件</div>`;
+  return html;
+}
+
+function renderPlanReview(status) {
+  $('planReviewPanel').style.display = 'block';
+  const remaining = Math.max(0, Math.round(status.plan_review_remaining || 0));
+  $('planCountdown').textContent = `自動開始まで 約${remaining}秒`;
+  const planJson = JSON.stringify(status.plan || {});
+  if (planJson !== lastPlanJson) {
+    lastPlanJson = planJson;
+    $('planContent').innerHTML = formatPlan(status.plan || {});
+    planBusy = false;
+    $('planApproveBtn').disabled = false;
+    $('planReviseBtn').disabled = false;
+  }
+}
+
+async function sendPlanReview(action) {
+  if (planBusy) return;
+  planBusy = true;
+  $('planApproveBtn').disabled = true;
+  $('planReviseBtn').disabled = true;
+  try {
+    const res = await fetch('/api/plan-review', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action, instructions: $('planInstructions').value.trim()}),
+    });
+    if (!res.ok) throw new Error('plan review request failed');
+    if (action === 'approve') $('planReviewPanel').style.display = 'none';
+    else $('planInstructions').value = '';
+  } catch (e) {
+    planBusy = false;
+    $('planApproveBtn').disabled = false;
+    $('planReviseBtn').disabled = false;
+  }
+}
+
 function render(status) {
   const pct = status.progress || 0;
   $('bar').style.width = pct + '%';
@@ -502,6 +586,14 @@ function render(status) {
     el.classList.toggle('done', status.state === 'completed' || i < active);
     el.classList.toggle('active', status.state === 'running' && i === active);
   });
+
+  // plan review panel
+  if (status.state === 'plan_review') {
+    renderPlanReview(status);
+  } else {
+    $('planReviewPanel').style.display = 'none';
+    lastPlanJson = null;
+  }
 
   // append new log lines
   const log = status.log || [];
@@ -567,6 +659,14 @@ function stopPolling() {
 }
 
 $('startBtn').addEventListener('click', startResearch);
+$('planApproveBtn').addEventListener('click', () => sendPlanReview('approve'));
+$('planReviseBtn').addEventListener('click', () => {
+  if (!$('planInstructions').value.trim()) {
+    alert('修正指示を入力してください');
+    return;
+  }
+  sendPlanReview('revise');
+});
 
 // resume view if a job is already running when the page loads
 poll().then(() => {

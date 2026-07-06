@@ -184,6 +184,7 @@ class Researcher:
         max_content_length: int = 50000,
         target_pages: int = None,
         target_characters: int = None,
+        plan_review_callback=None,
     ):
         """
         Initialize Researcher.
@@ -242,6 +243,11 @@ class Researcher:
             max_content_length: Maximum content length for extraction truncation
             target_pages: Target output page count (used for dynamic content sizing)
             target_characters: Target output character count (overrides target_pages)
+            plan_review_callback: Optional callback(plan, revise_fn) invoked
+                after the research plan is generated and before the research
+                loop starts. revise_fn(current_plan, instructions) returns an
+                LLM-revised plan. The callback returns the plan to use, or
+                None to keep the generated one.
         """
         self.llm = llm_client
         self.planning_llm = planning_llm or llm_client
@@ -276,6 +282,7 @@ class Researcher:
         self.session: Optional[ResearchSession] = None
         self.evidence_locker: Optional[EvidenceLocker] = None
         self.progress_callback = progress_callback
+        self.plan_review_callback = plan_review_callback
 
         # Multilingual search settings
         self.multilingual_config = multilingual_config
@@ -468,6 +475,34 @@ class Researcher:
                 f"Research plan created with {len(self.session.research_plan.table_of_contents.items)} sections",
                 10
             )
+
+            # Phase 1.5: Plan review — let the user inspect / revise the plan
+            # before any research starts (auto-continues on timeout)
+            if self.plan_review_callback:
+                self._report_progress("Waiting for plan review...", 10)
+
+                def _revise(current_plan, instructions):
+                    return self.query_generator.revise_research_plan(
+                        plan=current_plan,
+                        instructions=instructions,
+                        query=query,
+                        requirements=requirements,
+                    )
+
+                try:
+                    reviewed = self.plan_review_callback(
+                        self.session.research_plan, _revise
+                    )
+                    if reviewed is not None:
+                        self.session.research_plan = reviewed
+                        self._report_progress(
+                            f"Plan updated: "
+                            f"{len(reviewed.table_of_contents.items)} sections",
+                            10,
+                        )
+                except Exception as e:
+                    print(f"[PlanReview] Review step failed ({e}); "
+                          f"continuing with the generated plan")
 
             # Phase 2: Research Loop
             self.session.state = ResearchState.RESEARCHING

@@ -374,6 +374,7 @@ class DeepResearchTool:
         additional_context: str = "",
         additional_documents: List[str] = None,
         progress_callback: Callable[[str, float], None] = None,
+        plan_review_callback: Callable = None,
     ) -> Dict[str, Any]:
         """
         Run the complete research workflow.
@@ -385,6 +386,11 @@ class DeepResearchTool:
             additional_documents: List of paths to additional documents
             progress_callback: Callback function for progress updates
                               (message: str, percentage: float)
+            plan_review_callback: Optional callback(plan, revise_fn) invoked
+                after the research plan is generated, before research starts.
+                When None and config.research.plan_review is True, a console
+                prompt with a timeout (config.research.plan_review_timeout)
+                is used in interactive sessions
 
         Returns:
             Dictionary containing:
@@ -422,6 +428,15 @@ class DeepResearchTool:
 
         # Initialize researcher with content filter
         content_filter = self._create_content_filter()
+
+        # Plan review: explicit callback wins; otherwise use the console
+        # prompt (with auto-continue timeout) when enabled in config
+        if plan_review_callback is None and self.config.research.plan_review:
+            from .utils.plan_review import make_console_plan_review_callback
+            plan_review_callback = make_console_plan_review_callback(
+                timeout=self.config.research.plan_review_timeout,
+                language=self.config.research.language,
+            )
 
         self.researcher = Researcher(
             llm_client=self.llm_client,
@@ -467,6 +482,7 @@ class DeepResearchTool:
             max_content_length=self.config.research.max_content_length,
             target_pages=self.config.report.target_pages,
             target_characters=self.config.report.target_characters,
+            plan_review_callback=plan_review_callback,
         )
 
         # Conduct research

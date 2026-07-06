@@ -56,6 +56,8 @@ _CONFIG_PARAM_MAP = {
     "chart_library": "chart_library",
     "auto_figures": "auto_figures",
     "enable_verification": "enable_verification",
+    "plan_review": "plan_review",
+    "plan_review_timeout": "plan_review_timeout",
 }
 
 
@@ -124,7 +126,7 @@ class ResearchJob:
     def __init__(self, job_id: str, query: str):
         self.job_id = job_id
         self.query = query
-        self.state = "running"  # running / completed / error
+        self.state = "running"  # running / plan_review / completed / error
         self.progress = 0.0
         self.message = "開始しています..."
         self.log = deque(maxlen=300)
@@ -132,6 +134,11 @@ class ResearchJob:
         self.error: Optional[str] = None
         self.started_at = time.time()
         self._lock = threading.Lock()
+        # Plan review state (state == "plan_review")
+        self.plan: Optional[Dict[str, Any]] = None
+        self.plan_review_deadline: Optional[float] = None
+        self._plan_event: Optional[threading.Event] = None
+        self._plan_response: Optional[Dict[str, str]] = None
 
     def update(self, message: str, percentage: float) -> None:
         with self._lock:
@@ -144,9 +151,39 @@ class ResearchJob:
                 "msg": message,
             })
 
+    def begin_plan_review(self, plan_dict: Dict[str, Any], timeout: float):
+        """Enter plan-review state and block until a response or timeout.
+
+        Returns {"action": "approve"|"revise", "instructions": str} or None
+        when the timeout elapsed with no response (= auto-approve).
+        """
+        with self._lock:
+            self.plan = plan_dict
+            self.plan_review_deadline = time.time() + timeout
+            self._plan_event = threading.Event()
+            self._plan_response = None
+            self.state = "plan_review"
+        self._plan_event.wait(timeout)
+        with self._lock:
+            response = self._plan_response
+            self.state = "running"
+            self.plan_review_deadline = None
+            self._plan_event = None
+            self._plan_response = None
+        return response
+
+    def respond_plan_review(self, action: str, instructions: str = "") -> bool:
+        """Deliver the user's plan-review response. False if not reviewing."""
+        with self._lock:
+            if self.state != "plan_review" or self._plan_event is None:
+                return False
+            self._plan_response = {"action": action, "instructions": instructions}
+            self._plan_event.set()
+            return True
+
     def to_dict(self) -> Dict[str, Any]:
         with self._lock:
-            return {
+            data = {
                 "job_id": self.job_id,
                 "query": self.query,
                 "state": self.state,
@@ -156,7 +193,13 @@ class ResearchJob:
                 "result": self.result,
                 "error": self.error,
                 "elapsed_seconds": round(time.time() - self.started_at, 1),
+                "plan": self.plan,
             }
+            if self.state == "plan_review" and self.plan_review_deadline:
+                data["plan_review_remaining"] = max(
+                    0, round(self.plan_review_deadline - time.time(), 1)
+                )
+            return data
 
 
 class JobManager:
@@ -168,7 +211,8 @@ class JobManager:
         self._lock = threading.Lock()
 
     def is_running(self) -> bool:
-        return self.current is not None and self.current.state == "running"
+        return (self.current is not None
+                and self.current.state in ("running", "plan_review"))
 
     def start(self, params: Dict[str, Any]) -> ResearchJob:
         with self._lock:
@@ -203,11 +247,47 @@ class JobManager:
             if documents:
                 job.update(f"ローカル文書 {len(documents)} 件を読み込みます", 1)
 
+            # Plan review: pause after plan generation so the user can
+            # inspect / revise it in the UI; auto-continue on timeout
+            plan_cb = None
+            if params.get("plan_review", True):
+                plan_timeout = float(params.get("plan_review_timeout") or 60)
+
+                def plan_cb(plan, revise_fn):
+                    current = plan
+                    changed = False
+                    for _ in range(5):  # revision round limit
+                        job.update(
+                            f"調査計画のレビュー待ちです（{int(plan_timeout)}秒以内に"
+                            f"応答がなければこのまま開始します）", 10)
+                        response = job.begin_plan_review(
+                            current.to_dict(), plan_timeout)
+                        if response is None:
+                            job.update("応答がないため、この計画で調査を開始します", 10)
+                            return current if changed else None
+                        if response.get("action") != "revise":
+                            job.update("計画が承認されました。調査を開始します", 10)
+                            return current if changed else None
+                        instructions = (response.get("instructions") or "").strip()
+                        if not instructions:
+                            return current if changed else None
+                        job.update("計画を修正しています...", 10)
+                        try:
+                            current = revise_fn(current, instructions)
+                            changed = True
+                        except Exception as e:
+                            job.update(f"計画の修正に失敗しました（{e}）。"
+                                       f"現在の計画で開始します", 10)
+                            return current if changed else None
+                    job.update("修正回数の上限に達しました。この計画で開始します", 10)
+                    return current if changed else None
+
             result = tool.run(
                 query=params.get("query", ""),
                 requirements=params.get("requirements", ""),
                 additional_documents=documents or None,
                 progress_callback=job.update,
+                plan_review_callback=plan_cb,
             )
 
             job.result = {
@@ -321,7 +401,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        if parsed.path != "/api/research":
+        if parsed.path not in ("/api/research", "/api/plan-review"):
             self._send_json({"error": "not found"}, 404)
             return
 
@@ -332,11 +412,26 @@ class WebUIHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "invalid JSON body"}, 400)
             return
 
+        manager: JobManager = self.server.job_manager
+
+        if parsed.path == "/api/plan-review":
+            action = params.get("action")
+            if action not in ("approve", "revise"):
+                self._send_json({"error": "action must be 'approve' or 'revise'"}, 400)
+                return
+            job = manager.current
+            if job is None or job.state != "plan_review":
+                self._send_json({"error": "no job awaiting plan review"}, 409)
+                return
+            ok = job.respond_plan_review(
+                action, params.get("instructions", "") or "")
+            self._send_json({"ok": ok}, 200 if ok else 409)
+            return
+
         if not (params.get("query") or "").strip():
             self._send_json({"error": "query is required"}, 400)
             return
 
-        manager: JobManager = self.server.job_manager
         try:
             job = manager.start(params)
         except RuntimeError as e:

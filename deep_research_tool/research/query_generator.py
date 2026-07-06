@@ -617,44 +617,138 @@ CRITICAL RULES FOR SEARCH QUERIES:
                 return None
 
             data = extract_json_from_response(content)
-
-            # Build TOC
-            toc_items = []
-            for item_data in data.get("table_of_contents", []):
-                subsections = [
-                    TableOfContentsItem(
-                        section=sub.get("section", ""),
-                        title=sub.get("title", ""),
-                        description=sub.get("description", ""),
-                    )
-                    for sub in item_data.get("subsections", [])
-                ]
-                toc_items.append(TableOfContentsItem(
-                    section=item_data.get("section", ""),
-                    title=item_data.get("title", ""),
-                    description=item_data.get("description", ""),
-                    subsections=subsections,
-                ))
-
-            toc = TableOfContents(
-                title=data.get("title", query),
-                items=toc_items,
-            )
-
-            return ResearchPlan(
-                title=data.get("title", query),
-                summary=data.get("summary", ""),
-                table_of_contents=toc,
-                search_queries=data.get("search_queries", []),
-                key_terms=data.get("key_terms", []),
-                suggested_sources=data.get("suggested_sources", []),
-                methodology_notes=data.get("methodology_notes", ""),
-                estimated_complexity=data.get("estimated_complexity", "medium"),
-            )
+            return self._build_plan_from_data(data, query)
 
         except (json.JSONDecodeError, ValueError) as e:
             print(f"[QueryGenerator] JSON parsing failed: {e}")
             return None
+
+    @staticmethod
+    def _build_plan_from_data(data: Dict[str, Any], query: str) -> ResearchPlan:
+        """Build a ResearchPlan from the plan-JSON structure the LLM returns."""
+        toc_items = []
+        for item_data in data.get("table_of_contents", []):
+            subsections = [
+                TableOfContentsItem(
+                    section=sub.get("section", ""),
+                    title=sub.get("title", ""),
+                    description=sub.get("description", ""),
+                )
+                for sub in item_data.get("subsections", [])
+            ]
+            toc_items.append(TableOfContentsItem(
+                section=item_data.get("section", ""),
+                title=item_data.get("title", ""),
+                description=item_data.get("description", ""),
+                subsections=subsections,
+            ))
+
+        toc = TableOfContents(
+            title=data.get("title", query),
+            items=toc_items,
+        )
+
+        return ResearchPlan(
+            title=data.get("title", query),
+            summary=data.get("summary", ""),
+            table_of_contents=toc,
+            search_queries=data.get("search_queries", []),
+            key_terms=data.get("key_terms", []),
+            suggested_sources=data.get("suggested_sources", []),
+            methodology_notes=data.get("methodology_notes", ""),
+            estimated_complexity=data.get("estimated_complexity", "medium"),
+        )
+
+    def revise_research_plan(
+        self,
+        plan: ResearchPlan,
+        instructions: str,
+        query: str,
+        requirements: str = "",
+    ) -> ResearchPlan:
+        """
+        Revise an existing research plan according to user instructions.
+
+        Used by the plan-review step: the user can request changes to the
+        title, table of contents, or search queries in natural language
+        before the research loop starts.
+
+        Args:
+            plan: The current research plan
+            instructions: User's revision instructions (natural language)
+            query: The original research query/topic
+            requirements: The original research requirements
+
+        Returns:
+            Revised ResearchPlan (raises ValueError if the LLM response
+            cannot be parsed)
+        """
+        plan_json = json.dumps(
+            {
+                "title": plan.title,
+                "summary": plan.summary,
+                "table_of_contents": [i.to_dict() for i in plan.table_of_contents.items],
+                "search_queries": plan.search_queries,
+                "key_terms": plan.key_terms,
+                "suggested_sources": plan.suggested_sources,
+                "methodology_notes": plan.methodology_notes,
+                "estimated_complexity": plan.estimated_complexity,
+            },
+            ensure_ascii=False,
+            indent=1,
+        )
+
+        if self.language == "ja":
+            prompt = f"""以下は調査計画です。ユーザーの修正指示に従って計画を修正してください。
+
+調査テーマ: {query}
+要件: {requirements if requirements else "包括的な調査"}
+
+【現在の調査計画】
+{plan_json}
+
+【ユーザーの修正指示】
+{instructions}
+
+修正指示に該当しない部分は変更せず維持してください。目次（章立て）を変更した場合は、
+それに合わせて検索クエリも整合するよう調整してください。
+検索クエリは「1クエリ1トピック・40文字以内」のルールを守ってください。
+
+修正後の計画全体を、現在の計画と同じJSON形式で出力してください（JSON以外の文章は不要）。"""
+        else:
+            prompt = f"""Below is a research plan. Revise it according to the user's instructions.
+
+Research Topic: {query}
+Requirements: {requirements if requirements else "General comprehensive research"}
+
+[CURRENT PLAN]
+{plan_json}
+
+[USER'S REVISION INSTRUCTIONS]
+{instructions}
+
+Keep everything not covered by the instructions unchanged. If you change the
+table of contents, adjust the search queries so they stay consistent with it.
+Search queries must follow the one-query-one-topic rule and stay under 40 characters.
+
+Output the complete revised plan in the same JSON format as the current plan
+(JSON only, no other text)."""
+
+        response = self.llm.generate(prompt)
+        if not response or not response.content:
+            raise ValueError("LLM returned empty response for plan revision")
+
+        data = extract_json_from_response(response.content)
+        revised = self._build_plan_from_data(data, query)
+
+        # Guard against a degenerate revision (LLM dropped the ToC or queries)
+        if not revised.table_of_contents.items:
+            raise ValueError("Revised plan has no table of contents")
+        if not revised.search_queries:
+            revised.search_queries = list(plan.search_queries)
+        else:
+            revised.search_queries = self.split_complex_queries(revised.search_queries)
+        return revised
 
     def generate_follow_up_queries(
         self,
