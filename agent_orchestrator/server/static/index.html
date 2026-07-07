@@ -81,15 +81,17 @@
         <input id="min-rounds" type="number" min="0" max="8" value="0" />
       </label>
 
-      <div id="workspace-opts" class="set-group" hidden>
+      <div id="workspace-opts" class="set-group">
         <div class="set-title" data-i18n>Workspace</div>
-        <label class="field"><span class="field-label" data-i18n>Directory</span>
+        <label class="field"><span class="field-label"><span data-i18n>Directory</span>
+          <small id="workspace-optional" data-i18n>(optional — agents read/write its files one by one)</small></span>
           <input id="workspace-dir" type="text" data-i18n-ph
-            placeholder="blank = server's launch directory" /></label>
+            placeholder="a local folder the agents work in (read & write)" /></label>
         <label class="field-check"><input id="workspace-init" type="checkbox" />
           <span><span data-i18n>Create the directory if it doesn't exist</span>
             <small data-i18n>(no git)</small></span></label>
-        <label class="field"><span class="field-label"><span data-i18n>Test command</span>
+        <label class="field" id="test-cmd-wrap" hidden>
+          <span class="field-label"><span data-i18n>Test command</span>
           <small data-i18n>(auto-run after each build round)</small></span>
           <input id="test-cmd" type="text" data-i18n-ph
             placeholder="e.g. pytest -q — results are fed back to the team" /></label>
@@ -108,11 +110,27 @@
           <span>list_files <small data-i18n>(list workspace files)</small></span></label>
         <label class="field-check"><input type="checkbox" class="tool-check" value="read_file" />
           <span>read_file <small data-i18n>(read a workspace file)</small></span></label>
+        <label class="field-check"><input type="checkbox" class="tool-check" value="write_file" />
+          <span>write_file <small data-i18n>(write a workspace file — auto-on with a workspace)</small></span></label>
         <label class="field-check"><input type="checkbox" class="tool-check" value="run" />
           <span>run <small data-i18n>(shell commands in the workspace — trust required)</small></span></label>
         <label class="field-check"><input type="checkbox" class="tool-check" value="http_get" />
-          <span>http_get <small data-i18n>(fetch a URL)</small></span></label>
+          <span>http_get <small data-i18n>(fetch a URL — proxy + User-Agent)</small></span></label>
+        <label class="field-check"><input type="checkbox" class="tool-check" value="browser_get" />
+          <span>browser_get <small data-i18n>(headless browser — renders JavaScript)</small></span></label>
       </details>
+
+      <div class="set-group" id="loop-opts">
+        <div class="set-title" data-i18n>Auto-loop</div>
+        <label class="field-check"><input id="loop-on" type="checkbox" />
+          <span data-i18n>Evaluate the result and rework automatically until PASS</span></label>
+        <div id="loop-cfg" hidden>
+          <label class="field"><span class="field-label" data-i18n>Max iterations</span>
+            <input id="loop-iters" type="number" min="2" max="10" value="3" /></label>
+          <label class="field"><span class="field-label" data-i18n>Evaluator backend</span>
+            <div class="select-wrap"><select id="loop-eval"></select></div></label>
+        </div>
+      </div>
 
       <div class="actions">
         <button id="run" class="btn primary">
@@ -222,6 +240,12 @@
         <span class="eyebrow" data-i18n>Agents</span>
       </div>
       <div id="graph" class="graph" hidden>
+        <div id="graph-tools" class="graph-tools" hidden>
+          <div class="select-wrap g-kind-wrap"><select id="g-kind"
+            aria-label="Member kind"></select></div>
+          <button id="g-add" class="gbtn" type="button" data-i18n>+ Add</button>
+          <button id="g-remove" class="gbtn danger" type="button" data-i18n>− Remove</button>
+        </div>
         <svg id="graph-svg" viewBox="0 0 220 196" role="img"
           aria-label="Live interaction graph"></svg>
         <div id="graph-caption" class="graph-caption"></div>
@@ -254,6 +278,11 @@
           <label class="field">
             <span class="field-label" data-i18n>HTTP(S) proxy</span>
             <input id="set-proxy" type="text" placeholder="http://proxy.corp:8080 (blank = direct)" />
+          </label>
+          <label class="field">
+            <span class="field-label"><span data-i18n>User-Agent</span>
+              <small data-i18n>(used by http_get / browser_get)</small></span>
+            <input id="set-ua" type="text" />
           </label>
         </div>
 

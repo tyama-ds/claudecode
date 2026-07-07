@@ -155,6 +155,7 @@ class Handler(BaseHTTPRequestHandler):
         return {
             "proxy": s.proxy or "",
             "proxy_from_env": proxy_env,
+            "user_agent": s.user_agent,
             "providers": {
                 "anthropic": prov(s.anthropic_model, s.anthropic_base_url,
                                   s.anthropic_api_key, "ANTHROPIC_API_KEY"),
@@ -243,6 +244,24 @@ class Handler(BaseHTTPRequestHandler):
                 unavailable.append({"role": role_key, "id": spec.get("id", "mock"), "reason": reason})
             agents[role_key] = adapter
 
+        # Auto-loop: evaluate the finished result and rework until PASS.
+        loop_spec = body.get("loop") or {}
+        loop_evaluator = None
+        loop_iters = 0
+        if isinstance(loop_spec, dict) and loop_spec.get("iters"):
+            try:
+                loop_iters = max(2, min(int(loop_spec.get("iters", 3)), 10))
+            except (TypeError, ValueError):
+                loop_iters = 3
+            ev = loop_spec.get("evaluator") or {"id": "mock"}
+            loop_evaluator = build_adapter(
+                {"id": ev.get("id", "mock"), "name": "evaluator", "model": ev.get("model")}
+            )
+            ok, reason = loop_evaluator.available()
+            if not ok:
+                unavailable.append({"role": "evaluator", "id": ev.get("id", "mock"),
+                                    "reason": reason})
+
         if unavailable:
             self._send_json(
                 {"error": "selected agents are unavailable", "details": unavailable},
@@ -254,6 +273,8 @@ class Handler(BaseHTTPRequestHandler):
         session.personas = personas
         session.role_order = [k for k, _ in role_list]
         session.min_rounds = session_min_rounds
+        session.loop_iters = loop_iters
+        session.loop_evaluator = loop_evaluator
         if feedback and parent:
             session.parent_id = parent.id
 
@@ -261,7 +282,8 @@ class Handler(BaseHTTPRequestHandler):
         tools = body.get("tools") or []
         if isinstance(tools, list):
             session.tools = [t for t in tools
-                             if t in ("list_files", "read_file", "run", "http_get")]
+                             if t in ("list_files", "read_file", "write_file",
+                                      "run", "http_get", "browser_get")]
 
         # Chain of command for org_team: role -> supervisor role.
         sups = body.get("supervisors") or {}
@@ -283,10 +305,13 @@ class Handler(BaseHTTPRequestHandler):
             session.reference_dir = ref_real
             session.references = load_references(ref_real)
 
-        if strategy_name == "workspace_build":
-            # Default to the directory the server was launched from; a request may
-            # override it. Edits are confined to this root (see _safe_join).
-            ws = (body.get("workspace") or "").strip() or os.getcwd()
+        # A real read/write working directory. Required (defaulting to the
+        # server's launch dir) for workspace_build; optional for every other
+        # strategy — the team then works on its files individually, keeping the
+        # context window small. Edits are confined to this root (see _safe_join).
+        ws_req = (body.get("workspace") or "").strip()
+        if strategy_name == "workspace_build" or ws_req:
+            ws = ws_req or os.getcwd()
             session.workspace = os.path.realpath(ws)
             if body.get("create_dir"):
                 session.workspace_created = _ensure_workspace_dir(session.workspace)
@@ -298,6 +323,11 @@ class Handler(BaseHTTPRequestHandler):
             for adapter in agents.values():
                 if adapter.kind == "cli":
                     adapter.workdir = session.workspace
+            # File-by-file access is the point of a shared workspace: make sure
+            # the file tools are on so agents can read/write individually.
+            for t in ("list_files", "read_file", "write_file"):
+                if t not in session.tools:
+                    session.tools.append(t)
 
         start_session(session)
         self._send_json({"session_id": session.id})

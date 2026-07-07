@@ -20,11 +20,13 @@ import difflib
 import os
 import re
 import subprocess
+import threading
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 
 from ..adapters.base import Message
+from ..config import get_settings
 from .session import Session, Turn, WorkspaceFile
 
 
@@ -411,9 +413,87 @@ _TOOL_MAX_STEPS = 3  # tool->result follow-up turns per agent turn
 _TOOL_DOCS = {
     "list_files": "list_files — input ignored; lists every file in the workspace.",
     "read_file": "read_file — input: a workspace-relative path; returns the file's contents.",
+    "write_file": ("write_file — input: FIRST line is a workspace-relative path, every "
+                   "following line is the complete new file content; writes the file."),
     "run": "run — input: a shell command; runs in the workspace (60s timeout), returns output.",
-    "http_get": "http_get — input: an http(s) URL; fetches it and returns the text body.",
+    "http_get": ("http_get — input: an http(s) URL; fetches it (via the configured proxy "
+                 "and User-Agent) and returns the text body. Fast, but no JavaScript."),
+    "browser_get": ("browser_get — input: an http(s) URL; loads it in a real headless "
+                    "browser (JavaScript rendered) and returns the visible text. Use for "
+                    "dynamic/JS-heavy pages."),
 }
+
+
+def _http_get(url: str) -> str:
+    """Fetch a URL as text, honoring the configured proxy and User-Agent."""
+    import urllib.request
+    settings = get_settings()
+    req = urllib.request.Request(url, headers={"User-Agent": settings.user_agent})
+    if settings.proxy:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": settings.proxy, "https": settings.proxy}))
+    else:
+        opener = urllib.request.build_opener()
+    with opener.open(req, timeout=30) as resp:
+        raw = resp.read(_TOOL_MAX_OUTPUT * 4)
+    return raw.decode("utf-8", errors="replace")[:_TOOL_MAX_OUTPUT]
+
+
+def _browser_get(url: str) -> str:
+    """Render a URL in a real headless browser and return its visible text.
+
+    Tries Selenium first, then Playwright; both honor the configured proxy and
+    User-Agent. Falls back to a plain HTTP GET when neither is installed, so the
+    tool is always usable (just without JavaScript in that case).
+    """
+    settings = get_settings()
+    ua, proxy = settings.user_agent, settings.proxy
+    failures: List[str] = []
+    # -- Selenium (Chrome) ------------------------------------------------
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        opts = Options()
+        for flag in ("--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+                     "--disable-gpu"):
+            opts.add_argument(flag)
+        opts.add_argument(f"--user-agent={ua}")
+        if proxy:
+            opts.add_argument(f"--proxy-server={proxy}")
+        driver = webdriver.Chrome(options=opts)
+        try:
+            driver.set_page_load_timeout(45)
+            driver.get(url)
+            text = driver.find_element("tag name", "body").text
+        finally:
+            driver.quit()
+        return ("[rendered by Selenium]\n" + text)[:_TOOL_MAX_OUTPUT]
+    except ImportError:
+        pass  # Selenium not installed — try Playwright next
+    except Exception as exc:  # noqa: BLE001 - driver/runtime issue; keep falling back
+        failures.append(f"selenium: {type(exc).__name__}: {exc}")
+    # -- Playwright (Chromium) -------------------------------------------
+    try:
+        from playwright.sync_api import sync_playwright
+        launch = {"headless": True}
+        if proxy:
+            launch["proxy"] = {"server": proxy}
+        with sync_playwright() as p:
+            browser = p.chromium.launch(**launch)
+            page = browser.new_page(user_agent=ua)
+            page.goto(url, timeout=45000, wait_until="networkidle")
+            text = page.inner_text("body")
+            browser.close()
+        return ("[rendered by Playwright]\n" + text)[:_TOOL_MAX_OUTPUT]
+    except ImportError:
+        pass
+    except Exception as exc:  # noqa: BLE001 - browser missing/broken; keep falling back
+        failures.append(f"playwright: {type(exc).__name__}: {exc}")
+    # -- Fallback: plain HTTP (no JavaScript) — the tool never dead-ends ----
+    why = ("headless browser failed: " + "; ".join(failures)[:300]
+           if failures else "no headless browser installed")
+    return (f"[{why} — plain HTTP fetch, JavaScript NOT rendered]\n"
+            + _http_get(url))
 
 
 def _tools_system(session: Session) -> str:
@@ -433,7 +513,7 @@ def _tool_root(session: Session) -> str:
     return session.workspace or session.reference_dir or os.getcwd()
 
 
-def _exec_tool(session: Session, name: str, arg: str) -> str:
+def _exec_tool(session: Session, name: str, arg: str, role: str, rnd: int) -> str:
     """Execute one tool call; always returns text (errors included)."""
     root = _tool_root(session)
     try:
@@ -444,15 +524,35 @@ def _exec_tool(session: Session, name: str, arg: str) -> str:
             full = _safe_join(root, arg.strip())
             with open(full, "r", encoding="utf-8", errors="replace") as fh:
                 return fh.read()[:_TOOL_MAX_OUTPUT]
+        if name == "write_file":
+            if not session.workspace:
+                return "write_file requires a workspace directory for this session"
+            rel, _, content = arg.partition("\n")
+            rel = rel.strip()
+            if not rel:
+                return "write_file: missing path on the first line"
+            full = _safe_join(session.workspace, rel)
+            existed = os.path.isfile(full)
+            old = ""
+            if existed:
+                with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                    old = fh.read()
+            os.makedirs(os.path.dirname(full) or session.workspace, exist_ok=True)
+            new_content = content if content.endswith("\n") or not content else content + "\n"
+            with open(full, "w", encoding="utf-8") as fh:
+                fh.write(new_content)
+            _record_edit(session, role, rnd, rel, old, new_content,
+                         "modified" if existed else "created")
+            return f"wrote {rel} ({len(new_content)} bytes)"
         if name == "run":
             proc = subprocess.run(arg, shell=True, cwd=root, capture_output=True,
                                   text=True, timeout=60)
             out = ((proc.stdout or "") + (proc.stderr or ""))[:_TOOL_MAX_OUTPUT]
             return f"(exit {proc.returncode})\n{out}"
         if name == "http_get":
-            import urllib.request
-            with urllib.request.urlopen(arg.strip(), timeout=30) as resp:
-                return resp.read(_TOOL_MAX_OUTPUT).decode("utf-8", errors="replace")
+            return _http_get(arg.strip())
+        if name == "browser_get":
+            return _browser_get(arg.strip())
         return f"unknown tool: {name}"
     except Exception as exc:  # noqa: BLE001 - reported to the agent, not fatal
         return f"tool error: {type(exc).__name__}: {exc}"
@@ -467,7 +567,7 @@ def _run_tool_calls(session: Session, role: str, rnd: int, text: str) -> Optiona
         return None
     blocks = []
     for name, arg in calls:
-        out = _exec_tool(session, name, arg)
+        out = _exec_tool(session, name, arg, role, rnd)
         session.emit("tool_use", role=role, agent=session.agents[role].display_name,
                      tool=name, input=arg[:200], output=out[:400], round=rnd)
         blocks.append(f'<TOOL_RESULT name="{name}">\n{out}\n</TOOL_RESULT>')
@@ -504,27 +604,76 @@ def _run_turns_parallel(session: Session, specs: List[tuple]) -> Dict[str, str]:
     return results
 
 
+# Serialises generic workspace bookkeeping across parallel turns.
+_WS_LOCK = threading.Lock()
+
+_WS_LISTING_CAP = 200
+
+
+def _workspace_listing(root: str) -> str:
+    """A cheap paths-only listing (contents stay out of the context window)."""
+    names = sorted(_snapshot_workspace(root))
+    lines = names[:_WS_LISTING_CAP]
+    if len(names) > _WS_LISTING_CAP:
+        lines.append(f"... and {len(names) - _WS_LISTING_CAP} more")
+    return "\n".join(lines) if lines else "(empty)"
+
+
+def _workspace_system(session: Session) -> str:
+    """System-prompt suffix for strategies that share a generic workspace.
+
+    Deliberately context-frugal: only the file *listing* is injected — agents
+    read and write files individually instead of receiving everything.
+    """
+    if not session.workspace or session.strategy == "workspace_build":
+        return ""  # workspace_build runs its own richer workspace protocol
+    return (
+        "\n\n[SHARED WORKSPACE] The team shares a real working directory; work on "
+        "files INDIVIDUALLY to keep context small — do not ask for everything at "
+        "once. Current files:\n" + _workspace_listing(session.workspace) + "\n"
+        "Read a file with the read_file tool (or directly, if you are a CLI running "
+        "inside the directory). Write or change a file by emitting "
+        '`<FILE path="relative/path.ext">full new content</FILE>` or via the '
+        "write_file tool — one file at a time, always the complete content. Never "
+        "use absolute paths or `..`."
+    )
+
+
+def _absorb_generic_edits(session: Session, role: str, rnd: int, text: str) -> None:
+    """Apply <FILE> blocks and pick up native edits for any strategy that has a
+    workspace (workspace_build does this itself with richer semantics)."""
+    if not session.workspace or session.strategy == "workspace_build":
+        return
+    with _WS_LOCK:
+        if session.ws_baseline is None:
+            session.ws_baseline = _snapshot_workspace(session.workspace)
+        _apply_workspace_edits(session, role, rnd, text)
+        _, session.ws_baseline = _detect_native_edits(session, role, rnd,
+                                                      session.ws_baseline)
+
+
 def _run_turn(session: Session, role: str, system: str, instruction: str, rnd: int,
               action: str = "") -> str:
     """One agent turn, plus tool follow-ups when the session enables tools.
 
     If the reply contains ``<TOOL>`` calls, they are executed and the agent
     immediately gets another turn with the results (up to a small cap); the
-    last reply is returned.
+    last reply is returned. When the session has a generic shared workspace,
+    ``<FILE>`` blocks and native file edits are absorbed after each reply.
     """
     text = _run_single_turn(session, role, system, instruction, rnd, action)
-    if not session.tools:
-        return text
-    for _ in range(_TOOL_MAX_STEPS):
-        results_block = _run_tool_calls(session, role, rnd, text)
-        if results_block is None:
-            return text
-        text = _run_single_turn(
-            session, role, system,
-            f"Tool results:\n{results_block}\n\nContinue your turn using these "
-            f"results. You may call tools again, or give your final answer.",
-            rnd, action,
-        )
+    if session.tools:
+        for _ in range(_TOOL_MAX_STEPS):
+            results_block = _run_tool_calls(session, role, rnd, text)
+            if results_block is None:
+                break
+            text = _run_single_turn(
+                session, role, system,
+                f"Tool results:\n{results_block}\n\nContinue your turn using these "
+                f"results. You may call tools again, or give your final answer.",
+                rnd, action,
+            )
+    _absorb_generic_edits(session, role, rnd, text)
     return text
 
 
@@ -549,8 +698,9 @@ def _run_single_turn(session: Session, role: str, system: str, instruction: str,
                  action=action)
 
     # A per-role persona override from the UI wins over the strategy's default;
-    # the tools contract (when enabled) is appended either way.
-    system = (session.personas.get(role) or system) + _tools_system(session)
+    # the workspace and tools contracts (when enabled) are appended either way.
+    system = ((session.personas.get(role) or system)
+              + _workspace_system(session) + _tools_system(session))
 
     history = _build_history(session, role)
     use_history = bool(history) and getattr(adapter, "supports_history", True)
@@ -1410,12 +1560,24 @@ def _org_levels(order: List[str], sup: Dict[str, str], agents: Dict) -> List[Lis
     return [levels[k] for k in sorted(levels)]
 
 
+def _org_kind(role: str) -> str:
+    """Member kind from the role key: worker_2 -> worker, manager -> manager."""
+    return role.split("_", 1)[0]
+
+
+# Which leaf kinds produce work vs. evaluate the unit's work afterwards.
+_ORG_PRODUCERS = ("worker", "researcher")
+_ORG_EVALUATORS = ("reviewer", "critic")
+
+
 class OrgTeam(Strategy):
     name = "org_team"
     description = (
         "A custom chain of command you design yourself: a top manager delegates "
-        "through mid-level managers to workers; each level assigns in parallel, "
-        "reports flow back up, and the top manager declares when it's done."
+        "through mid-level managers to a mixed team — workers, researchers, "
+        "reviewers, critics; each level runs in parallel, evaluators check the "
+        "producers' output, reports flow back up, and the top manager declares "
+        "when it's done."
     )
     roles = []          # dynamic: any hierarchy, defined by the request's supervisors map
     dynamic_roles = True
@@ -1442,11 +1604,60 @@ class OrgTeam(Strategy):
 
     @staticmethod
     def _leaf_sys(me: str, role: str, sup_name: str) -> str:
+        kind = _org_kind(role)
+        if kind == "researcher":
+            return (
+                f"You are {me} ({role}), a RESEARCHER reporting to {sup_name}. Gather and "
+                f"structure the concrete information your assignment asks for — facts, "
+                f"options, prior art, constraints — so the rest of the unit can build on "
+                f"it. Use tools when available; state what is verified vs. assumed."
+            )
+        if kind == "reviewer":
+            return (
+                f"You are {me} ({role}), the unit REVIEWER reporting to {sup_name}. Each "
+                f"round you review what your unit produced against the assignments: "
+                f"correctness, completeness, edge cases, quality. Be specific and "
+                f"actionable; end every review with APPROVE or REQUEST CHANGES."
+            )
+        if kind == "critic":
+            return (
+                f"You are {me} ({role}), the unit's CRITIC (devil's advocate) reporting "
+                f"to {sup_name}. Attack the unit's current output and direction: hunt for "
+                f"flaws, risks, missed requirements, and weak assumptions others are too "
+                f"polite to raise. Be constructive but merciless; never rubber-stamp."
+            )
         return (
             f"You are {me} ({role}), a WORKER reporting to {sup_name}. Carry out the exact "
             f"assignment you are given — thoroughly and concretely, producing real output, "
             f"not a plan to do it later."
         )
+
+    _LEAF_ACTIONS = {"worker": "implement", "researcher": "research",
+                     "reviewer": "review", "critic": "review"}
+
+    def _leaf_instruction(self, session: Session, w: str, names: Dict[str, str],
+                          sup: Dict[str, str], siblings: List[str],
+                          objective: str) -> str:
+        kind = _org_kind(w)
+        boss = names[sup[w]]
+        if kind == "reviewer":
+            return (f"Task:\n{session.task}\n\nYour unit ({', '.join(siblings)}) has "
+                    f"delivered this round's work (see the conversation). "
+                    f"{('Your focus from ' + boss + ': ' + objective) if objective else ''}\n"
+                    f"Review the unit's output against the assignments: correctness, "
+                    f"completeness, quality. Address your report to {boss}. End with "
+                    f"APPROVE or REQUEST CHANGES.")
+        if kind == "critic":
+            return (f"Task:\n{session.task}\n\nYour unit ({', '.join(siblings)}) has "
+                    f"delivered this round's work (see the conversation). "
+                    f"{('Your focus from ' + boss + ': ' + objective) if objective else ''}\n"
+                    f"Critique it adversarially: the flaws, risks, missed requirements, "
+                    f"and weak assumptions that matter most. Report your top issues to "
+                    f"{boss}, most severe first.")
+        verb = ("Investigate it and deliver structured findings now."
+                if kind == "researcher" else "Complete it concretely now.")
+        return (f"Task:\n{session.task}\n\nYour assignment from {boss}:\n{objective}\n\n"
+                f"{verb}")
 
     def run(self, session: Session) -> str:
         order = session.role_order or list(session.agents)
@@ -1541,10 +1752,14 @@ class OrgTeam(Strategy):
                                      f"the auditor — work continues.")
                 continue
 
-            # 2. Delegation flows down, level by level; whole levels run in parallel.
+            # 2. Delegation flows down, level by level; whole levels run in
+            # parallel — producers (workers/researchers) first, then the
+            # evaluative members (reviewers/critics) check what they made.
             for level in levels[1:]:
                 mids = [r for r in level if children[r]]
                 leaves = [r for r in level if not children[r]]
+                producers = [r for r in leaves if _org_kind(r) not in _ORG_EVALUATORS]
+                evaluators = [r for r in leaves if _org_kind(r) in _ORG_EVALUATORS]
                 if mids:
                     specs = [(m, self._mgr_sys(names[m], m, children[m], names[sup[m]]),
                               f"Task:\n{session.task}\n\nYour manager ({names[sup[m]]}) "
@@ -1557,14 +1772,25 @@ class OrgTeam(Strategy):
                     results = _run_turns_parallel(session, specs)
                     for m in mids:
                         process_manager_text(m, results.get(m, ""), rnd)
-                if leaves:
-                    specs = [(w, self._leaf_sys(names[w], w, names[sup[w]]),
-                              f"Task:\n{session.task}\n\nYour assignment from "
-                              f"{names[sup[w]]}:\n{own_objective(w)}\n\nComplete it "
-                              f"concretely now.",
-                              rnd, "implement") for w in leaves]
-                    _run_turns_parallel(session, specs)
-                    for w in leaves:
+
+                def leaf_specs(group):
+                    out = []
+                    for w in group:
+                        siblings = [c for c in children[sup[w]] if c != w]
+                        # evaluators need no assignment to act; producers do
+                        obj = ((assignments.get(w) or "")
+                               if _org_kind(w) in _ORG_EVALUATORS else own_objective(w))
+                        out.append((w, self._leaf_sys(names[w], w, names[sup[w]]),
+                                    self._leaf_instruction(session, w, names, sup,
+                                                           siblings, obj),
+                                    rnd, self._LEAF_ACTIONS.get(_org_kind(w), "implement")))
+                    return out
+
+                for group in (producers, evaluators):
+                    if not group:
+                        continue
+                    _run_turns_parallel(session, leaf_specs(group))
+                    for w in group:
                         session.emit("worker_status", round=rnd, worker=w, name=names[w],
                                      status="delivered", note="", by=sup[w])
 

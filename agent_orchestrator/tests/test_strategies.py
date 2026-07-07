@@ -350,6 +350,39 @@ class TestStrategies(unittest.TestCase):
         conductor_rounds = [t.round for t in s.transcript if t.role == "conductor"]
         self.assertEqual(max(conductor_rounds), 3)  # stopped at 3, not 2
 
+    def test_org_team_mixed_kinds_producers_before_evaluators(self):
+        """Reviewers/critics run AFTER the workers/researchers of their unit,
+        with kind-specific actions on the turn events."""
+        agents = {
+            "manager": _FixedAdapter(
+                "Boss",
+                "@worker_1: build it\n@researcher_1: research it\n"
+                "@reviewer_1: check quality\n@critic_1: find flaws\nVERDICT: CONTINUE"),
+            "worker_1": _FixedAdapter("W1", "built the thing"),
+            "researcher_1": _FixedAdapter("R1", "findings: ..."),
+            "reviewer_1": _FixedAdapter("Rev", "solid. APPROVE"),
+            "critic_1": _FixedAdapter("Cri", "risk: no tests"),
+        }
+        s = Session(id="mix", task="t", strategy="org_team", rounds=1, agents=agents)
+        s.role_order = list(agents)
+        s.supervisors = {k: "manager" for k in agents if k != "manager"}
+        get_strategy("org_team").run(s)
+        r1 = [t.role for t in s.transcript if t.round == 1 and t.role != "manager"]
+        # both producers precede both evaluators within the round
+        self.assertLess(max(r1.index("worker_1"), r1.index("researcher_1")),
+                        min(r1.index("reviewer_1"), r1.index("critic_1")))
+        actions = {e.data["role"]: e.data["action"] for e in s.bus.history
+                   if e.type == "turn_start" and e.data["round"] == 1}
+        self.assertEqual(actions["worker_1"], "implement")
+        self.assertEqual(actions["researcher_1"], "research")
+        self.assertEqual(actions["reviewer_1"], "review")
+        self.assertEqual(actions["critic_1"], "review")
+        delivered = {d["worker"] for d in
+                     (e.data for e in s.bus.history if e.type == "worker_status")
+                     if d["status"] == "delivered"}
+        self.assertEqual(delivered,
+                         {"worker_1", "researcher_1", "reviewer_1", "critic_1"})
+
     def test_org_team_rejects_bad_hierarchy(self):
         agents = {"a": _FixedAdapter("A", "x"), "b": _FixedAdapter("B", "y")}
         s = Session(id="bad", task="t", strategy="org_team", rounds=1, agents=agents)
@@ -463,6 +496,61 @@ class TestStrategies(unittest.TestCase):
         self.assertEqual(out, "Final answer using the file.")
         self.assertIn("SECRET-42", agent.prompts[1])         # result fed back
         self.assertIn("tool_use", [e.type for e in s.bus.history])
+
+    def test_write_file_tool_writes_and_records(self):
+        from agent_orchestrator.orchestrator.strategies import _run_turn
+
+        class Writer(AgentAdapter):
+            kind = "fixed"
+            def __init__(self):
+                super().__init__("w", display_name="w")
+                self.supports_history = False
+                self.calls = 0
+            def _generate(self, prompt, system, history):
+                self.calls += 1
+                if self.calls == 1:
+                    return '<TOOL name="write_file">pkg/mod.py\nVALUE = 42</TOOL>'
+                return "Wrote the module."
+
+        d = tempfile.mkdtemp()
+        agent = Writer()
+        s = Session(id="wf", task="t", strategy="custom", rounds=1,
+                    agents={"agent_1": agent}, workspace=d)
+        s.tools = ["write_file"]
+        out = _run_turn(s, "agent_1", "You are an agent.", "Do it.", 1)
+        self.assertEqual(out, "Wrote the module.")
+        with open(os.path.join(d, "pkg", "mod.py")) as fh:
+            self.assertEqual(fh.read(), "VALUE = 42\n")
+        edits = [e.data for e in s.bus.history if e.type == "workspace_edit"]
+        self.assertEqual(edits[0]["path"], "pkg/mod.py")
+        self.assertEqual(edits[0]["status"], "created")
+
+    def test_generic_strategy_absorbs_file_blocks(self):
+        """Any strategy with a workspace applies <FILE> blocks to disk; only a
+        file *listing* (not contents) is injected into the system prompt."""
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "already.py"), "w") as fh:
+            fh.write("x = 'long secret content that must not be injected'\n")
+        impl = _FixedAdapter("impl", '<FILE path="gen.py">\ny = 2\n</FILE> APPROVE')
+        rev = _FixedAdapter("rev", "APPROVE")
+        s = Session(id="gen", task="t", strategy="implementer_reviewer", rounds=1,
+                    agents={"implementer": impl, "reviewer": rev}, workspace=d)
+        get_strategy("implementer_reviewer").run(s)
+        self.assertTrue(os.path.isfile(os.path.join(d, "gen.py")))
+        self.assertIn("workspace_edit", [e.type for e in s.bus.history])
+
+    def test_workspace_system_lists_but_does_not_inline(self):
+        from agent_orchestrator.orchestrator.strategies import _workspace_system
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "big.py"), "w") as fh:
+            fh.write("SECRET_CONTENT = 1\n")
+        s = Session(id="ls", task="t", strategy="round_robin", rounds=1,
+                    agents={}, workspace=d)
+        block = _workspace_system(s)
+        self.assertIn("big.py", block)                 # listing present
+        self.assertNotIn("SECRET_CONTENT", block)      # contents stay out
+        s.strategy = "workspace_build"
+        self.assertEqual(_workspace_system(s), "")     # wsb has its own protocol
 
     def test_workspace_context_included_for_existing_files(self):
         d = tempfile.mkdtemp()

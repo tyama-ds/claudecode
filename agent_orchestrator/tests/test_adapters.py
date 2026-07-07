@@ -159,6 +159,116 @@ class TestLocalProxyToggle(unittest.TestCase):
         self.assertTrue(s.local_use_proxy)
 
 
+class TestWebTools(unittest.TestCase):
+    """http_get honors proxy + User-Agent; browser_get falls back gracefully."""
+
+    def test_http_get_uses_proxy_and_user_agent(self):
+        import urllib.request
+        from agent_orchestrator.config import get_settings
+        from agent_orchestrator.orchestrator import strategies
+
+        s = get_settings()
+        old_proxy, old_ua = s.proxy, s.user_agent
+        s.proxy = "http://proxy.test:3128"
+        s.user_agent = "TestAgent/9.9"
+        captured = {}
+
+        class FakeResp:
+            def read(self, n=-1): return b"<html>ok</html>"
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        class FakeOpener:
+            def __init__(self, handler=None): captured["proxy_handler"] = handler
+            def open(self, req, timeout=None):
+                captured["ua"] = req.get_header("User-agent")
+                return FakeResp()
+
+        orig = urllib.request.build_opener
+        urllib.request.build_opener = lambda *a: FakeOpener(*a)
+        try:
+            out = strategies._http_get("https://example.com")
+        finally:
+            urllib.request.build_opener = orig
+            s.proxy, s.user_agent = old_proxy, old_ua
+
+        self.assertIn("ok", out)
+        self.assertEqual(captured["ua"], "TestAgent/9.9")
+        self.assertIsNotNone(captured["proxy_handler"])  # proxy handler was installed
+
+    def test_browser_get_falls_back_to_http_without_a_browser(self):
+        """With neither Selenium nor Playwright importable, browser_get returns
+        a plain HTTP fetch flagged as un-rendered — never an error."""
+        import builtins
+        from agent_orchestrator.orchestrator import strategies
+
+        real_import = builtins.__import__
+
+        def no_browsers(name, *a, **k):
+            if name.startswith("selenium") or name.startswith("playwright"):
+                raise ImportError("not installed")
+            return real_import(name, *a, **k)
+
+        orig_http = strategies._http_get
+        builtins.__import__ = no_browsers
+        strategies._http_get = lambda url: "PLAINBODY"
+        try:
+            out = strategies._browser_get("https://example.com")
+        finally:
+            builtins.__import__ = real_import
+            strategies._http_get = orig_http
+
+        self.assertIn("JavaScript NOT", out)
+        self.assertIn("PLAINBODY", out)
+
+    def test_browser_get_falls_back_when_browser_launch_fails(self):
+        """Playwright importable but its browser binary missing/broken must
+        also fall back to plain HTTP (never a dead-end error)."""
+        import sys
+        import types
+        from agent_orchestrator.orchestrator import strategies
+
+        fake_api = types.ModuleType("playwright.sync_api")
+        def sync_playwright():
+            raise RuntimeError("Executable doesn't exist at .../chrome")
+        fake_api.sync_playwright = sync_playwright
+        fake_pkg = types.ModuleType("playwright")
+        fake_pkg.sync_api = fake_api
+
+        import builtins
+        real_import = builtins.__import__
+        def fake_imports(name, *a, **k):
+            if name.startswith("selenium"):
+                raise ImportError("not installed")
+            if name == "playwright.sync_api":
+                return fake_api  # `from X.Y import Z` expects the leaf module
+            if name == "playwright":
+                return fake_pkg
+            return real_import(name, *a, **k)
+
+        orig_http = strategies._http_get
+        saved = {n: sys.modules.get(n) for n in ("playwright", "playwright.sync_api")}
+        sys.modules["playwright"] = fake_pkg
+        sys.modules["playwright.sync_api"] = fake_api
+        builtins.__import__ = fake_imports
+        strategies._http_get = lambda url: "PLAINBODY"
+        try:
+            out = strategies._browser_get("https://example.com")
+        finally:
+            builtins.__import__ = real_import
+            strategies._http_get = orig_http
+            for n, m in saved.items():
+                if m is None:
+                    sys.modules.pop(n, None)
+                else:
+                    sys.modules[n] = m
+
+        self.assertIn("headless browser failed", out)
+        self.assertIn("Executable doesn't exist", out)
+        self.assertIn("JavaScript NOT", out)
+        self.assertIn("PLAINBODY", out)
+
+
 class TestCLIWorkspaceMode(unittest.TestCase):
     """CLI adapters gain native file-editing flags only inside a workspace."""
 
