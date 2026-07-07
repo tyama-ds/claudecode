@@ -59,7 +59,23 @@ export ANTHROPIC_API_KEY="your-anthropic-api-key"
 export LOCAL_LLM_BASE_URL="http://localhost:11434"  # Ollama
 # export LOCAL_LLM_BASE_URL="http://localhost:8000"  # vLLM
 export LOCAL_LLM_API_KEY=""  # 認証が必要な場合のみ
+
+# 社内APIゲートウェイ・OpenAI互換サーバー経由の場合（省略時は公式エンドポイント）
+export OPENAI_BASE_URL="https://gateway.example.com/v1"
+export ANTHROPIC_BASE_URL="https://gateway.example.com"
+
+# Selenium使用時、ドライバの自動ダウンロードができない環境（社内プロキシ等）では
+# 手動配置したWebDriver（msedgedriver / chromedriver / geckodriver）のパスを指定
+export SELENIUM_DRIVER_PATH="/usr/local/bin/chromedriver"
 ```
+
+いずれも `create_config()` の引数（`openai_base_url` / `anthropic_base_url` /
+`driver_path` など）やWeb UIの入力欄でも指定できます。
+
+> 📓 **使用例ノートブック**: `notebooks/` に Jupyter ノートブックを用意しています。
+> - `01_全機能ガイド.ipynb` — 全設定項目のリファレンス
+> - `02_典型的な使用例.ipynb` — クイックリサーチ / ビジネスレポート / 社内プロキシ環境 / ローカル文書 / 工程別LLM / フェルミ推定 / ローカルLLM の7例
+> - `03_WebUI利用ガイド.ipynb` — ブラウザGUIの起動・設定・REST API
 
 ---
 

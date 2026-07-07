@@ -35,6 +35,7 @@ class AnthropicClient(BaseLLMClient):
         http_proxy: Optional[str] = None,
         https_proxy: Optional[str] = None,
         verify_ssl: bool = True,
+        base_url: Optional[str] = None,
     ):
         """
         Initialize Anthropic client.
@@ -48,6 +49,9 @@ class AnthropicClient(BaseLLMClient):
             http_proxy: HTTP proxy URL (e.g., "http://proxy:8080")
             https_proxy: HTTPS proxy URL
             verify_ssl: Verify SSL certificates
+            base_url: Custom API endpoint URL (uses ANTHROPIC_BASE_URL env var
+                if not provided; None uses the official https://api.anthropic.com).
+                Use for corporate API gateways or compatible endpoints.
         """
         # Resolve model alias if provided
         resolved_model = self._resolve_model(model) if model else self.DEFAULT_MODEL
@@ -62,6 +66,7 @@ class AnthropicClient(BaseLLMClient):
         self._http_proxy = http_proxy
         self._https_proxy = https_proxy
         self._verify_ssl = verify_ssl
+        self._base_url = base_url or os.getenv("ANTHROPIC_BASE_URL")
         self._initialize_client()
 
     def _resolve_model(self, model: str) -> str:
@@ -86,13 +91,12 @@ class AnthropicClient(BaseLLMClient):
                 except ImportError:
                     print("Warning: httpx not installed, proxy settings ignored")
 
+            client_kwargs = {"api_key": self.api_key}
+            if self._base_url:
+                client_kwargs["base_url"] = self._base_url
             if http_client:
-                self._client = anthropic.Anthropic(
-                    api_key=self.api_key,
-                    http_client=http_client,
-                )
-            else:
-                self._client = anthropic.Anthropic(api_key=self.api_key)
+                client_kwargs["http_client"] = http_client
+            self._client = anthropic.Anthropic(**client_kwargs)
 
         except ImportError:
             raise ImportError(

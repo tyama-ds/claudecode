@@ -258,9 +258,11 @@ class DeepResearchTool:
             "verify_ssl": self.config.proxy.verify_ssl,
         }
 
+        # Custom endpoint (corporate gateway / local server); None = official
+        kwargs["base_url"] = self.config.api.get_active_base_url()
+
         # Add local LLM specific settings
         if self.config.api.provider == LLMProvider.LOCAL:
-            kwargs["base_url"] = self.config.api.local_base_url
             kwargs["backend"] = self.config.api.local_backend.value
 
         return get_client(**kwargs)
@@ -288,9 +290,12 @@ class DeepResearchTool:
                 "http_proxy": self.config.proxy.http_proxy,
                 "https_proxy": self.config.proxy.https_proxy,
                 "verify_ssl": self.config.proxy.verify_ssl,
+                "base_url": spec.get(
+                    "base_url",
+                    self.config.api.get_base_url_for(provider),
+                ),
             }
             if provider == "local":
-                kwargs["base_url"] = spec.get("base_url", self.config.api.local_base_url)
                 kwargs["backend"] = spec.get(
                     "backend",
                     self.config.api.local_backend.value,
@@ -318,6 +323,7 @@ class DeepResearchTool:
             kwargs["headless"] = self.config.search.headless
             kwargs["browser"] = self.config.search.browser
             kwargs["implicit_wait"] = self.config.search.implicit_wait
+            kwargs["driver_path"] = self.config.search.driver_path
         elif self.config.search.method == SearchMethod.DUCKDUCKGO:
             kwargs["region"] = self.config.search.region
             kwargs["safe_search"] = self.config.search.safe_search
@@ -368,6 +374,7 @@ class DeepResearchTool:
         additional_context: str = "",
         additional_documents: List[str] = None,
         progress_callback: Callable[[str, float], None] = None,
+        plan_review_callback: Callable = None,
     ) -> Dict[str, Any]:
         """
         Run the complete research workflow.
@@ -379,6 +386,11 @@ class DeepResearchTool:
             additional_documents: List of paths to additional documents
             progress_callback: Callback function for progress updates
                               (message: str, percentage: float)
+            plan_review_callback: Optional callback(plan, revise_fn) invoked
+                after the research plan is generated, before research starts.
+                When None and config.research.plan_review is True, a console
+                prompt with a timeout (config.research.plan_review_timeout)
+                is used in interactive sessions
 
         Returns:
             Dictionary containing:
@@ -417,6 +429,15 @@ class DeepResearchTool:
         # Initialize researcher with content filter
         content_filter = self._create_content_filter()
 
+        # Plan review: explicit callback wins; otherwise use the console
+        # prompt (with auto-continue timeout) when enabled in config
+        if plan_review_callback is None and self.config.research.plan_review:
+            from .utils.plan_review import make_console_plan_review_callback
+            plan_review_callback = make_console_plan_review_callback(
+                timeout=self.config.research.plan_review_timeout,
+                language=self.config.research.language,
+            )
+
         self.researcher = Researcher(
             llm_client=self.llm_client,
             search_client=self.search_client,
@@ -448,6 +469,7 @@ class DeepResearchTool:
             selenium_browser=self.config.search.browser,
             selenium_proxies=self.config.proxy.get_proxies_dict(),
             selenium_verify_ssl=self.config.proxy.verify_ssl,
+            selenium_driver_path=self.config.search.driver_path,
             importance_threshold=self.config.research.importance_threshold,
             min_high_importance_sources=self.config.research.min_high_importance_sources,
             max_gap_fill_rounds=self.config.research.max_gap_fill_rounds,
@@ -460,6 +482,7 @@ class DeepResearchTool:
             max_content_length=self.config.research.max_content_length,
             target_pages=self.config.report.target_pages,
             target_characters=self.config.report.target_characters,
+            plan_review_callback=plan_review_callback,
         )
 
         # Conduct research

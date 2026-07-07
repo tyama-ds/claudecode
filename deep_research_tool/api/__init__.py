@@ -40,7 +40,9 @@ def get_client(
         http_proxy: HTTP proxy URL
         https_proxy: HTTPS proxy URL
         verify_ssl: Verify SSL certificates
-        base_url: Base URL for local LLM server (only for provider='local')
+        base_url: Custom API endpoint URL. For provider='local' this is the
+            local LLM server URL; for 'openai'/'anthropic' it overrides the
+            official endpoint (corporate gateways, OpenAI-compatible APIs)
         backend: Backend type for local LLM ('ollama', 'vllm', 'openai_compatible')
 
     Returns:
@@ -54,6 +56,7 @@ def get_client(
             http_proxy=http_proxy,
             https_proxy=https_proxy,
             verify_ssl=verify_ssl,
+            base_url=base_url,
         )
     elif provider.lower() == "anthropic":
         return AnthropicClient(
@@ -63,6 +66,7 @@ def get_client(
             http_proxy=http_proxy,
             https_proxy=https_proxy,
             verify_ssl=verify_ssl,
+            base_url=base_url,
         )
     elif provider.lower() == "local":
         return LocalLLMClient(
