@@ -1060,6 +1060,16 @@ class Researcher:
             if iteration >= self.min_iterations and len(section_content_parts) >= 2:
                 break
 
+            # Early exit: once a section already has plenty of sources there is
+            # little value in spending more iterations (each one costs extra
+            # searches + per-page LLM extractions). This keeps standard-mode
+            # sections from running far longer than necessary.
+            enough = max(4, self.max_pages_per_query * 2)
+            if len(section_content_parts) >= enough:
+                print(f"[Search] Section {section.section}: {len(section_content_parts)} "
+                      f"sources gathered (>= {enough}); ending research early")
+                break
+
         # IMMEDIATE CONTENT GENERATION after research for this section
         print(f"[DEBUG] Section {section.section} research complete. Parts: {len(section_content_parts)}")
         self._generate_and_save_section_content(section, section_content_parts)

@@ -447,6 +447,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
 def run_server(host: str = "127.0.0.1", port: int = 8765,
                output_dir: str = "./output") -> None:
     """Start the Web UI server (blocking)."""
+    from ..utils.helpers import ensure_utf8_output
+    ensure_utf8_output()  # avoid cp932 print crashes on Windows
     server = ThreadingHTTPServer((host, port), WebUIHandler)
     server.job_manager = JobManager()
     server.output_dir = output_dir

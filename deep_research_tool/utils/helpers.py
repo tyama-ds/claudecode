@@ -122,6 +122,37 @@ class ResearchWarnings:
         return self.get_all()
 
 
+_utf8_output_configured = False
+
+
+def ensure_utf8_output() -> None:
+    """Make stdout/stderr tolerate non-cp932 characters on Windows.
+
+    On Japanese Windows the console encoding defaults to cp932, which cannot
+    encode characters such as en dash (U+2013), em dash, or smart quotes that
+    routinely appear in fetched web content and LLM output. A bare print() of
+    such text then raises UnicodeEncodeError and can abort a run. Reconfigure
+    the streams to UTF-8 with errors="replace" so printing never crashes;
+    unencodable characters degrade to a replacement char instead. Idempotent
+    and safe on non-Windows / already-UTF-8 environments.
+    """
+    global _utf8_output_configured
+    if _utf8_output_configured:
+        return
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            # Redirected/!TextIOWrapper streams may not support reconfigure;
+            # never let output setup itself raise.
+            pass
+    _utf8_output_configured = True
+
+
 def setup_logging(
     level: str = "INFO",
     log_file: Optional[Path] = None,

@@ -859,6 +859,8 @@ def webui(host: str, port: int, output_dir: str):
 
 def main():
     """Main entry point."""
+    from .utils.helpers import ensure_utf8_output
+    ensure_utf8_output()
     cli()
 
 

@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable
 
-from .utils.helpers import ResearchWarnings
+from .utils.helpers import ResearchWarnings, ensure_utf8_output
 from .config import Config, LLMProvider, SearchMethod, ReportFormat, ReportGeneratorVersion
 from .api import get_client
 from .api.base import get_token_stats, reset_token_stats
@@ -176,6 +176,9 @@ class DeepResearchTool:
             config: Configuration object. If not provided, uses defaults
                    with environment variables for API keys.
         """
+        # Keep console output from crashing on non-cp932 characters (Windows)
+        ensure_utf8_output()
+
         self.config = config or Config()
         self._validate_config()
         self._setup_logging()
