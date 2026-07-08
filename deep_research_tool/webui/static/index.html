@@ -322,7 +322,17 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
         <input type="password" id="api_key" placeholder="sk-... / sk-ant-...">
         <label>APIエンドポイント（空欄=公式API / 環境変数を使用）</label>
         <input type="text" id="base_url" placeholder="https://gateway.example.com/v1 （社内ゲートウェイ・互換API・Ollama等）">
-        <p class="hint">社内APIゲートウェイやOpenAI互換サーバー経由で利用する場合に指定します。ローカルLLMの場合はサーバーURL（例: http://localhost:11434）を入力してください。</p>
+        <p class="hint">社内APIゲートウェイやOpenAI互換サーバー経由で利用する場合に指定します。ローカルLLMの場合はサーバーURL（例: http://localhost:11434 や http://192.168.x.x/v1）を入力してください。</p>
+
+        <div id="localBackendRow" style="display:none">
+          <label>ローカルLLMのバックエンド（プロバイダー=ローカルLLM時）</label>
+          <select id="local_backend">
+            <option value="ollama">Ollama（/api/chat）</option>
+            <option value="openai_compatible">OpenAI互換（/v1/chat/completions） vLLM / LM Studio 等</option>
+            <option value="vllm">vLLM</option>
+          </select>
+          <p class="hint">エンドポイントに <code>/v1</code> を含めた場合は自動的にOpenAI互換として扱われます。<code>/v1</code> を付けない互換サーバー（vLLM等）を使う場合はここで「OpenAI互換」を選んでください。</p>
+        </div>
 
         <label style="margin-top:16px">工程別のAI切り替え（空欄=既定を使用）</label>
         <div class="stage-row"><span class="name">計画</span>
@@ -397,6 +407,13 @@ const $ = (id) => document.getElementById(id);
 let polling = null;
 let logLength = 0;
 
+// show the local-LLM backend selector only when provider = local
+function syncLocalBackendRow() {
+  $('localBackendRow').style.display = $('provider').value === 'local' ? 'block' : 'none';
+}
+$('provider').addEventListener('change', syncLocalBackendRow);
+syncLocalBackendRow();
+
 // mode card selection highlight (per radio group)
 document.querySelectorAll('.mode-card input').forEach(input => {
   input.addEventListener('change', () => {
@@ -448,6 +465,7 @@ function collectParams() {
     else if (provider === 'anthropic') params.anthropic_base_url = baseUrl;
     else if (provider === 'local') params.local_base_url = baseUrl;
   }
+  if (provider === 'local') params.local_backend = $('local_backend').value;
   const docsText = $('local_documents').value.trim();
   if (docsText && params.source_mode !== 'web') {
     params.local_documents = docsText.split('\n').map(s => s.trim()).filter(Boolean);

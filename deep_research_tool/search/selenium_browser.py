@@ -112,6 +112,25 @@ class SeleniumBrowser(BaseSearchClient):
                   f"local WebDriver executable.")
             return None
 
+    @staticmethod
+    def _apply_anti_automation_options(options) -> None:
+        """Best-effort anti-automation flags for Chromium (Chrome/Edge).
+
+        These experimental options are cosmetic (hide the "automation"
+        banner) but on some Selenium / Edge / Chrome version combinations
+        they raise InvalidArgumentException and abort the whole launch.
+        Applying them best-effort keeps the browser starting no matter what.
+        """
+        for key, value in (
+            ("excludeSwitches", ["enable-automation"]),
+            ("useAutomationExtension", False),
+        ):
+            try:
+                options.add_experimental_option(key, value)
+            except Exception as e:
+                print(f"[SeleniumBrowser] skipping experimental option "
+                      f"{key!r} ({e})")
+
     def _create_driver(self):
         """Create a new Selenium WebDriver."""
         try:
@@ -150,9 +169,8 @@ class SeleniumBrowser(BaseSearchClient):
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
 
-        # Disable automation flags
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option("useAutomationExtension", False)
+        # Disable automation flags (best-effort; never abort launch)
+        self._apply_anti_automation_options(options)
 
         # Proxy / SSL settings
         for arg in self._chromium_proxy_args():
@@ -193,9 +211,8 @@ class SeleniumBrowser(BaseSearchClient):
             "Safari/537.36 Edg/120.0.0.0"
         )
 
-        # Disable automation flags
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option("useAutomationExtension", False)
+        # Disable automation flags (best-effort; never abort launch)
+        self._apply_anti_automation_options(options)
 
         # Proxy / SSL settings
         for arg in self._chromium_proxy_args():

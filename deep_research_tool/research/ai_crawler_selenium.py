@@ -7,10 +7,12 @@ seeding still goes through the regular search client; only page fetching
 uses the browser.
 """
 
-from typing import Optional
+from typing import Callable, List, Optional
 
 from ..evidence.content_filter import ContentFilter
+from ..utils.helpers import ResearchWarnings
 from .ai_crawler import AICrawler
+from .fast_crawler import CrawlResult
 
 
 class AICrawlerSelenium(AICrawler):
@@ -107,6 +109,67 @@ class AICrawlerSelenium(AICrawler):
                 driver_path=self._driver_path,
             )
         return self._selenium_client
+
+    def _start_browser(self) -> Optional[str]:
+        """Eagerly launch the browser so failures surface once and clearly.
+
+        Returns None on success, or an error message string on failure.
+        Without this, a browser that never launches would make every page
+        fetch fail silently and the crawl would just return zero pages.
+        """
+        try:
+            self._get_selenium_client()._get_driver()
+            return None
+        except Exception as e:
+            return f"{type(e).__name__}: {e}"
+
+    def crawl_and_evaluate(
+        self,
+        queries: List[str],
+        section_context: str,
+        research_topic: str = "",
+        max_pages_per_query: int = 3,
+        min_relevance_score: float = 0.2,
+        progress_callback: Callable[[str, int, int], None] = None,
+    ) -> CrawlResult:
+        """Validate the browser can launch, then run the normal AI crawl.
+
+        If the browser cannot start (missing/mismatched WebDriver, blocked
+        auto-download behind a proxy, etc.) a CRITICAL ResearchWarning with
+        actionable guidance is recorded and an empty result is returned,
+        instead of silently producing no pages.
+        """
+        err = self._start_browser()
+        if err is not None:
+            hint = (
+                f"Selenium browser ({self._browser}) failed to launch, so the "
+                f"'ai_crawl_selenium' crawl collected nothing. Set the WebDriver "
+                f"path (driver_path / SELENIUM_DRIVER_PATH) to a local "
+                f"{self._browser} driver matching the installed browser version, "
+                f"or switch crawl_mode to 'aicrawl' (no browser required). "
+                f"Underlying error: {err}"
+            )
+            print(f"[AICrawlerSelenium] {hint}")
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.CRITICAL, "AICrawlerSelenium", hint,
+            )
+            return CrawlResult(
+                pages=[],
+                total_fetch_time=0.0,
+                total_eval_time=0.0,
+                pages_fetched=0,
+                pages_filtered=0,
+                pages_evaluated=0,
+                errors=[hint],
+            )
+        return super().crawl_and_evaluate(
+            queries=queries,
+            section_context=section_context,
+            research_topic=research_topic,
+            max_pages_per_query=max_pages_per_query,
+            min_relevance_score=min_relevance_score,
+            progress_callback=progress_callback,
+        )
 
     def _fetch_page(self, url: str):
         """Fetch a page with the Selenium browser (JS-rendered content)."""
