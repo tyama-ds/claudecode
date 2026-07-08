@@ -139,17 +139,33 @@ def ensure_utf8_output() -> None:
     global _utf8_output_configured
     if _utf8_output_configured:
         return
+    import io
     for stream_name in ("stdout", "stderr"):
         stream = getattr(sys, stream_name, None)
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
+        if stream is None:
             continue
-        try:
-            reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            # Redirected/!TextIOWrapper streams may not support reconfigure;
-            # never let output setup itself raise.
-            pass
+        # Preferred: reconfigure the existing stream in place (keeps its
+        # identity, so handlers/loggers already bound to it are covered).
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+                continue
+            except Exception:
+                pass  # fall through to the buffer-wrap fallback
+        # Fallback: wrap the raw byte buffer in a UTF-8 text writer that
+        # replaces unencodable characters, and swap it in. Covers Pythons /
+        # streams where reconfigure is unavailable or refused.
+        buffer = getattr(stream, "buffer", None)
+        if buffer is not None:
+            try:
+                setattr(sys, stream_name, io.TextIOWrapper(
+                    buffer, encoding="utf-8", errors="replace",
+                    line_buffering=True,
+                ))
+            except Exception:
+                # Never let output hardening itself raise.
+                pass
     _utf8_output_configured = True
 
 
