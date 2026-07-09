@@ -53,3 +53,9 @@ pipeline_output/
 
 # J-Quants API取得データ(利用規約により再配布不可)
 stock-tracker/research/jquants_data.json
+
+# 自動売買バックエンドの実行時ファイル(秘密設定・状態・ログ・キルスイッチ)
+stock-tracker/trading/config.json
+stock-tracker/trading/state.json
+stock-tracker/trading/HALT
+stock-tracker/trading/logs/

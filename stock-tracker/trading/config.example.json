@@ -1,0 +1,18 @@
+{
+  "broker": "mock",
+  "env": "verification",
+  "dryRun": true,
+  "pollSeconds": 60,
+  "strategy": "maCross",
+  "params": { "short": 25, "long": 75 },
+  "symbols": [
+    { "code": "7203", "exchange": 1, "qty": 100, "accountType": 4 },
+    { "code": "8306", "exchange": 1, "qty": 100, "accountType": 4 }
+  ],
+  "risk": {
+    "maxPositionValueYen": 500000,
+    "maxOrderQty": 100,
+    "maxOrdersPerDay": 10,
+    "maxDailyLossYen": 30000
+  }
+}
