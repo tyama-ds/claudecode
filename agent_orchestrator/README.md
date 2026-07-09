@@ -235,6 +235,12 @@ Local-LLM calls **connect directly by default** (the endpoint is usually on
 localhost). If you need them routed through the proxy too, tick **Send via
 proxy** under *Local LLM* in Settings (or set `LOCAL_LLM_USE_PROXY=1`).
 
+Local servers often serve only a few parallel generations well, so *Local LLM*
+also has a **Max parallel requests** setting (`LOCAL_LLM_MAX_CONCURRENCY`,
+0 = unlimited): parallel team phases — workers, reviewers, whole org levels —
+are throttled to at most that many in-flight local-LLM calls, while other
+backends keep full parallelism.
+
 ## Headless usage
 
 ```bash

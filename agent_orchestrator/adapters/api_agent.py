@@ -17,6 +17,7 @@ the UI Settings tab take effect immediately.
 from __future__ import annotations
 
 import json
+import threading
 import urllib.error
 import urllib.request
 from typing import List, Optional
@@ -25,6 +26,30 @@ from ..config import get_settings
 from .base import AgentAdapter, Message
 
 _API_TIMEOUT = 300  # seconds
+
+# Throttle for the local LLM: at most ``local_max_concurrency`` requests
+# in flight at once across ALL roles/threads (0 = unlimited). Local servers
+# (Ollama / LM Studio) often degrade badly beyond a few parallel generations.
+_LOCAL_SEM_LOCK = threading.Lock()
+_local_sem: Optional[threading.BoundedSemaphore] = None
+_local_sem_limit: Optional[int] = None
+
+
+def _local_semaphore() -> Optional[threading.BoundedSemaphore]:
+    """The shared local-LLM semaphore for the current configured limit.
+
+    Rebuilt when the limit changes (between runs, in practice); returns ``None``
+    when unlimited.
+    """
+    global _local_sem, _local_sem_limit
+    limit = get_settings().local_max_concurrency
+    if limit <= 0:
+        return None
+    with _LOCAL_SEM_LOCK:
+        if _local_sem is None or _local_sem_limit != limit:
+            _local_sem = threading.BoundedSemaphore(limit)
+            _local_sem_limit = limit
+        return _local_sem
 
 
 class ApiHTTPError(RuntimeError):
@@ -153,6 +178,14 @@ class OpenAIAPIAdapter(AgentAdapter):
         return True, ""
 
     def _generate(self, prompt: str, system: Optional[str], history: List[Message]) -> str:
+        if self.local:
+            sem = _local_semaphore()
+            if sem is not None:
+                with sem:  # cap concurrent local-LLM generations
+                    return self._generate_impl(prompt, system, history)
+        return self._generate_impl(prompt, system, history)
+
+    def _generate_impl(self, prompt: str, system: Optional[str], history: List[Message]) -> str:
         settings = get_settings()
         base = settings.local_base_url if self.local else settings.openai_base_url
         url = base.rstrip("/") + "/chat/completions"

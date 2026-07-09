@@ -78,6 +78,10 @@ class Settings:
     # Whether local-LLM calls go through the proxy too. Local endpoints are
     # usually on localhost, so they default to a direct connection.
     local_use_proxy: bool = False
+    # Max simultaneous requests to the local LLM (0 = unlimited). Local servers
+    # (Ollama/LM Studio) often serve only a few parallel generations well, so
+    # parallel team phases are throttled to this many in-flight calls.
+    local_max_concurrency: int = 0
 
     # User-Agent sent by the http_get / browser_get agent tools.
     user_agent: str = (
@@ -113,6 +117,7 @@ class Settings:
             proxy=proxy,
             local_use_proxy=os.environ.get("LOCAL_LLM_USE_PROXY", "").strip().lower()
             in ("1", "true", "yes", "on"),
+            local_max_concurrency=int(os.environ.get("LOCAL_LLM_MAX_CONCURRENCY", "0") or 0),
             max_tokens=int(os.environ.get("ORCHESTRATOR_MAX_TOKENS", "4096")),
             cli_timeout=int(os.environ.get("ORCHESTRATOR_CLI_TIMEOUT", "600")),
             user_agent=os.environ.get("ORCHESTRATOR_USER_AGENT") or cls.user_agent,
@@ -139,6 +144,12 @@ class Settings:
             self.proxy = p or None
         if "local_use_proxy" in data:
             self.local_use_proxy = bool(data.get("local_use_proxy"))
+        if "local_max_concurrency" in data:
+            try:
+                self.local_max_concurrency = max(
+                    0, min(int(data.get("local_max_concurrency") or 0), 16))
+            except (TypeError, ValueError):
+                pass
         ua = data.get("user_agent")
         if ua and ua.strip():
             self.user_agent = ua.strip()
