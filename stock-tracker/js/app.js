@@ -84,6 +84,7 @@
     renderNews();
     renderAnalysis();
     if ($("#panel-factor").classList.contains("active")) renderFactor();
+    if ($("#panel-strategy").classList.contains("active")) renderStrategy();
   }
 
   function renderHeader() {
@@ -340,6 +341,183 @@
       tr.addEventListener("click", () => selectSymbol(tr.dataset.code)));
   }
 
+  /* ---------- 戦略・売買シグナル ---------- */
+  const stratState = { key: "maCross", params: {} };
+
+  function initStrategy() {
+    const sel = $("#stratSelect");
+    sel.innerHTML = Object.entries(Strategy.STRATEGIES)
+      .map(([k, s]) => `<option value="${k}">${s.label}</option>`).join("");
+    sel.value = stratState.key;
+    sel.addEventListener("change", e => { stratState.key = e.target.value; stratState.params = {}; renderStratParams(); renderStrategy(); });
+    renderStratParams();
+    $("#paperExec").addEventListener("click", paperExecute);
+    $("#paperReset").addEventListener("click", () => {
+      if (confirm("この銘柄のペーパー口座をリセットしますか?")) { Paper.reset(state.code); renderStrategy(); }
+    });
+  }
+
+  function renderStratParams() {
+    const strat = Strategy.STRATEGIES[stratState.key];
+    $("#stratDesc").textContent = strat.desc;
+    $("#stratParams").innerHTML = strat.params.map(p => {
+      const val = stratState.params[p.key] ?? p.default;
+      return `<label class="strat-param">${p.label}
+        <input type="number" data-pkey="${p.key}" value="${val}" min="${p.min}" max="${p.max}">
+      </label>`;
+    }).join("");
+    document.querySelectorAll("#stratParams input").forEach(inp =>
+      inp.addEventListener("change", e => {
+        stratState.params[e.target.dataset.pkey] = Number(e.target.value);
+        renderStrategy();
+      }));
+  }
+
+  function renderStrategy() {
+    const s = STOCK_DATA.symbols[state.code];
+    const prices = s.prices;
+    const signals = Strategy.generateSignals(prices, stratState.key, stratState.params);
+    const cur = Strategy.currentSignal(signals);
+    const last = prices[prices.length - 1];
+
+    /* 現在のシグナル */
+    renderSignalBox(s, signals, cur, last);
+
+    /* バックテスト */
+    const bt = Backtest.run(signals, { initialCash: Paper.INITIAL_CASH });
+    renderBacktest(s, bt);
+
+    /* ペーパートレード */
+    renderPaper(s, last, cur, signals);
+  }
+
+  function renderSignalBox(s, signals, cur, last) {
+    // 直近バーのシグナル(当日の新規シグナル)と、最後に出たシグナル
+    const todaySig = signals[signals.length - 1].signal;
+    const ind = signals[signals.length - 1].indicators || {};
+    let indText = "";
+    if (ind.short != null) indText = `短期MA ${Math.round(ind.short).toLocaleString()} / 長期MA ${Math.round(ind.long).toLocaleString()}`;
+    else if (ind.rsi != null) indText = `RSI ${ind.rsi.toFixed(1)}`;
+
+    let verdict, icon, cls, detail;
+    if (todaySig === "buy") { verdict = "買いシグナル"; icon = "🟢"; cls = "buy"; detail = "最新データで買いシグナルが点灯しました。"; }
+    else if (todaySig === "sell") { verdict = "売りシグナル"; icon = "🔴"; cls = "sell"; detail = "最新データで売りシグナルが点灯しました。"; }
+    else if (cur && cur.signal === "buy") { verdict = "買い継続(ホールド)"; icon = "🔵"; cls = "hold"; detail = `直近の買いシグナル(${StockChart.fmtDate(cur.date)})以降、保有継続のゾーンです。`; }
+    else if (cur && cur.signal === "sell") { verdict = "様子見(ノーポジション)"; icon = "⚪"; cls = "hold"; detail = `直近の売りシグナル(${StockChart.fmtDate(cur.date)})以降、待機のゾーンです。`; }
+    else { verdict = "シグナルなし"; icon = "⚪"; cls = "hold"; detail = "まだ売買シグナルが発生していません。"; }
+
+    $("#signalBox").innerHTML = `
+      <div class="signal-verdict ${cls}">${icon} ${verdict}</div>
+      <p class="signal-detail">${detail}</p>
+      <div class="signal-meta">
+        <span>銘柄: <b>${s.name}</b></span>
+        <span>最新終値: <b>${StockChart.fmtNum(last.close, s.currency)}</b>(${StockChart.fmtDate(last.date)})</span>
+        ${indText ? `<span>指標: <b>${indText}</b></span>` : ""}
+      </div>`;
+  }
+
+  function renderBacktest(s, bt) {
+    if (!bt) { $("#backtestTiles").innerHTML = "<p style='color:var(--ink-muted)'>データ不足</p>"; return; }
+    const m = bt.metrics;
+    const pct = v => (v == null ? "—" : (v >= 0 ? "+" : "") + (v * 100).toFixed(1) + "%");
+    const tiles = [];
+    const beatBH = m.totalReturn > m.buyHold;
+    addTile(tiles, "戦略リターン", pct(m.totalReturn), "", "初期資金比", m.totalReturn >= 0 ? "good" : "bad");
+    addTile(tiles, "買い持ち比較", pct(m.buyHold), "", "同期間の単純保有", "");
+    addTile(tiles, "対買い持ち", (beatBH ? "勝ち " : "負け ") + pct(m.totalReturn - m.buyHold), "", "超過リターン", beatBH ? "good" : "bad");
+    addTile(tiles, "最大ドローダウン", pct(m.maxDrawdown), "", "最大の下落幅", "bad");
+    addTile(tiles, "勝率", m.winRate == null ? "—" : (m.winRate * 100).toFixed(0) + "%", "", `${m.numTrades}回の決済`, m.winRate != null && m.winRate >= 0.5 ? "good" : "");
+    addTile(tiles, "シャープレシオ", m.sharpe == null ? "—" : m.sharpe.toFixed(2), "", "リスク調整後(年率)", m.sharpe != null && m.sharpe >= 1 ? "good" : "");
+    $("#backtestTiles").innerHTML = tiles.join("");
+
+    /* 資産推移(戦略 vs 買い持ち、初期資金=100に正規化) */
+    const base = m.initialCash;
+    const first = bt.equity[0].value;
+    const stratIdx = bt.equity.map(e => (e.value / base) * 100);
+    const firstClose = s.prices[s.prices.length - bt.equity.length].close;
+    const bhIdx = bt.equity.map((e, i) => {
+      const price = s.prices[s.prices.length - bt.equity.length + i].close;
+      return (price / firstClose) * 100;
+    });
+    StockChart.renderMiniLines($("#equityChart"), bt.equity.map(e => e.date), [
+      { label: "戦略", cssVar: "--series-1", values: stratIdx },
+      { label: "買い持ち", cssVar: "--series-3", values: bhIdx },
+    ], { fmt: v => v.toFixed(0) });
+    $("#equityLegend").innerHTML =
+      `<span class="legend-item"><span class="legend-swatch" style="background:var(--series-1)"></span>戦略(初期100)</span>` +
+      `<span class="legend-item"><span class="legend-swatch" style="background:var(--series-3)"></span>買い持ち(初期100)</span>`;
+
+    /* 売買履歴 */
+    const rows = bt.trades.slice().reverse();
+    let html = `<table class="rank-table"><thead><tr><th>建玉</th><th>手仕舞い</th><th>損益率</th></tr></thead><tbody>`;
+    if (bt.openTrade) {
+      html += `<tr><td>${StockChart.fmtDate(bt.openTrade.entryDate)}<span class="rank-code">建玉中</span></td><td>—(時価)</td><td class="${bt.openTrade.return >= 0 ? "pl-up" : "pl-down"}">${pct(bt.openTrade.return)}</td></tr>`;
+    }
+    html += rows.map(t =>
+      `<tr><td>${StockChart.fmtDate(t.entryDate)}</td><td>${StockChart.fmtDate(t.exitDate)}</td><td class="${t.return >= 0 ? "pl-up" : "pl-down"}">${pct(t.return)}</td></tr>`
+    ).join("");
+    if (!rows.length && !bt.openTrade) html += `<tr><td colspan="3" style="color:var(--ink-muted)">この期間に売買はありませんでした</td></tr>`;
+    html += "</tbody></table>";
+    $("#tradeTable").innerHTML = html;
+  }
+
+  function renderPaper(s, last, cur, signals) {
+    const sum = Paper.summary(state.code, last.close);
+    const yen = v => "¥" + Math.round(v).toLocaleString();
+    const pct = v => (v >= 0 ? "+" : "") + (v * 100).toFixed(2) + "%";
+    const todaySig = signals[signals.length - 1].signal;
+
+    $("#paperBox").innerHTML = `
+      <div class="paper-value ${sum.totalReturn >= 0 ? "up" : "down"}">
+        <span class="pv-label">総資産</span>
+        <span class="pv-num">${yen(sum.totalValue)}</span>
+        <span class="pv-ret">${pct(sum.totalReturn)}</span>
+      </div>
+      <div class="paper-rows">
+        <div><span>現金</span><b>${yen(sum.cash)}</b></div>
+        <div><span>建玉</span><b>${sum.shares > 0 ? Math.round(sum.shares).toLocaleString() + "株 @ " + StockChart.fmtNum(sum.avgPrice, s.currency) : "なし"}</b></div>
+        <div><span>評価損益(含み)</span><b class="${sum.unrealizedPnL >= 0 ? "pl-up" : "pl-down"}">${sum.shares > 0 ? yen(sum.unrealizedPnL) : "—"}</b></div>
+        <div><span>実現損益</span><b class="${sum.realizedPnL >= 0 ? "pl-up" : "pl-down"}">${yen(sum.realizedPnL)}</b></div>
+      </div>`;
+
+    // 執行ボタンの状態(全額イン/アウトモデル)
+    const btn = $("#paperExec");
+    let canExec = false, btnLabel = "現在のシグナルで執行";
+    if (todaySig === "buy" && sum.shares === 0) { canExec = true; btnLabel = `🟢 買い執行(${yen(sum.cash)}分)`; }
+    else if (todaySig === "sell" && sum.shares > 0) { canExec = true; btnLabel = "🔴 売り執行(全株)"; }
+    else if (sum.shares === 0 && cur && cur.signal === "buy") { canExec = true; btnLabel = "🟢 直近買いシグナルで新規建玉"; }
+    else if (sum.shares > 0 && cur && cur.signal === "sell") { canExec = true; btnLabel = "🔴 直近売りシグナルで手仕舞い"; }
+    else btnLabel = sum.shares > 0 ? "売りシグナル待ち(保有中)" : "買いシグナル待ち";
+    btn.textContent = btnLabel;
+    btn.disabled = !canExec;
+
+    // ログ
+    $("#paperLog").innerHTML = sum.log.length
+      ? `<table class="rank-table"><thead><tr><th>日付</th><th>売買</th><th>価格</th><th>株数</th><th>損益</th></tr></thead><tbody>` +
+        sum.log.map(l => `<tr><td>${StockChart.fmtDate(l.date)}</td><td>${l.action}</td><td>${StockChart.fmtNum(l.price, s.currency)}</td><td>${l.shares.toLocaleString()}</td><td class="${l.pnl == null ? "" : l.pnl >= 0 ? "pl-up" : "pl-down"}">${l.pnl == null ? "—" : yen(l.pnl)}</td></tr>`).join("") +
+        `</tbody></table>`
+      : `<p style="color:var(--ink-muted);font-size:.78rem">まだ取引履歴はありません。シグナルが出たら「執行」で仮想売買を記録できます。</p>`;
+  }
+
+  function paperExecute() {
+    const s = STOCK_DATA.symbols[state.code];
+    const last = s.prices[s.prices.length - 1];
+    const signals = Strategy.generateSignals(s.prices, stratState.key, stratState.params);
+    const cur = Strategy.currentSignal(signals);
+    const todaySig = signals[signals.length - 1].signal;
+    const sum = Paper.summary(state.code, last.close);
+
+    let action = null;
+    if ((todaySig === "buy" || (cur && cur.signal === "buy")) && sum.shares === 0) action = "buy";
+    else if ((todaySig === "sell" || (cur && cur.signal === "sell")) && sum.shares > 0) action = "sell";
+    if (!action) return;
+
+    const res = Paper.execute(state.code, action, last.close, last.date,
+      `${Strategy.STRATEGIES[stratState.key].label}`);
+    if (res.error) { alert(res.error); return; }
+    renderStrategy();
+  }
+
   /* ---------- タブ ---------- */
   function initTabs() {
     document.querySelectorAll(".tab").forEach(tab => {
@@ -350,6 +528,7 @@
         $("#panel-" + tab.dataset.tab).classList.add("active");
         if (tab.dataset.tab === "market") renderMarket();
         if (tab.dataset.tab === "factor") renderFactor();
+        if (tab.dataset.tab === "strategy") renderStrategy();
       });
     });
     document.querySelectorAll("#marketFilter .chip").forEach(chip => {
@@ -462,6 +641,7 @@
   initTheme();
   initTabs();
   initFactor();
+  initStrategy();
   initChartControls();
   initQA();
   initMisc();

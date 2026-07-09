@@ -80,6 +80,7 @@
       <button class="tab active" data-tab="news" role="tab">📰 ニュース・イベント</button>
       <button class="tab" data-tab="analysis" role="tab">📊 財務分析</button>
       <button class="tab" data-tab="factor" role="tab">🧮 ファクター分析</button>
+      <button class="tab" data-tab="strategy" role="tab">📈 戦略・売買シグナル</button>
       <button class="tab" data-tab="market" role="tab">🌐 市場全体の動き</button>
     </nav>
 
@@ -154,6 +155,53 @@
       <p class="disclaimer" style="margin-top:4px">※ ファクター偏差値は収録12銘柄内での相対値です。ETFはインデックス連動型のため対象外です。</p>
     </section>
 
+    <!-- 戦略・売買シグナルタブ -->
+    <section class="tab-panel" id="panel-strategy" role="tabpanel">
+      <div class="card strat-note-card">
+        <p class="strat-warning">⚠️ これは<b>発注を伴わない分析・シミュレーション専用</b>機能です。バックテストとペーパートレード(仮想資金)で戦略を検証します。実際のお金は一切動きません。ライブ自動売買は証券会社API連携を含む別ステップです(README参照)。</p>
+      </div>
+      <div class="card">
+        <div class="strat-controls">
+          <label>戦略
+            <select id="stratSelect"></select>
+          </label>
+          <div id="stratParams" class="strat-params"></div>
+        </div>
+        <p id="stratDesc" class="card-desc"></p>
+      </div>
+
+      <div class="strat-grid">
+        <div class="card signal-card" id="signalCard">
+          <h3 class="card-title">現在のシグナル</h3>
+          <div id="signalBox"></div>
+        </div>
+        <div class="card">
+          <h3 class="card-title">バックテスト結果 <span class="badge">直近データ・手数料0.05%</span></h3>
+          <div class="metric-tiles" id="backtestTiles"></div>
+        </div>
+        <div class="card strat-equity-card">
+          <h3 class="card-title">資産推移(戦略 vs 買い持ち)</h3>
+          <div id="equityChart"></div>
+          <div class="chart-legend" id="equityLegend"></div>
+        </div>
+        <div class="card strat-trades-card">
+          <h3 class="card-title">売買履歴(バックテスト)</h3>
+          <div id="tradeTable" class="trade-table-wrap"></div>
+        </div>
+        <div class="card paper-card">
+          <h3 class="card-title">📝 ペーパートレード(仮想資金100万円)</h3>
+          <p class="card-desc">現在のシグナルに従って仮想売買を記録します(localStorageに保存)。実弾なし・練習用です。</p>
+          <div id="paperBox"></div>
+          <div class="paper-actions">
+            <button class="btn-primary" id="paperExec">現在のシグナルで執行</button>
+            <button class="btn-ghost" id="paperReset">リセット</button>
+          </div>
+          <div id="paperLog" class="paper-log"></div>
+        </div>
+      </div>
+      <p class="disclaimer" style="margin-top:4px">※ バックテストは過去データに基づく参考値で、将来の成績を保証しません。手数料・スリッページ・約定滑りは簡略化しています。投資判断はご自身の責任で。</p>
+    </section>
+
     <!-- 市場全体タブ -->
     <section class="tab-panel" id="panel-market" role="tabpanel">
       <div class="card">
@@ -202,6 +250,9 @@
 <script src="js/chart.js"></script>
 <script src="js/analysis.js"></script>
 <script src="js/factor.js"></script>
+<script src="js/strategy.js"></script>
+<script src="js/backtest.js"></script>
+<script src="js/paper.js"></script>
 <script src="js/qa.js"></script>
 <script src="js/app.js"></script>
 </body>

@@ -350,6 +350,70 @@ input { font-family: inherit; }
   .factor-grid { grid-template-columns: 1fr; }
 }
 
+/* ==== 戦略・売買シグナル ==== */
+.strat-note-card { padding: 12px 16px; }
+.strat-warning { font-size: .76rem; color: var(--ink-2); background: color-mix(in srgb, var(--warn) 12%, var(--surface)); border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent); border-radius: var(--radius-sm); padding: 9px 13px; margin: 0; }
+.strat-controls { display: flex; align-items: flex-end; gap: 18px; flex-wrap: wrap; }
+.strat-controls > label, .strat-param { font-size: .74rem; font-weight: 600; color: var(--ink-2); display: flex; flex-direction: column; gap: 4px; }
+.strat-controls select, .strat-param input {
+  font-family: inherit; font-size: .82rem; padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--ink); outline: none;
+}
+.strat-controls select:focus, .strat-param input:focus { border-color: var(--accent); }
+.strat-params { display: flex; gap: 12px; flex-wrap: wrap; }
+.strat-param input { width: 92px; }
+
+.strat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.strat-grid .strat-equity-card,
+.strat-grid .strat-trades-card { grid-column: 1 / -1; }
+.strat-grid .paper-card { grid-column: 1 / -1; }
+
+.signal-verdict {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 1.05rem; font-weight: 800; padding: 8px 18px; border-radius: 999px;
+  background: var(--surface-2); margin-bottom: 10px;
+}
+.signal-verdict.buy { background: var(--up-bg); color: var(--up); }
+.signal-verdict.sell { background: var(--down-bg); color: var(--down); }
+.signal-detail { font-size: .84rem; color: var(--ink-2); margin-bottom: 12px; }
+.signal-meta { display: flex; flex-direction: column; gap: 4px; font-size: .78rem; color: var(--ink-muted); }
+.signal-meta b { color: var(--ink); }
+
+#equityChart svg { display: block; }
+.pl-up { color: var(--up); }
+.pl-down { color: var(--down); }
+
+.trade-table-wrap { max-height: 260px; overflow-y: auto; }
+
+/* ペーパートレード */
+.paper-value { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.paper-value .pv-label { font-size: .72rem; color: var(--ink-muted); font-weight: 600; }
+.paper-value .pv-num { font-size: 1.6rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.paper-value .pv-ret { font-size: .95rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.paper-value.up .pv-ret { color: var(--up); }
+.paper-value.down .pv-ret { color: var(--down); }
+.paper-rows { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin-bottom: 14px; }
+.paper-rows > div { background: var(--surface-2); border-radius: var(--radius-sm); padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; }
+.paper-rows span { font-size: .72rem; color: var(--ink-muted); }
+.paper-rows b { font-size: .82rem; font-variant-numeric: tabular-nums; }
+.paper-actions { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+.btn-primary {
+  border: none; background: var(--accent); color: #fff; font-weight: 700;
+  font-size: .82rem; padding: 9px 18px; border-radius: var(--radius-sm);
+}
+.btn-primary:disabled { background: var(--surface-2); color: var(--ink-muted); cursor: not-allowed; }
+.btn-ghost {
+  border: 1px solid var(--border); background: var(--surface); color: var(--ink-2);
+  font-weight: 600; font-size: .82rem; padding: 9px 16px; border-radius: var(--radius-sm);
+}
+.btn-ghost:hover { border-color: var(--down); color: var(--down); }
+.paper-log { max-height: 220px; overflow-y: auto; }
+
+@media (max-width: 900px) {
+  .strat-grid { grid-template-columns: 1fr; }
+}
+
 /* ==== Q&A ==== */
 .qa-fab {
   position: fixed; right: 24px; bottom: 24px; z-index: 90;

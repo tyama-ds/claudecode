@@ -67,6 +67,7 @@ const QA = (() => {
   function detectIntent(q) {
     if (/(なぜ|理由|要因|原因|何があった|どうして|変動|急落|急騰|下がっ|上がっ|下落|上昇|動い)/.test(q) && parseDates(q).length) return "why-move";
     if (/(なぜ|理由|要因|原因)/.test(q)) return "why-general";
+    if (/(シグナル|買い時|売り時|買うべき|売るべき|エントリー|ゴールデンクロス|デッドクロス|バックテスト|自動売買|戦略)/.test(q)) return "signal";
     if (/(ファクター|バリュー|グロース|モメンタム|ボラティリティ|クオリティ|スタイル|偏差値)/.test(q)) return "factor";
     if (/(いくら|株価は|価格|終値)/.test(q)) return "price";
     if (/(PER|PBR|ROE|配当|利回り|財務|指標|割安|割高)/i.test(q)) return "financials";
@@ -125,6 +126,7 @@ const QA = (() => {
     switch (intent) {
       case "why-move": return answerWhyMove(q, dates, codes, currentCode);
       case "price": return answerPrice(dates, codes);
+      case "signal": return answerSignal(codes, currentCode);
       case "factor": return answerFactor(q, codes, currentCode);
       case "financials": return answerFinancials(codes);
       case "advice": return answerAdvice(codes);
@@ -232,6 +234,33 @@ const QA = (() => {
     let html = `<h4>${adv.icon} ${s.name} — ${adv.verdict}</h4>`;
     for (const sec of adv.sections.slice(0, 4)) html += `<p><b>${sec.h}</b><br>${sec.p}</p>`;
     html += `<span class="qa-src">※ 参考見解であり投資助言ではありません。詳細は「財務分析」タブをご覧ください。</span>`;
+    return { html };
+  }
+
+  function answerSignal(codes, currentCode) {
+    const code = codes[0] || currentCode;
+    const sym = STOCK_DATA.symbols[code];
+    if (!sym || typeof Strategy === "undefined") {
+      return { html: "<p>銘柄を指定してください(例:「トヨタの買い時は?」)。</p>" };
+    }
+    const signals = Strategy.generateSignals(sym.prices, "maCross", {});
+    const today = signals[signals.length - 1].signal;
+    const cur = Strategy.currentSignal(signals);
+    const bt = typeof Backtest !== "undefined" ? Backtest.run(signals, {}) : null;
+
+    let state = today === "buy" ? "🟢 本日買いシグナル点灯"
+      : today === "sell" ? "🔴 本日売りシグナル点灯"
+      : cur && cur.signal === "buy" ? "🔵 買い継続ゾーン(保有)"
+      : cur && cur.signal === "sell" ? "⚪ 様子見ゾーン(ノーポジ)" : "⚪ シグナルなし";
+
+    let html = `<h4>📈 ${sym.name} の売買シグナル(移動平均クロス 25/75)</h4>
+      <p>現在の状態: <b>${state}</b></p>`;
+    if (cur) html += `<p>直近シグナル: ${cur.signal === "buy" ? "買い" : "売り"}(${StockChart.fmtDate(cur.date)})</p>`;
+    if (bt && bt.metrics) {
+      const m = bt.metrics;
+      html += `<p>バックテスト: 戦略 ${(m.totalReturn * 100).toFixed(1)}% / 買い持ち ${(m.buyHold * 100).toFixed(1)}%(${m.numTrades}回売買・勝率${m.winRate == null ? "—" : Math.round(m.winRate * 100) + "%"})</p>`;
+    }
+    html += `<span class="qa-src">※ 発注なしの分析専用。詳細と他戦略・ペーパートレードは「戦略・売買シグナル」タブへ。投資助言ではありません。</span>`;
     return { html };
   }
 
