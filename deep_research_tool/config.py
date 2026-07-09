@@ -276,6 +276,12 @@ class SearchConfig:
     query_simplify_min_results: int = 3      # Trigger simplification when results <= this
     query_simplify_max_retries: int = 3      # Max simplification levels (1-3)
 
+    # WAF / anti-bot mitigation for page fetching (duckduckgo/requests path):
+    # reused Session with browser-like headers, backoff retry on 429/5xx,
+    # per-domain delay, and soft-block detection with one re-fetch.
+    waf_mitigation: bool = True
+    per_domain_delay: float = 1.0            # base seconds between same-domain fetches (0=off)
+
 
 @dataclass
 class MultilingualSearchConfig:
@@ -624,6 +630,8 @@ def create_config(
     safe_search: str = "moderate",
     implicit_wait: int = 10,
     driver_path: Optional[str] = None,
+    waf_mitigation: bool = True,
+    per_domain_delay: float = 1.0,
     research_iterations: int = 3,
     output_format: str = "markdown",
     output_dir: str = "./output",
@@ -765,6 +773,12 @@ def create_config(
             msedgedriver / geckodriver). Required in offline or
             proxy-restricted environments where webdriver-manager cannot
             download drivers. Falls back to SELENIUM_DRIVER_PATH env var
+        waf_mitigation: Enable WAF/anti-bot mitigations for the requests-based
+            page fetch (browser-like headers, reused session, backoff retry on
+            429/5xx honouring Retry-After, per-domain delay, soft-block
+            detection with one re-fetch). Default True
+        per_domain_delay: Base seconds between fetches to the same domain
+            (jittered ±50%) to avoid WAF rate-limit triggers; 0 disables it
         research_iterations: Number of research iterations
         output_format: Report format ('docx', 'pdf', or 'markdown')
         output_dir: Output directory path
@@ -903,6 +917,8 @@ def create_config(
         safe_search=safe_search,
         implicit_wait=implicit_wait,
         driver_path=driver_path,
+        waf_mitigation=waf_mitigation,
+        per_domain_delay=per_domain_delay,
     )
 
     research_config = ResearchConfig(

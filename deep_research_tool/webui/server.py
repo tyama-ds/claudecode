@@ -36,6 +36,8 @@ _CONFIG_PARAM_MAP = {
     "search_method": "search_method",
     "browser": "browser",
     "driver_path": "driver_path",
+    "waf_mitigation": "waf_mitigation",
+    "per_domain_delay": "per_domain_delay",
     "http_proxy": "http_proxy",
     "https_proxy": "https_proxy",
     "verify_ssl": "verify_ssl",

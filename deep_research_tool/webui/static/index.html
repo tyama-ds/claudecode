@@ -247,6 +247,11 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
         <label>WebDriverのパス（Selenium使用時。空欄=自動ダウンロードを試行）</label>
         <input type="text" id="driver_path" placeholder="C:\tools\msedgedriver.exe / /usr/local/bin/chromedriver">
         <p class="hint">社内ネットワーク等でドライバの自動ダウンロードが失敗する場合は、ブラウザのバージョンに合ったWebDriver（msedgedriver / chromedriver / geckodriver）を手動配置し、そのフルパスを指定してください。環境変数 SELENIUM_DRIVER_PATH でも指定できます。</p>
+
+        <label class="check"><input type="checkbox" id="waf_mitigation" checked> WAF/ボット対策を有効化（標準・高速クロールのページ取得）</label>
+        <p class="hint">ブラウザ風ヘッダ・接続の再利用・429/5xxの自動リトライ（Retry-After準拠）・同一ドメインへの待機・チャレンジページ検知＋再取得を行います。JSチャレンジ必須のサイトは Selenium系モードが必要です。</p>
+        <div><label>同一ドメインへの待機秒数（0=無効。WAFのレート制限回避）</label>
+          <input type="number" id="per_domain_delay" value="1.0" min="0" max="10" step="0.5"></div>
       </div>
     </details>
 
@@ -439,6 +444,8 @@ function collectParams() {
     crawl_mode: document.querySelector('input[name=crawl_mode]:checked').value,
     browser: $('browser').value,
     driver_path: $('driver_path').value.trim(),
+    waf_mitigation: $('waf_mitigation').checked,
+    per_domain_delay: parseFloat($('per_domain_delay').value),
     http_proxy: $('http_proxy').value.trim(),
     https_proxy: $('https_proxy').value.trim(),
     verify_ssl: $('verify_ssl').checked,

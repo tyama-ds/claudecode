@@ -332,6 +332,8 @@ class DeepResearchTool:
             kwargs["safe_search"] = self.config.search.safe_search
             kwargs["simplify_min_results"] = self.config.search.query_simplify_min_results
             kwargs["simplify_max_retries"] = self.config.search.query_simplify_max_retries
+            kwargs["waf_mitigation"] = self.config.search.waf_mitigation
+            kwargs["per_domain_delay"] = self.config.search.per_domain_delay
 
         return get_search_client(
             method=self.config.search.method.value,
