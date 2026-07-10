@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
+from .. import __version__
+
 STATIC_DIR = Path(__file__).parent / "static"
 
 # UI parameter name -> create_config kwarg (pass-through numeric/str/bool)
@@ -363,12 +365,16 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 self._send_file(index, "text/html; charset=utf-8")
             else:
                 self._send_json({"error": "index.html not found"}, 500)
+        elif route == "/api/version":
+            self._send_json({"version": __version__})
         elif route == "/api/status":
             manager: JobManager = self.server.job_manager
             if manager.current is None:
-                self._send_json({"state": "idle"})
+                self._send_json({"state": "idle", "version": __version__})
             else:
-                self._send_json(manager.current.to_dict())
+                data = manager.current.to_dict()
+                data["version"] = __version__
+                self._send_json(data)
         elif route == "/api/reports":
             reports_dir = self._output_dir() / "reports"
             files = []
@@ -454,7 +460,7 @@ def run_server(host: str = "127.0.0.1", port: int = 8765,
     server = ThreadingHTTPServer((host, port), WebUIHandler)
     server.job_manager = JobManager()
     server.output_dir = output_dir
-    print(f"Deep Research Tool Web UI: http://{host}:{port}")
+    print(f"Deep Research Tool v{__version__} Web UI: http://{host}:{port}")
     print("Ctrl+C で終了")
     try:
         server.serve_forever()

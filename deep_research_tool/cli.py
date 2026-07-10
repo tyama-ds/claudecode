@@ -12,6 +12,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from rich.panel import Panel
 from rich.table import Table
 
+from . import __version__
 from .config import Config, LLMProvider, SearchMethod, ReportFormat, create_config
 from .main import DeepResearchTool
 
@@ -21,10 +22,11 @@ console = Console()
 
 def print_banner():
     """Print welcome banner."""
-    banner = """
+    banner = f"""
 ╔══════════════════════════════════════════════════════════════╗
 ║                   Deep Research Tool                          ║
 ║           Automated Research with AI Assistance               ║
+║{('v' + __version__).center(62)}║
 ╚══════════════════════════════════════════════════════════════╝
 """
     console.print(banner, style="bold blue")
@@ -54,7 +56,7 @@ def print_config_summary(config: Config):
 
 
 @click.group()
-@click.version_option(version="0.1.0")
+@click.version_option(version=__version__)
 def cli():
     """Deep Research Tool - Automated research with AI assistance."""
     pass

@@ -41,6 +41,9 @@ header {
 header .logo { font-size: 22px; }
 header h1 { font-size: 17px; margin: 0; font-weight: 700; letter-spacing: .02em; }
 header p { margin: 0; font-size: 12px; opacity: .85; }
+header .version { font-size: 12px; font-weight: 600; opacity: .8;
+  background: rgba(255,255,255,.18); border-radius: 999px; padding: 2px 10px;
+  vertical-align: middle; margin-left: 6px; }
 main {
   display: grid; grid-template-columns: 440px 1fr; gap: 20px;
   max-width: 1240px; margin: 24px auto; padding: 0 20px;
@@ -188,7 +191,7 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
 <header>
   <div class="logo">🔎</div>
   <div>
-    <h1>Deep Research Tool</h1>
+    <h1>Deep Research Tool <span class="version" id="appVersion"></span></h1>
     <p>調査テーマを入力するだけで、Web調査からレポート生成まで自動実行</p>
   </div>
 </header>
@@ -692,6 +695,15 @@ $('planReviseBtn').addEventListener('click', () => {
   }
   sendPlanReview('revise');
 });
+
+// show the running package version in the header (helps confirm which
+// installed copy the server is actually running)
+fetch('/api/version').then(r => r.json()).then(v => {
+  if (v.version) {
+    $('appVersion').textContent = 'v' + v.version;
+    document.title = `Deep Research Tool v${v.version}`;
+  }
+}).catch(() => {});
 
 // resume view if a job is already running when the page loads
 poll().then(() => {

@@ -179,6 +179,11 @@ class DeepResearchTool:
         # Keep console output from crashing on non-cp932 characters (Windows)
         ensure_utf8_output()
 
+        # Log the running version so it's always clear which installed copy
+        # is executing (helps diagnose stale-install issues)
+        from . import __version__
+        print(f"[DeepResearchTool] version {__version__}")
+
         self.config = config or Config()
         self._validate_config()
         self._setup_logging()
