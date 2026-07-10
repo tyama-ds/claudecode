@@ -159,6 +159,62 @@ class TestLocalProxyToggle(unittest.TestCase):
         self.assertTrue(s.local_use_proxy)
 
 
+class TestLocalConcurrencyLimit(unittest.TestCase):
+    """local_max_concurrency throttles simultaneous local-LLM generations."""
+
+    def test_settings_override_parses_and_clamps(self):
+        from agent_orchestrator.config import get_settings
+        s = get_settings()
+        old = s.local_max_concurrency
+        try:
+            s.apply_overrides({"local_max_concurrency": "3"})
+            self.assertEqual(s.local_max_concurrency, 3)
+            s.apply_overrides({"local_max_concurrency": 99})
+            self.assertEqual(s.local_max_concurrency, 16)   # clamped
+            s.apply_overrides({"local_max_concurrency": "junk"})
+            self.assertEqual(s.local_max_concurrency, 16)   # unchanged on garbage
+            s.apply_overrides({"local_max_concurrency": 0})
+            self.assertEqual(s.local_max_concurrency, 0)    # 0 = unlimited
+        finally:
+            s.local_max_concurrency = old
+
+    def test_semaphore_caps_inflight_local_calls(self):
+        import threading
+        import time
+        import agent_orchestrator.adapters.api_agent as api
+        from agent_orchestrator.config import get_settings
+
+        s = get_settings()
+        old = s.local_max_concurrency
+        s.local_max_concurrency = 2
+        lock = threading.Lock()
+        state = {"now": 0, "peak": 0}
+
+        def fake_post(url, headers, payload, use_proxy=True):
+            with lock:
+                state["now"] += 1
+                state["peak"] = max(state["peak"], state["now"])
+            time.sleep(0.08)
+            with lock:
+                state["now"] -= 1
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        orig_post = api._post_json
+        api._post_json = fake_post
+        try:
+            adapters = [api.OpenAIAPIAdapter(name=f"local{i}", local=True, model="m")
+                        for i in range(6)]
+            threads = [threading.Thread(target=a.generate, args=("hi",)) for a in adapters]
+            for t in threads: t.start()
+            for t in threads: t.join()
+        finally:
+            api._post_json = orig_post
+            s.local_max_concurrency = old
+
+        self.assertLessEqual(state["peak"], 2)  # never more than the limit
+        self.assertGreaterEqual(state["peak"], 2)  # and it did run in parallel
+
+
 class TestWebTools(unittest.TestCase):
     """http_get honors proxy + User-Agent; browser_get falls back gracefully."""
 

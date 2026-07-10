@@ -183,6 +183,8 @@ const JA = {
   "Base URL": "ベースURL",
   "Send via proxy": "プロキシ経由で送信",
   "(off = direct connection)": "（オフ＝直接接続）",
+  "Max parallel requests": "最大同時リクエスト数",
+  "(0 = unlimited — throttles parallel team phases)": "（0＝無制限 — 並列フェーズをこの数に絞ります）",
   "Save": "保存",
   "Saved ✓": "保存しました ✓",
   "Saving…": "保存中…",
@@ -1908,6 +1910,7 @@ async function loadSettings() {
         : (p.key_set ? "saved (hidden)" : "not set");
     }
     $("#set-local-proxy").checked = !!(d.providers.local && d.providers.local.use_proxy);
+    $("#set-local-conc").value = (d.providers.local && d.providers.local.max_concurrency) || 0;
   } catch (e) { $("#settings-status").textContent = "Failed to load: " + e; }
 }
 
@@ -1923,6 +1926,7 @@ async function saveSettings() {
     local_api_key: v("set-local-key"), local_model: v("set-local-model"),
     local_base_url: v("set-local-base"),
     local_use_proxy: $("#set-local-proxy").checked,
+    local_max_concurrency: parseInt(v("set-local-conc"), 10) || 0,
   };
   const st = $("#settings-status");
   st.textContent = t("Saving…");

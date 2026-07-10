@@ -166,6 +166,7 @@ class Handler(BaseHTTPRequestHandler):
                     "key_set": bool(s.local_api_key and s.local_api_key != "local"),
                     "key_from_env": bool(os.environ.get("LOCAL_LLM_API_KEY")),
                     "use_proxy": s.local_use_proxy,
+                    "max_concurrency": s.local_max_concurrency,
                 },
             },
         }

@@ -314,6 +314,9 @@
             <input id="set-local-model" type="text" /></label>
           <label class="field"><span class="field-label" data-i18n>Base URL</span>
             <input id="set-local-base" type="text" placeholder="http://localhost:11434/v1" /></label>
+          <label class="field"><span class="field-label"><span data-i18n>Max parallel requests</span>
+            <small data-i18n>(0 = unlimited — throttles parallel team phases)</small></span>
+            <input id="set-local-conc" type="number" min="0" max="16" value="0" /></label>
           <label class="field-check"><input id="set-local-proxy" type="checkbox" />
             <span><span data-i18n>Send via proxy</span>
               <small data-i18n>(off = direct connection)</small></span></label>
