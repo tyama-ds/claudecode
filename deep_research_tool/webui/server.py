@@ -207,24 +207,61 @@ class ResearchJob:
 
 
 class JobManager:
-    """Runs one research job at a time in a background thread."""
+    """Runs research jobs in background threads (several in parallel)."""
 
-    def __init__(self):
-        self.current: Optional[ResearchJob] = None
+    MAX_CONCURRENT = 3   # simultaneous research runs (LLM rate-limit guard)
+    MAX_KEPT = 20        # completed/errored jobs kept for the job list
+
+    def __init__(self, output_dir: str = "./output"):
+        self.output_dir = output_dir
+        self.jobs: "Dict[str, ResearchJob]" = {}
         self._counter = 0
         self._lock = threading.Lock()
 
+    # --- queries -------------------------------------------------------
+
+    def running_jobs(self):
+        return [j for j in self.jobs.values()
+                if j.state in ("running", "plan_review")]
+
     def is_running(self) -> bool:
-        return (self.current is not None
-                and self.current.state in ("running", "plan_review"))
+        return bool(self.running_jobs())
+
+    def get(self, job_id: str) -> Optional[ResearchJob]:
+        return self.jobs.get(job_id)
+
+    def list_jobs(self):
+        """All jobs, newest first."""
+        return sorted(self.jobs.values(),
+                      key=lambda j: j.started_at, reverse=True)
+
+    @property
+    def current(self) -> Optional[ResearchJob]:
+        """Most relevant job (running first, else newest) — legacy accessor."""
+        running = self.running_jobs()
+        if running:
+            return max(running, key=lambda j: j.started_at)
+        jobs = self.list_jobs()
+        return jobs[0] if jobs else None
+
+    # --- lifecycle -----------------------------------------------------
 
     def start(self, params: Dict[str, Any]) -> ResearchJob:
         with self._lock:
-            if self.is_running():
-                raise RuntimeError("A research job is already running")
+            if len(self.running_jobs()) >= self.MAX_CONCURRENT:
+                raise RuntimeError(
+                    f"同時に実行できる調査は{self.MAX_CONCURRENT}件までです。"
+                    f"実行中のジョブの完了を待ってください")
             self._counter += 1
             job = ResearchJob(f"job-{self._counter}", params.get("query", ""))
-            self.current = job
+            self.jobs[job.job_id] = job
+            self._trim_finished()
+
+        # Isolate each job's artifacts so parallel runs can't clobber each
+        # other's figures / evidence / session files.
+        base = params.get("output_dir") or self.output_dir
+        params = dict(params)
+        params["output_dir"] = str(Path(base) / job.job_id)
 
         thread = threading.Thread(
             target=self._run, args=(job, params), daemon=True,
@@ -232,7 +269,18 @@ class JobManager:
         thread.start()
         return job
 
+    def _trim_finished(self) -> None:
+        """Drop the oldest finished jobs beyond MAX_KEPT (callers hold _lock)."""
+        finished = [j for j in self.jobs.values()
+                    if j.state in ("completed", "error")]
+        excess = len(finished) - self.MAX_KEPT
+        if excess > 0:
+            for job in sorted(finished, key=lambda j: j.started_at)[:excess]:
+                self.jobs.pop(job.job_id, None)
+
     def _run(self, job: ResearchJob, params: Dict[str, Any]) -> None:
+        from ..utils.helpers import ResearchWarnings
+        ResearchWarnings.begin_run()
         try:
             from ..config import create_config
             from ..main import DeepResearchTool
@@ -309,6 +357,8 @@ class JobManager:
             job.error = f"{e}\n{traceback.format_exc(limit=3)}"
             job.state = "error"
             job.update(f"エラー: {e}", -1)
+        finally:
+            ResearchWarnings.end_run()
 
 
 class WebUIHandler(BaseHTTPRequestHandler):
@@ -367,28 +417,42 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "index.html not found"}, 500)
         elif route == "/api/version":
             self._send_json({"version": __version__})
+        elif route == "/api/jobs":
+            manager: JobManager = self.server.job_manager
+            self._send_json({
+                "version": __version__,
+                "max_concurrent": manager.MAX_CONCURRENT,
+                "jobs": [j.to_dict() for j in manager.list_jobs()],
+            })
         elif route == "/api/status":
             manager: JobManager = self.server.job_manager
-            if manager.current is None:
+            query = parse_qs(parsed.query)
+            job_id = (query.get("job_id") or [""])[0]
+            job = manager.get(job_id) if job_id else manager.current
+            if job is None:
                 self._send_json({"state": "idle", "version": __version__})
             else:
-                data = manager.current.to_dict()
+                data = job.to_dict()
                 data["version"] = __version__
                 self._send_json(data)
         elif route == "/api/reports":
-            reports_dir = self._output_dir() / "reports"
+            # Recursive: parallel jobs write under output/<job-id>/reports/
+            base = self._output_dir()
             files = []
-            if reports_dir.is_dir():
-                for f in sorted(reports_dir.iterdir(),
-                                key=lambda p: p.stat().st_mtime, reverse=True):
-                    if f.is_file():
-                        files.append({
-                            "name": f.name,
-                            "path": str(f),
-                            "size": f.stat().st_size,
-                            "mtime": f.stat().st_mtime,
-                        })
-            self._send_json({"reports": files[:50]})
+            if base.is_dir():
+                for f in base.rglob("*"):
+                    if f.is_file() and f.parent.name == "reports":
+                        files.append(f)
+                files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            self._send_json({"reports": [
+                {
+                    "name": f.name,
+                    "path": str(f),
+                    "size": f.stat().st_size,
+                    "mtime": f.stat().st_mtime,
+                }
+                for f in files[:50]
+            ]})
         elif route == "/api/report-file":
             query = parse_qs(parsed.query)
             raw = (query.get("path") or [""])[0]
@@ -427,7 +491,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
             if action not in ("approve", "revise"):
                 self._send_json({"error": "action must be 'approve' or 'revise'"}, 400)
                 return
-            job = manager.current
+            job_id = params.get("job_id") or ""
+            if job_id:
+                job = manager.get(job_id)
+            else:
+                # Legacy clients without job_id: target the only reviewing job
+                reviewing = [j for j in manager.running_jobs()
+                             if j.state == "plan_review"]
+                job = reviewing[0] if len(reviewing) == 1 else None
             if job is None or job.state != "plan_review":
                 self._send_json({"error": "no job awaiting plan review"}, 409)
                 return
@@ -458,7 +529,7 @@ def run_server(host: str = "127.0.0.1", port: int = 8765,
     from ..utils.helpers import ensure_utf8_output
     ensure_utf8_output()  # avoid cp932 print crashes on Windows
     server = ThreadingHTTPServer((host, port), WebUIHandler)
-    server.job_manager = JobManager()
+    server.job_manager = JobManager(output_dir=output_dir)
     server.output_dir = output_dir
     print(f"Deep Research Tool v{__version__} Web UI: http://{host}:{port}")
     print("Ctrl+C で終了")

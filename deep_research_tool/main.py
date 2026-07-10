@@ -412,8 +412,9 @@ class DeepResearchTool:
             - session: ResearchSession object
             - evidence_locker: EvidenceLocker object
         """
-        # Reset warning collector for this run
-        ResearchWarnings.reset()
+        # Reset warning collector for this run (kept when another run is
+        # already active, so parallel Web UI jobs don't wipe each other)
+        ResearchWarnings.reset_if_idle()
 
         # Log informational note when both enhanced_synthesis and V2 two_phase are active
         if (self.config.research.use_enhanced_synthesis
