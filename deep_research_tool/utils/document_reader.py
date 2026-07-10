@@ -95,22 +95,33 @@ class DocumentReader:
 
         file_type = self.SUPPORTED_TYPES.get(filepath.suffix.lower(), "unknown")
 
-        if file_type == "pdf":
-            return self._read_pdf(filepath)
-        elif file_type == "docx":
-            return self._read_docx(filepath)
-        elif file_type == "text":
-            return self._read_text(filepath)
-        elif file_type == "markdown":
-            return self._read_markdown(filepath)
-        elif file_type == "html":
-            return self._read_html(filepath)
-        else:
+        # Never let a single unreadable document raise out of here: the
+        # caller skips documents whose .error is set, but a raised
+        # exception would abort the entire research run.
+        try:
+            if file_type == "pdf":
+                return self._read_pdf(filepath)
+            elif file_type == "docx":
+                return self._read_docx(filepath)
+            elif file_type == "text":
+                return self._read_text(filepath)
+            elif file_type == "markdown":
+                return self._read_markdown(filepath)
+            elif file_type == "html":
+                return self._read_html(filepath)
+            else:
+                return DocumentContent(
+                    filepath=str(filepath),
+                    filename=filepath.name,
+                    file_type=file_type,
+                    error=f"Unsupported file type: {filepath.suffix}",
+                )
+        except Exception as e:
             return DocumentContent(
                 filepath=str(filepath),
                 filename=filepath.name,
                 file_type=file_type,
-                error=f"Unsupported file type: {filepath.suffix}",
+                error=f"Failed to read document: {e}",
             )
 
     def read_documents(self, filepaths: List[Path]) -> List[DocumentContent]:
@@ -126,21 +137,44 @@ class DocumentReader:
         return [self.read_document(Path(fp)) for fp in filepaths]
 
     def _read_pdf(self, filepath: Path) -> DocumentContent:
-        """Read PDF file using PyPDF or PyMuPDF."""
+        """Read PDF file using PyMuPDF, falling back to pypdf.
+
+        A failure in one backend (missing library, or a PDF that backend
+        cannot parse) falls through to the other, and if both fail the
+        error is returned on the DocumentContent rather than raised, so a
+        single unreadable document never aborts the whole research run.
+        """
+        errors = []
+
+        # Try PyMuPDF first (better quality extraction)
         try:
-            # Try PyMuPDF first (better quality extraction)
             return self._read_pdf_pymupdf(filepath)
         except ImportError:
-            try:
-                # Fall back to pypdf
-                return self._read_pdf_pypdf(filepath)
-            except ImportError:
-                return DocumentContent(
-                    filepath=str(filepath),
-                    filename=filepath.name,
-                    file_type="pdf",
-                    error="No PDF library installed. Install with: pip install PyMuPDF or pip install pypdf",
-                )
+            pass  # library not installed; try the fallback silently
+        except Exception as e:
+            errors.append(f"PyMuPDF: {e}")
+
+        # Fall back to pypdf
+        try:
+            return self._read_pdf_pypdf(filepath)
+        except ImportError:
+            pass
+        except Exception as e:
+            errors.append(f"pypdf: {e}")
+
+        if errors:
+            return DocumentContent(
+                filepath=str(filepath),
+                filename=filepath.name,
+                file_type="pdf",
+                error="Failed to read PDF (" + "; ".join(errors) + ")",
+            )
+        return DocumentContent(
+            filepath=str(filepath),
+            filename=filepath.name,
+            file_type="pdf",
+            error="No PDF library installed. Install with: pip install PyMuPDF or pip install pypdf",
+        )
 
     def _read_pdf_pymupdf(self, filepath: Path) -> DocumentContent:
         """Read PDF using PyMuPDF (fitz)."""
@@ -150,36 +184,41 @@ class DocumentReader:
         content_parts = []
         images = []
 
-        max_pages = self.max_pages or len(doc)
+        try:
+            # Capture the page count up front: the document object can no
+            # longer be queried once closed (len(doc) raises
+            # "ValueError: document closed").
+            page_count = len(doc)
+            max_pages = self.max_pages or page_count
 
-        for page_num in range(min(len(doc), max_pages)):
-            page = doc[page_num]
+            for page_num in range(min(page_count, max_pages)):
+                page = doc[page_num]
 
-            # Extract text
-            text = page.get_text()
-            content_parts.append(text)
+                # Extract text
+                text = page.get_text()
+                content_parts.append(text)
 
-            # Extract images if enabled
-            if self.extract_images:
-                image_list = page.get_images()
-                for img_idx, img in enumerate(image_list[:5]):  # Limit images per page
-                    xref = img[0]
-                    try:
-                        base_image = doc.extract_image(xref)
-                        images.append({
-                            "page": page_num + 1,
-                            "index": img_idx,
-                            "width": base_image.get("width", 0),
-                            "height": base_image.get("height", 0),
-                            "format": base_image.get("ext", ""),
-                        })
-                    except Exception:
-                        pass
+                # Extract images if enabled
+                if self.extract_images:
+                    image_list = page.get_images()
+                    for img_idx, img in enumerate(image_list[:5]):  # Limit images per page
+                        xref = img[0]
+                        try:
+                            base_image = doc.extract_image(xref)
+                            images.append({
+                                "page": page_num + 1,
+                                "index": img_idx,
+                                "width": base_image.get("width", 0),
+                                "height": base_image.get("height", 0),
+                                "format": base_image.get("ext", ""),
+                            })
+                        except Exception:
+                            pass
 
-        # Get metadata
-        metadata = doc.metadata or {}
-
-        doc.close()
+            # Get metadata (copy to a plain dict before the doc is closed)
+            metadata = dict(doc.metadata or {})
+        finally:
+            doc.close()
 
         return DocumentContent(
             filepath=str(filepath),
@@ -188,7 +227,7 @@ class DocumentReader:
             title=metadata.get("title", filepath.stem),
             content="\n\n".join(content_parts),
             metadata=metadata,
-            pages=len(doc),
+            pages=page_count,
             images=images,
         )
 

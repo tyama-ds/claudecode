@@ -67,6 +67,9 @@ class ContentExtractor:
     CHUNK_SIZE = 6000          # Characters per chunk for LLM processing
     CHUNK_OVERLAP = 500        # Overlap between chunks to preserve context
     MIN_CHUNK_RATIO = 0.2      # Runt chunks smaller than this ratio merge into previous
+    MAX_CHUNKS = 8             # Cap chunks per page so one huge page can't
+                               # explode into dozens of sequential LLM calls
+    CHUNK_WORKERS = 4          # Parallel workers for multi-chunk extraction
 
     def __init__(
         self,
@@ -265,20 +268,38 @@ Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
                     extraction_notes=data.get("extraction_notes", ""),
                 )
         else:
-            # Multi-chunk extraction
+            # Cap runaway chunk counts (a 50k-char page would otherwise be
+            # ~9 LLM calls; without a cap this is the main cause of very slow
+            # sections). Keep the leading chunks, which hold the most on-topic
+            # content for a focused query.
+            if self.MAX_CHUNKS and len(chunks) > self.MAX_CHUNKS:
+                print(f"[ContentExtractor] capping {len(chunks)} chunks to "
+                      f"{self.MAX_CHUNKS} for '{source_title[:40]}'")
+                chunks = chunks[:self.MAX_CHUNKS]
+
+            # Multi-chunk extraction. Chunks are independent, so extract them
+            # concurrently instead of one blocking LLM call after another.
             print(f"[ContentExtractor] Chunked extraction: {len(chunks)} chunks "
                   f"for '{source_title[:40]}' ({len(raw_content):,} chars)")
 
-            chunk_results = []
-            for i, chunk in enumerate(chunks):
-                label = f"(Chunk {i+1}/{len(chunks)})"
-                result = self._extract_single_chunk(
+            def _work(item):
+                i, chunk = item
+                label = f"(Chunk {i + 1}/{len(chunks)})"
+                return self._extract_single_chunk(
                     chunk, source_url, source_title,
                     section_context, research_query, lang_instruction,
                     chunk_label=label,
                 )
-                if result:
-                    chunk_results.append(result)
+
+            workers = min(self.CHUNK_WORKERS, len(chunks))
+            if workers > 1:
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                    # map preserves input order, so merged output is deterministic
+                    results = list(ex.map(_work, list(enumerate(chunks))))
+            else:
+                results = [_work(item) for item in enumerate(chunks)]
+            chunk_results = [r for r in results if r]
 
             if chunk_results:
                 merged = self._merge_chunk_results(chunk_results)

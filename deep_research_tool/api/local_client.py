@@ -196,17 +196,47 @@ class LocalLLMClient(BaseLLMClient):
         except ImportError:
             raise ImportError("requests library is required for LocalLLMClient")
 
+    def _base_has_version_segment(self) -> bool:
+        """Whether base_url already ends with a REST version segment (/v1, /v2...)."""
+        import re
+        return bool(re.search(r"/v\d+$", self.base_url))
+
+    def _use_openai_routing(self) -> bool:
+        """Whether to use the OpenAI-compatible /chat/completions endpoint.
+
+        vLLM / openai_compatible always use it. Ollama normally uses its
+        native /api/* endpoints, but when the user points base_url at a
+        versioned REST path (e.g. http://host/v1) they mean an
+        OpenAI-compatible server (this also matches Ollama's own OpenAI
+        compatibility layer), so route accordingly.
+        """
+        if self.backend != LocalLLMBackend.OLLAMA:
+            return True
+        return self._base_has_version_segment()
+
     def _get_api_url(self, endpoint: str) -> str:
-        """Get the full API URL based on backend type."""
-        if self.backend == LocalLLMBackend.OLLAMA:
-            # Ollama uses /api/chat and /api/generate
-            if endpoint == "chat":
-                return f"{self.base_url}/api/chat"
-            else:
-                return f"{self.base_url}/api/generate"
-        else:
-            # vLLM and OpenAI-compatible use /v1/chat/completions
-            return f"{self.base_url}/v1/chat/completions"
+        """Get the full API URL based on backend type.
+
+        Handles a base_url that already includes the version segment so we
+        never emit a doubled path like `/v1/v1/chat/completions`.
+        """
+        import re
+        base = self.base_url.rstrip("/")
+
+        if self._use_openai_routing():
+            # OpenAI-compatible: <base>/v1/chat/completions, but if the base
+            # already ends with /v1 (or /vN) just append chat/completions so
+            # http://host/v1 -> http://host/v1/chat/completions (not /v1/v1/...)
+            if self._base_has_version_segment():
+                return f"{base}/chat/completions"
+            return f"{base}/v1/chat/completions"
+
+        # Ollama native API uses /api/chat and /api/generate. Strip an
+        # accidental trailing /vN so http://host/v1 still resolves correctly.
+        base = re.sub(r"/v\d+$", "", base)
+        if endpoint == "chat":
+            return f"{base}/api/chat"
+        return f"{base}/api/generate"
 
     def chat(
         self,
@@ -269,10 +299,12 @@ class LocalLLMClient(BaseLLMClient):
     ) -> LLMResponse:
         """Send chat request to the local LLM server."""
 
-        if self.backend == LocalLLMBackend.OLLAMA:
-            return self._send_ollama_request(messages, **kwargs)
-        else:
+        # Route by the same rule used for URL building so the payload format
+        # (Ollama-native vs OpenAI-compatible) always matches the endpoint.
+        if self._use_openai_routing():
             return self._send_openai_compatible_request(messages, **kwargs)
+        else:
+            return self._send_ollama_request(messages, **kwargs)
 
     def _send_ollama_request(
         self,
@@ -404,6 +436,17 @@ class LocalLLMClient(BaseLLMClient):
         except Exception as e:
             raise RuntimeError(f"Local LLM API error: {e}")
 
+    def _models_url(self) -> str:
+        """Build the model-list URL, mirroring _get_api_url version handling."""
+        import re
+        base = self.base_url.rstrip("/")
+        if self._use_openai_routing():
+            if self._base_has_version_segment():
+                return f"{base}/models"
+            return f"{base}/v1/models"
+        base = re.sub(r"/v\d+$", "", base)
+        return f"{base}/api/tags"
+
     def list_models(self) -> List[str]:
         """
         List available models on the local server.
@@ -411,20 +454,18 @@ class LocalLLMClient(BaseLLMClient):
         Returns:
             List of model names
         """
-        if self.backend == LocalLLMBackend.OLLAMA:
-            url = f"{self.base_url}/api/tags"
-        else:
-            url = f"{self.base_url}/v1/models"
+        url = self._models_url()
+        openai_style = self._use_openai_routing()
 
         try:
             response = self._session.get(url, timeout=10)
             response.raise_for_status()
             data = response.json()
 
-            if self.backend == LocalLLMBackend.OLLAMA:
-                models = [m.get("name", "") for m in data.get("models", [])]
-            else:
+            if openai_style:
                 models = [m.get("id", "") for m in data.get("data", [])]
+            else:
+                models = [m.get("name", "") for m in data.get("models", [])]
 
             return models
 
@@ -440,12 +481,7 @@ class LocalLLMClient(BaseLLMClient):
             True if server is reachable
         """
         try:
-            if self.backend == LocalLLMBackend.OLLAMA:
-                url = f"{self.base_url}/api/tags"
-            else:
-                url = f"{self.base_url}/v1/models"
-
-            response = self._session.get(url, timeout=5)
+            response = self._session.get(self._models_url(), timeout=5)
             return response.status_code == 200
         except Exception:
             return False

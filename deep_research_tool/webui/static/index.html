@@ -41,6 +41,9 @@ header {
 header .logo { font-size: 22px; }
 header h1 { font-size: 17px; margin: 0; font-weight: 700; letter-spacing: .02em; }
 header p { margin: 0; font-size: 12px; opacity: .85; }
+header .version { font-size: 12px; font-weight: 600; opacity: .8;
+  background: rgba(255,255,255,.18); border-radius: 999px; padding: 2px 10px;
+  vertical-align: middle; margin-left: 6px; }
 main {
   display: grid; grid-template-columns: 440px 1fr; gap: 20px;
   max-width: 1240px; margin: 24px auto; padding: 0 20px;
@@ -188,7 +191,7 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
 <header>
   <div class="logo">🔎</div>
   <div>
-    <h1>Deep Research Tool</h1>
+    <h1>Deep Research Tool <span class="version" id="appVersion"></span></h1>
     <p>調査テーマを入力するだけで、Web調査からレポート生成まで自動実行</p>
   </div>
 </header>
@@ -247,6 +250,11 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
         <label>WebDriverのパス（Selenium使用時。空欄=自動ダウンロードを試行）</label>
         <input type="text" id="driver_path" placeholder="C:\tools\msedgedriver.exe / /usr/local/bin/chromedriver">
         <p class="hint">社内ネットワーク等でドライバの自動ダウンロードが失敗する場合は、ブラウザのバージョンに合ったWebDriver（msedgedriver / chromedriver / geckodriver）を手動配置し、そのフルパスを指定してください。環境変数 SELENIUM_DRIVER_PATH でも指定できます。</p>
+
+        <label class="check"><input type="checkbox" id="waf_mitigation" checked> WAF/ボット対策を有効化（標準・高速クロールのページ取得）</label>
+        <p class="hint">ブラウザ風ヘッダ・接続の再利用・429/5xxの自動リトライ（Retry-After準拠）・同一ドメインへの待機・チャレンジページ検知＋再取得を行います。JSチャレンジ必須のサイトは Selenium系モードが必要です。</p>
+        <div><label>同一ドメインへの待機秒数（0=無効。WAFのレート制限回避）</label>
+          <input type="number" id="per_domain_delay" value="1.0" min="0" max="10" step="0.5"></div>
       </div>
     </details>
 
@@ -322,7 +330,17 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
         <input type="password" id="api_key" placeholder="sk-... / sk-ant-...">
         <label>APIエンドポイント（空欄=公式API / 環境変数を使用）</label>
         <input type="text" id="base_url" placeholder="https://gateway.example.com/v1 （社内ゲートウェイ・互換API・Ollama等）">
-        <p class="hint">社内APIゲートウェイやOpenAI互換サーバー経由で利用する場合に指定します。ローカルLLMの場合はサーバーURL（例: http://localhost:11434）を入力してください。</p>
+        <p class="hint">社内APIゲートウェイやOpenAI互換サーバー経由で利用する場合に指定します。ローカルLLMの場合はサーバーURL（例: http://localhost:11434 や http://192.168.x.x/v1）を入力してください。</p>
+
+        <div id="localBackendRow" style="display:none">
+          <label>ローカルLLMのバックエンド（プロバイダー=ローカルLLM時）</label>
+          <select id="local_backend">
+            <option value="ollama">Ollama（/api/chat）</option>
+            <option value="openai_compatible">OpenAI互換（/v1/chat/completions） vLLM / LM Studio 等</option>
+            <option value="vllm">vLLM</option>
+          </select>
+          <p class="hint">エンドポイントに <code>/v1</code> を含めた場合は自動的にOpenAI互換として扱われます。<code>/v1</code> を付けない互換サーバー（vLLM等）を使う場合はここで「OpenAI互換」を選んでください。</p>
+        </div>
 
         <label style="margin-top:16px">工程別のAI切り替え（空欄=既定を使用）</label>
         <div class="stage-row"><span class="name">計画</span>
@@ -397,6 +415,13 @@ const $ = (id) => document.getElementById(id);
 let polling = null;
 let logLength = 0;
 
+// show the local-LLM backend selector only when provider = local
+function syncLocalBackendRow() {
+  $('localBackendRow').style.display = $('provider').value === 'local' ? 'block' : 'none';
+}
+$('provider').addEventListener('change', syncLocalBackendRow);
+syncLocalBackendRow();
+
 // mode card selection highlight (per radio group)
 document.querySelectorAll('.mode-card input').forEach(input => {
   input.addEventListener('change', () => {
@@ -422,6 +447,8 @@ function collectParams() {
     crawl_mode: document.querySelector('input[name=crawl_mode]:checked').value,
     browser: $('browser').value,
     driver_path: $('driver_path').value.trim(),
+    waf_mitigation: $('waf_mitigation').checked,
+    per_domain_delay: parseFloat($('per_domain_delay').value),
     http_proxy: $('http_proxy').value.trim(),
     https_proxy: $('https_proxy').value.trim(),
     verify_ssl: $('verify_ssl').checked,
@@ -448,6 +475,7 @@ function collectParams() {
     else if (provider === 'anthropic') params.anthropic_base_url = baseUrl;
     else if (provider === 'local') params.local_base_url = baseUrl;
   }
+  if (provider === 'local') params.local_backend = $('local_backend').value;
   const docsText = $('local_documents').value.trim();
   if (docsText && params.source_mode !== 'web') {
     params.local_documents = docsText.split('\n').map(s => s.trim()).filter(Boolean);
@@ -667,6 +695,15 @@ $('planReviseBtn').addEventListener('click', () => {
   }
   sendPlanReview('revise');
 });
+
+// show the running package version in the header (helps confirm which
+// installed copy the server is actually running)
+fetch('/api/version').then(r => r.json()).then(v => {
+  if (v.version) {
+    $('appVersion').textContent = 'v' + v.version;
+    document.title = `Deep Research Tool v${v.version}`;
+  }
+}).catch(() => {});
 
 // resume view if a job is already running when the page loads
 poll().then(() => {

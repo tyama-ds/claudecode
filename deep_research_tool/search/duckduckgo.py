@@ -6,9 +6,12 @@ Supports both the new 'ddgs' package and legacy 'duckduckgo-search' package.
 
 import csv
 import io
+import random
 import time
 import warnings
 from typing import List, Optional
+from urllib.parse import urlparse
+
 import requests
 from bs4 import BeautifulSoup
 
@@ -59,6 +62,8 @@ class DuckDuckGoSearch(BaseSearchClient):
         verify_ssl: bool = True,
         simplify_min_results: int = 3,
         simplify_max_retries: int = 3,
+        waf_mitigation: bool = True,
+        per_domain_delay: float = 1.0,
     ):
         """
         Initialize DuckDuckGo search client.
@@ -74,6 +79,14 @@ class DuckDuckGoSearch(BaseSearchClient):
             verify_ssl: Verify SSL certificates
             simplify_min_results: Trigger query simplification when results <= this
             simplify_max_retries: Max simplification levels to try (1-3)
+            waf_mitigation: Enable WAF/anti-bot mitigations for page fetching:
+                a reused Session with browser-like headers, automatic retry
+                with backoff on 429/5xx (honouring Retry-After), a randomized
+                per-domain delay, and detection of soft blocks (challenge
+                pages / 403 / 406) with one re-fetch attempt
+            per_domain_delay: Base seconds to wait between fetches to the same
+                domain (jittered ±50%); rapid-fire requests are a common WAF
+                rate-limit trigger. Set 0 to disable the delay
         """
         super().__init__(
             max_results=max_results,
@@ -87,9 +100,128 @@ class DuckDuckGoSearch(BaseSearchClient):
         self.verify_ssl = verify_ssl
         self.simplify_min_results = simplify_min_results
         self.simplify_max_retries = min(simplify_max_retries, 3)  # cap at 3 levels
+        self.waf_mitigation = waf_mitigation
+        self.per_domain_delay = max(0.0, per_domain_delay)
         self._ddgs = None
         self._ddgs_class = None
         self._using_new_package = False
+        self._session = None
+        self._last_fetch = {}  # domain -> last fetch monotonic time
+
+    # --- WAF / anti-bot mitigation --------------------------------------
+
+    # Statuses worth an automatic backoff+retry (transient / rate-limit)
+    _RETRY_STATUS = (429, 500, 502, 503, 504)
+    # Substrings that betray a soft WAF/anti-bot block on an HTTP 200/403 page
+    _WAF_MARKERS = (
+        "access denied", "reference #", "akamai", "bot detected",
+        "please enable javascript", "verifying you are human", "are you a human",
+        "captcha", "_incapsula_", "incapsula", "distil", "attention required",
+        "cloudflare", "just a moment",
+    )
+
+    _BROWSER_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+                   "image/avif,image/webp,image/apng,*/*;q=0.8,"
+                   "application/signed-exchange;v=b3;q=0.7"),
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+        # Deliberately omit 'br': requests can't always decode brotli cleanly
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+    }
+
+    def _build_session(self) -> "requests.Session":
+        """Session with browser headers, proxy, and backoff retry adapter."""
+        from requests.adapters import HTTPAdapter
+        try:
+            from urllib3.util.retry import Retry
+        except ImportError:  # very old urllib3
+            from requests.packages.urllib3.util.retry import Retry
+
+        s = requests.Session()
+        s.headers.update(self._BROWSER_HEADERS)
+        if self.proxies:
+            s.proxies.update(self.proxies)
+        s.verify = self.verify_ssl
+
+        # Retry generously on WAF/rate-limit *status* responses (429/5xx,
+        # honouring Retry-After) but fail fast on connection errors so a dead
+        # or blocked host doesn't drag the sequential crawl (connect=1).
+        retry = Retry(
+            total=3,
+            connect=1,
+            read=2,
+            status=3,
+            backoff_factor=0.5,  # 0s, 0.5s, 1s, 2s between attempts
+            status_forcelist=list(self._RETRY_STATUS),
+            allowed_methods=frozenset(["GET", "HEAD"]),
+            respect_retry_after_header=True,
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        s.mount("http://", adapter)
+        s.mount("https://", adapter)
+        return s
+
+    def _get_session(self) -> "requests.Session":
+        if self._session is None:
+            self._session = self._build_session()
+        return self._session
+
+    def _polite_wait(self, url: str) -> None:
+        """Sleep so same-domain requests aren't fired back-to-back."""
+        if not self.per_domain_delay:
+            return
+        domain = urlparse(url).netloc.lower()
+        last = self._last_fetch.get(domain)
+        now = time.monotonic()
+        if last is not None:
+            wait = random.uniform(self.per_domain_delay * 0.5,
+                                  self.per_domain_delay * 1.5)
+            elapsed = now - last
+            if elapsed < wait:
+                time.sleep(wait - elapsed)
+        self._last_fetch[domain] = time.monotonic()
+
+    def _is_waf_blocked(self, response) -> bool:
+        """Detect a soft WAF/anti-bot block (challenge page or block status)."""
+        if response.status_code in (401, 403, 406, 429):
+            return True
+        if response.status_code == 200:
+            ctype = response.headers.get("Content-Type", "").lower()
+            if "html" in ctype or not ctype:
+                body = (response.text or "")[:4000].lower()
+                return any(m in body for m in self._WAF_MARKERS)
+        return False
+
+    def _fetch(self, url: str, headers: dict):
+        """WAF-aware GET: polite delay, session+retry, one re-fetch on block."""
+        if not self.waf_mitigation:
+            return requests.get(
+                url, headers=headers, timeout=self.timeout,
+                allow_redirects=True, proxies=self.proxies, verify=self.verify_ssl,
+            )
+
+        session = self._get_session()
+        self._polite_wait(url)
+        response = session.get(
+            url, headers=headers, timeout=self.timeout, allow_redirects=True,
+        )
+        # One re-fetch on a soft block: some WAFs pass a client on the second
+        # hit once the connection/cookies are established.
+        if self._is_waf_blocked(response):
+            time.sleep(random.uniform(1.5, 3.0))
+            response = session.get(
+                url, headers=headers, timeout=self.timeout, allow_redirects=True,
+            )
+        return response
 
     def _get_ddgs_class(self):
         """Get the DDGS class from either ddgs or duckduckgo_search package."""
@@ -399,20 +531,32 @@ class DuckDuckGoSearch(BaseSearchClient):
         """
         extract_images = extract_images if extract_images is not None else self.extract_images
 
+        # Per-request headers. The Session already carries browser-like
+        # defaults; a Referer helps with WAFs that check request context.
+        parsed = urlparse(url)
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "Referer": f"{parsed.scheme}://{parsed.netloc}/",
         }
 
         try:
-            response = requests.get(
-                url,
-                headers=headers,
-                timeout=self.timeout,
-                allow_redirects=True,
-                proxies=self.proxies,
-                verify=self.verify_ssl,
-            )
+            response = self._fetch(url, headers)
+
+            # A soft WAF/anti-bot block that survived the re-fetch: surface it
+            # clearly instead of feeding a challenge page into the pipeline.
+            if self.waf_mitigation and self._is_waf_blocked(response):
+                return PageContent(
+                    url=url,
+                    title="Blocked",
+                    text_content=(
+                        f"[Blocked by the site's WAF/anti-bot protection "
+                        f"(HTTP {response.status_code}). This page likely needs "
+                        f"a real browser; try crawl_mode='ai_crawl_selenium' or "
+                        f"search_method='selenium'.]"
+                    ),
+                    metadata={"error": "waf_blocked",
+                              "status_code": response.status_code},
+                )
+
             response.raise_for_status()
 
             # Detect file type from Content-Type header and URL

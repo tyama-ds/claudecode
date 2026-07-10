@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable
 
-from .utils.helpers import ResearchWarnings
+from .utils.helpers import ResearchWarnings, ensure_utf8_output
 from .config import Config, LLMProvider, SearchMethod, ReportFormat, ReportGeneratorVersion
 from .api import get_client
 from .api.base import get_token_stats, reset_token_stats
@@ -176,6 +176,14 @@ class DeepResearchTool:
             config: Configuration object. If not provided, uses defaults
                    with environment variables for API keys.
         """
+        # Keep console output from crashing on non-cp932 characters (Windows)
+        ensure_utf8_output()
+
+        # Log the running version so it's always clear which installed copy
+        # is executing (helps diagnose stale-install issues)
+        from . import __version__
+        print(f"[DeepResearchTool] version {__version__}")
+
         self.config = config or Config()
         self._validate_config()
         self._setup_logging()
@@ -329,6 +337,8 @@ class DeepResearchTool:
             kwargs["safe_search"] = self.config.search.safe_search
             kwargs["simplify_min_results"] = self.config.search.query_simplify_min_results
             kwargs["simplify_max_retries"] = self.config.search.query_simplify_max_retries
+            kwargs["waf_mitigation"] = self.config.search.waf_mitigation
+            kwargs["per_domain_delay"] = self.config.search.per_domain_delay
 
         return get_search_client(
             method=self.config.search.method.value,
