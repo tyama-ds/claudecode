@@ -125,16 +125,60 @@ class ResearchWarnings:
 _utf8_output_configured = False
 
 
+class _SafeTextStream:
+    """Write-through stream wrapper that can never raise UnicodeEncodeError.
+
+    Last line of defence for Windows cp932 consoles: even when
+    reconfigure()/TextIOWrapper hardening did not take effect (exotic
+    stream objects, IDE pipes, service wrappers), a write that fails to
+    encode is retried with unencodable characters replaced, so printing
+    degrades gracefully instead of aborting the run.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, text):
+        try:
+            return self._stream.write(text)
+        except UnicodeEncodeError:
+            encoding = getattr(self._stream, "encoding", None) or "utf-8"
+            try:
+                safe = text.encode(encoding, errors="replace").decode(
+                    encoding, errors="replace")
+                return self._stream.write(safe)
+            except Exception:
+                # Absolute fallback: pure ASCII
+                return self._stream.write(
+                    text.encode("ascii", errors="replace").decode("ascii"))
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
+    def __getattr__(self, name):
+        # Delegate everything else (flush, isatty, encoding, buffer, ...)
+        return getattr(self._stream, name)
+
+
 def ensure_utf8_output() -> None:
     """Make stdout/stderr tolerate non-cp932 characters on Windows.
 
     On Japanese Windows the console encoding defaults to cp932, which cannot
-    encode characters such as en dash (U+2013), em dash, or smart quotes that
-    routinely appear in fetched web content and LLM output. A bare print() of
-    such text then raises UnicodeEncodeError and can abort a run. Reconfigure
-    the streams to UTF-8 with errors="replace" so printing never crashes;
-    unencodable characters degrade to a replacement char instead. Idempotent
-    and safe on non-Windows / already-UTF-8 environments.
+    encode characters such as en dash (U+2013), non-breaking hyphen (U+2011),
+    em dash, or smart quotes that routinely appear in fetched web content and
+    LLM output. A bare print() of such text then raises UnicodeEncodeError
+    and can abort a run.
+
+    Three layers, from preferred to last resort:
+    1. reconfigure the stream in place to UTF-8 with errors="replace";
+    2. when reconfigure is unavailable/refused, wrap the raw byte buffer in
+       a UTF-8 TextIOWrapper(errors="replace") and swap it in;
+    3. regardless of 1/2, wrap the stream in _SafeTextStream, which catches
+       UnicodeEncodeError on write and retries with replaced characters —
+       so no print can ever crash, whatever the underlying stream is.
+
+    Idempotent and safe on non-Windows / already-UTF-8 environments.
     """
     global _utf8_output_configured
     if _utf8_output_configured:
@@ -142,30 +186,37 @@ def ensure_utf8_output() -> None:
     import io
     for stream_name in ("stdout", "stderr"):
         stream = getattr(sys, stream_name, None)
-        if stream is None:
+        if stream is None or isinstance(stream, _SafeTextStream):
             continue
-        # Preferred: reconfigure the existing stream in place (keeps its
+        # Layer 1: reconfigure the existing stream in place (keeps its
         # identity, so handlers/loggers already bound to it are covered).
+        reconfigured = False
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
             try:
                 reconfigure(encoding="utf-8", errors="replace")
-                continue
+                reconfigured = True
             except Exception:
                 pass  # fall through to the buffer-wrap fallback
-        # Fallback: wrap the raw byte buffer in a UTF-8 text writer that
-        # replaces unencodable characters, and swap it in. Covers Pythons /
-        # streams where reconfigure is unavailable or refused.
-        buffer = getattr(stream, "buffer", None)
-        if buffer is not None:
-            try:
-                setattr(sys, stream_name, io.TextIOWrapper(
-                    buffer, encoding="utf-8", errors="replace",
-                    line_buffering=True,
-                ))
-            except Exception:
-                # Never let output hardening itself raise.
-                pass
+        # Layer 2: wrap the raw byte buffer in a UTF-8 text writer that
+        # replaces unencodable characters, and swap it in.
+        if not reconfigured:
+            buffer = getattr(stream, "buffer", None)
+            if buffer is not None:
+                try:
+                    stream = io.TextIOWrapper(
+                        buffer, encoding="utf-8", errors="replace",
+                        line_buffering=True,
+                    )
+                except Exception:
+                    # Never let output hardening itself raise.
+                    pass
+        # Layer 3: safety net — even if the stream still encodes cp932 for
+        # any reason, writes can no longer raise UnicodeEncodeError.
+        try:
+            setattr(sys, stream_name, _SafeTextStream(stream))
+        except Exception:
+            pass
     _utf8_output_configured = True
 
 
