@@ -196,6 +196,8 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
 }
 .file-row .fname { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-row .actions { display: flex; gap: 6px; flex-shrink: 0; }
+.warn-row { font-size: 12px; color: var(--muted); padding: 4px 2px; line-height: 1.5;
+  border-bottom: 1px dashed var(--line); }
 .file-row a {
   font-size: 12px; padding: 5px 12px; border-radius: 8px; text-decoration: none;
   background: var(--accent-soft); color: var(--accent); font-weight: 700;
@@ -456,6 +458,7 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
       <div class="result" id="resultPanel">
         <label>生成されたファイル</label>
         <div class="files" id="resultFiles"></div>
+        <div id="resultWarnings" style="display:none"></div>
       </div>
     </div>
   </section>
@@ -776,6 +779,20 @@ function showResults(result) {
         <a href="/api/report-file?path=${encodeURIComponent(f.path)}&download=1">保存</a>
       </span>
     </div>`).join('');
+
+  // processing warnings (fallbacks, skipped figures, etc.)
+  const warns = result.warnings || [];
+  if (warns.length) {
+    $('resultWarnings').style.display = 'block';
+    $('resultWarnings').innerHTML =
+      `<label>⚠ 処理中の警告（${warns.length}件）</label>` +
+      warns.slice(0, 12).map(w =>
+        `<div class="warn-row"><b>[${escapeHtml(w.severity || '')}]</b> ${escapeHtml(w.message || '')}</div>`
+      ).join('') +
+      (warns.length > 12 ? `<div class="warn-row">…ほか${warns.length - 12}件</div>` : '');
+  } else {
+    $('resultWarnings').style.display = 'none';
+  }
   $('resultPanel').style.display = 'block';
 }
 

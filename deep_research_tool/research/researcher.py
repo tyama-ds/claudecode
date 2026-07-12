@@ -2099,6 +2099,20 @@ Return the merged content as a single text block (no JSON, just the merged text)
         # Update gaps (remove gaps that may have been addressed)
         remaining_gaps = new_synthesized.get("information_gaps", [])
 
+        # Preserve and extend per-source evidence. Dropping this key made the
+        # V2 report generator fall back to the weak synthesized-content path
+        # for every expanded section (i.e. whenever target_pages /
+        # target_characters was set), losing raw content and [SOURCE N] data.
+        existing_extracted = list(existing_content.get("extracted_content", []))
+        existing_extracted.extend({
+            "title": ec.source_title,
+            "url": ec.source_url,
+            "content": ec.processed_content,
+            "raw_content": ec.raw_content,
+            "key_points": ec.key_points,
+            "relevance_score": ec.relevance_score,
+        } for ec in new_parts)
+
         return {
             "title": section.title,
             "content": merged_text,
@@ -2107,5 +2121,6 @@ Return the merged content as a single text block (no JSON, just the merged text)
             "sources": all_sources,
             "images": all_images,
             "gaps": remaining_gaps,
+            "extracted_content": existing_extracted,
             "expanded": True,
         }

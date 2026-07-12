@@ -836,8 +836,20 @@ Output only the polished body (no preamble, no JSON, no code block):"""
                 else:
                     print(f"[ReportGeneratorV2] Polish rejected for {section_num} "
                           f"(length {len(polished)} vs original {original_len})")
+                    ResearchWarnings.get_instance().add(
+                        ResearchWarnings.LOW,
+                        "ReportGeneratorV2",
+                        f"第{section_num}章の推敲結果が長さ検査で棄却され、"
+                        f"下書きのまま出力されています。",
+                    )
             except Exception as e:
                 print(f"[ReportGeneratorV2] Polish failed for {section_num}: {e}")
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.LOW,
+                    "ReportGeneratorV2",
+                    f"第{section_num}章の推敲パスが失敗し、下書きのまま"
+                    f"出力されています。Error: {e}",
+                )
 
             prev_tail = chapter.content[-300:]
 

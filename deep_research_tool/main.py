@@ -1664,7 +1664,16 @@ Output only the text (no JSON, no heading):"""
                     collection=collection,
                 )
                 if not updated_path:
-                    updated_path = report_path
+                    print(f"[AutoFigures] DOCX insertion failed; the report "
+                          f"keeps its original content without figures.")
+                    ResearchWarnings.get_instance().add(
+                        ResearchWarnings.MEDIUM,
+                        "AutoFigures",
+                        f"{total}件の図表を生成しましたが、DOCXへの挿入に失敗"
+                        f"しました。図表ファイル自体は {figures_dir} に保存"
+                        f"されています。",
+                    )
+                    return None
             elif suffix in ('.pdf', '.html'):
                 updated_path = generator.add_figures_to_pdf(
                     markdown_content=content,
@@ -1716,8 +1725,12 @@ Output only the text (no JSON, no heading):"""
             research_topic=session.query if session else ""
         )
 
+        # Numerical extraction is an evaluation-type task; route it to the
+        # 'evaluation' stage LLM when configured (usually a cheaper/faster
+        # model) instead of the default writing-grade model
+        extraction_llm = self.stage_llm_clients.get("evaluation", self.llm_client)
         extractor = NumericalDataExtractor(
-            llm_client=self.llm_client if self.config.report.numerical_llm_extraction else None,
+            llm_client=extraction_llm if self.config.report.numerical_llm_extraction else None,
             language=self.config.research.language,
             min_confidence=self.config.report.numerical_min_confidence,
             use_llm=self.config.report.numerical_llm_extraction,
@@ -1890,8 +1903,17 @@ Output only the text (no JSON, no heading):"""
                 source_texts=source_texts,
             )
 
-            # Update section content with processed content
-            session.section_contents[section_num]["content"] = result.processed_content
+            # Keep the section's full prose and APPEND DeepThink's synthesized
+            # conclusion. Replacing the content wholesale destroyed the
+            # section text: processed_content is a short conclusion-only blob
+            # (produced by 「最終結論:」-style prompts), which downstream report
+            # generation then rendered as fragmentary 結論-labeled chapters.
+            conclusion = (result.processed_content or "").strip()
+            if conclusion and conclusion not in content:
+                session.section_contents[section_num]["content"] = (
+                    content.rstrip() + "\n\n" + conclusion
+                )
+            session.section_contents[section_num]["deep_think_conclusion"] = conclusion
 
             # Store result metrics
             deep_think_results[section_num] = {

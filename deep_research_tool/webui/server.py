@@ -349,6 +349,10 @@ class JobManager:
                 "verification_html": result.get("verification_html"),
                 "session_id": result.get("session_id"),
                 "token_usage": result.get("token_usage"),
+                # Warnings raised late (e.g. figure insertion) never make it
+                # into the already-saved report footer, so surface them here
+                "warnings": result.get("warnings") or [],
+                "warning_count": result.get("warning_count", 0),
             }
             job.progress = 100.0
             job.state = "completed"
