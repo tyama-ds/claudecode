@@ -57,6 +57,37 @@ header .version { font-size: 12px; font-weight: 600; opacity: .8;
 .modal-body { padding: 16px 20px 20px; max-height: 75vh; overflow-y: auto; }
 .prov-block { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin: 12px 0; }
 .prov-title { font-weight: 700; font-size: 13px; }
+.modal-tabs { display: flex; gap: 4px; padding: 10px 20px 0; border-bottom: 1px solid var(--line); }
+.modal-tab { background: none; border: none; border-bottom: 2.5px solid transparent;
+  padding: 8px 14px; font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer; }
+.modal-tab.sel { color: var(--accent); border-bottom-color: var(--accent); }
+.feat-row { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin: 10px 0;
+  position: relative; cursor: help; }
+.feat-row:hover { border-color: var(--accent); }
+.feat-info { display: flex; flex-direction: column; gap: 2px; }
+.feat-name { font-weight: 700; font-size: 13.5px; }
+.feat-sub { font-size: 11.5px; color: var(--muted); }
+/* on-hover tooltip (data-tip) */
+.feat-row::after {
+  content: attr(data-tip);
+  position: absolute; left: 8px; right: 8px; bottom: calc(100% + 6px);
+  background: #1f2437; color: #fff; font-size: 12px; line-height: 1.6;
+  padding: 10px 12px; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
+  opacity: 0; pointer-events: none; transform: translateY(4px);
+  transition: opacity .15s ease, transform .15s ease; z-index: 20; white-space: normal;
+}
+.feat-row:hover::after { opacity: 1; transform: translateY(0); }
+/* slide toggle switch */
+.switch { position: relative; display: inline-block; width: 46px; height: 26px; flex-shrink: 0; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider { position: absolute; inset: 0; background: #c9cddc; border-radius: 999px;
+  transition: background .18s ease; cursor: pointer; }
+.slider::before { content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px;
+  background: #fff; border-radius: 50%; transition: transform .18s ease;
+  box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+.switch input:checked + .slider { background: var(--accent); }
+.switch input:checked + .slider::before { transform: translateX(20px); }
 .job-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
 .job-tab { border: 1.5px solid var(--line); border-radius: 10px; padding: 7px 12px;
   font-size: 12px; cursor: pointer; background: var(--bg); max-width: 240px;
@@ -222,10 +253,15 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
 <div class="modal-overlay" id="settingsModal" style="display:none">
   <div class="modal">
     <div class="modal-head">
-      <span>⚙ 設定（生成AI・プロキシ）</span>
+      <span>⚙ 設定</span>
       <button class="modal-close" id="settingsCloseBtn">✕</button>
     </div>
+    <div class="modal-tabs">
+      <button class="modal-tab sel" data-tab="tabAI">🤖 生成AI・プロキシ</button>
+      <button class="modal-tab" data-tab="tabFeatures">🧠 機能</button>
+    </div>
     <div class="modal-body">
+     <div id="tabAI" class="tab-pane">
       <p class="hint">プロバイダーごとにAPIキー・エンドポイントを設定できます。工程別のAI切り替えで複数プロバイダーを使う場合も、ここで各プロバイダーの認証情報を入力してください。設定はこのブラウザに保存されます（空欄=サーバー側の環境変数を使用）。</p>
 
       <div class="prov-block">
@@ -265,6 +301,42 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
         <input type="text" id="set_http_proxy" placeholder="http://proxy.example.com:8080">
         <label class="check"><input type="checkbox" id="set_verify_ssl" checked> SSL証明書を検証する（自己署名証明書の場合はオフ）</label>
       </div>
+
+     </div><!-- /tabAI -->
+
+     <div id="tabFeatures" class="tab-pane" style="display:none">
+      <p class="hint">調査の追加機能をON/OFFできます。各行にマウスを乗せると説明が表示されます。設定は保存され、次回以降の調査にも適用されます。</p>
+
+      <div class="feat-row" data-tip="収集した情報に多段の推論・一貫性チェック・原典忠実度チェックを適用し、分析の深さを高めます。各章の末尾に統合された結論が追記されます。実行時間とAPIコストが増加します。">
+        <div class="feat-info"><span class="feat-name">🧠 DeepThink推論強化</span>
+          <span class="feat-sub">多段推論で分析を深める</span></div>
+        <label class="switch"><input type="checkbox" id="feat_deep_think"><span class="slider"></span></label>
+      </div>
+
+      <div class="feat-row" data-tip="統計が公表されていない数値（市場規模・将来予測など）を要素分解して推定します。分解木・収集エビデンスとの照合・感度分析・モンテカルロシミュレーション付きで、推定根拠をレポートに明記します。">
+        <div class="feat-info"><span class="feat-name">🧮 フェルミ推定</span>
+          <span class="feat-sub">統計のない数値を分解推定</span></div>
+        <label class="switch"><input type="checkbox" id="feat_fermi"><span class="slider"></span></label>
+      </div>
+
+      <div class="feat-row" data-tip="レポートの記述を収集ソースと突き合わせ、根拠のない記述（ハルシネーション）を検出します。検証結果はHTMLレポートとして成果物に追加されます。実行時間が増加します。">
+        <div class="feat-info"><span class="feat-name">✅ ハルシネーション検証</span>
+          <span class="feat-sub">記述とソースの突き合わせ検証</span></div>
+        <label class="switch"><input type="checkbox" id="feat_verification" checked><span class="slider"></span></label>
+      </div>
+
+      <div class="feat-row" data-tip="日本語に加えて英語でも同時に検索し、結果を統合・翻訳します。海外動向・グローバル市場など、日本語ソースだけでは不足するテーマで有効です。検索時間が増加します。">
+        <div class="feat-info"><span class="feat-name">🌍 多言語検索（日英）</span>
+          <span class="feat-sub">英語ソースも検索して統合</span></div>
+        <label class="switch"><input type="checkbox" id="feat_multilingual"><span class="slider"></span></label>
+      </div>
+
+      <div class="feat-row" data-tip="章の執筆前に「アウトライン作成→論点別の執筆→統合」の多段生成を行い、情報量と構成の質を高めます（既定ON）。OFFにすると単一パスの合成になり、高速ですが内容が薄くなることがあります。">
+        <div class="feat-info"><span class="feat-name">📝 強化コンテンツ合成</span>
+          <span class="feat-sub">多段生成で章の情報量を向上</span></div>
+        <label class="switch"><input type="checkbox" id="feat_enhanced" checked><span class="slider"></span></label>
+      </div>
+     </div><!-- /tabFeatures -->
 
       <button class="primary" id="settingsSaveBtn">保存して閉じる</button>
       <p class="hint">※APIキーはこのブラウザのlocalStorageに保存されます。共有PCでは空欄のままサーバー側の環境変数をご利用ください。</p>
@@ -482,13 +554,25 @@ const SETTINGS_FIELDS = {
   set_http_proxy: 'http_proxy',
 };
 
+// Boolean feature toggles (機能 tab): element id -> create_config param
+const FEATURE_FIELDS = {
+  set_verify_ssl: 'verify_ssl',
+  feat_deep_think: 'deep_think',
+  feat_fermi: 'fermi_estimation',
+  feat_verification: 'enable_verification',
+  feat_multilingual: 'multilingual',
+  feat_enhanced: 'use_enhanced_synthesis',
+};
+
 function loadSettings() {
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem('drt_settings') || '{}'); } catch (e) {}
   for (const [el, key] of Object.entries(SETTINGS_FIELDS)) {
     if (saved[key] !== undefined) $(el).value = saved[key];
   }
-  if (saved.verify_ssl !== undefined) $('set_verify_ssl').checked = !!saved.verify_ssl;
+  for (const [el, key] of Object.entries(FEATURE_FIELDS)) {
+    if (saved[key] !== undefined) $(el).checked = !!saved[key];
+  }
   return saved;
 }
 
@@ -498,7 +582,9 @@ function saveSettings() {
     const v = $(el).value.trim ? $(el).value.trim() : $(el).value;
     if (v) s[key] = v;
   }
-  s.verify_ssl = $('set_verify_ssl').checked;
+  for (const [el, key] of Object.entries(FEATURE_FIELDS)) {
+    s[key] = $(el).checked;
+  }
   localStorage.setItem('drt_settings', JSON.stringify(s));
   return s;
 }
@@ -510,9 +596,21 @@ function settingsParams() {
     const v = ($(el).value || '').trim();
     if (v) p[key] = v;
   }
-  p.verify_ssl = $('set_verify_ssl').checked;
+  for (const [el, key] of Object.entries(FEATURE_FIELDS)) {
+    p[key] = $(el).checked;
+  }
   return p;
 }
+
+// settings modal tab switching
+document.querySelectorAll('.modal-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.modal-tab').forEach(t => t.classList.toggle('sel', t === tab));
+    document.querySelectorAll('.tab-pane').forEach(p => {
+      p.style.display = p.id === tab.dataset.tab ? 'block' : 'none';
+    });
+  });
+});
 
 $('settingsBtn').addEventListener('click', () => { $('settingsModal').style.display = 'flex'; });
 $('settingsCloseBtn').addEventListener('click', () => { $('settingsModal').style.display = 'none'; });

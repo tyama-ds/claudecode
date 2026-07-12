@@ -62,6 +62,11 @@ _CONFIG_PARAM_MAP = {
     "enable_verification": "enable_verification",
     "plan_review": "plan_review",
     "plan_review_timeout": "plan_review_timeout",
+    # Advanced feature toggles (settings modal 機能 tab)
+    "deep_think": "deep_think",
+    "fermi_estimation": "fermi_estimation",
+    "multilingual": "multilingual",
+    "use_enhanced_synthesis": "use_enhanced_synthesis",
 }
 
 
