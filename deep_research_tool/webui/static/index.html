@@ -88,6 +88,19 @@ header .version { font-size: 12px; font-weight: 600; opacity: .8;
   box-shadow: 0 1px 3px rgba(0,0,0,.3); }
 .switch input:checked + .slider { background: var(--accent); }
 .switch input:checked + .slider::before { transform: translateX(20px); }
+/* language selection (機能 tab sub-tabs) */
+#langPanel { border: 1px solid var(--line); border-radius: 12px; padding: 4px 14px 10px; margin: -2px 0 10px; }
+.lang-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 10px; }
+.lang-tab { background: none; border: none; border-bottom: 2px solid transparent;
+  padding: 7px 12px; font-size: 12.5px; font-weight: 600; color: var(--muted); cursor: pointer; }
+.lang-tab.sel { color: var(--accent); border-bottom-color: var(--accent); }
+.lang-pane { display: flex; flex-wrap: wrap; gap: 8px; }
+.lang-chip { display: inline-flex; align-items: center; gap: 6px; border: 1.5px solid var(--line);
+  border-radius: 999px; padding: 6px 12px; font-size: 12.5px; cursor: pointer; user-select: none; }
+.lang-chip input { accent-color: var(--accent); width: 14px; height: 14px; }
+.lang-chip:has(input:checked) { border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg)); font-weight: 700; }
+.lang-chip .native { color: var(--muted); font-size: 11px; font-weight: 400; }
 .job-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
 .job-tab { border: 1.5px solid var(--line); border-radius: 10px; padding: 7px 12px;
   font-size: 12px; cursor: pointer; background: var(--bg); max-width: 240px;
@@ -325,10 +338,41 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
         <label class="switch"><input type="checkbox" id="feat_verification" checked><span class="slider"></span></label>
       </div>
 
-      <div class="feat-row" data-tip="日本語に加えて英語でも同時に検索し、結果を統合・翻訳します。海外動向・グローバル市場など、日本語ソースだけでは不足するテーマで有効です。検索時間が増加します。">
-        <div class="feat-info"><span class="feat-name">🌍 多言語検索（日英）</span>
-          <span class="feat-sub">英語ソースも検索して統合</span></div>
+      <div class="feat-row" data-tip="選択した言語で同時に検索し、結果を統合・翻訳します（クエリはLLMが各言語に翻訳）。海外動向・グローバル市場など、日本語ソースだけでは不足するテーマで有効です。言語数に応じて検索時間が増加します。">
+        <div class="feat-info"><span class="feat-name">🌍 多言語検索</span>
+          <span class="feat-sub" id="langSummary">対象言語は下のタブで選択</span></div>
         <label class="switch"><input type="checkbox" id="feat_multilingual"><span class="slider"></span></label>
+      </div>
+
+      <div id="langPanel" style="display:none">
+        <div class="lang-tabs">
+          <button class="lang-tab sel" data-pane="langAsia">アジア</button>
+          <button class="lang-tab" data-pane="langWest">欧州・米州</button>
+          <button class="lang-tab" data-pane="langOther">中東</button>
+        </div>
+        <div id="langAsia" class="lang-pane">
+          <label class="lang-chip"><input type="checkbox" data-lang="ja" checked>日本語 <span class="native">ja</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="zh">中国語 <span class="native">中文</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="ko">韓国語 <span class="native">한국어</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="th">タイ語 <span class="native">ไทย</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="vi">ベトナム語 <span class="native">Tiếng Việt</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="hi">ヒンディー語 <span class="native">हिन्दी</span></label>
+        </div>
+        <div id="langWest" class="lang-pane" style="display:none">
+          <label class="lang-chip"><input type="checkbox" data-lang="en" checked>英語 <span class="native">English</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="de">ドイツ語 <span class="native">Deutsch</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="fr">フランス語 <span class="native">Français</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="es">スペイン語 <span class="native">Español</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="pt">ポルトガル語 <span class="native">Português</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="it">イタリア語 <span class="native">Italiano</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="nl">オランダ語 <span class="native">Nederlands</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="pl">ポーランド語 <span class="native">Polski</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="ru">ロシア語 <span class="native">Русский</span></label>
+        </div>
+        <div id="langOther" class="lang-pane" style="display:none">
+          <label class="lang-chip"><input type="checkbox" data-lang="ar">アラビア語 <span class="native">العربية</span></label>
+        </div>
+        <p class="hint">検索エンジンの地域設定と組み合わせて各言語で検索します。選択が多いほど収集は広くなりますが時間も増えます（目安: 2〜4言語）。</p>
       </div>
 
       <div class="feat-row" data-tip="章の執筆前に「アウトライン作成→論点別の執筆→統合」の多段生成を行い、情報量と構成の質を高めます（既定ON）。OFFにすると単一パスの合成になり、高速ですが内容が薄くなることがあります。">
@@ -573,6 +617,8 @@ function loadSettings() {
   for (const [el, key] of Object.entries(FEATURE_FIELDS)) {
     if (saved[key] !== undefined) $(el).checked = !!saved[key];
   }
+  if (Array.isArray(saved.search_languages)) setSelectedLangs(saved.search_languages);
+  syncLangUI();
   return saved;
 }
 
@@ -585,6 +631,7 @@ function saveSettings() {
   for (const [el, key] of Object.entries(FEATURE_FIELDS)) {
     s[key] = $(el).checked;
   }
+  s.search_languages = selectedLangs();
   localStorage.setItem('drt_settings', JSON.stringify(s));
   return s;
 }
@@ -599,6 +646,10 @@ function settingsParams() {
   for (const [el, key] of Object.entries(FEATURE_FIELDS)) {
     p[key] = $(el).checked;
   }
+  if (p.multilingual) {
+    const langs = selectedLangs();
+    p.search_languages = langs.length ? langs : ['ja', 'en'];
+  }
   return p;
 }
 
@@ -611,6 +662,45 @@ document.querySelectorAll('.modal-tab').forEach(tab => {
     });
   });
 });
+
+// ---- multilingual language selection (sub-tabs inside 機能 tab) ----
+const LANG_NAMES = {ja:'日本語', en:'英語', zh:'中国語', ko:'韓国語', th:'タイ語',
+  vi:'ベトナム語', hi:'ヒンディー語', de:'ドイツ語', fr:'フランス語', es:'スペイン語',
+  pt:'ポルトガル語', it:'イタリア語', nl:'オランダ語', pl:'ポーランド語',
+  ru:'ロシア語', ar:'アラビア語'};
+
+document.querySelectorAll('.lang-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.lang-tab').forEach(t => t.classList.toggle('sel', t === tab));
+    document.querySelectorAll('.lang-pane').forEach(p => {
+      p.style.display = p.id === tab.dataset.pane ? 'flex' : 'none';
+    });
+  });
+});
+
+function selectedLangs() {
+  return Array.from(document.querySelectorAll('.lang-chip input:checked'))
+    .map(cb => cb.dataset.lang);
+}
+
+function setSelectedLangs(langs) {
+  document.querySelectorAll('.lang-chip input').forEach(cb => {
+    cb.checked = langs.includes(cb.dataset.lang);
+  });
+}
+
+function syncLangUI() {
+  const on = $('feat_multilingual').checked;
+  $('langPanel').style.display = on ? 'block' : 'none';
+  const langs = selectedLangs();
+  $('langSummary').textContent = on
+    ? (langs.length ? '対象: ' + langs.map(l => LANG_NAMES[l] || l).join('・')
+                    : '言語を1つ以上選択してください')
+    : '対象言語は下のタブで選択（全16言語）';
+}
+$('feat_multilingual').addEventListener('change', syncLangUI);
+document.querySelectorAll('.lang-chip input').forEach(cb =>
+  cb.addEventListener('change', syncLangUI));
 
 $('settingsBtn').addEventListener('click', () => { $('settingsModal').style.display = 'flex'; });
 $('settingsCloseBtn').addEventListener('click', () => { $('settingsModal').style.display = 'none'; });

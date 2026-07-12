@@ -66,6 +66,7 @@ _CONFIG_PARAM_MAP = {
     "deep_think": "deep_think",
     "fermi_estimation": "fermi_estimation",
     "multilingual": "multilingual",
+    "search_languages": "search_languages",
     "use_enhanced_synthesis": "use_enhanced_synthesis",
 }
 
