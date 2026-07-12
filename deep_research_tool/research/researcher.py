@@ -802,6 +802,7 @@ class Researcher:
                 url=page.url,
                 title=page.title,
                 content_excerpt=page.processed_content[:500] if page.processed_content else page.snippet,
+                extracted_text=page.content or "",
                 evidence_type=EvidenceType.WEB_PAGE,
                 search_query=page.metadata.get("query", "aicrawl"),
                 section_reference=section.section,
