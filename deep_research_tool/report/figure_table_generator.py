@@ -223,6 +223,112 @@ class FigureTableGenerator:
         self.chart_library = (chart_library or "matplotlib").lower()
         self._seaborn_warned = False
         self._fetch_session = None
+        # Report-wide image dedup (reset per generate call): the same image
+        # (a site logo on every page, or one key chart cited by several
+        # pages) used to be inserted once per section
+        self._used_image_urls = set()
+        self._used_image_hashes = set()
+
+    # ------------------------------------------------------------------
+    # Image quality helpers
+    # ------------------------------------------------------------------
+
+    # URL/alt substrings that mark non-content images (logos, UI chrome,
+    # social buttons, tracking). Checked case-insensitively.
+    NOISE_IMAGE_KEYWORDS = (
+        'icon', 'logo', 'avatar', 'button', 'banner', 'ad-', 'ads/', '/ad/',
+        'pixel', 'tracking', 'spacer', 'favicon', 'sprite', 'header', 'footer',
+        'badge', 'arrow', 'bullet', 'share', 'sns', 'twitter', 'facebook',
+        'instagram', 'youtube', 'line-', 'rss', 'search', 'menu', 'cart',
+        'thumb_s', 'profile', '/common/', '/parts/', '/ui/', '/assets/img/base',
+        'noimage', 'no-image', 'blank.', 'dummy',
+    )
+
+    MIN_IMAGE_WIDTH = 200
+    MIN_IMAGE_HEIGHT = 150
+    MAX_ASPECT_RATIO = 4.0      # logos/banners are extremely wide or flat
+    MIN_IMAGE_BYTES = 5000      # tiny files are icons/pixels
+
+    def _reset_image_dedup(self) -> None:
+        self._used_image_urls = set()
+        self._used_image_hashes = set()
+
+    @classmethod
+    def _is_noise_image(cls, src: str, alt: str = "") -> bool:
+        """URL/alt-based filter for logos, icons, and UI chrome."""
+        haystack = f"{src} {alt}".lower()
+        return any(kw in haystack for kw in cls.NOISE_IMAGE_KEYWORDS)
+
+    def _validate_downloaded_image(self, image_path, image_data) -> bool:
+        """Post-download validation: dimensions, aspect ratio, file size.
+
+        Logos rarely announce themselves in the URL; the reliable signal is
+        the decoded image itself (small, or extremely wide/flat).
+        """
+        try:
+            import io as _io
+            from PIL import Image
+            if image_data:
+                raw = image_data
+            elif image_path and Path(image_path).exists():
+                raw = Path(image_path).read_bytes()
+            else:
+                return False
+            if len(raw) < self.MIN_IMAGE_BYTES:
+                return False
+            with Image.open(_io.BytesIO(raw)) as im:
+                w, h = im.size
+            if w < self.MIN_IMAGE_WIDTH or h < self.MIN_IMAGE_HEIGHT:
+                return False
+            ratio = max(w, h) / max(1, min(w, h))
+            if ratio > self.MAX_ASPECT_RATIO:
+                return False
+            return True
+        except ImportError:
+            return True   # PIL unavailable: keep old behavior
+        except Exception:
+            return False  # undecodable image is not embeddable anyway
+
+    def _register_image(self, src: str, image_path, image_data) -> bool:
+        """Report-wide dedup by URL and content hash. True = first use."""
+        import hashlib
+        key = (src or "").split("?")[0].split("#")[0]
+        if key and key in self._used_image_urls:
+            return False
+        try:
+            raw = image_data if image_data else (
+                Path(image_path).read_bytes() if image_path else b"")
+        except Exception:
+            raw = b""
+        digest = hashlib.md5(raw).hexdigest() if raw else None
+        if digest and digest in self._used_image_hashes:
+            return False
+        if key:
+            self._used_image_urls.add(key)
+        if digest:
+            self._used_image_hashes.add(digest)
+        return True
+
+    @staticmethod
+    def _image_caption(base: str, source_title: str, url: str) -> str:
+        """Compose a caption that always carries source attribution."""
+        from urllib.parse import urlparse
+        domain = ""
+        try:
+            domain = urlparse(url or "").netloc
+        except Exception:
+            pass
+        origin = (source_title or "").strip() or domain
+        if origin and domain and origin != domain:
+            attribution = f"出典: {origin}（{domain}）"
+        elif origin:
+            attribution = f"出典: {origin}"
+        else:
+            attribution = ""
+        base = (base or "").strip()
+        if base and attribution:
+            return f"{base}　{attribution}"
+        return base or attribution
 
     def _get_fetch_session(self):
         """Session for re-fetching evidence pages (HTML table extraction).
@@ -290,6 +396,7 @@ class FigureTableGenerator:
         Returns:
             FigureTableCollection with all figures and tables
         """
+        self._reset_image_dedup()
         collection = FigureTableCollection()
 
         # Get section information
@@ -360,6 +467,7 @@ class FigureTableGenerator:
         Returns:
             FigureTableCollection with figures, tables, and recommended charts
         """
+        self._reset_image_dedup()
         collection = FigureTableCollection()
 
         # Get section information
@@ -732,32 +840,56 @@ class FigureTableGenerator:
         """Extract relevant images for a section."""
         figures = []
 
-        # First, check if images are already stored in section_data
+        # First, check if images are already stored in section_data.
+        # This path had NO filtering: site logos and UI chrome collected
+        # during research went straight into the report, repeatedly.
         existing_images = section_data.get("images", [])
         print(f"[FigureTableGenerator] Section {section_id}: found {len(existing_images)} stored images")
-        for idx, img_data in enumerate(existing_images[:self.max_images_per_section]):
+        for idx, img_data in enumerate(existing_images):
+            if len(figures) >= self.max_images_per_section:
+                break
             src = img_data.get("src", "")
             if not src:
+                continue
+
+            alt = img_data.get("alt", "")
+            if self._is_noise_image(src, alt):
+                print(f"[FigureTableGenerator] skipped noise image: {src[:70]}")
                 continue
 
             page_url = img_data.get("page_url", "")
             image_path, image_data = self._download_image(src, referer=page_url or None)
 
-            if image_path or image_data:
-                figure = Figure(
-                    figure_id=f"fig_{section_id}_{idx+1}",
-                    figure_type=FigureType.IMAGE,
-                    title=img_data.get("suggested_caption", "") or img_data.get("alt", "") or f"Figure {idx+1}",
-                    caption=img_data.get("suggested_caption", "") or img_data.get("alt", ""),
-                    source_url=src,
-                    source_title=img_data.get("page_title", ""),
-                    section_id=section_id,
-                    image_path=image_path,
-                    image_data=image_data,
-                    alt_text=img_data.get("alt", ""),
-                )
-                figures.append(figure)
-                print(f"[FigureTableGenerator] Downloaded image from stored data: {src[:60]}")
+            if not (image_path or image_data):
+                continue
+            if not self._validate_downloaded_image(image_path, image_data):
+                print(f"[FigureTableGenerator] rejected image "
+                      f"(size/aspect/bytes): {src[:70]}")
+                continue
+            if not self._register_image(src, image_path, image_data):
+                print(f"[FigureTableGenerator] duplicate image skipped: {src[:70]}")
+                continue
+
+            base_caption = (img_data.get("suggested_caption", "")
+                            or alt or "")
+            figure = Figure(
+                figure_id=f"fig_{section_id}_{idx+1}",
+                figure_type=FigureType.IMAGE,
+                title=base_caption or f"Figure {idx+1}",
+                caption=self._image_caption(
+                    base_caption,
+                    img_data.get("page_title", ""),
+                    page_url or src,
+                ),
+                source_url=src,
+                source_title=img_data.get("page_title", ""),
+                section_id=section_id,
+                image_path=image_path,
+                image_data=image_data,
+                alt_text=alt,
+            )
+            figures.append(figure)
+            print(f"[FigureTableGenerator] Downloaded image from stored data: {src[:60]}")
 
         # If not enough images from stored data, try evidence URLs
         if len(figures) < self.max_images_per_section and evidence_list:
@@ -848,23 +980,25 @@ class FigureTableGenerator:
                 except (ValueError, TypeError):
                     pass
 
-                # Skip common non-content images
-                skip_keywords = ['icon', 'logo', 'avatar', 'button', 'banner',
-                                 'ad-', 'ads/', 'pixel', 'tracking', 'spacer']
-                if any(skip in src.lower() for skip in skip_keywords):
+                # Skip logos, icons, UI chrome (shared noise filter)
+                alt_text = img.get('alt', '')
+                if self._is_noise_image(src, alt_text):
                     continue
 
                 image_path, image_data = self._download_image(src, referer=url)
 
                 if image_path or image_data:
-                    alt_text = img.get('alt', '')
+                    if not self._validate_downloaded_image(image_path, image_data):
+                        continue
+                    if not self._register_image(src, image_path, image_data):
+                        continue
                     title = img.get('title', '') or alt_text
 
                     figure = Figure(
                         figure_id="",
                         figure_type=FigureType.IMAGE,
                         title=title or f"Image from {page_title}",
-                        caption=f"Source: {page_title}",
+                        caption=self._image_caption(title, page_title, url),
                         source_url=src,
                         source_title=page_title,
                         section_id="",
