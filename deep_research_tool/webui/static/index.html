@@ -44,6 +44,69 @@ header p { margin: 0; font-size: 12px; opacity: .85; }
 header .version { font-size: 12px; font-weight: 600; opacity: .8;
   background: rgba(255,255,255,.18); border-radius: 999px; padding: 2px 10px;
   vertical-align: middle; margin-left: 6px; }
+.settings-btn { background: rgba(255,255,255,.16); color: #fff; border: 1px solid rgba(255,255,255,.35);
+  border-radius: 10px; padding: 8px 16px; font-size: 13px; font-weight: 700; cursor: pointer; }
+.settings-btn:hover { background: rgba(255,255,255,.28); }
+.modal-overlay { position: fixed; inset: 0; background: rgba(15,18,34,.55); z-index: 50;
+  display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow-y: auto; }
+.modal { background: var(--card); border-radius: 16px; width: 100%; max-width: 560px;
+  box-shadow: 0 18px 60px rgba(0,0,0,.35); }
+.modal-head { display: flex; justify-content: space-between; align-items: center;
+  padding: 16px 20px; font-weight: 700; border-bottom: 1px solid var(--line); }
+.modal-close { background: none; border: none; font-size: 16px; cursor: pointer; color: var(--muted); }
+.modal-body { padding: 16px 20px 20px; max-height: 75vh; overflow-y: auto; }
+.prov-block { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin: 12px 0; }
+.prov-title { font-weight: 700; font-size: 13px; }
+.modal-tabs { display: flex; gap: 4px; padding: 10px 20px 0; border-bottom: 1px solid var(--line); }
+.modal-tab { background: none; border: none; border-bottom: 2.5px solid transparent;
+  padding: 8px 14px; font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer; }
+.modal-tab.sel { color: var(--accent); border-bottom-color: var(--accent); }
+.feat-row { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin: 10px 0;
+  position: relative; cursor: help; }
+.feat-row:hover { border-color: var(--accent); }
+.feat-info { display: flex; flex-direction: column; gap: 2px; }
+.feat-name { font-weight: 700; font-size: 13.5px; }
+.feat-sub { font-size: 11.5px; color: var(--muted); }
+/* on-hover tooltip (data-tip) */
+.feat-row::after {
+  content: attr(data-tip);
+  position: absolute; left: 8px; right: 8px; bottom: calc(100% + 6px);
+  background: #1f2437; color: #fff; font-size: 12px; line-height: 1.6;
+  padding: 10px 12px; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
+  opacity: 0; pointer-events: none; transform: translateY(4px);
+  transition: opacity .15s ease, transform .15s ease; z-index: 20; white-space: normal;
+}
+.feat-row:hover::after { opacity: 1; transform: translateY(0); }
+/* slide toggle switch */
+.switch { position: relative; display: inline-block; width: 46px; height: 26px; flex-shrink: 0; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider { position: absolute; inset: 0; background: #c9cddc; border-radius: 999px;
+  transition: background .18s ease; cursor: pointer; }
+.slider::before { content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px;
+  background: #fff; border-radius: 50%; transition: transform .18s ease;
+  box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+.switch input:checked + .slider { background: var(--accent); }
+.switch input:checked + .slider::before { transform: translateX(20px); }
+/* language selection (機能 tab sub-tabs) */
+#langPanel { border: 1px solid var(--line); border-radius: 12px; padding: 4px 14px 10px; margin: -2px 0 10px; }
+.lang-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 10px; }
+.lang-tab { background: none; border: none; border-bottom: 2px solid transparent;
+  padding: 7px 12px; font-size: 12.5px; font-weight: 600; color: var(--muted); cursor: pointer; }
+.lang-tab.sel { color: var(--accent); border-bottom-color: var(--accent); }
+.lang-pane { display: flex; flex-wrap: wrap; gap: 8px; }
+.lang-chip { display: inline-flex; align-items: center; gap: 6px; border: 1.5px solid var(--line);
+  border-radius: 999px; padding: 6px 12px; font-size: 12.5px; cursor: pointer; user-select: none; }
+.lang-chip input { accent-color: var(--accent); width: 14px; height: 14px; }
+.lang-chip:has(input:checked) { border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg)); font-weight: 700; }
+.lang-chip .native { color: var(--muted); font-size: 11px; font-weight: 400; }
+.job-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.job-tab { border: 1.5px solid var(--line); border-radius: 10px; padding: 7px 12px;
+  font-size: 12px; cursor: pointer; background: var(--bg); max-width: 240px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-tab.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--bg)); font-weight: 700; }
+.job-tab .st { margin-right: 6px; }
 main {
   display: grid; grid-template-columns: 440px 1fr; gap: 20px;
   max-width: 1240px; margin: 24px auto; padding: 0 20px;
@@ -177,6 +240,8 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
 }
 .file-row .fname { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-row .actions { display: flex; gap: 6px; flex-shrink: 0; }
+.warn-row { font-size: 12px; color: var(--muted); padding: 4px 2px; line-height: 1.5;
+  border-bottom: 1px dashed var(--line); }
 .file-row a {
   font-size: 12px; padding: 5px 12px; border-radius: 8px; text-decoration: none;
   background: var(--accent-soft); color: var(--accent); font-weight: 700;
@@ -190,11 +255,138 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
 <body>
 <header>
   <div class="logo">🔎</div>
-  <div>
+  <div style="flex:1">
     <h1>Deep Research Tool <span class="version" id="appVersion"></span></h1>
-    <p>調査テーマを入力するだけで、Web調査からレポート生成まで自動実行</p>
+    <p>調査テーマを入力するだけで、Web調査からレポート生成まで自動実行（最大3件まで同時実行できます）</p>
   </div>
+  <button id="settingsBtn" class="settings-btn">⚙ 設定</button>
 </header>
+
+<!-- ==================== 設定モーダル（生成AI・プロキシ） ==================== -->
+<div class="modal-overlay" id="settingsModal" style="display:none">
+  <div class="modal">
+    <div class="modal-head">
+      <span>⚙ 設定</span>
+      <button class="modal-close" id="settingsCloseBtn">✕</button>
+    </div>
+    <div class="modal-tabs">
+      <button class="modal-tab sel" data-tab="tabAI">🤖 生成AI・プロキシ</button>
+      <button class="modal-tab" data-tab="tabFeatures">🧠 機能</button>
+    </div>
+    <div class="modal-body">
+     <div id="tabAI" class="tab-pane">
+      <p class="hint">プロバイダーごとにAPIキー・エンドポイントを設定できます。工程別のAI切り替えで複数プロバイダーを使う場合も、ここで各プロバイダーの認証情報を入力してください。設定はこのブラウザに保存されます（空欄=サーバー側の環境変数を使用）。</p>
+
+      <div class="prov-block">
+        <div class="prov-title">OpenAI</div>
+        <label>APIキー</label>
+        <input type="password" id="set_openai_key" placeholder="sk-...">
+        <label>エンドポイント（空欄=公式API）</label>
+        <input type="text" id="set_openai_url" placeholder="https://gateway.example.com/v1 （社内ゲートウェイ・互換API）">
+      </div>
+
+      <div class="prov-block">
+        <div class="prov-title">Anthropic</div>
+        <label>APIキー</label>
+        <input type="password" id="set_anthropic_key" placeholder="sk-ant-...">
+        <label>エンドポイント（空欄=公式API）</label>
+        <input type="text" id="set_anthropic_url" placeholder="https://gateway.example.com">
+      </div>
+
+      <div class="prov-block">
+        <div class="prov-title">ローカルLLM</div>
+        <label>サーバーURL</label>
+        <input type="text" id="set_local_url" placeholder="http://localhost:11434 / http://192.168.x.x/v1">
+        <label>バックエンド</label>
+        <select id="set_local_backend">
+          <option value="ollama">Ollama（/api/chat）</option>
+          <option value="openai_compatible">OpenAI互換（/v1/chat/completions） vLLM / LM Studio 等</option>
+          <option value="vllm">vLLM</option>
+        </select>
+        <p class="hint">URLに /v1 を含めた場合は自動的にOpenAI互換として扱われます。</p>
+      </div>
+
+      <div class="prov-block">
+        <div class="prov-title">🔌 プロキシ（社内ネットワーク等）</div>
+        <label>HTTPSプロキシURL（空欄=環境変数 HTTPS_PROXY）</label>
+        <input type="text" id="set_https_proxy" placeholder="http://proxy.example.com:8080">
+        <label>HTTPプロキシURL（空欄=環境変数 HTTP_PROXY）</label>
+        <input type="text" id="set_http_proxy" placeholder="http://proxy.example.com:8080">
+        <label class="check"><input type="checkbox" id="set_verify_ssl" checked> SSL証明書を検証する（自己署名証明書の場合はオフ）</label>
+      </div>
+
+     </div><!-- /tabAI -->
+
+     <div id="tabFeatures" class="tab-pane" style="display:none">
+      <p class="hint">調査の追加機能をON/OFFできます。各行にマウスを乗せると説明が表示されます。設定は保存され、次回以降の調査にも適用されます。</p>
+
+      <div class="feat-row" data-tip="収集した情報に多段の推論・一貫性チェック・原典忠実度チェックを適用し、分析の深さを高めます。各章の末尾に統合された結論が追記されます。実行時間とAPIコストが増加します。">
+        <div class="feat-info"><span class="feat-name">🧠 DeepThink推論強化</span>
+          <span class="feat-sub">多段推論で分析を深める</span></div>
+        <label class="switch"><input type="checkbox" id="feat_deep_think"><span class="slider"></span></label>
+      </div>
+
+      <div class="feat-row" data-tip="統計が公表されていない数値（市場規模・将来予測など）を要素分解して推定します。分解木・収集エビデンスとの照合・感度分析・モンテカルロシミュレーション付きで、推定根拠をレポートに明記します。">
+        <div class="feat-info"><span class="feat-name">🧮 フェルミ推定</span>
+          <span class="feat-sub">統計のない数値を分解推定</span></div>
+        <label class="switch"><input type="checkbox" id="feat_fermi"><span class="slider"></span></label>
+      </div>
+
+      <div class="feat-row" data-tip="レポートの記述を収集ソースと突き合わせ、根拠のない記述（ハルシネーション）を検出します。検証結果はHTMLレポートとして成果物に追加されます。実行時間が増加します。">
+        <div class="feat-info"><span class="feat-name">✅ ハルシネーション検証</span>
+          <span class="feat-sub">記述とソースの突き合わせ検証</span></div>
+        <label class="switch"><input type="checkbox" id="feat_verification" checked><span class="slider"></span></label>
+      </div>
+
+      <div class="feat-row" data-tip="選択した言語で同時に検索し、結果を統合・翻訳します（クエリはLLMが各言語に翻訳）。海外動向・グローバル市場など、日本語ソースだけでは不足するテーマで有効です。言語数に応じて検索時間が増加します。">
+        <div class="feat-info"><span class="feat-name">🌍 多言語検索</span>
+          <span class="feat-sub" id="langSummary">対象言語は下のタブで選択</span></div>
+        <label class="switch"><input type="checkbox" id="feat_multilingual"><span class="slider"></span></label>
+      </div>
+
+      <div id="langPanel" style="display:none">
+        <div class="lang-tabs">
+          <button class="lang-tab sel" data-pane="langAsia">アジア</button>
+          <button class="lang-tab" data-pane="langWest">欧州・米州</button>
+          <button class="lang-tab" data-pane="langOther">中東</button>
+        </div>
+        <div id="langAsia" class="lang-pane">
+          <label class="lang-chip"><input type="checkbox" data-lang="ja" checked>日本語 <span class="native">ja</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="zh">中国語 <span class="native">中文</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="ko">韓国語 <span class="native">한국어</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="th">タイ語 <span class="native">ไทย</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="vi">ベトナム語 <span class="native">Tiếng Việt</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="hi">ヒンディー語 <span class="native">हिन्दी</span></label>
+        </div>
+        <div id="langWest" class="lang-pane" style="display:none">
+          <label class="lang-chip"><input type="checkbox" data-lang="en" checked>英語 <span class="native">English</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="de">ドイツ語 <span class="native">Deutsch</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="fr">フランス語 <span class="native">Français</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="es">スペイン語 <span class="native">Español</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="pt">ポルトガル語 <span class="native">Português</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="it">イタリア語 <span class="native">Italiano</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="nl">オランダ語 <span class="native">Nederlands</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="pl">ポーランド語 <span class="native">Polski</span></label>
+          <label class="lang-chip"><input type="checkbox" data-lang="ru">ロシア語 <span class="native">Русский</span></label>
+        </div>
+        <div id="langOther" class="lang-pane" style="display:none">
+          <label class="lang-chip"><input type="checkbox" data-lang="ar">アラビア語 <span class="native">العربية</span></label>
+        </div>
+        <p class="hint">検索エンジンの地域設定と組み合わせて各言語で検索します。選択が多いほど収集は広くなりますが時間も増えます（目安: 2〜4言語）。</p>
+      </div>
+
+      <div class="feat-row" data-tip="章の執筆前に「アウトライン作成→論点別の執筆→統合」の多段生成を行い、情報量と構成の質を高めます（既定ON）。OFFにすると単一パスの合成になり、高速ですが内容が薄くなることがあります。">
+        <div class="feat-info"><span class="feat-name">📝 強化コンテンツ合成</span>
+          <span class="feat-sub">多段生成で章の情報量を向上</span></div>
+        <label class="switch"><input type="checkbox" id="feat_enhanced" checked><span class="slider"></span></label>
+      </div>
+     </div><!-- /tabFeatures -->
+
+      <button class="primary" id="settingsSaveBtn">保存して閉じる</button>
+      <p class="hint">※APIキーはこのブラウザのlocalStorageに保存されます。共有PCでは空欄のままサーバー側の環境変数をご利用ください。</p>
+    </div>
+  </div>
+</div>
 
 <main>
   <!-- ==================== 設定フォーム ==================== -->
@@ -259,17 +451,6 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
     </details>
 
     <details>
-      <summary>🔌 プロキシ設定（社内ネットワーク等）</summary>
-      <div class="body">
-        <label>HTTPSプロキシURL（空欄=環境変数 HTTPS_PROXY を使用）</label>
-        <input type="text" id="https_proxy" placeholder="http://proxy.example.com:8080">
-        <label>HTTPプロキシURL（空欄=環境変数 HTTP_PROXY を使用）</label>
-        <input type="text" id="http_proxy" placeholder="http://proxy.example.com:8080">
-        <label class="check"><input type="checkbox" id="verify_ssl" checked> SSL証明書を検証する（自己署名証明書の場合はオフ）</label>
-      </div>
-    </details>
-
-    <details>
       <summary>📝 レポートの設定</summary>
       <div class="body">
         <div class="grid2">
@@ -307,7 +488,7 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
             </select>
           </div>
         </div>
-        <label class="check"><input type="checkbox" id="auto_figures"> 図表を自動生成してレポートに挿入する</label>
+        <label class="check"><input type="checkbox" id="auto_figures" checked> 図表を自動生成してレポートに挿入する（数値データが少ないテーマでは生成されないことがあります）</label>
         <label class="check"><input type="checkbox" id="v2_enable_polish" checked> 日本語の自然さを磨く推敲パス（V2）</label>
       </div>
     </details>
@@ -326,21 +507,7 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
           </div>
           <div><label>既定モデル（空欄=標準）</label><input type="text" id="model" placeholder="gpt-5-mini など"></div>
         </div>
-        <label>APIキー（空欄=環境変数を使用）</label>
-        <input type="password" id="api_key" placeholder="sk-... / sk-ant-...">
-        <label>APIエンドポイント（空欄=公式API / 環境変数を使用）</label>
-        <input type="text" id="base_url" placeholder="https://gateway.example.com/v1 （社内ゲートウェイ・互換API・Ollama等）">
-        <p class="hint">社内APIゲートウェイやOpenAI互換サーバー経由で利用する場合に指定します。ローカルLLMの場合はサーバーURL（例: http://localhost:11434 や http://192.168.x.x/v1）を入力してください。</p>
-
-        <div id="localBackendRow" style="display:none">
-          <label>ローカルLLMのバックエンド（プロバイダー=ローカルLLM時）</label>
-          <select id="local_backend">
-            <option value="ollama">Ollama（/api/chat）</option>
-            <option value="openai_compatible">OpenAI互換（/v1/chat/completions） vLLM / LM Studio 等</option>
-            <option value="vllm">vLLM</option>
-          </select>
-          <p class="hint">エンドポイントに <code>/v1</code> を含めた場合は自動的にOpenAI互換として扱われます。<code>/v1</code> を付けない互換サーバー（vLLM等）を使う場合はここで「OpenAI互換」を選んでください。</p>
-        </div>
+        <p class="hint">各プロバイダーのAPIキー・エンドポイント・プロキシは右上の <b>⚙ 設定</b> から入力してください。工程別に複数プロバイダーを使う場合も、それぞれのキーを設定しておけば自動で使い分けられます。</p>
 
         <label style="margin-top:16px">工程別のAI切り替え（空欄=既定を使用）</label>
         <div class="stage-row"><span class="name">計画</span>
@@ -368,6 +535,8 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
     <h2><span class="n">2</span>進捗と結果</h2>
 
     <div id="idleHint" class="idle-hint">調査テーマを入力して「調査を開始」を押してください</div>
+
+    <div class="job-tabs" id="jobTabs" style="display:none"></div>
 
     <div id="progressPanel" style="display:none">
       <div class="stepper">
@@ -405,6 +574,7 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
       <div class="result" id="resultPanel">
         <label>生成されたファイル</label>
         <div class="files" id="resultFiles"></div>
+        <div id="resultWarnings" style="display:none"></div>
       </div>
     </div>
   </section>
@@ -412,15 +582,133 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
 
 <script>
 const $ = (id) => document.getElementById(id);
-let polling = null;
 let logLength = 0;
+let selectedJobId = null;
+let lastRenderedJobId = null;
 
-// show the local-LLM backend selector only when provider = local
-function syncLocalBackendRow() {
-  $('localBackendRow').style.display = $('provider').value === 'local' ? 'block' : 'none';
+// ==================== 設定モーダル（localStorageに保存） ====================
+const SETTINGS_FIELDS = {
+  set_openai_key: 'openai_api_key',
+  set_openai_url: 'openai_base_url',
+  set_anthropic_key: 'anthropic_api_key',
+  set_anthropic_url: 'anthropic_base_url',
+  set_local_url: 'local_base_url',
+  set_local_backend: 'local_backend',
+  set_https_proxy: 'https_proxy',
+  set_http_proxy: 'http_proxy',
+};
+
+// Boolean feature toggles (機能 tab): element id -> create_config param
+const FEATURE_FIELDS = {
+  set_verify_ssl: 'verify_ssl',
+  feat_deep_think: 'deep_think',
+  feat_fermi: 'fermi_estimation',
+  feat_verification: 'enable_verification',
+  feat_multilingual: 'multilingual',
+  feat_enhanced: 'use_enhanced_synthesis',
+};
+
+function loadSettings() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem('drt_settings') || '{}'); } catch (e) {}
+  for (const [el, key] of Object.entries(SETTINGS_FIELDS)) {
+    if (saved[key] !== undefined) $(el).value = saved[key];
+  }
+  for (const [el, key] of Object.entries(FEATURE_FIELDS)) {
+    if (saved[key] !== undefined) $(el).checked = !!saved[key];
+  }
+  if (Array.isArray(saved.search_languages)) setSelectedLangs(saved.search_languages);
+  syncLangUI();
+  return saved;
 }
-$('provider').addEventListener('change', syncLocalBackendRow);
-syncLocalBackendRow();
+
+function saveSettings() {
+  const s = {};
+  for (const [el, key] of Object.entries(SETTINGS_FIELDS)) {
+    const v = $(el).value.trim ? $(el).value.trim() : $(el).value;
+    if (v) s[key] = v;
+  }
+  for (const [el, key] of Object.entries(FEATURE_FIELDS)) {
+    s[key] = $(el).checked;
+  }
+  s.search_languages = selectedLangs();
+  localStorage.setItem('drt_settings', JSON.stringify(s));
+  return s;
+}
+
+function settingsParams() {
+  // Read current modal values (persisted or not) into request params
+  const p = {};
+  for (const [el, key] of Object.entries(SETTINGS_FIELDS)) {
+    const v = ($(el).value || '').trim();
+    if (v) p[key] = v;
+  }
+  for (const [el, key] of Object.entries(FEATURE_FIELDS)) {
+    p[key] = $(el).checked;
+  }
+  if (p.multilingual) {
+    const langs = selectedLangs();
+    p.search_languages = langs.length ? langs : ['ja', 'en'];
+  }
+  return p;
+}
+
+// settings modal tab switching
+document.querySelectorAll('.modal-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.modal-tab').forEach(t => t.classList.toggle('sel', t === tab));
+    document.querySelectorAll('.tab-pane').forEach(p => {
+      p.style.display = p.id === tab.dataset.tab ? 'block' : 'none';
+    });
+  });
+});
+
+// ---- multilingual language selection (sub-tabs inside 機能 tab) ----
+const LANG_NAMES = {ja:'日本語', en:'英語', zh:'中国語', ko:'韓国語', th:'タイ語',
+  vi:'ベトナム語', hi:'ヒンディー語', de:'ドイツ語', fr:'フランス語', es:'スペイン語',
+  pt:'ポルトガル語', it:'イタリア語', nl:'オランダ語', pl:'ポーランド語',
+  ru:'ロシア語', ar:'アラビア語'};
+
+document.querySelectorAll('.lang-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.lang-tab').forEach(t => t.classList.toggle('sel', t === tab));
+    document.querySelectorAll('.lang-pane').forEach(p => {
+      p.style.display = p.id === tab.dataset.pane ? 'flex' : 'none';
+    });
+  });
+});
+
+function selectedLangs() {
+  return Array.from(document.querySelectorAll('.lang-chip input:checked'))
+    .map(cb => cb.dataset.lang);
+}
+
+function setSelectedLangs(langs) {
+  document.querySelectorAll('.lang-chip input').forEach(cb => {
+    cb.checked = langs.includes(cb.dataset.lang);
+  });
+}
+
+function syncLangUI() {
+  const on = $('feat_multilingual').checked;
+  $('langPanel').style.display = on ? 'block' : 'none';
+  const langs = selectedLangs();
+  $('langSummary').textContent = on
+    ? (langs.length ? '対象: ' + langs.map(l => LANG_NAMES[l] || l).join('・')
+                    : '言語を1つ以上選択してください')
+    : '対象言語は下のタブで選択（全16言語）';
+}
+$('feat_multilingual').addEventListener('change', syncLangUI);
+document.querySelectorAll('.lang-chip input').forEach(cb =>
+  cb.addEventListener('change', syncLangUI));
+
+$('settingsBtn').addEventListener('click', () => { $('settingsModal').style.display = 'flex'; });
+$('settingsCloseBtn').addEventListener('click', () => { $('settingsModal').style.display = 'none'; });
+$('settingsSaveBtn').addEventListener('click', () => { saveSettings(); $('settingsModal').style.display = 'none'; });
+$('settingsModal').addEventListener('click', (e) => {
+  if (e.target === $('settingsModal')) $('settingsModal').style.display = 'none';
+});
+loadSettings();
 
 // mode card selection highlight (per radio group)
 document.querySelectorAll('.mode-card input').forEach(input => {
@@ -437,7 +725,6 @@ document.querySelectorAll('.mode-card input').forEach(input => {
 
 function collectParams() {
   const provider = $('provider').value;
-  const apiKey = $('api_key').value.trim();
   const params = {
     query: $('query').value.trim(),
     requirements: $('requirements').value.trim(),
@@ -449,9 +736,6 @@ function collectParams() {
     driver_path: $('driver_path').value.trim(),
     waf_mitigation: $('waf_mitigation').checked,
     per_domain_delay: parseFloat($('per_domain_delay').value),
-    http_proxy: $('http_proxy').value.trim(),
-    https_proxy: $('https_proxy').value.trim(),
-    verify_ssl: $('verify_ssl').checked,
     ai_crawl_max_pages: parseInt($('ai_crawl_max_pages').value) || 15,
     ai_crawl_site_depth: parseInt($('ai_crawl_site_depth').value) || 2,
     gap_fill_rounds: parseInt($('gap_fill_rounds').value),
@@ -464,18 +748,10 @@ function collectParams() {
     auto_figures: $('auto_figures').checked,
     plan_review: $('plan_review').checked,
     plan_review_timeout: 60,
+    // provider credentials / endpoints / proxy from the ⚙ settings modal:
+    // all providers' keys are sent so per-stage overrides can mix providers
+    ...settingsParams(),
   };
-  if (apiKey) {
-    if (provider === 'openai') params.openai_api_key = apiKey;
-    else if (provider === 'anthropic') params.anthropic_api_key = apiKey;
-  }
-  const baseUrl = $('base_url').value.trim();
-  if (baseUrl) {
-    if (provider === 'openai') params.openai_base_url = baseUrl;
-    else if (provider === 'anthropic') params.anthropic_base_url = baseUrl;
-    else if (provider === 'local') params.local_base_url = baseUrl;
-  }
-  if (provider === 'local') params.local_backend = $('local_backend').value;
   const docsText = $('local_documents').value.trim();
   if (docsText && params.source_mode !== 'web') {
     params.local_documents = docsText.split('\n').map(s => s.trim()).filter(Boolean);
@@ -509,7 +785,7 @@ async function startResearch() {
     $('formError').textContent = 'ローカル文献モードには文書パスの入力が必要です';
     return;
   }
-  $('startBtn').disabled = true;
+  $('startBtn').disabled = true;   // only while submitting
   try {
     const res = await fetch('/api/research', {
       method: 'POST',
@@ -518,22 +794,39 @@ async function startResearch() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'failed');
-    resetProgress();
-    startPolling();
+    selectedJobId = data.job_id;   // focus the new job
+    await pollJobs();
   } catch (e) {
-    $('startBtn').disabled = false;
     $('formError').className = 'banner error';
     $('formError').textContent = '開始できませんでした: ' + e.message;
+  } finally {
+    $('startBtn').disabled = false;  // parallel runs allowed (server caps them)
   }
 }
 
-function resetProgress() {
+const STATE_ICON = {running: '🔄', plan_review: '📋', completed: '✅', error: '❌'};
+
+function renderTabs(jobs) {
+  if (!jobs.length) {
+    $('jobTabs').style.display = 'none';
+    $('idleHint').style.display = 'block';
+    $('progressPanel').style.display = 'none';
+    return;
+  }
   $('idleHint').style.display = 'none';
+  $('jobTabs').style.display = 'flex';
   $('progressPanel').style.display = 'block';
-  $('resultPanel').style.display = 'none';
-  $('jobBanner').className = 'banner';
-  $('log').textContent = '';
-  logLength = 0;
+  $('jobTabs').innerHTML = jobs.map(j => `
+    <div class="job-tab ${j.job_id === selectedJobId ? 'sel' : ''}" data-job="${j.job_id}"
+         title="${escapeHtml(j.query || '')}">
+      <span class="st">${STATE_ICON[j.state] || '⏳'}</span>${escapeHtml((j.query || j.job_id).slice(0, 24))}
+    </div>`).join('');
+  document.querySelectorAll('.job-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      selectedJobId = tab.dataset.job;
+      pollJobs();
+    });
+  });
 }
 
 function stepIndex(pct) {
@@ -587,7 +880,11 @@ async function sendPlanReview(action) {
     const res = await fetch('/api/plan-review', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({action, instructions: $('planInstructions').value.trim()}),
+      body: JSON.stringify({
+        action,
+        job_id: selectedJobId,
+        instructions: $('planInstructions').value.trim(),
+      }),
     });
     if (!res.ok) throw new Error('plan review request failed');
     if (action === 'approve') $('planReviewPanel').style.display = 'none';
@@ -600,6 +897,15 @@ async function sendPlanReview(action) {
 }
 
 function render(status) {
+  // when switching between job tabs, reset per-job view state
+  if (status.job_id !== lastRenderedJobId) {
+    lastRenderedJobId = status.job_id;
+    logLength = -1;
+    lastPlanJson = null;
+    $('jobBanner').className = 'banner';
+    $('resultPanel').style.display = 'none';
+  }
+
   const pct = status.progress || 0;
   $('bar').style.width = pct + '%';
   $('bar').classList.toggle('moving', status.state === 'running');
@@ -634,16 +940,16 @@ function render(status) {
   }
 
   if (status.state === 'completed') {
-    stopPolling();
-    $('startBtn').disabled = false;
     $('jobBanner').className = 'banner success';
     $('jobBanner').textContent = '✅ 調査が完了しました';
     showResults(status.result || {});
   } else if (status.state === 'error') {
-    stopPolling();
-    $('startBtn').disabled = false;
     $('jobBanner').className = 'banner error';
     $('jobBanner').textContent = '❌ エラー: ' + (status.error || '不明なエラー');
+    $('resultPanel').style.display = 'none';
+  } else {
+    $('jobBanner').className = 'banner';
+    $('resultPanel').style.display = 'none';
   }
 }
 
@@ -661,6 +967,20 @@ function showResults(result) {
         <a href="/api/report-file?path=${encodeURIComponent(f.path)}&download=1">保存</a>
       </span>
     </div>`).join('');
+
+  // processing warnings (fallbacks, skipped figures, etc.)
+  const warns = result.warnings || [];
+  if (warns.length) {
+    $('resultWarnings').style.display = 'block';
+    $('resultWarnings').innerHTML =
+      `<label>⚠ 処理中の警告（${warns.length}件）</label>` +
+      warns.slice(0, 12).map(w =>
+        `<div class="warn-row"><b>[${escapeHtml(w.severity || '')}]</b> ${escapeHtml(w.message || '')}</div>`
+      ).join('') +
+      (warns.length > 12 ? `<div class="warn-row">…ほか${warns.length - 12}件</div>` : '');
+  } else {
+    $('resultWarnings').style.display = 'none';
+  }
   $('resultPanel').style.display = 'block';
 }
 
@@ -669,22 +989,24 @@ function escapeHtml(s) {
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-async function poll() {
+async function pollJobs() {
   try {
-    const res = await fetch('/api/status');
-    const status = await res.json();
-    if (status.state && status.state !== 'idle') render(status);
+    const res = await fetch('/api/jobs');
+    const data = await res.json();
+    const jobs = data.jobs || [];
+    // default selection: newest job needing attention, else newest
+    if (!selectedJobId || !jobs.some(j => j.job_id === selectedJobId)) {
+      const attention = jobs.find(j => j.state === 'plan_review')
+                     || jobs.find(j => j.state === 'running');
+      selectedJobId = (attention || jobs[0] || {}).job_id || null;
+    }
+    renderTabs(jobs);
+    const sel = jobs.find(j => j.job_id === selectedJobId);
+    if (sel) render(sel);
   } catch (e) { /* server briefly unavailable; keep polling */ }
 }
 
-function startPolling() {
-  stopPolling();
-  poll();
-  polling = setInterval(poll, 1500);
-}
-function stopPolling() {
-  if (polling) { clearInterval(polling); polling = null; }
-}
+setInterval(pollJobs, 1500);   // continuous polling covers all parallel jobs
 
 $('startBtn').addEventListener('click', startResearch);
 $('planApproveBtn').addEventListener('click', () => sendPlanReview('approve'));
@@ -705,13 +1027,8 @@ fetch('/api/version').then(r => r.json()).then(v => {
   }
 }).catch(() => {});
 
-// resume view if a job is already running when the page loads
-poll().then(() => {
-  fetch('/api/status').then(r => r.json()).then(s => {
-    if (s.state === 'running' || s.state === 'plan_review') { resetProgress(); startPolling(); $('startBtn').disabled = true; }
-    else if (s.state === 'completed' || s.state === 'error') { resetProgress(); render(s); }
-  });
-});
+// initial load: pick up any jobs already running on the server
+pollJobs();
 </script>
 </body>
 </html>

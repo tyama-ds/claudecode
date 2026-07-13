@@ -28,6 +28,30 @@ from ...utils.helpers import split_prose_and_meta
 # Delimiter between chapter prose and metadata JSON in generation responses
 CHAPTER_META_DELIMITER = "===CHAPTER_META==="
 
+# Paragraph-leading label prefixes that make prose read like bullet notes
+# ("結論：〜", "要点：〜"). Some models emit these compulsively (especially
+# when a style instruction mentions conclusions-first); strip the label and
+# keep the sentence. Headings / tables / bullets / quotes are left untouched.
+_LABEL_PREFIX_RE = re.compile(
+    r'^(?:\*\*)?(?:結論|要点|ポイント|概要|まとめ|示唆|考察|分析)(?:\*\*)?[：:]\s*'
+)
+
+
+def strip_label_prefixes(text: str) -> str:
+    """Remove note-style label prefixes (結論： etc.) from paragraph starts."""
+    out = []
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        is_block = stripped.startswith(("#", "|", ">", "- ", "* ")) or \
+            re.match(r"^\d+[.)]\s", stripped)
+        if not is_block:
+            indent = line[:len(line) - len(stripped)]
+            new = _LABEL_PREFIX_RE.sub("", stripped)
+            if new != stripped and new:
+                line = indent + new
+        out.append(line)
+    return "\n".join(out)
+
 logger = logging.getLogger(__name__)
 
 
@@ -524,6 +548,9 @@ After the body, output this delimiter followed by metadata:
                     min_chars=min_chars,
                 )
 
+            # Note-style label prefixes (結論： etc.) break the prose flow
+            body = strip_label_prefixes(body)
+
             return ChapterContent(
                 section_number=section_number,
                 section_title=section_title,
@@ -721,7 +748,7 @@ Output only the revised content (no JSON):"""
                 refined_content = response.content.strip()
 
                 # Update chapter
-                chapter.content = refined_content
+                chapter.content = strip_label_prefixes(refined_content)
                 chapter.word_count = len(refined_content)
                 chapter.is_draft = False
 
@@ -773,7 +800,8 @@ Output only the revised content (no JSON):"""
 1. 事実・数値・固有名詞・出典表記・見出し構成は一切変更しない。情報の追加・削除もしない。
 2. 翻訳調・単調な文末・不自然な語順・冗長表現を直し、段落内と段落間の流れを滑らかにする。
 3. 文体（です・ます調／である調）は上記スタイル指示に統一する。
-4. 修正が不要な文はそのまま残してよい。
+4. 「結論：」「要点：」のようなラベル書きや細切れの短文の羅列があれば、通常の流れる文章に書き直す。段落同士は接続表現でつなぎ、章全体を調子の通った文章にする。
+5. 修正が不要な文はそのまま残してよい。
 
 推敲後の本文のみを出力（前置き・JSON・コードブロック不要）:"""
             else:
@@ -801,14 +829,27 @@ Output only the polished body (no preamble, no JSON, no code block):"""
 
                 original_len = len(chapter.content)
                 if polished and 0.6 * original_len <= len(polished) <= 1.5 * original_len:
+                    polished = strip_label_prefixes(polished)
                     chapter.content = polished
                     chapter.word_count = len(polished)
                     chapter.is_draft = False
                 else:
                     print(f"[ReportGeneratorV2] Polish rejected for {section_num} "
                           f"(length {len(polished)} vs original {original_len})")
+                    ResearchWarnings.get_instance().add(
+                        ResearchWarnings.LOW,
+                        "ReportGeneratorV2",
+                        f"第{section_num}章の推敲結果が長さ検査で棄却され、"
+                        f"下書きのまま出力されています。",
+                    )
             except Exception as e:
                 print(f"[ReportGeneratorV2] Polish failed for {section_num}: {e}")
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.LOW,
+                    "ReportGeneratorV2",
+                    f"第{section_num}章の推敲パスが失敗し、下書きのまま"
+                    f"出力されています。Error: {e}",
+                )
 
             prev_tail = chapter.content[-300:]
 

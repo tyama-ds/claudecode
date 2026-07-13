@@ -412,8 +412,9 @@ class DeepResearchTool:
             - session: ResearchSession object
             - evidence_locker: EvidenceLocker object
         """
-        # Reset warning collector for this run
-        ResearchWarnings.reset()
+        # Reset warning collector for this run (kept when another run is
+        # already active, so parallel Web UI jobs don't wipe each other)
+        ResearchWarnings.reset_if_idle()
 
         # Log informational note when both enhanced_synthesis and V2 two_phase are active
         if (self.config.research.use_enhanced_synthesis
@@ -1615,25 +1616,38 @@ Output only the text (no JSON, no heading):"""
         if total == 0:
             print("[AutoFigures] No figures, tables, or charts were extracted. "
                   "Skipping insertion into report.")
+            n_points = len(numerical_store.data_points) if numerical_store else 0
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.MEDIUM,
+                "AutoFigures",
+                f"図表の自動生成は実行されましたが、0件でした"
+                f"（抽出できた数値データ: {n_points}点、チャート推奨: "
+                f"{len(chart_recommendations)}件）。収集ソースに統計・数値情報が"
+                f"少ない可能性があります。数値データの多いテーマ・情報源では"
+                f"自動的に生成されます。",
+            )
             return None
 
-        # Step 6: Read the report content
-        try:
-            content = None
-            encodings = ['utf-8', 'utf-8-sig', 'cp932', 'shift_jis', 'latin-1']
-            for encoding in encodings:
-                try:
-                    with open(report_path, 'r', encoding=encoding) as f:
+        # Step 6: Read the report content (text formats only — .docx/.pdf are
+        # binary and their insertion paths below don't need the raw text)
+        content = ""
+        if report_path.suffix.lower() in ('.md', '.txt', '.html'):
+            try:
+                content = None
+                encodings = ['utf-8', 'utf-8-sig', 'cp932', 'shift_jis', 'latin-1']
+                for encoding in encodings:
+                    try:
+                        with open(report_path, 'r', encoding=encoding) as f:
+                            content = f.read()
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                if content is None:
+                    with open(report_path, 'r', encoding='utf-8', errors='replace') as f:
                         content = f.read()
-                    break
-                except UnicodeDecodeError:
-                    continue
-            if content is None:
-                with open(report_path, 'r', encoding='utf-8', errors='replace') as f:
-                    content = f.read()
-        except Exception as e:
-            print(f"[AutoFigures] Failed to read report file {report_path}: {e}")
-            return None
+            except Exception as e:
+                print(f"[AutoFigures] Failed to read report file {report_path}: {e}")
+                return None
 
         # Step 7: Insert figures/tables into the report
         try:
@@ -1650,7 +1664,16 @@ Output only the text (no JSON, no heading):"""
                     collection=collection,
                 )
                 if not updated_path:
-                    updated_path = report_path
+                    print(f"[AutoFigures] DOCX insertion failed; the report "
+                          f"keeps its original content without figures.")
+                    ResearchWarnings.get_instance().add(
+                        ResearchWarnings.MEDIUM,
+                        "AutoFigures",
+                        f"{total}件の図表を生成しましたが、DOCXへの挿入に失敗"
+                        f"しました。図表ファイル自体は {figures_dir} に保存"
+                        f"されています。",
+                    )
+                    return None
             elif suffix in ('.pdf', '.html'):
                 updated_path = generator.add_figures_to_pdf(
                     markdown_content=content,
@@ -1702,8 +1725,12 @@ Output only the text (no JSON, no heading):"""
             research_topic=session.query if session else ""
         )
 
+        # Numerical extraction is an evaluation-type task; route it to the
+        # 'evaluation' stage LLM when configured (usually a cheaper/faster
+        # model) instead of the default writing-grade model
+        extraction_llm = self.stage_llm_clients.get("evaluation", self.llm_client)
         extractor = NumericalDataExtractor(
-            llm_client=self.llm_client if self.config.report.numerical_llm_extraction else None,
+            llm_client=extraction_llm if self.config.report.numerical_llm_extraction else None,
             language=self.config.research.language,
             min_confidence=self.config.report.numerical_min_confidence,
             use_llm=self.config.report.numerical_llm_extraction,
@@ -1711,40 +1738,87 @@ Output only the text (no JSON, no heading):"""
             enable_pint=self.config.report.enable_pint,
         )
 
-        # Extract from each evidence item
-        for evidence in evidence_locker.get_all_evidence():
-            if not evidence.content_excerpt:
-                continue
+        # Extract from each evidence item.
+        #
+        # - Use the FULL extracted text when available. content_excerpt is a
+        #   500-char summary snippet; feeding only that starved the extractor
+        #   of numbers and typically yielded zero chartable data.
+        # - Skip items whose text contains no digits (nothing to extract).
+        # - Cap the number of items and run extractions in parallel: this was
+        #   previously one sequential LLM call per evidence item, which alone
+        #   could take hours on a large run.
+        import concurrent.futures
+        import re as _re
 
-            # Get section ID from evidence if available
-            section_id = ""
+        MAX_NUMERIC_EVIDENCE = 80
+        EXTRACT_WORKERS = 6
+
+        candidates = []
+        for evidence in evidence_locker.get_all_evidence():
+            text = (getattr(evidence, "extracted_text", "") or ""
+                    ) or (evidence.content_excerpt or "")
+            if not text or not _re.search(r"\d", text):
+                continue
+            candidates.append((evidence, text))
+
+        skipped_no_digits = (
+            len(evidence_locker.get_all_evidence()) - len(candidates))
+        if len(candidates) > MAX_NUMERIC_EVIDENCE:
+            # Keep the most relevant items when over the cap
+            candidates.sort(
+                key=lambda ct: getattr(ct[0], "relevance_score", 0.0) or 0.0,
+                reverse=True,
+            )
+            print(f"[AutoFigures] capping numerical extraction to "
+                  f"{MAX_NUMERIC_EVIDENCE} of {len(candidates)} evidence items")
+            candidates = candidates[:MAX_NUMERIC_EVIDENCE]
+
+        print(f"[AutoFigures] numerical extraction: {len(candidates)} evidence "
+              f"items ({skipped_no_digits} skipped: no numbers), "
+              f"{EXTRACT_WORKERS} parallel workers")
+
+        def _section_for(evidence) -> str:
             if session and session.section_contents:
-                # Try to match evidence to section
                 for sec_id, sec_data in session.section_contents.items():
                     if sec_id.startswith("_"):
                         continue
-                    sources = sec_data.get("sources", [])
-                    # sources is a list of URL strings, not dicts
-                    if evidence.url in sources:
-                        section_id = sec_id
-                        break
+                    if evidence.url in sec_data.get("sources", []):
+                        return sec_id
+            return ""
 
-            # Determine source reliability from verification if available
-            source_reliability = 0.7  # Default
+        def _extract_one(item):
+            evidence, text = item
+            source_reliability = 0.7
             if hasattr(evidence, 'quality_score') and evidence.quality_score:
                 source_reliability = evidence.quality_score
+            try:
+                return extractor.extract_from_content(
+                    content=text,
+                    source_url=evidence.url,
+                    source_title=evidence.title,
+                    evidence_id=evidence.id,
+                    section_id=_section_for(evidence),
+                    source_reliability=source_reliability,
+                    research_topic=session.query if session else "",
+                )
+            except Exception as e:
+                print(f"[AutoFigures] numerical extraction failed for "
+                      f"{evidence.url[:60]}: {e}")
+                return []
 
-            data_points = extractor.extract_from_content(
-                content=evidence.content_excerpt,
-                source_url=evidence.url,
-                source_title=evidence.title,
-                evidence_id=evidence.id,
-                section_id=section_id,
-                source_reliability=source_reliability,
-                research_topic=session.query if session else "",
-            )
-
-            store.add_many(data_points)
+        if candidates:
+            workers = min(EXTRACT_WORKERS, len(candidates))
+            if workers > 1:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                    for i, data_points in enumerate(ex.map(_extract_one, candidates), 1):
+                        store.add_many(data_points)
+                        if i % 10 == 0 or i == len(candidates):
+                            print(f"[AutoFigures] numerical extraction "
+                                  f"{i}/{len(candidates)} done "
+                                  f"({len(store.data_points)} data points)")
+            else:
+                for item in candidates:
+                    store.add_many(_extract_one(item))
 
         # Also extract from section contents (may have synthesized data)
         if session and session.section_contents:
@@ -1829,8 +1903,17 @@ Output only the text (no JSON, no heading):"""
                 source_texts=source_texts,
             )
 
-            # Update section content with processed content
-            session.section_contents[section_num]["content"] = result.processed_content
+            # Keep the section's full prose and APPEND DeepThink's synthesized
+            # conclusion. Replacing the content wholesale destroyed the
+            # section text: processed_content is a short conclusion-only blob
+            # (produced by 「最終結論:」-style prompts), which downstream report
+            # generation then rendered as fragmentary 結論-labeled chapters.
+            conclusion = (result.processed_content or "").strip()
+            if conclusion and conclusion not in content:
+                session.section_contents[section_num]["content"] = (
+                    content.rstrip() + "\n\n" + conclusion
+                )
+            session.section_contents[section_num]["deep_think_conclusion"] = conclusion
 
             # Store result metrics
             deep_think_results[section_num] = {

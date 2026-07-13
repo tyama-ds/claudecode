@@ -742,13 +742,16 @@ class FigureTableGenerator:
             parsed = urlparse(url)
             headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
 
-        max_retries = 3
+        # 2 attempts with a short (5, 10) timeout: figure images are
+        # nice-to-have, and the previous 3 x (5,20)s + exponential backoff
+        # could burn ~78s per dead URL, sequentially, across many images
+        max_retries = 2
         last_exception = None
         for attempt in range(max_retries):
             try:
                 response = requests.get(
                     url,
-                    timeout=(5, 20),
+                    timeout=(5, 10),
                     headers=headers,
                     proxies=self.proxies,
                     verify=self.verify_ssl,
@@ -2068,28 +2071,43 @@ Example: line"""
             print("[FigureTableGenerator] python-docx not installed. Install with: pip install python-docx")
             return None
 
+        # Formats python-docx can embed; SVG/WebP downloads must be skipped,
+        # not attempted (add_picture raises UnrecognizedImageError)
+        EMBEDDABLE_IMAGE_SUFFIXES = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff'}
+
         try:
             doc = Document(docx_path)
             output_path = output_path or docx_path.parent / f"{docx_path.stem}_with_figures.docx"
 
-            # Track which section we're in
+            # Track which section we're in.
+            # IMPORTANT: insertion positions must be indices into the body's
+            # block-level children (paragraphs AND tables), because
+            # _move_paragraph_after/_move_table_after reposition within that
+            # list. Indexing doc.paragraphs would drift by one for every
+            # table already present in the document.
+            body_children = list(doc.element.body)
+
             current_section = None
             insert_after = []
             matched_sections = set()
 
-            for i, paragraph in enumerate(doc.paragraphs):
+            for paragraph in doc.paragraphs:
                 text = paragraph.text.strip()
 
                 # Detect section headers (match "1. " or "1.2. " format)
                 match = re.match(r'^(\d+(?:\.\d+)?)[.\s]', text)
                 if match and paragraph.style.name.startswith('Heading'):
+                    try:
+                        body_idx = body_children.index(paragraph._element)  # noqa: SLF001
+                    except ValueError:
+                        continue  # paragraph nested in a table etc.
                     if current_section:
-                        insert_after.append((i, current_section))
+                        insert_after.append((body_idx, current_section))
                     current_section = match.group(1)
 
             # Insert at end for last section
             if current_section:
-                insert_after.append((len(doc.paragraphs), current_section))
+                insert_after.append((len(body_children), current_section))
 
             def _image_exists(img_path) -> bool:
                 """Check if image path exists on disk."""
@@ -2097,6 +2115,18 @@ Example: line"""
                     return False
                 p = Path(img_path) if not isinstance(img_path, Path) else img_path
                 return p.exists()
+
+            def _embeddable(img_path) -> bool:
+                if not _image_exists(img_path):
+                    return False
+                suffix = Path(img_path).suffix.lower()
+                if suffix and suffix not in EMBEDDABLE_IMAGE_SUFFIXES:
+                    print(f"[FigureTableGenerator] skipping non-embeddable "
+                          f"image format {suffix}: {img_path}")
+                    return False
+                return True
+
+            skipped_elements = 0
 
             # Insert in reverse order to maintain indices
             for insert_idx, section_id in reversed(insert_after):
@@ -2109,7 +2139,7 @@ Example: line"""
 
                 # Add charts
                 for chart in reversed(section_charts):
-                    if _image_exists(chart.image_path):
+                    if _embeddable(chart.image_path):
                         elements.append(('image', chart))
 
                 # Add tables
@@ -2118,10 +2148,14 @@ Example: line"""
 
                 # Add figures
                 for fig in reversed(section_figures):
-                    if _image_exists(fig.image_path):
+                    if _embeddable(fig.image_path):
                         elements.append(('image', fig))
 
                 for elem_type, elem in elements:
+                  # One corrupt image or malformed table must not abort the
+                  # whole insertion (previously a single failure dropped
+                  # every figure in the report)
+                  try:
                     if elem_type == 'image':
                         # Add image
                         p = doc.add_paragraph()
@@ -2178,39 +2212,37 @@ Example: line"""
                         self._move_table_after(doc, docx_table, insert_idx + 1)
                         if caption_p:
                             self._move_paragraph_after(doc, caption_p, insert_idx + 2)
+                  except Exception as elem_err:
+                    skipped_elements += 1
+                    label = getattr(elem, 'title', '') or getattr(elem, 'caption', '')
+                    print(f"[FigureTableGenerator] skipping one "
+                          f"{elem_type} ('{str(label)[:40]}') in section "
+                          f"{section_id}: {elem_err}")
 
             # Append orphaned figures (section_id="" or unmatched) at end of document
             orphan_figures = [f for f in collection.figures if f.section_id not in matched_sections]
             orphan_charts = [c for c in collection.charts if c.section_id not in matched_sections]
-            has_orphans = any(
-                _image_exists(item.image_path)
-                for item in orphan_figures + orphan_charts
-            )
-            if has_orphans:
-                for fig in orphan_figures:
-                    if _image_exists(fig.image_path):
-                        p = doc.add_paragraph()
-                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        run = p.add_run()
-                        img_path = Path(fig.image_path) if not isinstance(fig.image_path, Path) else fig.image_path
-                        run.add_picture(str(img_path), width=Inches(5.5))
-                        caption_p = doc.add_paragraph()
-                        caption_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        caption_run = caption_p.add_run(fig.caption)
-                        caption_run.font.size = Pt(9)
-                        caption_run.italic = True
-                for chart in orphan_charts:
-                    if _image_exists(chart.image_path):
-                        p = doc.add_paragraph()
-                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        run = p.add_run()
-                        img_path = Path(chart.image_path) if not isinstance(chart.image_path, Path) else chart.image_path
-                        run.add_picture(str(img_path), width=Inches(5.5))
-                        caption_p = doc.add_paragraph()
-                        caption_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        caption_run = caption_p.add_run(chart.caption)
-                        caption_run.font.size = Pt(9)
-                        caption_run.italic = True
+            for item in orphan_figures + orphan_charts:
+                if not _embeddable(item.image_path):
+                    continue
+                try:
+                    p = doc.add_paragraph()
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    run = p.add_run()
+                    img_path = Path(item.image_path) if not isinstance(item.image_path, Path) else item.image_path
+                    run.add_picture(str(img_path), width=Inches(5.5))
+                    caption_p = doc.add_paragraph()
+                    caption_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    caption_run = caption_p.add_run(item.caption)
+                    caption_run.font.size = Pt(9)
+                    caption_run.italic = True
+                except Exception as elem_err:
+                    skipped_elements += 1
+                    print(f"[FigureTableGenerator] skipping one orphan image: {elem_err}")
+
+            if skipped_elements:
+                print(f"[FigureTableGenerator] {skipped_elements} element(s) "
+                      f"skipped during DOCX insertion (see messages above)")
 
             doc.save(output_path)
             return output_path

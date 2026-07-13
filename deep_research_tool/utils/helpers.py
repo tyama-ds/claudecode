@@ -36,6 +36,7 @@ class ResearchWarnings:
 
     _instance: Optional["ResearchWarnings"] = None
     _lock = threading.Lock()
+    _active_runs = 0  # research runs currently executing (parallel Web UI jobs)
 
     def __init__(self) -> None:
         self._warnings: List[Dict[str, str]] = []
@@ -54,6 +55,31 @@ class ResearchWarnings:
         """Reset the singleton (call at the start of each run)."""
         with cls._lock:
             cls._instance = cls()
+
+    @classmethod
+    def reset_if_idle(cls) -> None:
+        """Reset only when no other research run is active.
+
+        With parallel Web UI jobs an unconditional reset at run start would
+        wipe the warnings of a job that is still running. When runs overlap,
+        warnings are shared between them (a known cosmetic limitation) but
+        never silently destroyed.
+        """
+        with cls._lock:
+            if cls._active_runs == 0:
+                cls._instance = cls()
+
+    @classmethod
+    def begin_run(cls) -> None:
+        """Mark a research run as active (see reset_if_idle)."""
+        with cls._lock:
+            cls._active_runs += 1
+
+    @classmethod
+    def end_run(cls) -> None:
+        """Mark a research run as finished."""
+        with cls._lock:
+            cls._active_runs = max(0, cls._active_runs - 1)
 
     # --- recording ---
     def add(self, severity: str, source: str, message: str) -> None:

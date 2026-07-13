@@ -785,6 +785,13 @@ Write the integrated content directly (no JSON, no section title):"""
                 return content
         except Exception as e:
             print(f"[WARNING] Content integration failed: {e}")
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.MEDIUM,
+                "ContentExtractor",
+                f"セクション「{section_title}」の統合パスが失敗し、論点ごとの"
+                f"下書き断片をそのまま連結しました。この章は文章の流れが"
+                f"途切れている可能性があります。Error: {e}",
+            )
 
         # Fallback: just join the sections
         return "\n\n".join(s['content'] for s in detailed_sections)
