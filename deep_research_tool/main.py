@@ -1614,11 +1614,32 @@ Output only the text (no JSON, no heading):"""
             )
             return None
 
+        # Guarantee layer: sections whose table extraction came up empty
+        # still get a 主要数値一覧 table synthesized from the numerical store
+        if self.config.report.auto_figures_include_tables and numerical_store:
+            try:
+                generator.add_numeric_summary_tables(collection, numerical_store)
+            except Exception as e:
+                print(f"[AutoFigures] numeric summary tables failed: {e}")
+
         # Report extraction results
         n_figures = len(collection.figures)
         n_tables = len(collection.tables)
         n_charts = len(collection.charts)
         total = n_figures + n_tables + n_charts
+
+        # Table-zero visibility: tables silently absent (while charts exist)
+        # was indistinguishable from "no tables wanted"
+        if (self.config.report.auto_figures_include_tables
+                and n_tables == 0 and total > 0):
+            n_points = len(numerical_store.data_points) if numerical_store else 0
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.LOW,
+                "AutoFigures",
+                f"表は0件でした（図・チャートは{total}件生成）。HTML表の取得・"
+                f"LLM表抽出・数値一覧の全てで表になるデータが見つかりません"
+                f"でした（数値データ点: {n_points}）。",
+            )
 
         print(f"[AutoFigures] Extraction complete: "
               f"{n_figures} figure(s), {n_tables} table(s), {n_charts} chart(s)")

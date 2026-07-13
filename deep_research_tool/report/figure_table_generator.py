@@ -222,6 +222,48 @@ class FigureTableGenerator:
         self.verify_ssl = verify_ssl
         self.chart_library = (chart_library or "matplotlib").lower()
         self._seaborn_warned = False
+        self._fetch_session = None
+
+    def _get_fetch_session(self):
+        """Session for re-fetching evidence pages (HTML table extraction).
+
+        Browser-like headers matter: the old bare requests.get with a
+        'ResearchBot' User-Agent got 403'd by the same WAF-protected sites
+        that served content during research, so HTML table extraction
+        silently never worked there. Retries fail fast (connect=1) so a
+        dead host can't stall the figure stage.
+        """
+        if self._fetch_session is None:
+            from requests.adapters import HTTPAdapter
+            try:
+                from urllib3.util.retry import Retry
+            except ImportError:
+                from requests.packages.urllib3.util.retry import Retry
+
+            s = requests.Session()
+            s.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) "
+                              "Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;"
+                          "q=0.9,*/*;q=0.8",
+                "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+                "Accept-Encoding": "gzip, deflate",
+                "Connection": "keep-alive",
+            })
+            if self.proxies:
+                s.proxies.update(self.proxies)
+            s.verify = self.verify_ssl
+            retry = Retry(total=2, connect=1, read=1, status=2,
+                          backoff_factor=0.5,
+                          status_forcelist=[429, 500, 502, 503, 504],
+                          allowed_methods=frozenset(["GET"]),
+                          raise_on_status=False)
+            adapter = HTTPAdapter(max_retries=retry)
+            s.mount("http://", adapter)
+            s.mount("https://", adapter)
+            self._fetch_session = s
+        return self._fetch_session
 
     # ========================================================================
     # Main Entry Point
@@ -364,6 +406,85 @@ class FigureTableGenerator:
                 collection.tables.append(table)
 
         return collection
+
+    def add_numeric_summary_tables(
+        self,
+        collection: FigureTableCollection,
+        numerical_store,
+        max_rows: int = 8,
+        min_points: int = 3,
+    ) -> int:
+        """Guarantee-layer: synthesize per-section 主要数値一覧 tables.
+
+        When HTML/LLM/pattern table extraction all come up empty for a
+        section but the numerical store holds extracted data points, build
+        a summary table from those points so the report still presents its
+        numbers in structured form. Sections that already have a table are
+        left alone. Returns the number of tables added.
+        """
+        if numerical_store is None or not getattr(
+                numerical_store, "data_points", None):
+            return 0
+
+        from .chart_quality import is_year_like
+
+        # Group usable points by section
+        by_section = {}
+        for p in numerical_store.data_points:
+            if not p.section_id or getattr(p, "is_derived", False):
+                continue
+            if is_year_like(p.value, p.unit):
+                continue
+            if not (p.metric_name or "").strip():
+                continue
+            by_section.setdefault(p.section_id, []).append(p)
+
+        sections_with_tables = {t.section_id for t in collection.tables}
+        added = 0
+
+        for section_id, points in sorted(by_section.items()):
+            if section_id in sections_with_tables:
+                continue
+
+            # Dedupe by (metric, subject, year): keep highest confidence
+            best = {}
+            for p in points:
+                key = ((p.metric_name or "").strip().lower(),
+                       (p.subject or "").strip().lower(), p.year)
+                cur = best.get(key)
+                if cur is None or p.combined_confidence > cur.combined_confidence:
+                    best[key] = p
+            unique = sorted(best.values(),
+                            key=lambda p: p.combined_confidence, reverse=True)
+            if len(unique) < min_points:
+                continue
+
+            rows = []
+            for p in unique[:max_rows]:
+                value = f"{p.value:,.10g}" + (f" {p.unit}" if p.unit else "")
+                rows.append([
+                    p.metric_name or "-",
+                    p.subject or "-",
+                    str(p.year) if p.year else "-",
+                    value,
+                ])
+
+            n_sources = len({p.source_url for p in unique if p.source_url})
+            collection.tables.append(TableData(
+                table_id=f"summary_{section_id}",
+                title=f"表: 本章の主要数値（{len(rows)}項目）",
+                caption=(f"調査で収集した数値データの一覧"
+                         f"（出典{n_sources}件、信頼度順）"),
+                headers=["指標", "対象", "年", "値"],
+                rows=rows,
+                section_id=section_id,
+            ))
+            added += 1
+
+        if added:
+            print(f"[FigureTableGenerator] numeric summary tables added "
+                  f"for {added} section(s) lacking tables")
+        return added
 
     def _table_from_recommendation(self, rec) -> Optional[TableData]:
         """Build a TableData from a demoted ChartRecommendation."""
@@ -1017,21 +1138,33 @@ class FigureTableGenerator:
 
         return tables
 
+    # Total characters of evidence fed to LLM table extraction
+    EVIDENCE_TEXT_BUDGET = 12000
+
     def _build_evidence_text(self, evidence_list: List) -> str:
         """Build combined text from evidence content for table extraction.
 
-        Uses the original source content (content_excerpt / original_content)
-        rather than LLM-generated prose to reduce hallucination risk.
+        Uses the FULL extracted source text, not the 500-char summary
+        excerpt: tables and number-dense passages rarely survive into the
+        excerpt, which used to starve LLM/pattern table extraction into
+        producing nothing. (The old fallback field name 'original_content'
+        did not exist on Evidence — the real field is 'extracted_text'.)
         """
         parts = []
-        for evidence in evidence_list[:5]:  # Limit to avoid token overflow
+        budget = self.EVIDENCE_TEXT_BUDGET
+        for evidence in evidence_list[:8]:
             text = (
-                getattr(evidence, 'content_excerpt', '')
-                or getattr(evidence, 'original_content', '')
+                getattr(evidence, 'extracted_text', '')
+                or getattr(evidence, 'content_excerpt', '')
                 or ''
-            )
-            if text.strip():
-                parts.append(text.strip())
+            ).strip()
+            if not text:
+                continue
+            per_item = min(len(text), max(1500, budget // 4))
+            parts.append(text[:per_item])
+            budget -= per_item
+            if budget <= 0:
+                break
         return "\n\n".join(parts)
 
     def _extract_tables_with_llm(
@@ -1164,17 +1297,20 @@ Return ONLY valid JSON, no other text."""
         except ImportError:
             return tables
 
+        session = self._get_fetch_session()
         for evidence in evidence_list[:3]:
             if len(tables) >= max_tables:
                 break
 
+            # Documents (PDF/XLSX...) have no HTML tables; skip the fetch
+            if any(evidence.url.lower().endswith(ext) for ext in
+                   ('.pdf', '.xlsx', '.xls', '.docx', '.pptx', '.csv')):
+                continue
+
             try:
-                response = requests.get(
+                response = session.get(
                     evidence.url,
-                    timeout=self.download_timeout,
-                    headers={"User-Agent": "Mozilla/5.0 (compatible; ResearchBot/1.0)"},
-                    proxies=self.proxies,
-                    verify=self.verify_ssl,
+                    timeout=(5, 10),
                 )
                 response.raise_for_status()
                 soup = BeautifulSoup(response.content, 'html.parser')

@@ -166,7 +166,7 @@ class TestEndpoints:
     def test_running_job_status_shape(self, server):
         job = ResearchJob("job-1", "テストクエリ")
         job.update("調査中...", 42.0)
-        server.job_manager.current = job
+        server.job_manager.jobs[job.job_id] = job   # parallel-jobs registry
         status, body = get(server, "/api/status")
         data = json.loads(body)
         assert status == 200
@@ -174,9 +174,19 @@ class TestEndpoints:
         assert data["progress"] == 42.0
         assert data["message"] == "調査中..."
         assert data["log"][-1]["msg"] == "調査中..."
+        # per-job targeting
+        status, body = get(server, f"/api/status?job_id={job.job_id}")
+        assert json.loads(body)["job_id"] == job.job_id
+        # jobs listing
+        status, body = get(server, "/api/jobs")
+        listing = json.loads(body)
+        assert listing["max_concurrent"] >= 1
+        assert any(j["job_id"] == job.job_id for j in listing["jobs"])
 
-    def test_second_job_rejected_while_running(self, server):
-        job = ResearchJob("job-1", "q")
-        server.job_manager.current = job  # state=running
-        status, data = post(server, "/api/research", {"query": "another"})
+    def test_job_rejected_at_max_concurrent(self, server):
+        manager = server.job_manager
+        for i in range(manager.MAX_CONCURRENT):
+            job = ResearchJob(f"job-{i+1}", f"q{i+1}")   # state=running
+            manager.jobs[job.job_id] = job
+        status, data = post(server, "/api/research", {"query": "one too many"})
         assert status == 409
