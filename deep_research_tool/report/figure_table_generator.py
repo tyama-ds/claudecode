@@ -297,6 +297,7 @@ class FigureTableGenerator:
         recommendations: List,
         include_images: bool = True,
         include_tables: bool = True,
+        demoted_tables: List = None,
     ) -> FigureTableCollection:
         """
         Generate figures and tables from ChartAnalyzer recommendations.
@@ -310,6 +311,9 @@ class FigureTableGenerator:
             recommendations: List of ChartRecommendation from ChartAnalyzer
             include_images: Include images from sources
             include_tables: Include extracted tables (in addition to recommended charts)
+            demoted_tables: Chart candidates that failed the quality gate but
+                whose numbers are still table-worthy (e.g. a 2-point trend);
+                rendered as tables instead of charts
 
         Returns:
             FigureTableCollection with figures, tables, and recommended charts
@@ -352,7 +356,43 @@ class FigureTableGenerator:
             if chart:
                 collection.charts.append(chart)
 
+        # Demote gate-rejected chart candidates to tables: the numbers still
+        # add value, they just don't justify a graphic
+        for rec in (demoted_tables or []):
+            table = self._table_from_recommendation(rec)
+            if table:
+                collection.tables.append(table)
+
         return collection
+
+    def _table_from_recommendation(self, rec) -> Optional[TableData]:
+        """Build a TableData from a demoted ChartRecommendation."""
+        try:
+            points = rec.data_points or []
+            if len(points) < 2:
+                return None
+            unit = (points[0].unit or "").strip()
+            is_time = any(dp.year for dp in points)
+            x_header = "年" if is_time else "項目"
+            y_header = f"{rec.title}" + (f"（{unit}）" if unit else "")
+            rows = []
+            for dp in sorted(points, key=lambda d: (d.year or 0,
+                                                    (d.subject or ""))):
+                x = str(dp.year) if is_time and dp.year else (dp.subject or "-")
+                rows.append([x, f"{dp.value:,.10g}"])
+            return TableData(
+                table_id=f"demoted_{rec.chart_id}",
+                title=f"表: {rec.title}",
+                caption=rec.main_message or rec.subtitle or rec.title,
+                headers=[x_header, y_header],
+                rows=rows,
+                section_id=rec.section_id,
+                source_url=(rec.source_urls[0] if rec.source_urls else None),
+            )
+        except Exception as e:
+            print(f"[FigureTableGenerator] table demotion failed "
+                  f"('{getattr(rec, 'title', '')[:40]}'): {e}")
+            return None
 
     def _generate_chart_from_recommendation(self, recommendation) -> Optional[Figure]:
         """
