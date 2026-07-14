@@ -143,6 +143,7 @@ class ChartAnalyzer:
         use_llm_analysis: bool = True,
         fill_missing_data: bool = True,
         max_charts_per_section: int = 3,
+        max_workers: int = 8,
     ):
         """
         Initialize analyzer.
@@ -161,6 +162,7 @@ class ChartAnalyzer:
         self.use_llm_analysis = use_llm_analysis and llm_client is not None
         self.fill_missing_data = fill_missing_data
         self.max_charts_per_section = max_charts_per_section
+        self.max_workers = max(1, int(max_workers))
 
         # Quality gate state (populated by analyze())
         from .chart_quality import ChartQualityGate
@@ -729,7 +731,11 @@ class ChartAnalyzer:
         recommendations: List[ChartRecommendation],
         research_topic: str,
     ) -> List[ChartRecommendation]:
-        """LLM judge: keep charts that can state a finding; drop the rest."""
+        """LLM judge: keep charts that can state a finding; drop the rest.
+
+        Judgments are independent per chart, so they run concurrently
+        (previously up to 5 sequential blocking LLM calls).
+        """
         if not self.llm or not recommendations:
             return recommendations
 
@@ -737,7 +743,7 @@ class ChartAnalyzer:
         # Process top recommendations
         top_recs = recommendations[:5]
 
-        for rec in top_recs:
+        def _judge(rec):
             try:
                 # Prepare data summary
                 data_summary = []
@@ -785,24 +791,34 @@ these apply:
 Answer (finding, or REJECT):"""
 
                 response = self.llm.generate(prompt)
-                verdict = (response.content or "").strip()
-
-                if verdict.upper().startswith("REJECT"):
-                    rejected_ids.add(rec.chart_id)
-                    self.quality_gate.rejections.append({
-                        "title": rec.title,
-                        "section_id": rec.section_id,
-                        "reasons": ["llm_judge_reject"],
-                        "n_points": len(rec.data_points),
-                    })
-                    logger.info(f"LLM judge rejected chart '{rec.title[:40]}'")
-                elif len(verdict) > 10:
-                    # The stated finding doubles as the caption/insight
-                    rec.main_message = verdict
-
+                return (response.content or "").strip()
             except Exception as e:
                 logger.warning(f"LLM insight refinement failed: {e}")
+                return None
+
+        import concurrent.futures
+        workers = min(self.max_workers, len(top_recs))
+        if workers > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                verdicts = list(ex.map(_judge, top_recs))
+        else:
+            verdicts = [_judge(rec) for rec in top_recs]
+
+        for rec, verdict in zip(top_recs, verdicts):
+            if verdict is None:
                 continue
+            if verdict.upper().startswith("REJECT"):
+                rejected_ids.add(rec.chart_id)
+                self.quality_gate.rejections.append({
+                    "title": rec.title,
+                    "section_id": rec.section_id,
+                    "reasons": ["llm_judge_reject"],
+                    "n_points": len(rec.data_points),
+                })
+                logger.info(f"LLM judge rejected chart '{rec.title[:40]}'")
+            elif len(verdict) > 10:
+                # The stated finding doubles as the caption/insight
+                rec.main_message = verdict
 
         if rejected_ids:
             recommendations = [r for r in recommendations

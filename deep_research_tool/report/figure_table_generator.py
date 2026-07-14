@@ -195,6 +195,7 @@ class FigureTableGenerator:
         proxies: Dict[str, str] = None,
         verify_ssl: bool = True,
         chart_library: str = "matplotlib",
+        max_workers: int = 8,
     ):
         """
         Initialize FigureTableGenerator.
@@ -223,9 +224,13 @@ class FigureTableGenerator:
         self.chart_library = (chart_library or "matplotlib").lower()
         self._seaborn_warned = False
         self._fetch_session = None
+        self.max_workers = max(1, int(max_workers))
         # Report-wide image dedup (reset per generate call): the same image
         # (a site logo on every page, or one key chart cited by several
-        # pages) used to be inserted once per section
+        # pages) used to be inserted once per section. Guarded by a lock —
+        # sections are processed in parallel.
+        import threading as _threading
+        self._image_dedup_lock = _threading.Lock()
         self._used_image_urls = set()
         self._used_image_hashes = set()
 
@@ -250,8 +255,30 @@ class FigureTableGenerator:
     MIN_IMAGE_BYTES = 5000      # tiny files are icons/pixels
 
     def _reset_image_dedup(self) -> None:
-        self._used_image_urls = set()
-        self._used_image_hashes = set()
+        with self._image_dedup_lock:
+            self._used_image_urls = set()
+            self._used_image_hashes = set()
+
+    def _process_sections_parallel(self, sections: Dict, worker):
+        """Run per-section extraction concurrently, keep section order.
+
+        Per-section work is network + LLM bound (image downloads, HTML
+        refetch, LLM table extraction), previously strictly sequential —
+        the main reason the figure stage crawled on many-section reports.
+        Chart RENDERING stays sequential: matplotlib's pyplot API is not
+        thread-safe.
+        """
+        import concurrent.futures
+        items = [(sid, sdata) for sid, sdata in sections.items()
+                 if not sid.startswith("_")]
+        if not items:
+            return []
+        workers = min(self.max_workers, len(items))
+        if workers <= 1:
+            return [(sid, worker(sid, sdata)) for sid, sdata in items]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            results = list(ex.map(lambda it: worker(*it), items))
+        return list(zip([sid for sid, _ in items], results))
 
     @classmethod
     def _is_noise_image(cls, src: str, alt: str = "") -> bool:
@@ -290,24 +317,30 @@ class FigureTableGenerator:
             return False  # undecodable image is not embeddable anyway
 
     def _register_image(self, src: str, image_path, image_data) -> bool:
-        """Report-wide dedup by URL and content hash. True = first use."""
+        """Report-wide dedup by URL and content hash. True = first use.
+
+        Atomic under the dedup lock: sections run in parallel, and a
+        check-then-add race would let the same image through twice.
+        """
         import hashlib
         key = (src or "").split("?")[0].split("#")[0]
-        if key and key in self._used_image_urls:
-            return False
         try:
             raw = image_data if image_data else (
                 Path(image_path).read_bytes() if image_path else b"")
         except Exception:
             raw = b""
         digest = hashlib.md5(raw).hexdigest() if raw else None
-        if digest and digest in self._used_image_hashes:
-            return False
-        if key:
-            self._used_image_urls.add(key)
-        if digest:
-            self._used_image_hashes.add(digest)
-        return True
+
+        with self._image_dedup_lock:
+            if key and key in self._used_image_urls:
+                return False
+            if digest and digest in self._used_image_hashes:
+                return False
+            if key:
+                self._used_image_urls.add(key)
+            if digest:
+                self._used_image_hashes.add(digest)
+            return True
 
     @staticmethod
     def _image_caption(base: str, source_title: str, url: str) -> str:
@@ -402,24 +435,18 @@ class FigureTableGenerator:
         # Get section information
         sections = self._get_sections(session)
 
-        for section_id, section_data in sections.items():
-            if section_id.startswith("_"):
-                continue
-
-            # Get evidence for this section
+        # Per-section extraction runs concurrently (network/LLM bound);
+        # results merge in section order for deterministic output
+        def _work(section_id, section_data):
             section_evidence = evidence_locker.get_section_evidence(section_id)
             content = section_data.get("content", "")
-
-            # Extract images from sources
+            images, tables = [], []
             if include_images:
                 images = self._extract_images_for_section(
                     section_id=section_id,
                     section_data=section_data,
                     evidence_list=section_evidence,
                 )
-                collection.figures.extend(images)
-
-            # Extract numerical data and create tables
             if include_tables:
                 tables = self._extract_tables_for_section(
                     section_id=section_id,
@@ -427,12 +454,17 @@ class FigureTableGenerator:
                     content=content,
                     evidence_list=section_evidence,
                 )
-                collection.tables.extend(tables)
+            return images, tables
 
-            # Generate charts from tables
-            if include_charts and collection.tables:
-                section_tables = [t for t in collection.tables if t.section_id == section_id]
-                for table in section_tables:
+        for section_id, (images, tables) in self._process_sections_parallel(
+                sections, _work):
+            collection.figures.extend(images)
+            collection.tables.extend(tables)
+
+            # Generate charts from tables (sequential: pyplot is not
+            # thread-safe; rendering is local and fast)
+            if include_charts and tables:
+                for table in tables:
                     chart = self._generate_chart_for_table(table)
                     if chart:
                         collection.charts.append(chart)
@@ -473,24 +505,18 @@ class FigureTableGenerator:
         # Get section information
         sections = self._get_sections(session)
 
-        # Process each section for images and tables
-        for section_id, section_data in sections.items():
-            if section_id.startswith("_"):
-                continue
-
+        # Process sections concurrently (network/LLM bound); merge in
+        # section order so output stays deterministic
+        def _work(section_id, section_data):
             section_evidence = evidence_locker.get_section_evidence(section_id)
             content = section_data.get("content", "")
-
-            # Extract images if enabled
+            images, tables = [], []
             if include_images:
                 images = self._extract_images_for_section(
                     section_id=section_id,
                     section_data=section_data,
                     evidence_list=section_evidence,
                 )
-                collection.figures.extend(images)
-
-            # Extract tables if enabled (but don't generate charts from them)
             if include_tables:
                 tables = self._extract_tables_for_section(
                     section_id=section_id,
@@ -498,9 +524,15 @@ class FigureTableGenerator:
                     content=content,
                     evidence_list=section_evidence,
                 )
-                collection.tables.extend(tables)
+            return images, tables
 
-        # Generate charts from recommendations
+        for _sid, (images, tables) in self._process_sections_parallel(
+                sections, _work):
+            collection.figures.extend(images)
+            collection.tables.extend(tables)
+
+        # Generate charts from recommendations (sequential: pyplot is not
+        # thread-safe; rendering is local and fast)
         for rec in recommendations:
             chart = self._generate_chart_from_recommendation(rec)
             if chart:

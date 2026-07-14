@@ -68,6 +68,7 @@ _CONFIG_PARAM_MAP = {
     "multilingual": "multilingual",
     "search_languages": "search_languages",
     "use_enhanced_synthesis": "use_enhanced_synthesis",
+    "figure_max_workers": "figure_max_workers",
 }
 
 

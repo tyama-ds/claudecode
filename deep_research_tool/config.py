@@ -514,6 +514,9 @@ class ReportConfig:
 
     # Auto figure/table generation settings
     auto_figures: bool = False  # Auto-generate figures/tables during run_research
+    # Parallel workers for the figure stage (per-section image/table
+    # extraction, numerical extraction, LLM chart judging)
+    figure_max_workers: int = 8
     auto_figures_include_images: bool = True  # Include images from web sources
     auto_figures_include_tables: bool = True  # Include extracted tables
     auto_figures_include_charts: bool = True  # Include generated charts
@@ -710,6 +713,7 @@ def create_config(
     stage_llm: Optional[Dict[str, Dict[str, Any]]] = None,
     # Auto figure/table generation parameters
     auto_figures: bool = False,
+    figure_max_workers: int = 8,
     auto_figures_include_images: bool = True,
     auto_figures_include_tables: bool = True,
     auto_figures_include_charts: bool = True,
@@ -861,6 +865,9 @@ def create_config(
                       "writing": {"provider": "anthropic",
                                   "model": "claude-3-5-sonnet-20241022"}}
         auto_figures: Auto-generate figures/tables during run_research
+        figure_max_workers: Parallel workers for the figure stage
+            (per-section image/table extraction, numerical extraction,
+            LLM chart judging). Default 8
         auto_figures_include_images: Include images from web sources in auto figures
         auto_figures_include_tables: Include extracted tables in auto figures
         auto_figures_include_charts: Include generated charts in auto figures
@@ -971,6 +978,7 @@ def create_config(
         v2_enable_polish=v2_enable_polish,
         chart_library=chart_library,
         auto_figures=auto_figures,
+        figure_max_workers=figure_max_workers,
         auto_figures_include_images=auto_figures_include_images,
         auto_figures_include_tables=auto_figures_include_tables,
         auto_figures_include_charts=auto_figures_include_charts,

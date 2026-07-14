@@ -625,6 +625,7 @@ class DeepResearchTool:
                         language=self.config.research.language,
                         proxies=self.config.proxy.get_proxies_dict(),
                         verify_ssl=self.config.proxy.verify_ssl,
+                        max_workers=self.config.report.figure_max_workers,
                     )
                     figure_collection = fig_generator.generate_figures_and_tables(
                         session=session,
@@ -1535,6 +1536,7 @@ Output only the text (no JSON, no heading):"""
                 if self.config.report.intelligent_charts and numerical_store:
                     analyzer = ChartAnalyzer(
                         llm_client=self.llm_client if self.config.report.chart_insights else None,
+                        max_workers=self.config.report.figure_max_workers,
                         language=self.config.research.language,
                         min_confidence=self.config.report.numerical_min_confidence,
                         use_llm_analysis=self.config.report.chart_insights,
@@ -1581,6 +1583,7 @@ Output only the text (no JSON, no heading):"""
             proxies=proxies,
             verify_ssl=self.config.proxy.verify_ssl,
             chart_library=self.config.report.chart_library,
+            max_workers=self.config.report.figure_max_workers,
         )
 
         # Step 5: Generate figures/tables/charts
@@ -1785,7 +1788,7 @@ Output only the text (no JSON, no heading):"""
         import re as _re
 
         MAX_NUMERIC_EVIDENCE = 80
-        EXTRACT_WORKERS = 6
+        EXTRACT_WORKERS = max(1, self.config.report.figure_max_workers)
 
         candidates = []
         for evidence in evidence_locker.get_all_evidence():
@@ -2841,6 +2844,7 @@ def run_manual_research(
                     language=config.research.language,
                     proxies=config.proxy.get_proxies_dict(),
                     verify_ssl=config.proxy.verify_ssl,
+                    max_workers=config.report.figure_max_workers,
                 )
                 figure_collection = fig_generator.generate_figures_and_tables(
                     session=session,
