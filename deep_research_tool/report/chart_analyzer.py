@@ -143,6 +143,7 @@ class ChartAnalyzer:
         use_llm_analysis: bool = True,
         fill_missing_data: bool = True,
         max_charts_per_section: int = 3,
+        max_workers: int = 8,
     ):
         """
         Initialize analyzer.
@@ -161,6 +162,12 @@ class ChartAnalyzer:
         self.use_llm_analysis = use_llm_analysis and llm_client is not None
         self.fill_missing_data = fill_missing_data
         self.max_charts_per_section = max_charts_per_section
+        self.max_workers = max(1, int(max_workers))
+
+        # Quality gate state (populated by analyze())
+        from .chart_quality import ChartQualityGate
+        self.quality_gate = ChartQualityGate()
+        self.demoted_table_candidates: List[ChartRecommendation] = []
 
     def analyze(
         self,
@@ -209,14 +216,43 @@ class ChartAnalyzer:
         growth_recs = self._analyze_growth(store, research_topic)
         recommendations.extend(growth_recs)
 
-        # Calculate priority scores
+        # Quality gate: only candidates that carry actual information pass.
+        # Rejected-but-tabular candidates are kept for table demotion; the
+        # gate's rejection log feeds the zero-chart warning.
+        from .chart_quality import ChartQualityGate
+        self.quality_gate = ChartQualityGate()
+        self.demoted_table_candidates = []
+        passed = []
         for rec in recommendations:
-            rec.priority_score = self._calculate_priority(rec)
+            result = self.quality_gate.evaluate(
+                rec.data_points,
+                purpose=rec.purpose.value,
+                title=rec.title,
+                section_id=rec.section_id,
+            )
+            if result.passed:
+                rec.data_points = result.points   # aggregated series
+                rec.informativeness = result.info_score
+                passed.append(rec)
+            elif result.demote_to_table:
+                rec.data_points = result.points
+                self.demoted_table_candidates.append(rec)
+            else:
+                logger.info(f"Chart candidate rejected "
+                            f"('{rec.title[:40]}'): {result.describe()}")
+        recommendations = passed
+
+        # Calculate priority scores (informativeness now contributes)
+        for rec in recommendations:
+            rec.priority_score = self._calculate_priority(rec) \
+                + rec.informativeness * 10
 
         # Sort by priority
         recommendations.sort(key=lambda x: x.priority_score, reverse=True)
 
-        # Use LLM to refine insights if available
+        # LLM judge: a chart that cannot state a takeaway is dropped; the
+        # takeaway becomes the caption (this replaces the old post-hoc
+        # insight decoration, so the call count is unchanged)
         if self.use_llm_analysis and recommendations:
             recommendations = self._refine_with_llm(
                 recommendations,
@@ -695,14 +731,19 @@ class ChartAnalyzer:
         recommendations: List[ChartRecommendation],
         research_topic: str,
     ) -> List[ChartRecommendation]:
-        """Use LLM to refine insights and messages."""
+        """LLM judge: keep charts that can state a finding; drop the rest.
+
+        Judgments are independent per chart, so they run concurrently
+        (previously up to 5 sequential blocking LLM calls).
+        """
         if not self.llm or not recommendations:
             return recommendations
 
+        rejected_ids = set()
         # Process top recommendations
         top_recs = recommendations[:5]
 
-        for rec in top_recs:
+        def _judge(rec):
             try:
                 # Prepare data summary
                 data_summary = []
@@ -712,7 +753,7 @@ class ChartAnalyzer:
                 data_str = "\n".join(data_summary)
 
                 if self.language == "ja":
-                    prompt = f"""以下のグラフデータについて、ビジネスレポート向けの簡潔な洞察を1-2文で記述してください。
+                    prompt = f"""以下のグラフ候補を審査してください。
 
 研究テーマ: {research_topic}
 グラフタイトル: {rec.title}
@@ -721,18 +762,16 @@ class ChartAnalyzer:
 データ:
 {data_str}
 
-既存の洞察:
-{rec.main_message}
+【審査基準】
+このグラフが読者に伝える「発見」を、具体的な数字を含む1〜2文で述べてください。
+ただし、次のいずれかに該当する場合は発見文の代わりに REJECT とだけ答えてください:
+- データが自明・トートロジー（例: 年の並びをそのまま描いただけ）
+- 値の差や変化に意味が読み取れない
+- 調査テーマと無関係
 
-【指示】
-- データから読み取れる重要なポイントを強調
-- 具体的な数字を含める
-- ビジネス上の示唆があれば言及
-- 1-2文で簡潔に
-
-洞察:"""
+回答（発見文 または REJECT）:"""
                 else:
-                    prompt = f"""Write 1-2 concise business insights for the following chart data.
+                    prompt = f"""Judge this chart candidate.
 
 Research Topic: {research_topic}
 Chart Title: {rec.title}
@@ -741,27 +780,49 @@ Chart Purpose: {rec.purpose.value}
 Data:
 {data_str}
 
-Existing insight:
-{rec.main_message}
+[CRITERIA]
+State the finding this chart conveys to a reader in 1-2 sentences with
+specific numbers. However, answer with the single word REJECT when any of
+these apply:
+- the data is trivial or tautological (e.g., plotting the years themselves)
+- no meaningful difference or change can be read from the values
+- unrelated to the research topic
 
-Instructions:
-- Highlight key takeaways from the data
-- Include specific numbers
-- Mention business implications if relevant
-- Keep to 1-2 sentences
-
-Insight:"""
+Answer (finding, or REJECT):"""
 
                 response = self.llm.generate(prompt)
-                refined_message = response.content.strip()
-
-                if refined_message and len(refined_message) > 10:
-                    rec.main_message = refined_message
-
+                return (response.content or "").strip()
             except Exception as e:
                 logger.warning(f"LLM insight refinement failed: {e}")
-                continue
+                return None
 
+        import concurrent.futures
+        workers = min(self.max_workers, len(top_recs))
+        if workers > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                verdicts = list(ex.map(_judge, top_recs))
+        else:
+            verdicts = [_judge(rec) for rec in top_recs]
+
+        for rec, verdict in zip(top_recs, verdicts):
+            if verdict is None:
+                continue
+            if verdict.upper().startswith("REJECT"):
+                rejected_ids.add(rec.chart_id)
+                self.quality_gate.rejections.append({
+                    "title": rec.title,
+                    "section_id": rec.section_id,
+                    "reasons": ["llm_judge_reject"],
+                    "n_points": len(rec.data_points),
+                })
+                logger.info(f"LLM judge rejected chart '{rec.title[:40]}'")
+            elif len(verdict) > 10:
+                # The stated finding doubles as the caption/insight
+                rec.main_message = verdict
+
+        if rejected_ids:
+            recommendations = [r for r in recommendations
+                               if r.chart_id not in rejected_ids]
         return recommendations
 
     def get_charts_for_section(

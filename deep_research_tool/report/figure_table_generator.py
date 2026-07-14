@@ -195,6 +195,7 @@ class FigureTableGenerator:
         proxies: Dict[str, str] = None,
         verify_ssl: bool = True,
         chart_library: str = "matplotlib",
+        max_workers: int = 8,
     ):
         """
         Initialize FigureTableGenerator.
@@ -222,6 +223,186 @@ class FigureTableGenerator:
         self.verify_ssl = verify_ssl
         self.chart_library = (chart_library or "matplotlib").lower()
         self._seaborn_warned = False
+        self._fetch_session = None
+        self.max_workers = max(1, int(max_workers))
+        # Report-wide image dedup (reset per generate call): the same image
+        # (a site logo on every page, or one key chart cited by several
+        # pages) used to be inserted once per section. Guarded by a lock —
+        # sections are processed in parallel.
+        import threading as _threading
+        self._image_dedup_lock = _threading.Lock()
+        self._used_image_urls = set()
+        self._used_image_hashes = set()
+
+    # ------------------------------------------------------------------
+    # Image quality helpers
+    # ------------------------------------------------------------------
+
+    # URL/alt substrings that mark non-content images (logos, UI chrome,
+    # social buttons, tracking). Checked case-insensitively.
+    NOISE_IMAGE_KEYWORDS = (
+        'icon', 'logo', 'avatar', 'button', 'banner', 'ad-', 'ads/', '/ad/',
+        'pixel', 'tracking', 'spacer', 'favicon', 'sprite', 'header', 'footer',
+        'badge', 'arrow', 'bullet', 'share', 'sns', 'twitter', 'facebook',
+        'instagram', 'youtube', 'line-', 'rss', 'search', 'menu', 'cart',
+        'thumb_s', 'profile', '/common/', '/parts/', '/ui/', '/assets/img/base',
+        'noimage', 'no-image', 'blank.', 'dummy',
+    )
+
+    MIN_IMAGE_WIDTH = 200
+    MIN_IMAGE_HEIGHT = 150
+    MAX_ASPECT_RATIO = 4.0      # logos/banners are extremely wide or flat
+    MIN_IMAGE_BYTES = 5000      # tiny files are icons/pixels
+
+    def _reset_image_dedup(self) -> None:
+        with self._image_dedup_lock:
+            self._used_image_urls = set()
+            self._used_image_hashes = set()
+
+    def _process_sections_parallel(self, sections: Dict, worker):
+        """Run per-section extraction concurrently, keep section order.
+
+        Per-section work is network + LLM bound (image downloads, HTML
+        refetch, LLM table extraction), previously strictly sequential —
+        the main reason the figure stage crawled on many-section reports.
+        Chart RENDERING stays sequential: matplotlib's pyplot API is not
+        thread-safe.
+        """
+        import concurrent.futures
+        items = [(sid, sdata) for sid, sdata in sections.items()
+                 if not sid.startswith("_")]
+        if not items:
+            return []
+        workers = min(self.max_workers, len(items))
+        if workers <= 1:
+            return [(sid, worker(sid, sdata)) for sid, sdata in items]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            results = list(ex.map(lambda it: worker(*it), items))
+        return list(zip([sid for sid, _ in items], results))
+
+    @classmethod
+    def _is_noise_image(cls, src: str, alt: str = "") -> bool:
+        """URL/alt-based filter for logos, icons, and UI chrome."""
+        haystack = f"{src} {alt}".lower()
+        return any(kw in haystack for kw in cls.NOISE_IMAGE_KEYWORDS)
+
+    def _validate_downloaded_image(self, image_path, image_data) -> bool:
+        """Post-download validation: dimensions, aspect ratio, file size.
+
+        Logos rarely announce themselves in the URL; the reliable signal is
+        the decoded image itself (small, or extremely wide/flat).
+        """
+        try:
+            import io as _io
+            from PIL import Image
+            if image_data:
+                raw = image_data
+            elif image_path and Path(image_path).exists():
+                raw = Path(image_path).read_bytes()
+            else:
+                return False
+            if len(raw) < self.MIN_IMAGE_BYTES:
+                return False
+            with Image.open(_io.BytesIO(raw)) as im:
+                w, h = im.size
+            if w < self.MIN_IMAGE_WIDTH or h < self.MIN_IMAGE_HEIGHT:
+                return False
+            ratio = max(w, h) / max(1, min(w, h))
+            if ratio > self.MAX_ASPECT_RATIO:
+                return False
+            return True
+        except ImportError:
+            return True   # PIL unavailable: keep old behavior
+        except Exception:
+            return False  # undecodable image is not embeddable anyway
+
+    def _register_image(self, src: str, image_path, image_data) -> bool:
+        """Report-wide dedup by URL and content hash. True = first use.
+
+        Atomic under the dedup lock: sections run in parallel, and a
+        check-then-add race would let the same image through twice.
+        """
+        import hashlib
+        key = (src or "").split("?")[0].split("#")[0]
+        try:
+            raw = image_data if image_data else (
+                Path(image_path).read_bytes() if image_path else b"")
+        except Exception:
+            raw = b""
+        digest = hashlib.md5(raw).hexdigest() if raw else None
+
+        with self._image_dedup_lock:
+            if key and key in self._used_image_urls:
+                return False
+            if digest and digest in self._used_image_hashes:
+                return False
+            if key:
+                self._used_image_urls.add(key)
+            if digest:
+                self._used_image_hashes.add(digest)
+            return True
+
+    @staticmethod
+    def _image_caption(base: str, source_title: str, url: str) -> str:
+        """Compose a caption that always carries source attribution."""
+        from urllib.parse import urlparse
+        domain = ""
+        try:
+            domain = urlparse(url or "").netloc
+        except Exception:
+            pass
+        origin = (source_title or "").strip() or domain
+        if origin and domain and origin != domain:
+            attribution = f"出典: {origin}（{domain}）"
+        elif origin:
+            attribution = f"出典: {origin}"
+        else:
+            attribution = ""
+        base = (base or "").strip()
+        if base and attribution:
+            return f"{base}　{attribution}"
+        return base or attribution
+
+    def _get_fetch_session(self):
+        """Session for re-fetching evidence pages (HTML table extraction).
+
+        Browser-like headers matter: the old bare requests.get with a
+        'ResearchBot' User-Agent got 403'd by the same WAF-protected sites
+        that served content during research, so HTML table extraction
+        silently never worked there. Retries fail fast (connect=1) so a
+        dead host can't stall the figure stage.
+        """
+        if self._fetch_session is None:
+            from requests.adapters import HTTPAdapter
+            try:
+                from urllib3.util.retry import Retry
+            except ImportError:
+                from requests.packages.urllib3.util.retry import Retry
+
+            s = requests.Session()
+            s.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) "
+                              "Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;"
+                          "q=0.9,*/*;q=0.8",
+                "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+                "Accept-Encoding": "gzip, deflate",
+                "Connection": "keep-alive",
+            })
+            if self.proxies:
+                s.proxies.update(self.proxies)
+            s.verify = self.verify_ssl
+            retry = Retry(total=2, connect=1, read=1, status=2,
+                          backoff_factor=0.5,
+                          status_forcelist=[429, 500, 502, 503, 504],
+                          allowed_methods=frozenset(["GET"]),
+                          raise_on_status=False)
+            adapter = HTTPAdapter(max_retries=retry)
+            s.mount("http://", adapter)
+            s.mount("https://", adapter)
+            self._fetch_session = s
+        return self._fetch_session
 
     # ========================================================================
     # Main Entry Point
@@ -248,29 +429,24 @@ class FigureTableGenerator:
         Returns:
             FigureTableCollection with all figures and tables
         """
+        self._reset_image_dedup()
         collection = FigureTableCollection()
 
         # Get section information
         sections = self._get_sections(session)
 
-        for section_id, section_data in sections.items():
-            if section_id.startswith("_"):
-                continue
-
-            # Get evidence for this section
+        # Per-section extraction runs concurrently (network/LLM bound);
+        # results merge in section order for deterministic output
+        def _work(section_id, section_data):
             section_evidence = evidence_locker.get_section_evidence(section_id)
             content = section_data.get("content", "")
-
-            # Extract images from sources
+            images, tables = [], []
             if include_images:
                 images = self._extract_images_for_section(
                     section_id=section_id,
                     section_data=section_data,
                     evidence_list=section_evidence,
                 )
-                collection.figures.extend(images)
-
-            # Extract numerical data and create tables
             if include_tables:
                 tables = self._extract_tables_for_section(
                     section_id=section_id,
@@ -278,12 +454,17 @@ class FigureTableGenerator:
                     content=content,
                     evidence_list=section_evidence,
                 )
-                collection.tables.extend(tables)
+            return images, tables
 
-            # Generate charts from tables
-            if include_charts and collection.tables:
-                section_tables = [t for t in collection.tables if t.section_id == section_id]
-                for table in section_tables:
+        for section_id, (images, tables) in self._process_sections_parallel(
+                sections, _work):
+            collection.figures.extend(images)
+            collection.tables.extend(tables)
+
+            # Generate charts from tables (sequential: pyplot is not
+            # thread-safe; rendering is local and fast)
+            if include_charts and tables:
+                for table in tables:
                     chart = self._generate_chart_for_table(table)
                     if chart:
                         collection.charts.append(chart)
@@ -297,6 +478,7 @@ class FigureTableGenerator:
         recommendations: List,
         include_images: bool = True,
         include_tables: bool = True,
+        demoted_tables: List = None,
     ) -> FigureTableCollection:
         """
         Generate figures and tables from ChartAnalyzer recommendations.
@@ -310,33 +492,31 @@ class FigureTableGenerator:
             recommendations: List of ChartRecommendation from ChartAnalyzer
             include_images: Include images from sources
             include_tables: Include extracted tables (in addition to recommended charts)
+            demoted_tables: Chart candidates that failed the quality gate but
+                whose numbers are still table-worthy (e.g. a 2-point trend);
+                rendered as tables instead of charts
 
         Returns:
             FigureTableCollection with figures, tables, and recommended charts
         """
+        self._reset_image_dedup()
         collection = FigureTableCollection()
 
         # Get section information
         sections = self._get_sections(session)
 
-        # Process each section for images and tables
-        for section_id, section_data in sections.items():
-            if section_id.startswith("_"):
-                continue
-
+        # Process sections concurrently (network/LLM bound); merge in
+        # section order so output stays deterministic
+        def _work(section_id, section_data):
             section_evidence = evidence_locker.get_section_evidence(section_id)
             content = section_data.get("content", "")
-
-            # Extract images if enabled
+            images, tables = [], []
             if include_images:
                 images = self._extract_images_for_section(
                     section_id=section_id,
                     section_data=section_data,
                     evidence_list=section_evidence,
                 )
-                collection.figures.extend(images)
-
-            # Extract tables if enabled (but don't generate charts from them)
             if include_tables:
                 tables = self._extract_tables_for_section(
                     section_id=section_id,
@@ -344,15 +524,136 @@ class FigureTableGenerator:
                     content=content,
                     evidence_list=section_evidence,
                 )
-                collection.tables.extend(tables)
+            return images, tables
 
-        # Generate charts from recommendations
+        for _sid, (images, tables) in self._process_sections_parallel(
+                sections, _work):
+            collection.figures.extend(images)
+            collection.tables.extend(tables)
+
+        # Generate charts from recommendations (sequential: pyplot is not
+        # thread-safe; rendering is local and fast)
         for rec in recommendations:
             chart = self._generate_chart_from_recommendation(rec)
             if chart:
                 collection.charts.append(chart)
 
+        # Demote gate-rejected chart candidates to tables: the numbers still
+        # add value, they just don't justify a graphic
+        for rec in (demoted_tables or []):
+            table = self._table_from_recommendation(rec)
+            if table:
+                collection.tables.append(table)
+
         return collection
+
+    def add_numeric_summary_tables(
+        self,
+        collection: FigureTableCollection,
+        numerical_store,
+        max_rows: int = 8,
+        min_points: int = 3,
+    ) -> int:
+        """Guarantee-layer: synthesize per-section 主要数値一覧 tables.
+
+        When HTML/LLM/pattern table extraction all come up empty for a
+        section but the numerical store holds extracted data points, build
+        a summary table from those points so the report still presents its
+        numbers in structured form. Sections that already have a table are
+        left alone. Returns the number of tables added.
+        """
+        if numerical_store is None or not getattr(
+                numerical_store, "data_points", None):
+            return 0
+
+        from .chart_quality import is_year_like
+
+        # Group usable points by section
+        by_section = {}
+        for p in numerical_store.data_points:
+            if not p.section_id or getattr(p, "is_derived", False):
+                continue
+            if is_year_like(p.value, p.unit):
+                continue
+            if not (p.metric_name or "").strip():
+                continue
+            by_section.setdefault(p.section_id, []).append(p)
+
+        sections_with_tables = {t.section_id for t in collection.tables}
+        added = 0
+
+        for section_id, points in sorted(by_section.items()):
+            if section_id in sections_with_tables:
+                continue
+
+            # Dedupe by (metric, subject, year): keep highest confidence
+            best = {}
+            for p in points:
+                key = ((p.metric_name or "").strip().lower(),
+                       (p.subject or "").strip().lower(), p.year)
+                cur = best.get(key)
+                if cur is None or p.combined_confidence > cur.combined_confidence:
+                    best[key] = p
+            unique = sorted(best.values(),
+                            key=lambda p: p.combined_confidence, reverse=True)
+            if len(unique) < min_points:
+                continue
+
+            rows = []
+            for p in unique[:max_rows]:
+                value = f"{p.value:,.10g}" + (f" {p.unit}" if p.unit else "")
+                rows.append([
+                    p.metric_name or "-",
+                    p.subject or "-",
+                    str(p.year) if p.year else "-",
+                    value,
+                ])
+
+            n_sources = len({p.source_url for p in unique if p.source_url})
+            collection.tables.append(TableData(
+                table_id=f"summary_{section_id}",
+                title=f"表: 本章の主要数値（{len(rows)}項目）",
+                caption=(f"調査で収集した数値データの一覧"
+                         f"（出典{n_sources}件、信頼度順）"),
+                headers=["指標", "対象", "年", "値"],
+                rows=rows,
+                section_id=section_id,
+            ))
+            added += 1
+
+        if added:
+            print(f"[FigureTableGenerator] numeric summary tables added "
+                  f"for {added} section(s) lacking tables")
+        return added
+
+    def _table_from_recommendation(self, rec) -> Optional[TableData]:
+        """Build a TableData from a demoted ChartRecommendation."""
+        try:
+            points = rec.data_points or []
+            if len(points) < 2:
+                return None
+            unit = (points[0].unit or "").strip()
+            is_time = any(dp.year for dp in points)
+            x_header = "年" if is_time else "項目"
+            y_header = f"{rec.title}" + (f"（{unit}）" if unit else "")
+            rows = []
+            for dp in sorted(points, key=lambda d: (d.year or 0,
+                                                    (d.subject or ""))):
+                x = str(dp.year) if is_time and dp.year else (dp.subject or "-")
+                rows.append([x, f"{dp.value:,.10g}"])
+            return TableData(
+                table_id=f"demoted_{rec.chart_id}",
+                title=f"表: {rec.title}",
+                caption=rec.main_message or rec.subtitle or rec.title,
+                headers=[x_header, y_header],
+                rows=rows,
+                section_id=rec.section_id,
+                source_url=(rec.source_urls[0] if rec.source_urls else None),
+            )
+        except Exception as e:
+            print(f"[FigureTableGenerator] table demotion failed "
+                  f"('{getattr(rec, 'title', '')[:40]}'): {e}")
+            return None
 
     def _generate_chart_from_recommendation(self, recommendation) -> Optional[Figure]:
         """
@@ -571,32 +872,56 @@ class FigureTableGenerator:
         """Extract relevant images for a section."""
         figures = []
 
-        # First, check if images are already stored in section_data
+        # First, check if images are already stored in section_data.
+        # This path had NO filtering: site logos and UI chrome collected
+        # during research went straight into the report, repeatedly.
         existing_images = section_data.get("images", [])
         print(f"[FigureTableGenerator] Section {section_id}: found {len(existing_images)} stored images")
-        for idx, img_data in enumerate(existing_images[:self.max_images_per_section]):
+        for idx, img_data in enumerate(existing_images):
+            if len(figures) >= self.max_images_per_section:
+                break
             src = img_data.get("src", "")
             if not src:
+                continue
+
+            alt = img_data.get("alt", "")
+            if self._is_noise_image(src, alt):
+                print(f"[FigureTableGenerator] skipped noise image: {src[:70]}")
                 continue
 
             page_url = img_data.get("page_url", "")
             image_path, image_data = self._download_image(src, referer=page_url or None)
 
-            if image_path or image_data:
-                figure = Figure(
-                    figure_id=f"fig_{section_id}_{idx+1}",
-                    figure_type=FigureType.IMAGE,
-                    title=img_data.get("suggested_caption", "") or img_data.get("alt", "") or f"Figure {idx+1}",
-                    caption=img_data.get("suggested_caption", "") or img_data.get("alt", ""),
-                    source_url=src,
-                    source_title=img_data.get("page_title", ""),
-                    section_id=section_id,
-                    image_path=image_path,
-                    image_data=image_data,
-                    alt_text=img_data.get("alt", ""),
-                )
-                figures.append(figure)
-                print(f"[FigureTableGenerator] Downloaded image from stored data: {src[:60]}")
+            if not (image_path or image_data):
+                continue
+            if not self._validate_downloaded_image(image_path, image_data):
+                print(f"[FigureTableGenerator] rejected image "
+                      f"(size/aspect/bytes): {src[:70]}")
+                continue
+            if not self._register_image(src, image_path, image_data):
+                print(f"[FigureTableGenerator] duplicate image skipped: {src[:70]}")
+                continue
+
+            base_caption = (img_data.get("suggested_caption", "")
+                            or alt or "")
+            figure = Figure(
+                figure_id=f"fig_{section_id}_{idx+1}",
+                figure_type=FigureType.IMAGE,
+                title=base_caption or f"Figure {idx+1}",
+                caption=self._image_caption(
+                    base_caption,
+                    img_data.get("page_title", ""),
+                    page_url or src,
+                ),
+                source_url=src,
+                source_title=img_data.get("page_title", ""),
+                section_id=section_id,
+                image_path=image_path,
+                image_data=image_data,
+                alt_text=alt,
+            )
+            figures.append(figure)
+            print(f"[FigureTableGenerator] Downloaded image from stored data: {src[:60]}")
 
         # If not enough images from stored data, try evidence URLs
         if len(figures) < self.max_images_per_section and evidence_list:
@@ -687,23 +1012,25 @@ class FigureTableGenerator:
                 except (ValueError, TypeError):
                     pass
 
-                # Skip common non-content images
-                skip_keywords = ['icon', 'logo', 'avatar', 'button', 'banner',
-                                 'ad-', 'ads/', 'pixel', 'tracking', 'spacer']
-                if any(skip in src.lower() for skip in skip_keywords):
+                # Skip logos, icons, UI chrome (shared noise filter)
+                alt_text = img.get('alt', '')
+                if self._is_noise_image(src, alt_text):
                     continue
 
                 image_path, image_data = self._download_image(src, referer=url)
 
                 if image_path or image_data:
-                    alt_text = img.get('alt', '')
+                    if not self._validate_downloaded_image(image_path, image_data):
+                        continue
+                    if not self._register_image(src, image_path, image_data):
+                        continue
                     title = img.get('title', '') or alt_text
 
                     figure = Figure(
                         figure_id="",
                         figure_type=FigureType.IMAGE,
                         title=title or f"Image from {page_title}",
-                        caption=f"Source: {page_title}",
+                        caption=self._image_caption(title, page_title, url),
                         source_url=src,
                         source_title=page_title,
                         section_id="",
@@ -977,21 +1304,33 @@ class FigureTableGenerator:
 
         return tables
 
+    # Total characters of evidence fed to LLM table extraction
+    EVIDENCE_TEXT_BUDGET = 12000
+
     def _build_evidence_text(self, evidence_list: List) -> str:
         """Build combined text from evidence content for table extraction.
 
-        Uses the original source content (content_excerpt / original_content)
-        rather than LLM-generated prose to reduce hallucination risk.
+        Uses the FULL extracted source text, not the 500-char summary
+        excerpt: tables and number-dense passages rarely survive into the
+        excerpt, which used to starve LLM/pattern table extraction into
+        producing nothing. (The old fallback field name 'original_content'
+        did not exist on Evidence — the real field is 'extracted_text'.)
         """
         parts = []
-        for evidence in evidence_list[:5]:  # Limit to avoid token overflow
+        budget = self.EVIDENCE_TEXT_BUDGET
+        for evidence in evidence_list[:8]:
             text = (
-                getattr(evidence, 'content_excerpt', '')
-                or getattr(evidence, 'original_content', '')
+                getattr(evidence, 'extracted_text', '')
+                or getattr(evidence, 'content_excerpt', '')
                 or ''
-            )
-            if text.strip():
-                parts.append(text.strip())
+            ).strip()
+            if not text:
+                continue
+            per_item = min(len(text), max(1500, budget // 4))
+            parts.append(text[:per_item])
+            budget -= per_item
+            if budget <= 0:
+                break
         return "\n\n".join(parts)
 
     def _extract_tables_with_llm(
@@ -1124,17 +1463,20 @@ Return ONLY valid JSON, no other text."""
         except ImportError:
             return tables
 
+        session = self._get_fetch_session()
         for evidence in evidence_list[:3]:
             if len(tables) >= max_tables:
                 break
 
+            # Documents (PDF/XLSX...) have no HTML tables; skip the fetch
+            if any(evidence.url.lower().endswith(ext) for ext in
+                   ('.pdf', '.xlsx', '.xls', '.docx', '.pptx', '.csv')):
+                continue
+
             try:
-                response = requests.get(
+                response = session.get(
                     evidence.url,
-                    timeout=self.download_timeout,
-                    headers={"User-Agent": "Mozilla/5.0 (compatible; ResearchBot/1.0)"},
-                    proxies=self.proxies,
-                    verify=self.verify_ssl,
+                    timeout=(5, 10),
                 )
                 response.raise_for_status()
                 soup = BeautifulSoup(response.content, 'html.parser')

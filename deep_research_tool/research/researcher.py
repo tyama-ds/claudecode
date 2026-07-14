@@ -1020,10 +1020,15 @@ class Researcher:
                                     "section_reference": section.section,
                                     "relevance_score": extracted.relevance_score,
                                 }
-                                if result.metadata.get("source_language"):
-                                    evidence_kwargs["source_language"] = result.metadata["source_language"]
-                                    evidence_kwargs["is_translated"] = result.metadata.get("is_translated", False)
-                                    evidence_kwargs["translation_confidence"] = result.metadata.get("translation_confidence", 1.0)
+                                # Guarded: a result object without metadata
+                                # must not abort evidence registration (an
+                                # exception here silently lost ALL evidence
+                                # for the page)
+                                result_meta = getattr(result, "metadata", None) or {}
+                                if result_meta.get("source_language"):
+                                    evidence_kwargs["source_language"] = result_meta["source_language"]
+                                    evidence_kwargs["is_translated"] = result_meta.get("is_translated", False)
+                                    evidence_kwargs["translation_confidence"] = result_meta.get("translation_confidence", 1.0)
 
                                 self.evidence_locker.add_evidence(**evidence_kwargs)
                             else:

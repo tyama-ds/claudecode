@@ -380,6 +380,12 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
           <span class="feat-sub">多段生成で章の情報量を向上</span></div>
         <label class="switch"><input type="checkbox" id="feat_enhanced" checked><span class="slider"></span></label>
       </div>
+
+      <div class="feat-row" data-tip="図表生成ステージの並列度です。章ごとの画像・表の抽出、数値データのLLM抽出、チャートのAI審査がこのワーカー数で同時実行されます。増やすほど速くなりますが、LLMのレート制限や回線負荷に注意してください（目安: 4〜8）。">
+        <div class="feat-info"><span class="feat-name">⚡ 図表生成の並列ワーカー数</span>
+          <span class="feat-sub">画像・表・数値抽出の同時実行数</span></div>
+        <input type="number" id="feat_fig_workers" value="8" min="1" max="16" style="width:80px">
+      </div>
      </div><!-- /tabFeatures -->
 
       <button class="primary" id="settingsSaveBtn">保存して閉じる</button>
@@ -617,6 +623,7 @@ function loadSettings() {
   for (const [el, key] of Object.entries(FEATURE_FIELDS)) {
     if (saved[key] !== undefined) $(el).checked = !!saved[key];
   }
+  if (saved.figure_max_workers) $('feat_fig_workers').value = saved.figure_max_workers;
   if (Array.isArray(saved.search_languages)) setSelectedLangs(saved.search_languages);
   syncLangUI();
   return saved;
@@ -631,6 +638,7 @@ function saveSettings() {
   for (const [el, key] of Object.entries(FEATURE_FIELDS)) {
     s[key] = $(el).checked;
   }
+  s.figure_max_workers = parseInt($('feat_fig_workers').value) || 8;
   s.search_languages = selectedLangs();
   localStorage.setItem('drt_settings', JSON.stringify(s));
   return s;
@@ -650,6 +658,7 @@ function settingsParams() {
     const langs = selectedLangs();
     p.search_languages = langs.length ? langs : ['ja', 'en'];
   }
+  p.figure_max_workers = Math.min(16, Math.max(1, parseInt($('feat_fig_workers').value) || 8));
   return p;
 }
 

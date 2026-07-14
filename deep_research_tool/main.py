@@ -625,6 +625,7 @@ class DeepResearchTool:
                         language=self.config.research.language,
                         proxies=self.config.proxy.get_proxies_dict(),
                         verify_ssl=self.config.proxy.verify_ssl,
+                        max_workers=self.config.report.figure_max_workers,
                     )
                     figure_collection = fig_generator.generate_figures_and_tables(
                         session=session,
@@ -1509,6 +1510,8 @@ Output only the text (no JSON, no heading):"""
         # Step 1-3: Extract numerical data and analyze for charts
         numerical_store = None
         chart_recommendations = []
+        demoted_tables = []
+        quality_rejection_summary = ""
 
         if self.config.report.numerical_extraction:
             try:
@@ -1533,6 +1536,7 @@ Output only the text (no JSON, no heading):"""
                 if self.config.report.intelligent_charts and numerical_store:
                     analyzer = ChartAnalyzer(
                         llm_client=self.llm_client if self.config.report.chart_insights else None,
+                        max_workers=self.config.report.figure_max_workers,
                         language=self.config.research.language,
                         min_confidence=self.config.report.numerical_min_confidence,
                         use_llm_analysis=self.config.report.chart_insights,
@@ -1545,6 +1549,13 @@ Output only the text (no JSON, no heading):"""
                         store=numerical_store,
                         research_topic=research_topic,
                     )
+                    # Rejected-but-tabular candidates become tables instead;
+                    # the rejection breakdown feeds the zero-figure warning
+                    demoted_tables = list(analyzer.demoted_table_candidates)
+                    quality_rejection_summary = (
+                        analyzer.quality_gate.rejection_summary())
+                    if quality_rejection_summary:
+                        print(f"[AutoFigures] {quality_rejection_summary}")
 
                 # Save numerical data store
                 if numerical_store:
@@ -1572,17 +1583,19 @@ Output only the text (no JSON, no heading):"""
             proxies=proxies,
             verify_ssl=self.config.proxy.verify_ssl,
             chart_library=self.config.report.chart_library,
+            max_workers=self.config.report.figure_max_workers,
         )
 
         # Step 5: Generate figures/tables/charts
         try:
-            if chart_recommendations:
+            if chart_recommendations or demoted_tables:
                 collection = generator.generate_from_recommendations(
                     session=session,
                     evidence_locker=evidence_locker,
                     recommendations=chart_recommendations,
                     include_images=self.config.report.auto_figures_include_images,
                     include_tables=self.config.report.auto_figures_include_tables,
+                    demoted_tables=demoted_tables,
                 )
             else:
                 # Fallback to standard generation
@@ -1604,11 +1617,32 @@ Output only the text (no JSON, no heading):"""
             )
             return None
 
+        # Guarantee layer: sections whose table extraction came up empty
+        # still get a 主要数値一覧 table synthesized from the numerical store
+        if self.config.report.auto_figures_include_tables and numerical_store:
+            try:
+                generator.add_numeric_summary_tables(collection, numerical_store)
+            except Exception as e:
+                print(f"[AutoFigures] numeric summary tables failed: {e}")
+
         # Report extraction results
         n_figures = len(collection.figures)
         n_tables = len(collection.tables)
         n_charts = len(collection.charts)
         total = n_figures + n_tables + n_charts
+
+        # Table-zero visibility: tables silently absent (while charts exist)
+        # was indistinguishable from "no tables wanted"
+        if (self.config.report.auto_figures_include_tables
+                and n_tables == 0 and total > 0):
+            n_points = len(numerical_store.data_points) if numerical_store else 0
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.LOW,
+                "AutoFigures",
+                f"表は0件でした（図・チャートは{total}件生成）。HTML表の取得・"
+                f"LLM表抽出・数値一覧の全てで表になるデータが見つかりません"
+                f"でした（数値データ点: {n_points}）。",
+            )
 
         print(f"[AutoFigures] Extraction complete: "
               f"{n_figures} figure(s), {n_tables} table(s), {n_charts} chart(s)")
@@ -1617,14 +1651,17 @@ Output only the text (no JSON, no heading):"""
             print("[AutoFigures] No figures, tables, or charts were extracted. "
                   "Skipping insertion into report.")
             n_points = len(numerical_store.data_points) if numerical_store else 0
+            detail = f"品質検定の内訳 — {quality_rejection_summary}。" \
+                if quality_rejection_summary else \
+                "収集ソースに統計・数値情報が少ない可能性があります。"
             ResearchWarnings.get_instance().add(
                 ResearchWarnings.MEDIUM,
                 "AutoFigures",
                 f"図表の自動生成は実行されましたが、0件でした"
                 f"（抽出できた数値データ: {n_points}点、チャート推奨: "
-                f"{len(chart_recommendations)}件）。収集ソースに統計・数値情報が"
-                f"少ない可能性があります。数値データの多いテーマ・情報源では"
-                f"自動的に生成されます。",
+                f"{len(chart_recommendations)}件）。{detail}"
+                f"意味のない図（同値の羅列・年同士のプロット等）は品質検定で"
+                f"自動的に除外されます。",
             )
             return None
 
@@ -1751,7 +1788,7 @@ Output only the text (no JSON, no heading):"""
         import re as _re
 
         MAX_NUMERIC_EVIDENCE = 80
-        EXTRACT_WORKERS = 6
+        EXTRACT_WORKERS = max(1, self.config.report.figure_max_workers)
 
         candidates = []
         for evidence in evidence_locker.get_all_evidence():
@@ -2807,6 +2844,7 @@ def run_manual_research(
                     language=config.research.language,
                     proxies=config.proxy.get_proxies_dict(),
                     verify_ssl=config.proxy.verify_ssl,
+                    max_workers=config.report.figure_max_workers,
                 )
                 figure_collection = fig_generator.generate_figures_and_tables(
                     session=session,

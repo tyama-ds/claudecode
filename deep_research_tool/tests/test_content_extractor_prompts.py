@@ -162,7 +162,10 @@ class TestJapanesePrompts:
             research_query="クエリ",
         )
         prompt = llm.generate.call_args.args[0]
-        assert "調査テーマ" in prompt
+        # Chunked-extraction architecture: unified English prompt with a
+        # language instruction, carrying the query/section context
+        assert "Respond in Japanese" in prompt
+        assert "クエリ" in prompt and "セクション" in prompt
         assert result.processed_content == "自然な要約文である。"
         assert result.relevance_score == 0.7
 

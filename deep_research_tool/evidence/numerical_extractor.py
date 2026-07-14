@@ -1404,6 +1404,17 @@ class NumericalDataExtractor:
             if dp.combined_confidence >= self.min_confidence
         ]
 
+        # Data-quality choke point for BOTH extraction paths: calendar years
+        # extracted as values render as year-vs-year identity lines, and
+        # metric-less unit-less numbers (page numbers, list indices) are
+        # unchartable noise.
+        from ..report.chart_quality import is_year_like
+        data_points = [
+            dp for dp in data_points
+            if not is_year_like(dp.value, dp.unit)
+            and ((dp.metric_name or "").strip() or (dp.unit or "").strip())
+        ]
+
         return data_points
 
     def _extract_with_llm(
@@ -1578,6 +1589,24 @@ Output format:
                     raw_value = float(item.get("value", 0))
                     data_type_str = item.get("data_type", "other")
                     category_str = item.get("category", "other")
+
+                    # Data-poisoning guards (source of meaningless charts):
+                    # a calendar year extracted as the VALUE later renders as
+                    # a year-vs-year identity line. Years belong in the year
+                    # field, never in value.
+                    from ..report.chart_quality import is_year_like
+                    if is_year_like(raw_value, raw_unit):
+                        logger.debug(
+                            f"Skipping year-as-value extraction: "
+                            f"{raw_value} ({item.get('metric_name', '')})")
+                        continue
+                    # A point with neither a metric name nor a unit is
+                    # unchartable noise (page numbers, list indices, ...)
+                    if not (item.get("metric_name") or "").strip() and \
+                            not (raw_unit or "").strip():
+                        logger.debug(
+                            f"Skipping unit-less/metric-less value: {raw_value}")
+                        continue
 
                     # Normalize value using unit converter
                     normalized_value = self._normalize_value(raw_value, raw_unit)
