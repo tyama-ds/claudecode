@@ -69,6 +69,15 @@ _CONFIG_PARAM_MAP = {
     "search_languages": "search_languages",
     "use_enhanced_synthesis": "use_enhanced_synthesis",
     "figure_max_workers": "figure_max_workers",
+    # Adaptive length + finalization loop settings
+    "length_mode": "length_mode",
+    "preferred_body_chars": "preferred_body_chars",
+    "hard_min_body_chars": "hard_min_body_chars",
+    "hard_max_body_chars": "hard_max_body_chars",
+    "length_tolerance": "length_tolerance",
+    "max_final_research_rounds": "max_final_research_rounds",
+    "max_final_revision_rounds": "max_final_revision_rounds",
+    "min_claim_support_score": "min_claim_support_score",
 }
 
 

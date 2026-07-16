@@ -540,43 +540,51 @@ class DeepResearchTool:
             if evidence_format in ("csv", "both"):
                 evidence_csv = evidence_locker.export_to_csv()
 
-        # Verification (if enabled)
+        # ------------------------------------------------------------------
+        # Pipeline ordering (finalization spec):
+        #   V1: enhancement -> legacy verification -> render.
+        #       Enhancement used to run AFTER verification, so the shipped
+        #       body was never the verified body. It now runs first.
+        #   V2/V3: the enhancement pass is INTEGRATED into chapter
+        #       generation (V2/V3 already rewrite every section from the
+        #       full evidence), so the duplicate regeneration is removed;
+        #       verification of the FINAL candidate body happens after
+        #       generation in the finalization loop below.
+        # ------------------------------------------------------------------
         verification_html = None
         verification_result = None
-        if self.config.enable_verification:
+        legacy_v1 = (self.config.report.generator_version
+                     == ReportGeneratorVersion.V1)
+
+        if legacy_v1:
             if progress_callback:
-                progress_callback("Running verification...", 90)
-
-            self.verifier = Verifier(
-                llm_client=self.llm_client,
-                language=self.config.research.language,
-            )
-
-            # Get full content for verification
-            content_for_verification = self._get_content_for_verification(session)
-
-            verification_result = self.verifier.verify_content(
-                content=content_for_verification,
+                progress_callback(
+                    "Reviewing all evidence for report enhancement...", 88)
+            session = self._enhance_sections_with_full_evidence(
+                session=session,
                 evidence_locker=evidence_locker,
-                document_title=session.research_plan.title if session.research_plan else query,
-                strictness=self.config.verification_strictness,
+                query=query,
             )
 
-            verification_html = self.config.report.output_dir / f"verification_{session.session_id}.html"
-            self.verifier.generate_verification_report_html(
-                verification_result,
-                verification_html,
-            )
-
-        # Enhance section contents with full evidence review before report generation
-        if progress_callback:
-            progress_callback("Reviewing all evidence for report enhancement...", 92)
-
-        session = self._enhance_sections_with_full_evidence(
-            session=session,
-            evidence_locker=evidence_locker,
-            query=query,
-        )
+            if self.config.enable_verification:
+                if progress_callback:
+                    progress_callback("Running verification...", 90)
+                self.verifier = Verifier(
+                    llm_client=self.llm_client,
+                    language=self.config.research.language,
+                )
+                content_for_verification = self._get_content_for_verification(session)
+                verification_result = self.verifier.verify_content(
+                    content=content_for_verification,
+                    evidence_locker=evidence_locker,
+                    document_title=session.research_plan.title if session.research_plan else query,
+                    strictness=self.config.verification_strictness,
+                )
+                verification_html = self.config.report.output_dir / f"verification_{session.session_id}.html"
+                self.verifier.generate_verification_report_html(
+                    verification_result,
+                    verification_html,
+                )
 
         # Generate report
         if progress_callback:
@@ -612,6 +620,18 @@ class DeepResearchTool:
                 research_plan=session.research_plan,
                 section_contents=session.section_contents,
             )
+
+            # Finalization loop: verify the final candidate body and only
+            # then freeze it (V3 rendering below is deterministic)
+            if self.config.enable_verification:
+                verification_result, verification_html = \
+                    self._run_finalization_loop(
+                        result=result,
+                        session=session,
+                        evidence_locker=evidence_locker,
+                        query=query,
+                        progress_callback=progress_callback,
+                    )
 
             # Pre-generate figures if auto_figures is enabled
             figure_collection = None
@@ -667,6 +687,22 @@ class DeepResearchTool:
                 research_plan=session.research_plan,
                 section_contents=session.section_contents,
             )
+
+            # Finalization loop: verify the final candidate body, act on
+            # structured findings (research / rewrite / compress /
+            # finalize-with-limitations), re-verify after every change,
+            # then FREEZE. Everything after this point is deterministic
+            # rendering (markdown assembly, format conversion).
+            if self.config.enable_verification:
+                verification_result, verification_html = \
+                    self._run_finalization_loop(
+                        result=result,
+                        session=session,
+                        evidence_locker=evidence_locker,
+                        query=query,
+                        progress_callback=progress_callback,
+                    )
+
             # Generate final document as markdown
             final_doc = generator.generate_final_document(
                 result,
@@ -1152,6 +1188,332 @@ class DeepResearchTool:
             content_parts.append(section_data.get("content", ""))
 
         return "\n\n".join(content_parts)
+
+    # ------------------------------------------------------------------
+    # Finalization loop (verify final candidate -> act -> re-verify -> freeze)
+    # ------------------------------------------------------------------
+
+    def _run_finalization_loop(self, result, session, evidence_locker,
+                               query, progress_callback=None):
+        """Verify and finalize the exact body that will be rendered.
+
+        Returns (verdict, verification_html_path). After this returns, the
+        chapters inside `result` are FROZEN: no LLM may modify them; only
+        deterministic rendering (markdown assembly, DOCX/PDF/HTML
+        conversion, display-number substitution) is allowed downstream.
+        """
+        from .report.citations import CitationManager
+        from .report.finalization import (
+            FinalizationController, LoopBudget, count_body_chars)
+        from .report.length_planner import LengthPlanner
+        from .verification.claim_verifier import ClaimVerifier
+
+        if progress_callback:
+            progress_callback("Verifying final report body...", 96)
+
+        rc = self.config.research
+        rp = self.config.report
+
+        # --- citation registry: stable per-section [SOURCE N] -> source URL
+        locker_urls = {e.url for e in evidence_locker.get_all_evidence()}
+        citation_mgr = CitationManager(
+            evidence_ids_exist=lambda url: url in locker_urls)
+        section_evidence: dict = {}
+        for sid, sdata in session.section_contents.items():
+            if sid.startswith("_"):
+                continue
+            extracted = sdata.get("extracted_content") or []
+            urls = [ec.get("url", "") for ec in extracted]
+            if not urls:
+                urls = list(sdata.get("sources") or [])
+            citation_mgr.register_section(sid, urls)
+            section_evidence[sid] = extracted
+
+        # --- adaptive length ranges from unique information units
+        planner = LengthPlanner(
+            language=rc.language,
+            length_mode=rp.length_mode,
+            preferred_body_chars=(rp.preferred_body_chars
+                                  or rp.target_characters),
+            hard_min_body_chars=rp.hard_min_body_chars,
+            hard_max_body_chars=rp.hard_max_body_chars,
+            length_tolerance=rp.length_tolerance,
+        )
+        plan_sections = []
+        if session.research_plan:
+            for item in session.research_plan.table_of_contents.get_flat_sections():
+                plan_sections.append(
+                    {"section": item.section, "title": item.title})
+        planner.initial_allocation(plan_sections)
+        units = {sid: planner.extract_units(sid, evs)
+                 for sid, evs in section_evidence.items()}
+        planner.recalc_after_research(units)
+
+        # --- critical questions from the research plan's main chapters
+        critical_questions = []
+        if session.research_plan:
+            for item in session.research_plan.table_of_contents.items:
+                q = f"{item.title} {getattr(item, 'description', '')}".strip()
+                if q:
+                    critical_questions.append(q)
+
+        # --- verifier + controller callbacks
+        eval_llm = self.stage_llm_clients.get("evaluation", self.llm_client)
+        claim_verifier = ClaimVerifier(
+            llm_client=eval_llm, language=rc.language)
+        self.claim_verifier = claim_verifier
+
+        all_evidence = evidence_locker.get_all_evidence()
+
+        def verify_fn(chapters):
+            return claim_verifier.verify_report(
+                chapters=chapters,
+                evidence_list=all_evidence,
+                citation_manager=citation_mgr,
+                critical_questions=critical_questions,
+                length_plans=planner.plans,
+                preferred_body_chars=planner.preferred_body_chars,
+                exclude_references=rp.exclude_references_from_count,
+            )
+
+        def research_fn(issues, queries):
+            return self._final_research_round(
+                issues, queries, session, evidence_locker,
+                citation_mgr, section_evidence)
+
+        def rewrite_fn(sid, issues):
+            return self._final_edit_section(
+                sid, issues, session, citation_mgr, mode="rewrite")
+
+        def compress_fn(sid, issues):
+            return self._final_edit_section(
+                sid, issues, session, citation_mgr, mode="compress")
+
+        def hedge_fn(sid, issues):
+            return self._final_edit_section(
+                sid, issues, session, citation_mgr, mode="hedge")
+
+        controller = FinalizationController(
+            verify_fn=verify_fn,
+            research_fn=research_fn,
+            rewrite_fn=rewrite_fn,
+            compress_fn=compress_fn,
+            hedge_fn=hedge_fn,
+            validate_citations_fn=citation_mgr.validate,
+            budget=LoopBudget(
+                max_final_research_rounds=rc.max_final_research_rounds,
+                max_final_revision_rounds=rc.max_final_revision_rounds,
+                max_no_improvement_rounds=rc.max_no_improvement_rounds,
+                min_score_improvement=rc.min_score_improvement,
+                min_new_independent_sources=rc.min_new_independent_sources,
+                min_claim_support_score=rc.min_claim_support_score,
+                required_critical_coverage=rc.required_critical_coverage,
+            ),
+            hard_max_body_chars=rp.hard_max_body_chars,
+            language=rc.language,
+        )
+
+        chapters = {sid: ch.content for sid, ch in result.chapters.items()}
+        # Edit callbacks read the CURRENT text from this shared dict (the
+        # controller mutates it in place across rounds)
+        self._finalize_current_chapters = chapters
+        outcome = controller.run(chapters)
+
+        # Freeze: write the verified text back into the generation result
+        for sid, text in outcome["chapters"].items():
+            if sid in result.chapters:
+                result.chapters[sid].content = text
+                result.chapters[sid].word_count = len(text)
+
+        verdict = outcome["verdict"]
+        print(f"[Finalize] decision={outcome['decision']} "
+              f"support={verdict.metrics.claim_support_score:.2f} "
+              f"unsupported={verdict.metrics.unsupported_count} "
+              f"contradicted={verdict.metrics.contradicted_count} "
+              f"body_chars={verdict.metrics.actual_body_chars}")
+        if outcome["decision"] == "finalize_with_limitations":
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.HIGH, "Finalize",
+                f"追加調査の上限内で解決できない論点が残ったため、限定表現へ"
+                f"変更し「調査上の限界」を本文に記載しました"
+                f"（未解決issue: {len(verdict.issues)}件）。",
+            )
+
+        html_path = (self.config.report.output_dir
+                     / f"verification_{session.session_id}.html")
+        try:
+            self._write_claim_verification_html(
+                verdict, outcome, html_path)
+        except Exception as e:
+            print(f"[Finalize] verification HTML failed: {e}")
+            html_path = None
+        return verdict, html_path
+
+    def _final_research_round(self, issues, queries, session,
+                              evidence_locker, citation_mgr,
+                              section_evidence):
+        """Targeted research for unresolved issues (bounded by the loop).
+
+        New evidence APPENDS to each section's citation registry so that
+        existing [SOURCE N] numbers never shift.
+        """
+        from .evidence.locker import EvidenceType
+
+        new_sources = 0
+        changed_sections = []
+        per_issue_sections = {}
+        for issue in issues:
+            if issue.section_id:
+                per_issue_sections.setdefault(issue.section_id, []).append(issue)
+
+        for q in queries[:6]:
+            try:
+                results = self.search_client.search(q)
+            except Exception as e:
+                print(f"[Finalize] research query failed '{q[:40]}': {e}")
+                continue
+            for r in results[:2]:
+                url = getattr(r, "url", "")
+                if not url or url in {e.url for e in
+                                      evidence_locker.get_all_evidence()}:
+                    continue    # never refetch a known URL
+                try:
+                    page = self.search_client.get_page_content(url)
+                except Exception:
+                    continue
+                text = getattr(page, "text_content", "") or ""
+                if len(text) < 200:
+                    continue
+                # attach to the sections that raised the issues
+                target_sections = list(per_issue_sections.keys()) or \
+                    [sid for sid in section_evidence.keys()][:1]
+                evidence_locker.add_evidence(
+                    url=url, title=getattr(page, "title", "") or url,
+                    content_excerpt=text[:500], extracted_text=text,
+                    evidence_type=EvidenceType.WEB_PAGE,
+                    search_query=q,
+                    section_reference=target_sections[0],
+                )
+                new_sources += 1
+                for sid in target_sections:
+                    entry = {"title": getattr(page, "title", "") or url,
+                             "url": url, "content": text[:2000],
+                             "raw_content": text, "key_points": [],
+                             "relevance_score": 0.5}
+                    section_evidence.setdefault(sid, []).append(entry)
+                    sdata = session.section_contents.get(sid)
+                    if sdata is not None:
+                        sdata.setdefault("extracted_content", []).append(entry)
+                        sdata.setdefault("sources", []).append(url)
+                    citation_mgr.append_evidence(sid, url)
+                    if sid not in changed_sections:
+                        changed_sections.append(sid)
+        return {"new_sources": new_sources,
+                "changed_sections": changed_sections}
+
+    def _final_edit_section(self, sid, issues, session, citation_mgr,
+                            mode="rewrite"):
+        """LLM edit of ONE section from its EXISTING evidence.
+
+        mode: rewrite  (deepen using unused evidence, no new facts)
+              compress (remove redundancy, keep claims & citations)
+              hedge    (soften unresolved assertions, state limitations)
+        The controller machine-validates citations before accepting.
+        """
+        sdata = session.section_contents.get(sid) or {}
+        # live text: the controller mutates this shared dict across rounds
+        current = getattr(self, "_finalize_current_chapters", {}).get(sid, "")
+        if not current:
+            current = sdata.get("content", "")
+        if not current:
+            return None
+
+        extracted = sdata.get("extracted_content") or []
+        blocks = []
+        for i, ec in enumerate(extracted[:15], 1):
+            body = (ec.get("raw_content") or ec.get("content") or "")[:1200]
+            blocks.append(f"[SOURCE {i}] {ec.get('title', '')}\n{body}")
+        evidence_text = "\n---\n".join(blocks)
+        issue_text = "\n".join(
+            f"- ({i.type}) {i.claim or i.reason}" for i in issues[:8])
+
+        lang_ja = self.config.research.language == "ja"
+        if mode == "rewrite":
+            instruction = (
+                "既存のエビデンスだけを使い、以下の不足点を解消するように本文を増補・再構成してください。"
+                "外部の新しい情報を創作しない。[SOURCE N] は上記の番号のみ使用し、既存の引用は維持する。"
+                if lang_ja else
+                "Using ONLY the evidence above, expand/restructure the text to fix the issues. "
+                "Do not invent facts. Use only the [SOURCE N] numbers listed; keep existing citations.")
+        elif mode == "compress":
+            instruction = (
+                "重要な主張と引用 [SOURCE N] をすべて維持したまま、重複・冗長・低重要度の記述を圧縮してください。"
+                "引用だけ残して主張を消さない。新しい情報を加えない。"
+                if lang_ja else
+                "Compress redundancy while KEEPING every important claim and its [SOURCE N] citations. "
+                "Never leave a citation whose claim was removed. Add nothing new.")
+        else:  # hedge
+            instruction = (
+                "以下の未解決の主張について、断定を避けた限定表現（「〜の可能性がある」「公開情報では確認できなかった」等）に"
+                "修正してください。それ以外の本文・引用は変更しない。"
+                if lang_ja else
+                "Soften the unresolved assertions below into hedged statements. "
+                "Change nothing else; keep all citations.")
+
+        prompt = (f"{'あなたはレポート編集者です。' if lang_ja else 'You are a report editor.'}\n\n"
+                  f"{'【対象セクション本文】' if lang_ja else '[SECTION TEXT]'}\n{current}\n\n"
+                  f"{'【エビデンス】' if lang_ja else '[EVIDENCE]'}\n{evidence_text}\n\n"
+                  f"{'【指摘事項】' if lang_ja else '[ISSUES]'}\n{issue_text or '-'}\n\n"
+                  f"{'【指示】' if lang_ja else '[INSTRUCTIONS]'}\n{instruction}\n\n"
+                  f"{'修正後の本文のみを出力（見出しを含め、JSON・前置き不要）:' if lang_ja else 'Output only the revised section text:'}")
+
+        llm = self.stage_llm_clients.get("writing", self.llm_client)
+        try:
+            response = llm.generate(prompt)
+            text = (response.content or "").strip()
+            return text or None
+        except Exception as e:
+            print(f"[Finalize] section edit failed ({mode}, {sid}): {e}")
+            return None
+
+    def _write_claim_verification_html(self, verdict, outcome, path) -> None:
+        """Deterministic HTML report of the final verification."""
+        import html as _html
+        m = verdict.metrics
+        rows = "".join(
+            f"<tr><td>{_html.escape(i.section_id)}</td>"
+            f"<td>{_html.escape(i.claim_id)}</td>"
+            f"<td>{_html.escape(i.type)}</td>"
+            f"<td>{_html.escape(i.severity)}</td>"
+            f"<td>{_html.escape((i.claim or '')[:120])}</td>"
+            f"<td>{_html.escape((i.reason or '')[:160])}</td></tr>"
+            for i in verdict.issues)
+        history = "".join(
+            f"<li>round {h['round']}: {h['decision']} "
+            f"(score={h['score']:.2f}, issues={h['issues']})</li>"
+            for h in outcome.get("history", []))
+        doc = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Final Verification</title>
+<style>body{{font-family:sans-serif;margin:2em}}table{{border-collapse:collapse}}
+td,th{{border:1px solid #ccc;padding:4px 8px;font-size:13px}}</style></head><body>
+<h1>最終検証レポート</h1>
+<p>判定: <b>{_html.escape(outcome.get('decision', ''))}</b></p>
+<ul>
+<li>claim support score: {m.claim_support_score:.3f}</li>
+<li>unsupported: {m.unsupported_count}（うちcritical: {m.unsupported_critical_claims}）</li>
+<li>contradicted: {m.contradicted_count}</li>
+<li>critical question coverage: {m.critical_question_coverage:.2f}</li>
+<li>citations valid: {m.citations_valid}</li>
+<li>body chars: {m.actual_body_chars}
+ (recommended {m.recommended_min_chars}–{m.recommended_max_chars})</li>
+</ul>
+<h2>判定履歴</h2><ol>{history}</ol>
+<h2>Issues ({len(verdict.issues)})</h2>
+<table><tr><th>section</th><th>claim</th><th>type</th><th>severity</th>
+<th>claim text</th><th>reason</th></tr>{rows}</table>
+</body></html>"""
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(doc, encoding="utf-8")
 
     def _enhance_sections_with_full_evidence(
         self,

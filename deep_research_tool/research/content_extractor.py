@@ -555,12 +555,24 @@ Key Points: {', '.join(ec.key_points[:3]) if ec.key_points else 'N/A'}
         # Collect source references
         source_refs = list(range(1, len(extracted_contents) + 1))
 
+        # Real information gaps: outline points whose content generation
+        # produced nothing substantial are unanswered by the evidence.
+        # (This used to be a hardcoded empty list, so gap-fill and the
+        # finalization loop never saw what was actually missing.)
+        information_gaps = [
+            s["title"] for s in detailed_sections
+            if not s.get("content")
+            or len(s["content"].strip()) < 100
+            or "could not be generated" in s["content"]
+            or "生成できませんでした" in s["content"]
+        ]
+
         return {
             "content": final_content,
             "summary": self._generate_section_summary(section_title, final_content, lang_instruction),
             "source_references": source_refs,
             "analysis_points": [s["title"] for s in detailed_sections],
-            "information_gaps": [],
+            "information_gaps": information_gaps,
             "confidence_level": "medium" if len(extracted_contents) >= 2 else "low",
             "outline": outline,
         }

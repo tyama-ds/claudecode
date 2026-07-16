@@ -436,6 +436,15 @@ class ResearchConfig:
     plan_review: bool = True
     plan_review_timeout: int = 60  # seconds
 
+    # --- Finalization loop control (backward compatible additions) ---
+    max_final_research_rounds: int = 2
+    max_final_revision_rounds: int = 2
+    max_no_improvement_rounds: int = 1
+    min_score_improvement: float = 0.03
+    min_new_independent_sources: int = 1
+    min_claim_support_score: float = 0.85
+    required_critical_coverage: float = 1.0
+
     # Extended mode settings (deep site crawling)
     extended_mode: bool = False
     crawl_max_pages: int = 10  # Max pages to crawl per site
@@ -517,6 +526,16 @@ class ReportConfig:
     # Parallel workers for the figure stage (per-section image/table
     # extraction, numerical extraction, LLM chart judging)
     figure_max_workers: int = 8
+
+    # --- Adaptive length control (finalization pipeline) ---
+    # 'adaptive': length is a range derived from unique information units;
+    # 'fixed': legacy fixed-quota behavior driven by preferred_body_chars
+    length_mode: str = "adaptive"
+    preferred_body_chars: Optional[int] = None   # soft wish, never a hard gate
+    hard_min_body_chars: Optional[int] = None    # absolute only when user-set
+    hard_max_body_chars: Optional[int] = None    # absolute only when user-set
+    length_tolerance: float = 0.20               # +/- band around recommendations
+    exclude_references_from_count: bool = True   # count body w/o refs/TOC/markup
     auto_figures_include_images: bool = True  # Include images from web sources
     auto_figures_include_tables: bool = True  # Include extracted tables
     auto_figures_include_charts: bool = True  # Include generated charts
@@ -714,6 +733,19 @@ def create_config(
     # Auto figure/table generation parameters
     auto_figures: bool = False,
     figure_max_workers: int = 8,
+    length_mode: str = "adaptive",
+    preferred_body_chars: Optional[int] = None,
+    hard_min_body_chars: Optional[int] = None,
+    hard_max_body_chars: Optional[int] = None,
+    length_tolerance: float = 0.20,
+    exclude_references_from_count: bool = True,
+    max_final_research_rounds: int = 2,
+    max_final_revision_rounds: int = 2,
+    max_no_improvement_rounds: int = 1,
+    min_score_improvement: float = 0.03,
+    min_new_independent_sources: int = 1,
+    min_claim_support_score: float = 0.85,
+    required_critical_coverage: float = 1.0,
     auto_figures_include_images: bool = True,
     auto_figures_include_tables: bool = True,
     auto_figures_include_charts: bool = True,
@@ -865,6 +897,27 @@ def create_config(
                       "writing": {"provider": "anthropic",
                                   "model": "claude-3-5-sonnet-20241022"}}
         auto_figures: Auto-generate figures/tables during run_research
+        length_mode: 'adaptive' (length as an information-driven range,
+            default) or 'fixed' (legacy fixed-quota behavior)
+        preferred_body_chars: soft target for total body characters (never a
+            hard gate); None = no fixed quota
+        hard_min_body_chars / hard_max_body_chars: absolute limits, enforced
+            only when explicitly set by the user (None = unconstrained)
+        length_tolerance: +/- band around recommended lengths (default 0.20)
+        exclude_references_from_count: count body chars without markdown
+            syntax, TOC and reference sections (default True)
+        max_final_research_rounds: additional research rounds in the final
+            verification loop (default 2)
+        max_final_revision_rounds: rewrite/compress rounds in the final loop
+        max_no_improvement_rounds: stop after this many stagnant rounds
+        min_score_improvement: minimum claim-support-score gain to count as
+            improvement (default 0.03)
+        min_new_independent_sources: research must add at least this many new
+            independent sources to count as progress
+        min_claim_support_score: acceptance threshold for the weighted claim
+            support score (default 0.85)
+        required_critical_coverage: required coverage of critical questions
+            for acceptance (default 1.0)
         figure_max_workers: Parallel workers for the figure stage
             (per-section image/table extraction, numerical extraction,
             LLM chart judging). Default 8
@@ -939,6 +992,13 @@ def create_config(
         evidence_format=evidence_format,
         plan_review=plan_review,
         plan_review_timeout=plan_review_timeout,
+        max_final_research_rounds=max_final_research_rounds,
+        max_final_revision_rounds=max_final_revision_rounds,
+        max_no_improvement_rounds=max_no_improvement_rounds,
+        min_score_improvement=min_score_improvement,
+        min_new_independent_sources=min_new_independent_sources,
+        min_claim_support_score=min_claim_support_score,
+        required_critical_coverage=required_critical_coverage,
         extended_mode=extended_mode,
         crawl_max_pages=crawl_max_pages,
         crawl_max_depth=crawl_max_depth,
@@ -979,6 +1039,12 @@ def create_config(
         chart_library=chart_library,
         auto_figures=auto_figures,
         figure_max_workers=figure_max_workers,
+        length_mode=length_mode,
+        preferred_body_chars=preferred_body_chars,
+        hard_min_body_chars=hard_min_body_chars,
+        hard_max_body_chars=hard_max_body_chars,
+        length_tolerance=length_tolerance,
+        exclude_references_from_count=exclude_references_from_count,
         auto_figures_include_images=auto_figures_include_images,
         auto_figures_include_tables=auto_figures_include_tables,
         auto_figures_include_charts=auto_figures_include_charts,

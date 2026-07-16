@@ -1,0 +1,642 @@
+"""
+Finalization pipeline - state-based decisions for the final report loop.
+
+Implements the pipeline tail:
+
+    draft -> verify -> decide -> (research | rewrite | compress |
+    finalize-with-limitations) -> re-verify -> accept -> render
+
+Design principles (from the pipeline specification):
+- The text that ships is the text that was verified: any LLM edit to the
+  body triggers re-verification, and nothing edits the body after the
+  final verification (only deterministic rendering).
+- "Not enough" never automatically means "search more": evidence
+  shortage (RESEARCH) is separated from explanation shortage
+  (REWRITE_FROM_EVIDENCE) and from redundancy (COMPRESS_FROM_EVIDENCE).
+- Length is an adaptive range derived from information units, not a
+  fixed quota. Short-but-complete is acceptable; useful overshoot within
+  the hard maximum is never trimmed.
+- Loops are bounded; when search cannot resolve an issue the run ends
+  with limitations stated in the body (FINALIZE_WITH_LIMITATIONS).
+- The LLM produces structured assessments; the state choice and every
+  threshold comparison happen in Python.
+"""
+
+import re
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
+
+
+class ResearchDecision(Enum):
+    ACCEPT = "accept"
+    RESEARCH = "research"
+    REWRITE_FROM_EVIDENCE = "rewrite_from_evidence"
+    COMPRESS_FROM_EVIDENCE = "compress_from_evidence"
+    FINALIZE_WITH_LIMITATIONS = "finalize_with_limitations"
+
+
+# Issue types produced by verification / assessment
+ISSUE_UNSUPPORTED = "unsupported_claim"
+ISSUE_CONTRADICTED = "contradicted_claim"
+ISSUE_UNANSWERED_QUESTION = "unanswered_critical_question"
+ISSUE_INSUFFICIENT_EXPLANATION = "insufficient_explanation"
+ISSUE_UNUSED_EVIDENCE = "unused_high_importance_evidence"
+ISSUE_REDUNDANCY = "redundant_content"
+ISSUE_INVALID_CITATION = "invalid_citation"
+ISSUE_OVER_HARD_MAX = "over_hard_max"
+
+
+@dataclass
+class VerificationIssue:
+    """One structured problem found in the candidate body."""
+    section_id: str = ""
+    claim_id: str = ""
+    type: str = ""
+    severity: str = "important"       # critical / important / minor
+    claim: str = ""
+    reason: str = ""
+    supporting_source_ids: List[str] = field(default_factory=list)
+    needed_evidence: Optional[str] = None
+    search_queries: List[str] = field(default_factory=list)
+    fallback_action: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "section_id": self.section_id,
+            "claim_id": self.claim_id,
+            "type": self.type,
+            "severity": self.severity,
+            "claim": self.claim,
+            "reason": self.reason,
+            "supporting_source_ids": self.supporting_source_ids,
+            "needed_evidence": self.needed_evidence,
+            "search_queries": self.search_queries,
+            "fallback_action": self.fallback_action,
+        }
+
+
+@dataclass
+class SectionAssessment:
+    """Per-section length/content evaluation (spec section 5)."""
+    section_id: str
+    importance: str = "normal"         # high / normal / low
+    actual_chars: int = 0
+    recommended_min_chars: int = 0
+    recommended_chars: int = 0
+    recommended_max_chars: int = 0
+    missing_content_units: List[str] = field(default_factory=list)
+    unused_evidence_ids: List[str] = field(default_factory=list)
+    redundant_passages: List[str] = field(default_factory=list)
+    recommended_action: str = ResearchDecision.ACCEPT.value
+    reason: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "section_id": self.section_id,
+            "importance": self.importance,
+            "actual_chars": self.actual_chars,
+            "recommended_min_chars": self.recommended_min_chars,
+            "recommended_chars": self.recommended_chars,
+            "recommended_max_chars": self.recommended_max_chars,
+            "missing_content_units": self.missing_content_units,
+            "unused_evidence_ids": self.unused_evidence_ids,
+            "redundant_passages": self.redundant_passages,
+            "recommended_action": self.recommended_action,
+            "reason": self.reason,
+        }
+
+
+@dataclass
+class VerificationMetrics:
+    """Aggregated metrics for one verification pass."""
+    critical_question_coverage: float = 1.0
+    claim_support_score: float = 1.0
+    unsupported_critical_claims: int = 0
+    unsupported_count: int = 0
+    contradicted_count: int = 0
+    unresolved_contradictions: int = 0
+    citations_valid: bool = True
+    primary_freshness_ok: bool = True
+    actual_body_chars: int = 0
+    preferred_body_chars: Optional[int] = None
+    recommended_min_chars: int = 0
+    recommended_chars: int = 0
+    recommended_max_chars: int = 0
+    missing_content_units: List[str] = field(default_factory=list)
+    unused_high_importance_evidence_ids: List[str] = field(default_factory=list)
+    redundant_passages: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "critical_question_coverage": self.critical_question_coverage,
+            "claim_support_score": self.claim_support_score,
+            "unsupported_critical_claims": self.unsupported_critical_claims,
+            "unsupported_count": self.unsupported_count,
+            "contradicted_count": self.contradicted_count,
+            "unresolved_contradictions": self.unresolved_contradictions,
+            "citations_valid": self.citations_valid,
+            "actual_body_chars": self.actual_body_chars,
+            "preferred_body_chars": self.preferred_body_chars,
+            "recommended_min_chars": self.recommended_min_chars,
+            "recommended_chars": self.recommended_chars,
+            "recommended_max_chars": self.recommended_max_chars,
+            "missing_content_units": self.missing_content_units,
+            "unused_high_importance_evidence_ids":
+                self.unused_high_importance_evidence_ids,
+            "redundant_passages": self.redundant_passages,
+        }
+
+
+@dataclass
+class StructuredVerdict:
+    """The structured verification output (spec section 3)."""
+    decision: str = ResearchDecision.ACCEPT.value   # advisory; Python re-decides
+    issues: List[VerificationIssue] = field(default_factory=list)
+    metrics: VerificationMetrics = field(default_factory=VerificationMetrics)
+    section_assessments: Dict[str, SectionAssessment] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "decision": self.decision,
+            "issues": [i.to_dict() for i in self.issues],
+            "metrics": self.metrics.to_dict(),
+            "section_assessments": {
+                k: v.to_dict() for k, v in self.section_assessments.items()},
+        }
+
+    def issues_of(self, *types: str) -> List[VerificationIssue]:
+        return [i for i in self.issues if i.type in types]
+
+    def critical_issues(self) -> List[VerificationIssue]:
+        return [i for i in self.issues if i.severity == "critical"]
+
+
+# ---------------------------------------------------------------------------
+# Body character counting (markdown syntax / TOC / references excluded)
+# ---------------------------------------------------------------------------
+
+_REFERENCE_HEADINGS = (
+    "参考文献", "引用文献", "references", "sources", "bibliography",
+    "出典一覧", "用語集", "glossary", "処理中の警告",
+)
+
+
+def count_body_chars(text: str, exclude_references: bool = True) -> int:
+    """Count body characters, excluding markdown syntax, TOC and references.
+
+    Used for every length judgement so that markup and reference lists
+    never inflate the perceived body size.
+    """
+    if not text:
+        return 0
+    lines = []
+    in_code = False
+    in_reference = False
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code:
+            continue
+        if stripped.startswith("#"):
+            title = stripped.lstrip("#").strip().lower()
+            if exclude_references and any(
+                    h in title for h in _REFERENCE_HEADINGS):
+                in_reference = True
+                continue
+            in_reference = False
+            continue    # headings are structure, not body
+        if in_reference:
+            continue
+        if stripped.startswith("|"):        # tables: keep cell text only
+            stripped = re.sub(r"[|:\-\s]+", "", stripped)
+        lines.append(stripped)
+    body = "\n".join(lines)
+    body = re.sub(r"\[SOURCE\s*\d+\]", "", body)         # citation tags
+    body = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", body)      # images
+    body = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", body)  # links -> text
+    body = re.sub(r"[*_`>#]+", "", body)                  # md tokens
+    body = re.sub(r"\s+", "", body)                       # whitespace
+    return len(body)
+
+
+# ---------------------------------------------------------------------------
+# Decision logic (pure Python; spec sections 2, 5, 7)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LoopBudget:
+    """Round limits and stagnation state for the finalization loop."""
+    max_final_research_rounds: int = 2
+    max_final_revision_rounds: int = 2
+    max_no_improvement_rounds: int = 1
+    min_score_improvement: float = 0.03
+    min_new_independent_sources: int = 1
+    min_claim_support_score: float = 0.85
+    required_critical_coverage: float = 1.0
+
+    research_rounds: int = 0
+    revision_rounds: int = 0
+    no_improvement_rounds: int = 0
+    prev_score: Optional[float] = None
+    seen_queries: set = field(default_factory=set)
+    seen_urls: set = field(default_factory=set)
+
+    def research_allowed(self) -> bool:
+        return (self.research_rounds < self.max_final_research_rounds
+                and self.no_improvement_rounds <= self.max_no_improvement_rounds)
+
+    def revision_allowed(self) -> bool:
+        return self.revision_rounds < self.max_final_revision_rounds
+
+    def novel_queries(self, queries: List[str]) -> List[str]:
+        """Drop queries already tried (identical or near-identical)."""
+        fresh = []
+        for q in queries:
+            key = re.sub(r"\s+", "", (q or "").lower())
+            if not key or key in self.seen_queries:
+                continue
+            # near-duplicate: an already-seen query containing / contained by
+            if any(key in s or s in key for s in self.seen_queries):
+                continue
+            self.seen_queries.add(key)
+            fresh.append(q)
+        return fresh
+
+    def register_score(self, score: float, resolved_issues: int,
+                       new_independent_sources: int) -> None:
+        """Track improvement; stagnation feeds the stop conditions."""
+        improved = False
+        if self.prev_score is not None:
+            if (score - self.prev_score) >= self.min_score_improvement:
+                improved = True
+        if resolved_issues > 0:
+            improved = True
+        if new_independent_sources >= self.min_new_independent_sources:
+            improved = True
+        if self.prev_score is None:
+            improved = True     # first round is not stagnation
+        self.prev_score = score
+        if improved:
+            self.no_improvement_rounds = 0
+        else:
+            self.no_improvement_rounds += 1
+
+
+def passes_hard_gates(verdict: StructuredVerdict, budget: LoopBudget) -> bool:
+    """Hard gates that averages and length can never override (spec 7)."""
+    m = verdict.metrics
+    if m.critical_question_coverage < budget.required_critical_coverage:
+        return False
+    if m.unsupported_critical_claims > 0:
+        return False
+    if not m.citations_valid:
+        return False
+    if not m.primary_freshness_ok:
+        return False
+    return True
+
+
+def decide(
+    verdict: StructuredVerdict,
+    budget: LoopBudget,
+    hard_max_body_chars: Optional[int] = None,
+) -> ResearchDecision:
+    """Choose the next state. Thresholds live here, not in the LLM.
+
+    Priority: hard length ceiling > evidence problems > redundancy >
+    shallow explanation > accept.
+    """
+    m = verdict.metrics
+
+    # --- absolute ceiling: compress (keep claims & citations) ---
+    if hard_max_body_chars and m.actual_body_chars > hard_max_body_chars:
+        if budget.revision_allowed():
+            return ResearchDecision.COMPRESS_FROM_EVIDENCE
+        return ResearchDecision.FINALIZE_WITH_LIMITATIONS
+
+    # --- evidence-level problems -> research (bounded) ---
+    needs_research = (
+        m.critical_question_coverage < budget.required_critical_coverage
+        or m.unsupported_critical_claims > 0
+        or any(i.needed_evidence for i in verdict.issues)
+        or bool(verdict.issues_of(ISSUE_UNSUPPORTED, ISSUE_CONTRADICTED,
+                                  ISSUE_UNANSWERED_QUESTION))
+    )
+    if needs_research:
+        if budget.research_allowed():
+            return ResearchDecision.RESEARCH
+        return ResearchDecision.FINALIZE_WITH_LIMITATIONS
+
+    # --- support score below threshold but nothing actionable by search ---
+    if m.claim_support_score < budget.min_claim_support_score:
+        if budget.research_allowed():
+            return ResearchDecision.RESEARCH
+        return ResearchDecision.FINALIZE_WITH_LIMITATIONS
+
+    # --- invalid citations are a body defect: fix from evidence, not search ---
+    if not m.citations_valid:
+        if budget.revision_allowed():
+            return ResearchDecision.REWRITE_FROM_EVIDENCE
+        return ResearchDecision.FINALIZE_WITH_LIMITATIONS
+
+    # --- redundancy / imbalance -> compress (must carry reasons) ---
+    if m.redundant_passages and budget.revision_allowed():
+        return ResearchDecision.COMPRESS_FROM_EVIDENCE
+
+    # --- shallow explanation with sufficient evidence -> rewrite, no search ---
+    shallow = (
+        bool(m.missing_content_units)
+        or bool(m.unused_high_importance_evidence_ids)
+        or bool(verdict.issues_of(ISSUE_INSUFFICIENT_EXPLANATION,
+                                  ISSUE_UNUSED_EVIDENCE))
+    )
+    if shallow and budget.revision_allowed():
+        return ResearchDecision.REWRITE_FROM_EVIDENCE
+
+    # Short but complete is acceptable; useful overshoot under the hard
+    # ceiling is acceptable — no length-only rejections here by design.
+    if passes_hard_gates(verdict, budget):
+        return ResearchDecision.ACCEPT
+
+    # Gates failed but nothing actionable remains
+    if budget.research_allowed() and not passes_hard_gates(verdict, budget):
+        return ResearchDecision.RESEARCH
+    return ResearchDecision.FINALIZE_WITH_LIMITATIONS
+
+
+def decide_section_action(assessment: SectionAssessment,
+                          evidence_sufficient: bool) -> str:
+    """Per-section recommendation (spec section 5, 初稿後判定)."""
+    a = assessment
+    if a.redundant_passages:
+        return ResearchDecision.COMPRESS_FROM_EVIDENCE.value
+    if a.missing_content_units:
+        if evidence_sufficient:
+            return ResearchDecision.REWRITE_FROM_EVIDENCE.value
+        return ResearchDecision.RESEARCH.value
+    if a.actual_chars < a.recommended_min_chars:
+        # short: fine when nothing required is missing
+        if evidence_sufficient or not a.missing_content_units:
+            return ResearchDecision.ACCEPT.value
+        return ResearchDecision.RESEARCH.value
+    return ResearchDecision.ACCEPT.value
+
+
+# ---------------------------------------------------------------------------
+# Finalization controller
+# ---------------------------------------------------------------------------
+
+class FinalizationController:
+    """Runs the bounded verify → decide → act → re-verify loop.
+
+    All actions are injected callables so the controller stays pure and
+    testable without a network or a real LLM:
+
+      verify_fn(chapters)                 -> StructuredVerdict
+      research_fn(issues, queries)        -> {"new_sources": int}
+      rewrite_fn(section_id, issues)      -> new_text or None
+      compress_fn(section_id, issues)     -> new_text or None
+      hedge_fn(section_id, issues)        -> new_text or None  (limitations)
+      validate_citations_fn(section_id, text) -> bool
+
+    Invariants enforced here:
+    - after ANY body change, verify_fn runs again before ACCEPT
+    - once the loop returns, no further body-changing callable is invoked
+      (rendering afterwards must be deterministic)
+    """
+
+    def __init__(
+        self,
+        verify_fn: Callable,
+        research_fn: Callable = None,
+        rewrite_fn: Callable = None,
+        compress_fn: Callable = None,
+        hedge_fn: Callable = None,
+        validate_citations_fn: Callable = None,
+        budget: LoopBudget = None,
+        hard_max_body_chars: Optional[int] = None,
+        language: str = "ja",
+    ):
+        self.verify_fn = verify_fn
+        self.research_fn = research_fn
+        self.rewrite_fn = rewrite_fn
+        self.compress_fn = compress_fn
+        self.hedge_fn = hedge_fn
+        self.validate_citations_fn = validate_citations_fn or (lambda s, t: True)
+        self.budget = budget or LoopBudget()
+        self.hard_max_body_chars = hard_max_body_chars
+        self.language = language
+        self.history: List[Dict[str, Any]] = []
+        self.limitations: List[str] = []
+
+    # -- helpers ----------------------------------------------------------
+
+    def _sections_with_issues(self, verdict: StructuredVerdict,
+                              *types: str) -> List[str]:
+        secs = []
+        for issue in verdict.issues:
+            if types and issue.type not in types:
+                continue
+            if issue.section_id and issue.section_id not in secs:
+                secs.append(issue.section_id)
+        return secs
+
+    def _apply_edit(self, chapters: Dict[str, str], section_id: str,
+                    new_text: Optional[str]) -> bool:
+        """Apply an edited section iff its citations survive validation."""
+        if not new_text or not new_text.strip():
+            return False
+        if not self.validate_citations_fn(section_id, new_text):
+            print(f"[Finalize] rejected edit for section {section_id}: "
+                  f"invalid citations in LLM output")
+            return False
+        chapters[section_id] = new_text
+        return True
+
+    def _append_limitations(self, chapters: Dict[str, str],
+                            verdict: StructuredVerdict) -> None:
+        """Deterministically record unresolved issues in the body."""
+        unresolved = [i for i in verdict.issues]
+        if not unresolved and not self.limitations:
+            return
+        if self.language == "ja":
+            lines = ["", "### 調査上の限界", ""]
+            for note in self.limitations:
+                lines.append(f"- {note}")
+            for i in unresolved:
+                what = i.claim or i.reason or i.type
+                lines.append(f"- 未解決: {what}（{i.reason or i.type}）")
+        else:
+            lines = ["", "### Research Limitations", ""]
+            for note in self.limitations:
+                lines.append(f"- {note}")
+            for i in unresolved:
+                what = i.claim or i.reason or i.type
+                lines.append(f"- Unresolved: {what} ({i.reason or i.type})")
+        last_key = list(chapters.keys())[-1] if chapters else None
+        if last_key is not None:
+            chapters[last_key] = chapters[last_key].rstrip() + "\n" + "\n".join(lines)
+
+    # -- main loop --------------------------------------------------------
+
+    def run(self, chapters: Dict[str, str]) -> Dict[str, Any]:
+        """Run the loop; returns final chapters + verdict + decision trail.
+
+        The returned chapters are FROZEN: they have been verified after
+        the last body change, and callers must only apply deterministic
+        rendering afterwards.
+        """
+        verdict = self.verify_fn(chapters)
+        max_total_rounds = (self.budget.max_final_research_rounds
+                            + self.budget.max_final_revision_rounds + 2)
+
+        for _round in range(max_total_rounds + 1):
+            decision = decide(verdict, self.budget, self.hard_max_body_chars)
+            self.history.append({
+                "round": _round,
+                "decision": decision.value,
+                "score": verdict.metrics.claim_support_score,
+                "issues": len(verdict.issues),
+            })
+
+            if decision == ResearchDecision.ACCEPT:
+                return self._finish(chapters, verdict, decision)
+
+            if decision == ResearchDecision.FINALIZE_WITH_LIMITATIONS:
+                changed = self._finalize_with_limitations(chapters, verdict)
+                if changed:
+                    verdict = self.verify_fn(chapters)   # re-verify edits
+                self._append_limitations(chapters, verdict)  # deterministic
+                return self._finish(chapters, verdict,
+                                    ResearchDecision.FINALIZE_WITH_LIMITATIONS)
+
+            changed_any = False
+            prev_issue_count = len(verdict.issues)
+
+            if decision == ResearchDecision.RESEARCH:
+                changed_any = self._do_research(chapters, verdict)
+            elif decision == ResearchDecision.REWRITE_FROM_EVIDENCE:
+                changed_any = self._do_revision(
+                    chapters, verdict, self.rewrite_fn,
+                    (ISSUE_INSUFFICIENT_EXPLANATION, ISSUE_UNUSED_EVIDENCE))
+            elif decision == ResearchDecision.COMPRESS_FROM_EVIDENCE:
+                changed_any = self._do_revision(
+                    chapters, verdict, self.compress_fn,
+                    (ISSUE_REDUNDANCY, ISSUE_OVER_HARD_MAX))
+
+            # Any body change (or even a no-op action) demands re-verification
+            verdict = self.verify_fn(chapters)
+            resolved = max(0, prev_issue_count - len(verdict.issues))
+            self.budget.register_score(
+                verdict.metrics.claim_support_score,
+                resolved_issues=resolved,
+                new_independent_sources=self._last_new_sources,
+            )
+            if not changed_any:
+                # action produced nothing -> counts as stagnation
+                self.budget.no_improvement_rounds = max(
+                    self.budget.no_improvement_rounds, 1)
+
+        # Safety net: bounded loop exhausted
+        self._append_limitations(chapters, verdict)
+        return self._finish(chapters, verdict,
+                            ResearchDecision.FINALIZE_WITH_LIMITATIONS)
+
+    _last_new_sources = 0
+
+    def _do_research(self, chapters: Dict[str, str],
+                     verdict: StructuredVerdict) -> bool:
+        """Targeted additional research; never repeats queries/URLs."""
+        self._last_new_sources = 0
+        self.budget.research_rounds += 1
+        issues = verdict.issues_of(
+            ISSUE_UNSUPPORTED, ISSUE_CONTRADICTED, ISSUE_UNANSWERED_QUESTION
+        ) or verdict.issues
+        queries = []
+        for issue in issues:
+            queries.extend(issue.search_queries or [])
+        queries = self.budget.novel_queries(queries)
+        if not queries and not self.research_fn:
+            return False
+        if self.research_fn is None:
+            return False
+        try:
+            outcome = self.research_fn(issues, queries) or {}
+        except Exception as e:
+            print(f"[Finalize] research round failed: {e}")
+            return False
+        self._last_new_sources = int(outcome.get("new_sources", 0))
+        changed = bool(outcome.get("changed_sections"))
+        # After research, affected sections are rewritten from evidence
+        if self.rewrite_fn:
+            for sid in outcome.get("changed_sections", []) or \
+                    self._sections_with_issues(verdict):
+                new_text = self.rewrite_fn(sid, issues)
+                if self._apply_edit(chapters, sid, new_text):
+                    changed = True
+        return changed or self._last_new_sources > 0
+
+    def _do_revision(self, chapters: Dict[str, str],
+                     verdict: StructuredVerdict, fn: Callable,
+                     issue_types) -> bool:
+        """Rewrite/compress affected sections from EXISTING evidence."""
+        if fn is None:
+            return False
+        self.budget.revision_rounds += 1
+        sections = self._sections_with_issues(verdict, *issue_types)
+        if not sections:
+            # metrics-level signal without per-section issue: touch the
+            # sections named in metrics, else all
+            sections = list(chapters.keys())
+        changed = False
+        issues = verdict.issues_of(*issue_types) or verdict.issues
+        for sid in sections:
+            if sid not in chapters:
+                continue
+            try:
+                new_text = fn(sid, [i for i in issues
+                                    if i.section_id in ("", sid)])
+            except Exception as e:
+                print(f"[Finalize] revision failed for {sid}: {e}")
+                continue
+            if self._apply_edit(chapters, sid, new_text):
+                changed = True
+        return changed
+
+    def _finalize_with_limitations(self, chapters: Dict[str, str],
+                                   verdict: StructuredVerdict) -> bool:
+        """Soften unresolved assertions (LLM), to be re-verified by caller."""
+        if self.language == "ja":
+            self.limitations.append(
+                "追加調査の上限に達したか、新しい独立ソースが得られなかったため、"
+                "一部の論点は未確認のままです。")
+        else:
+            self.limitations.append(
+                "Research limits were reached; some points remain unverified.")
+        if self.hedge_fn is None:
+            return False
+        changed = False
+        for sid in self._sections_with_issues(verdict):
+            if sid not in chapters:
+                continue
+            try:
+                new_text = self.hedge_fn(
+                    sid, [i for i in verdict.issues if i.section_id == sid])
+            except Exception as e:
+                print(f"[Finalize] hedging failed for {sid}: {e}")
+                continue
+            if self._apply_edit(chapters, sid, new_text):
+                changed = True
+        return changed
+
+    def _finish(self, chapters, verdict, decision):
+        return {
+            "chapters": chapters,
+            "verdict": verdict,
+            "decision": decision.value,
+            "history": self.history,
+            "limitations": self.limitations,
+        }

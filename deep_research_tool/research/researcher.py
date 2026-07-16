@@ -1310,12 +1310,24 @@ class Researcher:
         parts: List[ExtractedContent],
         synthesized: Dict[str, Any],
     ) -> bool:
-        """Decide whether a section needs a gap-fill re-search round."""
+        """Decide whether a section needs a gap-fill re-search round.
+
+        Signals (any one triggers a bounded gap-fill round):
+        - too few high-importance sources for the research purpose
+        - the synthesis reports concrete unanswered points
+          (information_gaps — real gaps, not a hardcoded empty list)
+        - low synthesis confidence
+        Note: this is an EVIDENCE-level check during collection; length or
+        prose depth never triggers a search here (the finalization loop
+        separates RESEARCH from REWRITE_FROM_EVIDENCE).
+        """
         high_importance = [
             p for p in parts
             if (p.importance_score or p.relevance_score) >= self.importance_threshold
         ]
         if len(high_importance) < self.min_high_importance_sources:
+            return True
+        if synthesized.get("information_gaps"):
             return True
         if synthesized.get("confidence_level") == "low":
             return True
