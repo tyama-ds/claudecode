@@ -128,6 +128,30 @@ def cli():
     help="Target character count for output"
 )
 @click.option(
+    "--length-mode",
+    type=click.Choice(["adaptive", "fixed"]),
+    default="adaptive",
+    help="Length control: adaptive range from information units (default) or fixed quota"
+)
+@click.option(
+    "--preferred-body-chars",
+    type=int,
+    default=None,
+    help="Soft preferred body length in characters (never a hard gate)"
+)
+@click.option(
+    "--hard-min-body-chars",
+    type=int,
+    default=None,
+    help="Absolute minimum body characters (enforced only when set)"
+)
+@click.option(
+    "--hard-max-body-chars",
+    type=int,
+    default=None,
+    help="Absolute maximum body characters (enforced only when set)"
+)
+@click.option(
     "--extended-mode",
     is_flag=True,
     default=False,
@@ -248,6 +272,10 @@ def research(
     verify: bool,
     target_pages: Optional[int],
     target_characters: Optional[int],
+    length_mode: str,
+    preferred_body_chars: Optional[int],
+    hard_min_body_chars: Optional[int],
+    hard_max_body_chars: Optional[int],
     extended_mode: bool,
     crawl_max_pages: int,
     crawl_max_depth: int,
@@ -293,6 +321,10 @@ def research(
         verbose=verbose,
         target_pages=target_pages,
         target_characters=target_characters,
+        length_mode=length_mode,
+        preferred_body_chars=preferred_body_chars,
+        hard_min_body_chars=hard_min_body_chars,
+        hard_max_body_chars=hard_max_body_chars,
         extended_mode=extended_mode,
         crawl_max_pages=crawl_max_pages,
         crawl_max_depth=crawl_max_depth,
@@ -390,6 +422,30 @@ def research(
     type=int,
     default=None,
     help="Target character count for output"
+)
+@click.option(
+    "--length-mode",
+    type=click.Choice(["adaptive", "fixed"]),
+    default="adaptive",
+    help="Length control: adaptive range from information units (default) or fixed quota"
+)
+@click.option(
+    "--preferred-body-chars",
+    type=int,
+    default=None,
+    help="Soft preferred body length in characters (never a hard gate)"
+)
+@click.option(
+    "--hard-min-body-chars",
+    type=int,
+    default=None,
+    help="Absolute minimum body characters (enforced only when set)"
+)
+@click.option(
+    "--hard-max-body-chars",
+    type=int,
+    default=None,
+    help="Absolute maximum body characters (enforced only when set)"
 )
 def report(
     session_path: str,
