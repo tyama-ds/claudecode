@@ -409,6 +409,37 @@ class EvidenceLocker:
         """Get all evidence items."""
         return list(self._evidence.values())
 
+    def get_by_url(self, url: str) -> Optional[Evidence]:
+        """Get the first evidence item with this URL."""
+        if not url:
+            return None
+        for evidence in self._evidence.values():
+            if evidence.url == url:
+                return evidence
+        return None
+
+    def has_url(self, url: str) -> bool:
+        return self.get_by_url(url) is not None
+
+    def reorder(self, ordered_ids: List[str]) -> None:
+        """Reorder the locker so the given evidence ids come first.
+
+        Used at final rendering: the citation renderer produces
+        document-wide [n] numbers in first-use order, and every report
+        renderer builds its references list from get_all_evidence()
+        insertion order — reordering makes reference entry n match the
+        [n] used in the text. Ids not present are ignored; evidence not
+        listed keeps its relative order after the listed items.
+        """
+        ordered = {}
+        for eid in ordered_ids:
+            if eid in self._evidence and eid not in ordered:
+                ordered[eid] = self._evidence[eid]
+        for eid, evidence in self._evidence.items():
+            if eid not in ordered:
+                ordered[eid] = evidence
+        self._evidence = ordered
+
     def update_reliability(self, evidence_id: str, score: float) -> None:
         """Update reliability score for evidence."""
         if evidence_id in self._evidence:

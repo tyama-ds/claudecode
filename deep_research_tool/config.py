@@ -635,6 +635,50 @@ class Config:
             if not doc.exists():
                 errors.append(f"Additional document not found: {doc}")
 
+        # --- Length control validation (finalization pipeline) ---
+        rp = self.report
+        if (rp.length_mode or "").lower() not in ("adaptive", "fixed"):
+            errors.append(
+                f"length_mode must be 'adaptive' or 'fixed' "
+                f"(got {rp.length_mode!r})")
+        for name in ("preferred_body_chars", "hard_min_body_chars",
+                     "hard_max_body_chars", "target_characters"):
+            value = getattr(rp, name)
+            if value is not None and value < 0:
+                errors.append(f"{name} must be >= 0 (got {value})")
+        if (rp.hard_min_body_chars is not None
+                and rp.hard_max_body_chars is not None
+                and rp.hard_min_body_chars > rp.hard_max_body_chars):
+            errors.append(
+                f"hard_min_body_chars ({rp.hard_min_body_chars}) must be "
+                f"<= hard_max_body_chars ({rp.hard_max_body_chars})")
+        if not (0 <= rp.length_tolerance < 1):
+            errors.append(
+                f"length_tolerance must satisfy 0 <= value < 1 "
+                f"(got {rp.length_tolerance})")
+        if ((rp.length_mode or "").lower() == "fixed"
+                and not (rp.preferred_body_chars or rp.target_characters)):
+            errors.append(
+                "length_mode='fixed' requires preferred_body_chars or "
+                "target_characters to be set")
+
+        # --- Finalization loop validation ---
+        rc = self.research
+        for name in ("max_final_research_rounds", "max_final_revision_rounds",
+                     "max_no_improvement_rounds",
+                     "min_new_independent_sources"):
+            value = getattr(rc, name)
+            if value < 0:
+                errors.append(f"{name} must be >= 0 (got {value})")
+        for name in ("min_claim_support_score", "required_critical_coverage"):
+            value = getattr(rc, name)
+            if not (0 <= value <= 1):
+                errors.append(f"{name} must be between 0 and 1 (got {value})")
+        if rc.min_score_improvement < 0:
+            errors.append(
+                f"min_score_improvement must be >= 0 "
+                f"(got {rc.min_score_improvement})")
+
         return errors
 
 

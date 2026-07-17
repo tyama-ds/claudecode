@@ -220,6 +220,11 @@ class ReportGeneratorV2:
         self.progress_callback = progress_callback
         self.target_pages = target_pages
         self.target_characters = target_characters
+        # Stage-1 adaptive length: per-section character targets from the
+        # LengthPlanner's pre-draft allocation ({section_id: chars}).
+        # When set, each chapter's length instruction uses its own target
+        # instead of the uniform per-chapter average.
+        self.section_char_targets: Dict[str, int] = {}
 
         # Initialize components
         self.glossary_manager = GlossaryManager(llm_client, language)
@@ -431,11 +436,15 @@ class ReportGeneratorV2:
             sources = []
             content_summary = str(content_data)[:4000] if content_data else no_info
 
+        # Per-section target from the stage-1 length allocation wins over
+        # the uniform per-chapter average
+        section_target = self.section_char_targets.get(section_number) \
+            or self._chapter_target_chars
         length_instruction_ja = ""
         length_instruction_en = ""
-        if self._chapter_target_chars:
-            length_instruction_ja = f"\n8. このセクションは約{self._chapter_target_chars}文字を目安に執筆する"
-            length_instruction_en = f"\n8. Target approximately {self._chapter_target_chars} characters for this section"
+        if section_target:
+            length_instruction_ja = f"\n8. このセクションは約{section_target}文字を目安に執筆する"
+            length_instruction_en = f"\n8. Target approximately {section_target} characters for this section"
 
         if self.language == "ja":
             prompt = f"""{context_prompt}
@@ -534,8 +543,8 @@ After the body, output this delimiter followed by metadata:
             # the LLM under-delivered, not that evidence is missing. Retry
             # once with an explicit expansion prompt before accepting it.
             min_chars = (
-                int(self._chapter_target_chars * self.SHORT_CHAPTER_RATIO)
-                if self._chapter_target_chars else 800
+                int(section_target * self.SHORT_CHAPTER_RATIO)
+                if section_target else 800
             )
             if len(body.strip()) < min_chars:
                 body, meta = self._expand_short_chapter(
@@ -939,15 +948,9 @@ Output only the polished body (no preamble, no JSON, no code block):"""
 
         # Glossary
         if include_glossary and result.context.glossary:
-            glossary_section = self.glossary_manager.generate_glossary_section(
-                {k: {
-                    "term": v.term,
-                    "definition": v.definition,
-                    "aliases": v.aliases,
-                } for k, v in result.context.glossary.items()},
-                title="用語集" if self.language == "ja" else "Glossary"
-            )
-            lines.append(glossary_section)
+            glossary_section = self.build_glossary_markdown(result)
+            if glossary_section:
+                lines.append(glossary_section)
 
         # Consistency summary
         if include_consistency_summary and result.consistency_report:
@@ -967,6 +970,20 @@ Output only the polished body (no preamble, no JSON, no code block):"""
             lines.append("")
 
         return "\n".join(lines)
+
+    def build_glossary_markdown(self, result: "GenerationResult") -> str:
+        """Glossary section as markdown (also used to feed the glossary
+        into the body BEFORE final verification)."""
+        if not result.context.glossary:
+            return ""
+        return self.glossary_manager.generate_glossary_section(
+            {k: {
+                "term": v.term,
+                "definition": v.definition,
+                "aliases": v.aliases,
+            } for k, v in result.context.glossary.items()},
+            title="用語集" if self.language == "ja" else "Glossary"
+        )
 
     @staticmethod
     def _get_quality_badge(quality) -> str:

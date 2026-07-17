@@ -15,9 +15,17 @@ Design principles (from the pipeline specification):
   (REWRITE_FROM_EVIDENCE) and from redundancy (COMPRESS_FROM_EVIDENCE).
 - Length is an adaptive range derived from information units, not a
   fixed quota. Short-but-complete is acceptable; useful overshoot within
-  the hard maximum is never trimmed.
+  the hard maximum is never trimmed. hard_min / hard_max are absolute
+  ONLY when the user explicitly set them.
 - Loops are bounded; when search cannot resolve an issue the run ends
   with limitations stated in the body (FINALIZE_WITH_LIMITATIONS).
+  FINALIZE_WITH_LIMITATIONS order: hedge edits -> deterministic
+  limitations section -> citation machine check -> full re-verification
+  of the final body -> freeze. The safety-net exit follows the same
+  order, so no body ever ships without a verification pass over its
+  final form.
+- An unverifiable body (verifier failure, zero claims on factual text)
+  is NEVER accepted: it ends in FINALIZE_WITH_LIMITATIONS or an error.
 - The LLM produces structured assessments; the state choice and every
   threshold comparison happen in Python.
 """
@@ -39,12 +47,24 @@ class ResearchDecision(Enum):
 # Issue types produced by verification / assessment
 ISSUE_UNSUPPORTED = "unsupported_claim"
 ISSUE_CONTRADICTED = "contradicted_claim"
+ISSUE_UNCERTAIN = "uncertain_claim"
+ISSUE_UNCITED_CLAIM = "claim_without_citation"
 ISSUE_UNANSWERED_QUESTION = "unanswered_critical_question"
 ISSUE_INSUFFICIENT_EXPLANATION = "insufficient_explanation"
 ISSUE_UNUSED_EVIDENCE = "unused_high_importance_evidence"
 ISSUE_REDUNDANCY = "redundant_content"
 ISSUE_INVALID_CITATION = "invalid_citation"
+ISSUE_ORPHAN_CITATION = "orphan_citation"
+ISSUE_ALL_CITATIONS_DELETED = "all_citations_deleted"
 ISSUE_OVER_HARD_MAX = "over_hard_max"
+ISSUE_UNDER_HARD_MIN = "under_hard_min"
+ISSUE_VERIFICATION_FAILURE = "verification_failure"
+ISSUE_STALE_OR_NON_PRIMARY = "stale_or_non_primary_sources"
+
+# primary/freshness gate states (3-state, never a silent boolean)
+FRESHNESS_PASS = "pass"
+FRESHNESS_FAIL = "fail"
+FRESHNESS_NOT_REQUIRED = "not_required"
 
 
 @dataclass
@@ -115,9 +135,11 @@ class VerificationMetrics:
     unsupported_critical_claims: int = 0
     unsupported_count: int = 0
     contradicted_count: int = 0
+    uncertain_count: int = 0
     unresolved_contradictions: int = 0
     citations_valid: bool = True
-    primary_freshness_ok: bool = True
+    # primary/freshness gate: pass / fail / not_required (3-state)
+    primary_freshness: str = FRESHNESS_NOT_REQUIRED
     actual_body_chars: int = 0
     preferred_body_chars: Optional[int] = None
     recommended_min_chars: int = 0
@@ -126,6 +148,15 @@ class VerificationMetrics:
     missing_content_units: List[str] = field(default_factory=list)
     unused_high_importance_evidence_ids: List[str] = field(default_factory=list)
     redundant_passages: List[str] = field(default_factory=list)
+    # fail-closed accounting: the verifier records HOW MUCH it verified
+    claims_total: int = 0
+    chunks_total: int = 0
+    chunks_failed: int = 0
+    extraction_errors: List[str] = field(default_factory=list)
+    # True when verification could not actually verify the body
+    # (0 claims on factual text, all chunks failed, verifier crash):
+    # such a body must never be ACCEPTed.
+    verification_failed: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -134,8 +165,10 @@ class VerificationMetrics:
             "unsupported_critical_claims": self.unsupported_critical_claims,
             "unsupported_count": self.unsupported_count,
             "contradicted_count": self.contradicted_count,
+            "uncertain_count": self.uncertain_count,
             "unresolved_contradictions": self.unresolved_contradictions,
             "citations_valid": self.citations_valid,
+            "primary_freshness": self.primary_freshness,
             "actual_body_chars": self.actual_body_chars,
             "preferred_body_chars": self.preferred_body_chars,
             "recommended_min_chars": self.recommended_min_chars,
@@ -145,6 +178,11 @@ class VerificationMetrics:
             "unused_high_importance_evidence_ids":
                 self.unused_high_importance_evidence_ids,
             "redundant_passages": self.redundant_passages,
+            "claims_total": self.claims_total,
+            "chunks_total": self.chunks_total,
+            "chunks_failed": self.chunks_failed,
+            "extraction_errors": self.extraction_errors,
+            "verification_failed": self.verification_failed,
         }
 
 
@@ -214,7 +252,7 @@ def count_body_chars(text: str, exclude_references: bool = True) -> int:
             stripped = re.sub(r"[|:\-\s]+", "", stripped)
         lines.append(stripped)
     body = "\n".join(lines)
-    body = re.sub(r"\[SOURCE\s*\d+\]", "", body)         # citation tags
+    body = re.sub(r"\[SOURCE:?\s*\d+\]", "", body)        # citation tags
     body = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", body)      # images
     body = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", body)  # links -> text
     body = re.sub(r"[*_`>#]+", "", body)                  # md tokens
@@ -245,8 +283,11 @@ class LoopBudget:
     seen_urls: set = field(default_factory=set)
 
     def research_allowed(self) -> bool:
+        # Strict comparisons: max_no_improvement_rounds=1 means ONE
+        # stagnant round stops further research (was off-by-one).
         return (self.research_rounds < self.max_final_research_rounds
-                and self.no_improvement_rounds <= self.max_no_improvement_rounds)
+                and self.no_improvement_rounds < max(
+                    1, self.max_no_improvement_rounds))
 
     def revision_allowed(self) -> bool:
         return self.revision_rounds < self.max_final_revision_rounds
@@ -264,6 +305,13 @@ class LoopBudget:
             self.seen_queries.add(key)
             fresh.append(q)
         return fresh
+
+    def is_novel_url(self, url: str) -> bool:
+        """True exactly once per URL; registers the URL as seen."""
+        if not url or url in self.seen_urls:
+            return False
+        self.seen_urls.add(url)
+        return True
 
     def register_score(self, score: float, resolved_issues: int,
                        new_independent_sources: int) -> None:
@@ -288,13 +336,15 @@ class LoopBudget:
 def passes_hard_gates(verdict: StructuredVerdict, budget: LoopBudget) -> bool:
     """Hard gates that averages and length can never override (spec 7)."""
     m = verdict.metrics
+    if m.verification_failed:
+        return False
     if m.critical_question_coverage < budget.required_critical_coverage:
         return False
     if m.unsupported_critical_claims > 0:
         return False
     if not m.citations_valid:
         return False
-    if not m.primary_freshness_ok:
+    if m.primary_freshness == FRESHNESS_FAIL:
         return False
     return True
 
@@ -303,13 +353,24 @@ def decide(
     verdict: StructuredVerdict,
     budget: LoopBudget,
     hard_max_body_chars: Optional[int] = None,
+    hard_min_body_chars: Optional[int] = None,
 ) -> ResearchDecision:
     """Choose the next state. Thresholds live here, not in the LLM.
 
-    Priority: hard length ceiling > evidence problems > redundancy >
-    shallow explanation > accept.
+    Priority: unverifiable body > hard length ceiling > evidence
+    problems > citation defects > hard floor > redundancy > shallow
+    explanation > accept.
+
+    hard_min / hard_max apply ONLY when the caller passes them (i.e. the
+    user explicitly set them); a legacy target_characters value in
+    adaptive mode never reaches this function as a hard bound and can
+    therefore never trigger research on its own.
     """
     m = verdict.metrics
+
+    # --- unverifiable body is never accepted ---
+    if m.verification_failed:
+        return ResearchDecision.FINALIZE_WITH_LIMITATIONS
 
     # --- absolute ceiling: compress (keep claims & citations) ---
     if hard_max_body_chars and m.actual_body_chars > hard_max_body_chars:
@@ -321,6 +382,7 @@ def decide(
     needs_research = (
         m.critical_question_coverage < budget.required_critical_coverage
         or m.unsupported_critical_claims > 0
+        or m.primary_freshness == FRESHNESS_FAIL
         or any(i.needed_evidence for i in verdict.issues)
         or bool(verdict.issues_of(ISSUE_UNSUPPORTED, ISSUE_CONTRADICTED,
                                   ISSUE_UNANSWERED_QUESTION))
@@ -342,6 +404,20 @@ def decide(
             return ResearchDecision.REWRITE_FROM_EVIDENCE
         return ResearchDecision.FINALIZE_WITH_LIMITATIONS
 
+    # --- absolute floor (user-set only): expand from evidence, then
+    #     research, NEVER padding. An evidence-poor short body ends in
+    #     RESEARCH or limitations, not in inflated prose. ---
+    if hard_min_body_chars and m.actual_body_chars < hard_min_body_chars:
+        has_untapped_evidence = bool(
+            m.unused_high_importance_evidence_ids or m.missing_content_units
+            or verdict.issues_of(ISSUE_UNUSED_EVIDENCE,
+                                 ISSUE_INSUFFICIENT_EXPLANATION))
+        if has_untapped_evidence and budget.revision_allowed():
+            return ResearchDecision.REWRITE_FROM_EVIDENCE
+        if budget.research_allowed():
+            return ResearchDecision.RESEARCH
+        return ResearchDecision.FINALIZE_WITH_LIMITATIONS
+
     # --- redundancy / imbalance -> compress (must carry reasons) ---
     if m.redundant_passages and budget.revision_allowed():
         return ResearchDecision.COMPRESS_FROM_EVIDENCE
@@ -351,7 +427,8 @@ def decide(
         bool(m.missing_content_units)
         or bool(m.unused_high_importance_evidence_ids)
         or bool(verdict.issues_of(ISSUE_INSUFFICIENT_EXPLANATION,
-                                  ISSUE_UNUSED_EVIDENCE))
+                                  ISSUE_UNUSED_EVIDENCE,
+                                  ISSUE_UNCITED_CLAIM))
     )
     if shallow and budget.revision_allowed():
         return ResearchDecision.REWRITE_FROM_EVIDENCE
@@ -362,7 +439,7 @@ def decide(
         return ResearchDecision.ACCEPT
 
     # Gates failed but nothing actionable remains
-    if budget.research_allowed() and not passes_hard_gates(verdict, budget):
+    if budget.research_allowed():
         return ResearchDecision.RESEARCH
     return ResearchDecision.FINALIZE_WITH_LIMITATIONS
 
@@ -400,12 +477,15 @@ class FinalizationController:
       rewrite_fn(section_id, issues)      -> new_text or None
       compress_fn(section_id, issues)     -> new_text or None
       hedge_fn(section_id, issues)        -> new_text or None  (limitations)
-      validate_citations_fn(section_id, text) -> bool
+      validate_citations_fn(section_id, text[, previous_text]) -> bool
 
     Invariants enforced here:
-    - after ANY body change, verify_fn runs again before ACCEPT
+    - after ANY body change (LLM edit OR deterministic limitations
+      append), verify_fn runs again before the loop returns
     - once the loop returns, no further body-changing callable is invoked
       (rendering afterwards must be deterministic)
+    - a RESEARCH round with no novel queries is never executed and never
+      consumes a research round
     """
 
     def __init__(
@@ -418,6 +498,7 @@ class FinalizationController:
         validate_citations_fn: Callable = None,
         budget: LoopBudget = None,
         hard_max_body_chars: Optional[int] = None,
+        hard_min_body_chars: Optional[int] = None,
         language: str = "ja",
     ):
         self.verify_fn = verify_fn
@@ -428,9 +509,11 @@ class FinalizationController:
         self.validate_citations_fn = validate_citations_fn or (lambda s, t: True)
         self.budget = budget or LoopBudget()
         self.hard_max_body_chars = hard_max_body_chars
+        self.hard_min_body_chars = hard_min_body_chars
         self.language = language
         self.history: List[Dict[str, Any]] = []
         self.limitations: List[str] = []
+        self._last_new_sources = 0
 
     # -- helpers ----------------------------------------------------------
 
@@ -444,12 +527,25 @@ class FinalizationController:
                 secs.append(issue.section_id)
         return secs
 
+    def _validate_citations(self, section_id: str, text: str,
+                            previous_text: Optional[str] = None) -> bool:
+        """Call the injected validator; 2-arg validators stay supported."""
+        try:
+            return self.validate_citations_fn(section_id, text, previous_text)
+        except TypeError:
+            return self.validate_citations_fn(section_id, text)
+
     def _apply_edit(self, chapters: Dict[str, str], section_id: str,
                     new_text: Optional[str]) -> bool:
-        """Apply an edited section iff its citations survive validation."""
+        """Apply an edited section iff its citations survive validation.
+
+        The previous text is passed so an edit that deletes every
+        citation from a previously-cited section is rejected too.
+        """
         if not new_text or not new_text.strip():
             return False
-        if not self.validate_citations_fn(section_id, new_text):
+        if not self._validate_citations(section_id, new_text,
+                                        chapters.get(section_id)):
             print(f"[Finalize] rejected edit for section {section_id}: "
                   f"invalid citations in LLM output")
             return False
@@ -457,11 +553,13 @@ class FinalizationController:
         return True
 
     def _append_limitations(self, chapters: Dict[str, str],
-                            verdict: StructuredVerdict) -> None:
-        """Deterministically record unresolved issues in the body."""
+                            verdict: StructuredVerdict) -> bool:
+        """Deterministically record unresolved issues in the body.
+
+        Returns True when the body changed (the caller must re-verify)."""
         unresolved = [i for i in verdict.issues]
         if not unresolved and not self.limitations:
-            return
+            return False
         if self.language == "ja":
             lines = ["", "### 調査上の限界", ""]
             for note in self.limitations:
@@ -477,8 +575,10 @@ class FinalizationController:
                 what = i.claim or i.reason or i.type
                 lines.append(f"- Unresolved: {what} ({i.reason or i.type})")
         last_key = list(chapters.keys())[-1] if chapters else None
-        if last_key is not None:
-            chapters[last_key] = chapters[last_key].rstrip() + "\n" + "\n".join(lines)
+        if last_key is None:
+            return False
+        chapters[last_key] = chapters[last_key].rstrip() + "\n" + "\n".join(lines)
+        return True
 
     # -- main loop --------------------------------------------------------
 
@@ -486,15 +586,17 @@ class FinalizationController:
         """Run the loop; returns final chapters + verdict + decision trail.
 
         The returned chapters are FROZEN: they have been verified after
-        the last body change, and callers must only apply deterministic
-        rendering afterwards.
+        the last body change (including the deterministic limitations
+        section), and callers must only apply deterministic rendering
+        afterwards.
         """
         verdict = self.verify_fn(chapters)
         max_total_rounds = (self.budget.max_final_research_rounds
                             + self.budget.max_final_revision_rounds + 2)
 
         for _round in range(max_total_rounds + 1):
-            decision = decide(verdict, self.budget, self.hard_max_body_chars)
+            decision = decide(verdict, self.budget, self.hard_max_body_chars,
+                              self.hard_min_body_chars)
             self.history.append({
                 "round": _round,
                 "decision": decision.value,
@@ -506,12 +608,7 @@ class FinalizationController:
                 return self._finish(chapters, verdict, decision)
 
             if decision == ResearchDecision.FINALIZE_WITH_LIMITATIONS:
-                changed = self._finalize_with_limitations(chapters, verdict)
-                if changed:
-                    verdict = self.verify_fn(chapters)   # re-verify edits
-                self._append_limitations(chapters, verdict)  # deterministic
-                return self._finish(chapters, verdict,
-                                    ResearchDecision.FINALIZE_WITH_LIMITATIONS)
+                return self._exit_with_limitations(chapters, verdict)
 
             changed_any = False
             prev_issue_count = len(verdict.issues)
@@ -521,7 +618,8 @@ class FinalizationController:
             elif decision == ResearchDecision.REWRITE_FROM_EVIDENCE:
                 changed_any = self._do_revision(
                     chapters, verdict, self.rewrite_fn,
-                    (ISSUE_INSUFFICIENT_EXPLANATION, ISSUE_UNUSED_EVIDENCE))
+                    (ISSUE_INSUFFICIENT_EXPLANATION, ISSUE_UNUSED_EVIDENCE,
+                     ISSUE_UNCITED_CLAIM))
             elif decision == ResearchDecision.COMPRESS_FROM_EVIDENCE:
                 changed_any = self._do_revision(
                     chapters, verdict, self.compress_fn,
@@ -540,18 +638,52 @@ class FinalizationController:
                 self.budget.no_improvement_rounds = max(
                     self.budget.no_improvement_rounds, 1)
 
-        # Safety net: bounded loop exhausted
-        self._append_limitations(chapters, verdict)
+        # Safety net: bounded loop exhausted. Same exit contract as
+        # FINALIZE_WITH_LIMITATIONS: the post-limitations body is
+        # re-verified before it ships.
+        return self._exit_with_limitations(chapters, verdict,
+                                           note_hedge=False)
+
+    def _exit_with_limitations(self, chapters: Dict[str, str],
+                               verdict: StructuredVerdict,
+                               note_hedge: bool = True) -> Dict[str, Any]:
+        """FINALIZE_WITH_LIMITATIONS in the mandated order:
+        hedge -> limitations append -> citation machine check ->
+        full re-verification -> freeze."""
+        changed = False
+        if note_hedge:
+            changed = self._finalize_with_limitations(chapters, verdict)
+        else:
+            if self.language == "ja":
+                self.limitations.append(
+                    "検証ループの上限に達したため、未解決の論点が残っています。")
+            else:
+                self.limitations.append(
+                    "The verification loop budget was exhausted; some "
+                    "points remain unresolved.")
+        appended = self._append_limitations(chapters, verdict)
+
+        # Citation machine check over the final body (defense in depth;
+        # the re-verification below also validates via the registry)
+        for sid, text in chapters.items():
+            if not self._validate_citations(sid, text):
+                print(f"[Finalize] citation check failed on final body "
+                      f"for section {sid}")
+
+        if changed or appended:
+            verdict = self.verify_fn(chapters)   # verify the FINAL body
         return self._finish(chapters, verdict,
                             ResearchDecision.FINALIZE_WITH_LIMITATIONS)
 
-    _last_new_sources = 0
-
     def _do_research(self, chapters: Dict[str, str],
                      verdict: StructuredVerdict) -> bool:
-        """Targeted additional research; never repeats queries/URLs."""
+        """Targeted additional research; never repeats queries/URLs.
+
+        A round with no novel queries is NOT executed and does NOT
+        consume the research budget — it registers as stagnation via the
+        caller instead of burning rounds on empty searches.
+        """
         self._last_new_sources = 0
-        self.budget.research_rounds += 1
         issues = verdict.issues_of(
             ISSUE_UNSUPPORTED, ISSUE_CONTRADICTED, ISSUE_UNANSWERED_QUESTION
         ) or verdict.issues
@@ -559,10 +691,9 @@ class FinalizationController:
         for issue in issues:
             queries.extend(issue.search_queries or [])
         queries = self.budget.novel_queries(queries)
-        if not queries and not self.research_fn:
-            return False
-        if self.research_fn is None:
-            return False
+        if not queries or self.research_fn is None:
+            return False    # no round consumed
+        self.budget.research_rounds += 1
         try:
             outcome = self.research_fn(issues, queries) or {}
         except Exception as e:
@@ -608,7 +739,7 @@ class FinalizationController:
 
     def _finalize_with_limitations(self, chapters: Dict[str, str],
                                    verdict: StructuredVerdict) -> bool:
-        """Soften unresolved assertions (LLM), to be re-verified by caller."""
+        """Soften unresolved assertions (LLM); caller re-verifies."""
         if self.language == "ja":
             self.limitations.append(
                 "追加調査の上限に達したか、新しい独立ソースが得られなかったため、"
@@ -633,10 +764,17 @@ class FinalizationController:
         return changed
 
     def _finish(self, chapters, verdict, decision):
+        over_hard_max = bool(
+            self.hard_max_body_chars
+            and verdict.metrics.actual_body_chars > self.hard_max_body_chars)
+        if over_hard_max and decision == ResearchDecision.ACCEPT:
+            # never report a hard-max violation as a clean completion
+            decision = ResearchDecision.FINALIZE_WITH_LIMITATIONS
         return {
             "chapters": chapters,
             "verdict": verdict,
             "decision": decision.value,
             "history": self.history,
             "limitations": self.limitations,
+            "over_hard_max": over_hard_max,
         }

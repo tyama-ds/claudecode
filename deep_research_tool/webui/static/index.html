@@ -500,6 +500,47 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
     </details>
 
     <details>
+      <summary>📏 文章量と最終検証の設定</summary>
+      <div class="body">
+        <div class="grid2">
+          <div>
+            <label>文章量モード</label>
+            <select id="length_mode">
+              <option value="adaptive">適応（情報量から推奨レンジを算出）</option>
+              <option value="fixed">固定（目標文字数を明示）</option>
+            </select>
+          </div>
+          <div><label>目標本文文字数（空欄=自動）</label>
+            <input type="number" id="preferred_body_chars" min="0" placeholder="例: 20000"></div>
+          <div><label>本文の下限文字数（空欄=なし・水増しは行いません）</label>
+            <input type="number" id="hard_min_body_chars" min="0" placeholder="空欄=制約なし"></div>
+          <div><label>本文の上限文字数（空欄=なし）</label>
+            <input type="number" id="hard_max_body_chars" min="0" placeholder="空欄=制約なし"></div>
+          <div><label>許容幅（0〜0.99）</label>
+            <input type="number" id="length_tolerance" min="0" max="0.99" step="0.05" value="0.20"></div>
+        </div>
+        <label style="margin-top:12px">最終検証ループ</label>
+        <div class="grid2">
+          <div><label>追加調査ラウンド上限</label>
+            <input type="number" id="max_final_research_rounds" min="0" max="10" value="2"></div>
+          <div><label>リライト/圧縮ラウンド上限</label>
+            <input type="number" id="max_final_revision_rounds" min="0" max="10" value="2"></div>
+          <div><label>改善なし許容ラウンド数</label>
+            <input type="number" id="max_no_improvement_rounds" min="0" max="5" value="1"></div>
+          <div><label>進捗と見なす最小スコア改善（0〜1）</label>
+            <input type="number" id="min_score_improvement" min="0" max="1" step="0.01" value="0.03"></div>
+          <div><label>進捗と見なす新規独立ソース数</label>
+            <input type="number" id="min_new_independent_sources" min="0" max="10" value="1"></div>
+          <div><label>主張サポート合格スコア（0〜1）</label>
+            <input type="number" id="min_claim_support_score" min="0" max="1" step="0.05" value="0.85"></div>
+          <div><label>必須の重要質問カバレッジ（0〜1）</label>
+            <input type="number" id="required_critical_coverage" min="0" max="1" step="0.05" value="1.0"></div>
+        </div>
+        <p class="hint">下限・上限は明示した場合のみ絶対制約になります。下限未達でも水増しは行わず、追加調査または「調査上の限界」記載で対応します。上限超過が圧縮でも解消しない場合、レポートは警告付きの完了になります。</p>
+      </div>
+    </details>
+
+    <details>
       <summary>🤖 AIモデルの設定</summary>
       <div class="body">
         <div class="grid2">
@@ -732,9 +773,52 @@ document.querySelectorAll('.mode-card input').forEach(input => {
   });
 });
 
+// Length / finalization-loop fields: id -> {type, min, max, maxExclusive}
+const LENGTH_LOOP_FIELDS = {
+  preferred_body_chars: {type: 'int', min: 0},
+  hard_min_body_chars: {type: 'int', min: 0},
+  hard_max_body_chars: {type: 'int', min: 0},
+  length_tolerance: {type: 'float', min: 0, max: 1, maxExclusive: true},
+  max_final_research_rounds: {type: 'int', min: 0},
+  max_final_revision_rounds: {type: 'int', min: 0},
+  max_no_improvement_rounds: {type: 'int', min: 0},
+  min_score_improvement: {type: 'float', min: 0, max: 1},
+  min_new_independent_sources: {type: 'int', min: 0},
+  min_claim_support_score: {type: 'float', min: 0, max: 1},
+  required_critical_coverage: {type: 'float', min: 0, max: 1},
+};
+
+// Collect + validate the 12 length/loop settings.
+// Empty inputs are OMITTED (server treats them as "use default / None");
+// invalid values throw an Error shown in the form banner.
+function collectLengthParams() {
+  const p = {length_mode: $('length_mode').value};
+  for (const [id, spec] of Object.entries(LENGTH_LOOP_FIELDS)) {
+    const raw = $(id).value.trim();
+    if (raw === '') continue;                    // 空 → 未指定(None)
+    const v = spec.type === 'int' ? parseInt(raw, 10) : parseFloat(raw);
+    if (Number.isNaN(v)) throw new Error(`${id} は数値で入力してください`);
+    if (spec.type === 'int' && !Number.isInteger(parseFloat(raw)))
+      throw new Error(`${id} は整数で入力してください`);
+    if (spec.min !== undefined && v < spec.min)
+      throw new Error(`${id} は ${spec.min} 以上で入力してください`);
+    if (spec.max !== undefined &&
+        (spec.maxExclusive ? v >= spec.max : v > spec.max))
+      throw new Error(`${id} は ${spec.maxExclusive ? spec.max + '未満' : spec.max + '以下'}で入力してください`);
+    p[id] = v;
+  }
+  if (p.hard_min_body_chars !== undefined && p.hard_max_body_chars !== undefined
+      && p.hard_min_body_chars > p.hard_max_body_chars)
+    throw new Error('本文の下限文字数は上限文字数以下にしてください');
+  if (p.length_mode === 'fixed' && p.preferred_body_chars === undefined)
+    throw new Error('固定モードでは目標本文文字数の入力が必要です');
+  return p;
+}
+
 function collectParams() {
   const provider = $('provider').value;
   const params = {
+    ...collectLengthParams(),
     query: $('query').value.trim(),
     requirements: $('requirements').value.trim(),
     provider: provider,
@@ -782,7 +866,14 @@ function collectParams() {
 }
 
 async function startResearch() {
-  const params = collectParams();
+  let params;
+  try {
+    params = collectParams();
+  } catch (e) {
+    $('formError').className = 'banner error';
+    $('formError').textContent = '設定エラー: ' + e.message;
+    return;
+  }
   $('formError').className = 'banner';
   if (!params.query) {
     $('formError').className = 'banner error';
