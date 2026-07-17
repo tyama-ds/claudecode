@@ -5,6 +5,7 @@ This module provides the main interface for conducting automated research.
 """
 
 import logging
+import re
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable
 
@@ -530,26 +531,23 @@ class DeepResearchTool:
                 progress_callback=progress_callback,
             )
 
-        # Export evidence (respecting save_evidence and evidence_format settings)
+        # Evidence export happens AFTER report finalization (further below)
+        # so that evidence added by the final research rounds is included
+        # in the JSON/CSV exports and the references registry.
         evidence_json = None
         evidence_csv = None
-        if self.config.research.save_evidence:
-            evidence_format = self.config.research.evidence_format
-            if evidence_format in ("json", "both"):
-                evidence_json = evidence_locker.export_to_json()
-            if evidence_format in ("csv", "both"):
-                evidence_csv = evidence_locker.export_to_csv()
 
         # ------------------------------------------------------------------
         # Pipeline ordering (finalization spec):
-        #   V1: enhancement -> legacy verification -> render.
-        #       Enhancement used to run AFTER verification, so the shipped
-        #       body was never the verified body. It now runs first.
-        #   V2/V3: the enhancement pass is INTEGRATED into chapter
-        #       generation (V2/V3 already rewrite every section from the
-        #       full evidence), so the duplicate regeneration is removed;
-        #       verification of the FINAL candidate body happens after
-        #       generation in the finalization loop below.
+        #   ALL report versions (V1 / V2 / V3) run the SAME finalization
+        #   pipeline on the common chapter form:
+        #     generation result -> {section_id: text} -> verify -> decide
+        #     -> act -> re-verify -> freeze -> deterministic render.
+        #   V1: enhancement first, then finalization right before render
+        #       (after the Fermi section joined the body).
+        #   V2/V3: chapter generation, then finalization of the final
+        #       candidate body (with Fermi/glossary/warnings already in
+        #       it), then deterministic rendering.
         # ------------------------------------------------------------------
         verification_html = None
         verification_result = None
@@ -565,26 +563,9 @@ class DeepResearchTool:
                 evidence_locker=evidence_locker,
                 query=query,
             )
-
-            if self.config.enable_verification:
-                if progress_callback:
-                    progress_callback("Running verification...", 90)
-                self.verifier = Verifier(
-                    llm_client=self.llm_client,
-                    language=self.config.research.language,
-                )
-                content_for_verification = self._get_content_for_verification(session)
-                verification_result = self.verifier.verify_content(
-                    content=content_for_verification,
-                    evidence_locker=evidence_locker,
-                    document_title=session.research_plan.title if session.research_plan else query,
-                    strictness=self.config.verification_strictness,
-                )
-                verification_html = self.config.report.output_dir / f"verification_{session.session_id}.html"
-                self.verifier.generate_verification_report_html(
-                    verification_result,
-                    verification_html,
-                )
+            # V1 verification now runs through the SAME finalization
+            # pipeline as V2/V3 — in the V1 branch below, after the Fermi
+            # section exists, immediately before rendering.
 
         # Generate report
         if progress_callback:
@@ -596,6 +577,31 @@ class DeepResearchTool:
             output_dir=self.config.report.output_dir / "reports",
         )
         self.report_generator = generator
+
+        # Stage-1 adaptive length: the pre-draft allocation from the
+        # research plan feeds draft generation (audit item 10). V2/V3
+        # accept per-section character targets; V1 keeps its
+        # synthesis-side length control and is covered by stages 2-3 in
+        # the finalization loop.
+        if version_tag in ("v2", "v3") and session.research_plan:
+            from .report.length_planner import LengthPlanner
+            rp = self.config.report
+            stage1 = LengthPlanner(
+                language=self.config.research.language,
+                length_mode=rp.length_mode,
+                preferred_body_chars=(rp.preferred_body_chars
+                                      or rp.target_characters),
+                hard_min_body_chars=rp.hard_min_body_chars,
+                hard_max_body_chars=rp.hard_max_body_chars,
+                length_tolerance=rp.length_tolerance,
+            )
+            plan_sections = [
+                {"section": it.section, "title": it.title}
+                for it in (session.research_plan.table_of_contents
+                           .get_flat_sections())]
+            stage1_plans = stage1.initial_allocation(plan_sections)
+            generator.section_char_targets = {
+                sid: p.provisional_chars for sid, p in stage1_plans.items()}
 
         # --- Run Fermi estimation early (before report save) ---
         # This must happen before DOCX/PDF conversion so that the Fermi
@@ -613,6 +619,7 @@ class DeepResearchTool:
                 pre_deep_think_content=_pre_deep_think_content,
             )
 
+        extras_flags = {}
         if version_tag == "v3":
             # V3: DOCX-native generation flow
             result = generator.generate_report(
@@ -621,17 +628,24 @@ class DeepResearchTool:
                 section_contents=session.section_contents,
             )
 
-            # Finalization loop: verify the final candidate body and only
-            # then freeze it (V3 rendering below is deterministic)
+            # Finalization loop: verify the final candidate body — with
+            # Fermi / glossary / warnings already IN it — and only then
+            # freeze it (V3 rendering below is deterministic)
             if self.config.enable_verification:
+                extra_chapters, extras_flags = self._build_extra_chapters(
+                    generator, result, fermi_markdown)
                 verification_result, verification_html = \
                     self._run_finalization_loop(
                         result=result,
                         session=session,
                         evidence_locker=evidence_locker,
                         query=query,
+                        requirements=requirements,
                         progress_callback=progress_callback,
+                        extra_chapters=extra_chapters,
                     )
+                if extras_flags.get("fermi"):
+                    fermi_markdown = ""    # already in the verified body
 
             # Pre-generate figures if auto_figures is enabled
             figure_collection = None
@@ -660,12 +674,18 @@ class DeepResearchTool:
                         f"auto-generated figures or tables. Error: {e}",
                     )
 
-            # Build warnings text
+            # Build warnings text. When the warnings snapshot was already
+            # verified inside the body, only warnings raised AFTER the
+            # finalization are appended (deterministic rendering).
             warnings_text = ""
             warnings_collector = ResearchWarnings.get_instance()
             if warnings_collector.has_warnings():
                 language = getattr(self.config.research, "language", "en")
-                warnings_text = warnings_collector.to_report_section(language)
+                if extras_flags.get("warnings"):
+                    warnings_text = self._late_warnings_section(
+                        warnings_collector, language)
+                else:
+                    warnings_text = warnings_collector.to_report_section(language)
 
             # Build DOCX directly via python-docx API
             output_dir = self.config.report.output_dir / "reports"
@@ -675,7 +695,8 @@ class DeepResearchTool:
                 filename=f"report_{session.session_id}",
                 evidence_locker=evidence_locker,
                 figure_collection=figure_collection,
-                include_glossary=self.config.report.v2_include_glossary,
+                include_glossary=(self.config.report.v2_include_glossary
+                                  and not extras_flags.get("glossary")),
                 fermi_markdown=fermi_markdown,
                 warnings_text=warnings_text,
             )
@@ -688,37 +709,52 @@ class DeepResearchTool:
                 section_contents=session.section_contents,
             )
 
-            # Finalization loop: verify the final candidate body, act on
+            # Finalization loop: verify the final candidate body — with
+            # Fermi / glossary / warnings already IN it — act on
             # structured findings (research / rewrite / compress /
             # finalize-with-limitations), re-verify after every change,
             # then FREEZE. Everything after this point is deterministic
             # rendering (markdown assembly, format conversion).
             if self.config.enable_verification:
+                extra_chapters, extras_flags = self._build_extra_chapters(
+                    generator, result, fermi_markdown)
                 verification_result, verification_html = \
                     self._run_finalization_loop(
                         result=result,
                         session=session,
                         evidence_locker=evidence_locker,
                         query=query,
+                        requirements=requirements,
                         progress_callback=progress_callback,
+                        extra_chapters=extra_chapters,
                     )
+                if extras_flags.get("fermi"):
+                    fermi_markdown = ""    # already in the verified body
 
             # Generate final document as markdown
             final_doc = generator.generate_final_document(
                 result,
-                include_glossary=self.config.report.v2_include_glossary,
+                include_glossary=(self.config.report.v2_include_glossary
+                                  and not extras_flags.get("glossary")),
                 evidence_locker=evidence_locker,
             )
 
             # Append Fermi estimation to markdown BEFORE format conversion
+            # (only when the finalization did not already verify it)
             if fermi_markdown:
                 final_doc += fermi_markdown
 
-            # Append warnings to markdown BEFORE format conversion
+            # Append warnings to markdown BEFORE format conversion. When
+            # a warnings snapshot was verified inside the body, only
+            # warnings raised after finalization are appended.
             warnings_collector = ResearchWarnings.get_instance()
             if warnings_collector.has_warnings():
                 language = getattr(self.config.research, "language", "en")
-                final_doc += warnings_collector.to_report_section(language)
+                if extras_flags.get("warnings"):
+                    final_doc += self._late_warnings_section(
+                        warnings_collector, language)
+                else:
+                    final_doc += warnings_collector.to_report_section(language)
 
             # Save to file in the configured format (DOCX/PDF/HTML/MD)
             output_dir = self.config.report.output_dir / "reports"
@@ -730,20 +766,58 @@ class DeepResearchTool:
                 strict_format=self.config.report.strict_format,
             )
         else:
-            # V1: Original generation flow
+            # V1: common finalization on the session sections BEFORE the
+            # deterministic render. The Fermi section joins the body
+            # first so it is part of what gets verified (audit item 5).
+            finalized = False
+            if self.config.enable_verification:
+                if fermi_markdown:
+                    v1_keys = [k for k in session.section_contents
+                               if not k.startswith("_")]
+                    if v1_keys:
+                        last = v1_keys[-1]
+                        prev = session.section_contents[last].get("content", "")
+                        session.section_contents[last]["content"] = (
+                            prev.rstrip() + "\n" + fermi_markdown)
+                        fermi_markdown = ""
+                verification_result, verification_html = \
+                    self._run_finalization_v1(
+                        session=session,
+                        evidence_locker=evidence_locker,
+                        query=query,
+                        requirements=requirements,
+                        progress_callback=progress_callback,
+                    )
+                finalized = True
+
+            # After finalization the body is FROZEN: the legacy length
+            # adjustment must never rewrite a verified body, so the
+            # targets are only applied on the unverified path.
             report_path = generator.generate_report(
                 session=session,
                 evidence_locker=evidence_locker,
                 format=self.config.report.format,
-                verification_result=verification_result,
-                target_pages=self.config.report.target_pages,
-                target_characters=self.config.report.target_characters,
+                verification_result=None,
+                target_pages=None if finalized else self.config.report.target_pages,
+                target_characters=(None if finalized
+                                   else self.config.report.target_characters),
             )
 
             # For V1 non-markdown formats, fermi section was not included
-            # in the generator. Append to markdown files only.
+            # in the generator. Append to markdown files only (verified
+            # bodies already contain it).
             if fermi_markdown and Path(report_path).suffix.lower() == ".md":
                 self._append_text_to_file(Path(report_path), fermi_markdown)
+
+        # Export evidence AFTER finalization (audit item 13): the exports,
+        # references and registry include evidence added by the final
+        # research rounds, in the final citation order.
+        if self.config.research.save_evidence:
+            evidence_format = self.config.research.evidence_format
+            if evidence_format in ("json", "both"):
+                evidence_json = evidence_locker.export_to_json()
+            if evidence_format in ("csv", "both"):
+                evidence_csv = evidence_locker.export_to_csv()
 
         # Auto figure/table generation (if enabled)
         # V3 handles figures inline via generate_and_save(), so skip post-hoc insertion
@@ -1190,147 +1264,34 @@ class DeepResearchTool:
         return "\n\n".join(content_parts)
 
     # ------------------------------------------------------------------
-    # Finalization loop (verify final candidate -> act -> re-verify -> freeze)
+    # Finalization (common pipeline for V1 / V2 / V3 / manual mode)
     # ------------------------------------------------------------------
 
-    def _run_finalization_loop(self, result, session, evidence_locker,
-                               query, progress_callback=None):
-        """Verify and finalize the exact body that will be rendered.
-
-        Returns (verdict, verification_html_path). After this returns, the
-        chapters inside `result` are FROZEN: no LLM may modify them; only
-        deterministic rendering (markdown assembly, DOCX/PDF/HTML
-        conversion, display-number substitution) is allowed downstream.
-        """
-        from .report.citations import CitationManager
-        from .report.finalization import (
-            FinalizationController, LoopBudget, count_body_chars)
-        from .report.length_planner import LengthPlanner
-        from .verification.claim_verifier import ClaimVerifier
-
-        if progress_callback:
-            progress_callback("Verifying final report body...", 96)
-
-        rc = self.config.research
-        rp = self.config.report
-
-        # --- citation registry: stable per-section [SOURCE N] -> source URL
-        locker_urls = {e.url for e in evidence_locker.get_all_evidence()}
-        citation_mgr = CitationManager(
-            evidence_ids_exist=lambda url: url in locker_urls)
-        section_evidence: dict = {}
-        for sid, sdata in session.section_contents.items():
-            if sid.startswith("_"):
-                continue
-            extracted = sdata.get("extracted_content") or []
-            urls = [ec.get("url", "") for ec in extracted]
-            if not urls:
-                urls = list(sdata.get("sources") or [])
-            citation_mgr.register_section(sid, urls)
-            section_evidence[sid] = extracted
-
-        # --- adaptive length ranges from unique information units
-        planner = LengthPlanner(
-            language=rc.language,
-            length_mode=rp.length_mode,
-            preferred_body_chars=(rp.preferred_body_chars
-                                  or rp.target_characters),
-            hard_min_body_chars=rp.hard_min_body_chars,
-            hard_max_body_chars=rp.hard_max_body_chars,
-            length_tolerance=rp.length_tolerance,
-        )
-        plan_sections = []
-        if session.research_plan:
-            for item in session.research_plan.table_of_contents.get_flat_sections():
-                plan_sections.append(
-                    {"section": item.section, "title": item.title})
-        planner.initial_allocation(plan_sections)
-        units = {sid: planner.extract_units(sid, evs)
-                 for sid, evs in section_evidence.items()}
-        planner.recalc_after_research(units)
-
-        # --- critical questions from the research plan's main chapters
-        critical_questions = []
-        if session.research_plan:
-            for item in session.research_plan.table_of_contents.items:
-                q = f"{item.title} {getattr(item, 'description', '')}".strip()
-                if q:
-                    critical_questions.append(q)
-
-        # --- verifier + controller callbacks
-        eval_llm = self.stage_llm_clients.get("evaluation", self.llm_client)
-        claim_verifier = ClaimVerifier(
-            llm_client=eval_llm, language=rc.language)
-        self.claim_verifier = claim_verifier
-
-        all_evidence = evidence_locker.get_all_evidence()
-
-        def verify_fn(chapters):
-            return claim_verifier.verify_report(
-                chapters=chapters,
-                evidence_list=all_evidence,
-                citation_manager=citation_mgr,
-                critical_questions=critical_questions,
-                length_plans=planner.plans,
-                preferred_body_chars=planner.preferred_body_chars,
-                exclude_references=rp.exclude_references_from_count,
-            )
-
-        def research_fn(issues, queries):
-            return self._final_research_round(
-                issues, queries, session, evidence_locker,
-                citation_mgr, section_evidence)
-
-        def rewrite_fn(sid, issues):
-            return self._final_edit_section(
-                sid, issues, session, citation_mgr, mode="rewrite")
-
-        def compress_fn(sid, issues):
-            return self._final_edit_section(
-                sid, issues, session, citation_mgr, mode="compress")
-
-        def hedge_fn(sid, issues):
-            return self._final_edit_section(
-                sid, issues, session, citation_mgr, mode="hedge")
-
-        controller = FinalizationController(
-            verify_fn=verify_fn,
-            research_fn=research_fn,
-            rewrite_fn=rewrite_fn,
-            compress_fn=compress_fn,
-            hedge_fn=hedge_fn,
-            validate_citations_fn=citation_mgr.validate,
-            budget=LoopBudget(
-                max_final_research_rounds=rc.max_final_research_rounds,
-                max_final_revision_rounds=rc.max_final_revision_rounds,
-                max_no_improvement_rounds=rc.max_no_improvement_rounds,
-                min_score_improvement=rc.min_score_improvement,
-                min_new_independent_sources=rc.min_new_independent_sources,
-                min_claim_support_score=rc.min_claim_support_score,
-                required_critical_coverage=rc.required_critical_coverage,
-            ),
-            hard_max_body_chars=rp.hard_max_body_chars,
-            language=rc.language,
+    def _build_finalization_runner(self, session, evidence_locker, query,
+                                   requirements="", progress_callback=None,
+                                   chapter_citation_callback=None):
+        from .report.finalization_runner import FinalizationRunner
+        return FinalizationRunner(
+            evidence_locker=evidence_locker,
+            session_contents=session.section_contents,
+            research_plan=session.research_plan,
+            query=query,
+            requirements=requirements,
+            language=self.config.research.language,
+            llm_client=self.llm_client,
+            eval_llm=self.stage_llm_clients.get("evaluation"),
+            writing_llm=self.stage_llm_clients.get("writing"),
+            search_client=self.search_client,
+            report_config=self.config.report,
+            research_config=self.config.research,
+            output_dir=self.config.report.output_dir,
+            session_id=session.session_id,
+            progress_callback=progress_callback,
+            chapter_citation_callback=chapter_citation_callback,
         )
 
-        chapters = {sid: ch.content for sid, ch in result.chapters.items()}
-        # Edit callbacks read the CURRENT text from this shared dict (the
-        # controller mutates it in place across rounds)
-        self._finalize_current_chapters = chapters
-        outcome = controller.run(chapters)
-
-        # Freeze: write the verified text back into the generation result
-        for sid, text in outcome["chapters"].items():
-            if sid in result.chapters:
-                result.chapters[sid].content = text
-                result.chapters[sid].word_count = len(text)
-
+    def _warn_on_finalization_outcome(self, outcome) -> None:
         verdict = outcome["verdict"]
-        print(f"[Finalize] decision={outcome['decision']} "
-              f"support={verdict.metrics.claim_support_score:.2f} "
-              f"unsupported={verdict.metrics.unsupported_count} "
-              f"contradicted={verdict.metrics.contradicted_count} "
-              f"body_chars={verdict.metrics.actual_body_chars}")
         if outcome["decision"] == "finalize_with_limitations":
             ResearchWarnings.get_instance().add(
                 ResearchWarnings.HIGH, "Finalize",
@@ -1338,182 +1299,170 @@ class DeepResearchTool:
                 f"変更し「調査上の限界」を本文に記載しました"
                 f"（未解決issue: {len(verdict.issues)}件）。",
             )
+        if outcome.get("over_hard_max"):
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.CRITICAL, "Finalize",
+                f"本文が上限文字数(hard_max_body_chars)を超過したまま圧縮"
+                f"できませんでした（{verdict.metrics.actual_body_chars}字）。"
+                f"このレポートは正常完了ではありません。",
+            )
+        if verdict.metrics.verification_failed:
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.CRITICAL, "Finalize",
+                "最終本文の検証が実行できませんでした（主張抽出0件または"
+                "全チャンク失敗）。本文は未検証のため取り扱いに注意して"
+                "ください。",
+            )
 
-        html_path = (self.config.report.output_dir
-                     / f"verification_{session.session_id}.html")
-        try:
-            self._write_claim_verification_html(
-                verdict, outcome, html_path)
-        except Exception as e:
-            print(f"[Finalize] verification HTML failed: {e}")
-            html_path = None
-        return verdict, html_path
+    def _run_finalization_loop(self, result, session, evidence_locker,
+                               query, progress_callback=None,
+                               requirements="", extra_chapters=None):
+        """Verify and finalize the exact body that will be rendered
+        (V2 / V3 chapter form).
 
-    def _final_research_round(self, issues, queries, session,
-                              evidence_locker, citation_mgr,
-                              section_evidence):
-        """Targeted research for unresolved issues (bounded by the loop).
-
-        New evidence APPENDS to each section's citation registry so that
-        existing [SOURCE N] numbers never shift.
+        Returns (verdict, verification_html_path). After this returns, the
+        chapters inside `result` are FROZEN and already display-numbered:
+        no LLM may modify them; only deterministic rendering (markdown
+        assembly, DOCX/PDF/HTML conversion) is allowed downstream.
         """
-        from .evidence.locker import EvidenceType
+        def chapter_citation_cb(sid, evidence):
+            ch = result.chapters.get(sid)
+            if ch is not None and evidence.url not in ch.citations:
+                ch.citations.append(evidence.url)
 
-        new_sources = 0
-        changed_sections = []
-        per_issue_sections = {}
-        for issue in issues:
-            if issue.section_id:
-                per_issue_sections.setdefault(issue.section_id, []).append(issue)
+        runner = self._build_finalization_runner(
+            session, evidence_locker, query, requirements,
+            progress_callback, chapter_citation_callback=chapter_citation_cb)
+        self.finalization_runner = runner
+        self.claim_verifier = runner.claim_verifier
 
-        for q in queries[:6]:
-            try:
-                results = self.search_client.search(q)
-            except Exception as e:
-                print(f"[Finalize] research query failed '{q[:40]}': {e}")
-                continue
-            for r in results[:2]:
-                url = getattr(r, "url", "")
-                if not url or url in {e.url for e in
-                                      evidence_locker.get_all_evidence()}:
-                    continue    # never refetch a known URL
+        chapters = {sid: ch.content for sid, ch in result.chapters.items()}
+        for key, text in (extra_chapters or {}).items():
+            if text and text.strip():
+                chapters[key] = text
+
+        outcome = runner.run(chapters)
+        self.finalization_outcome = outcome
+
+        # Freeze: write the verified, display-numbered text back into the
+        # generation result (extras become chapters of their own)
+        for sid, text in outcome["chapters"].items():
+            if sid in result.chapters:
+                result.chapters[sid].content = text
+                result.chapters[sid].word_count = len(text)
+            else:
+                result.chapters[sid] = self._make_extra_chapter(sid, text)
+
+        self._warn_on_finalization_outcome(outcome)
+        return outcome["verdict"], outcome["html_path"]
+
+    def _run_finalization_v1(self, session, evidence_locker, query,
+                             requirements="", progress_callback=None):
+        """Common finalization for the V1 path: the session sections ARE
+        the chapters; the frozen, display-numbered text is written back
+        before the deterministic V1 render."""
+        runner = self._build_finalization_runner(
+            session, evidence_locker, query, requirements,
+            progress_callback)
+        self.finalization_runner = runner
+        self.claim_verifier = runner.claim_verifier
+
+        chapters = {
+            sid: sdata.get("content", "")
+            for sid, sdata in session.section_contents.items()
+            if not sid.startswith("_") and sdata.get("content")
+        }
+        if not chapters:
+            return None, None
+
+        outcome = runner.run(chapters)
+        self.finalization_outcome = outcome
+
+        for sid, text in outcome["chapters"].items():
+            if sid in session.section_contents:
+                session.section_contents[sid]["content"] = text
+
+        self._warn_on_finalization_outcome(outcome)
+        return outcome["verdict"], outcome["html_path"]
+
+    def _make_extra_chapter(self, sid, text):
+        """Wrap a verified extra section (Fermi / glossary / warnings)
+        as a chapter so renderers treat it like any frozen chapter."""
+        from .report.v2.generator import ChapterContent
+        title = ""
+        m = re.match(r"^##\s*(?:[^.\n]*\.\s*)?([^\n]+)", text.strip()) \
+            if text else None
+        if m:
+            title = m.group(1).strip()
+        return ChapterContent(
+            section_number=sid,
+            section_title=title or sid,
+            content=text,
+            word_count=len(text or ""),
+            is_draft=False,
+        )
+
+    def _build_extra_chapters(self, generator, result, fermi_markdown):
+        """Body-bound extras (Fermi / glossary / warnings snapshot) that
+        must be part of the body BEFORE final verification (audit item 5).
+
+        Returns (extra_chapters, flags): flags record which extras were
+        included so the renderers do not duplicate them afterwards.
+        """
+        language = self.config.research.language
+        ja = language == "ja"
+        extras = {}
+        flags = {}
+
+        if fermi_markdown and fermi_markdown.strip():
+            num = "付録A" if ja else "Appendix A"
+            title = "フェルミ推定" if ja else "Fermi Estimation"
+            body = re.sub(r"^-{3,}\s*\n##[^\n]*\n", "",
+                          fermi_markdown.strip())
+            extras[num] = f"## {num}. {title}\n\n{body}"
+            flags["fermi"] = True
+
+        if (self.config.report.v2_include_glossary
+                and getattr(getattr(result, "context", None),
+                            "glossary", None)):
+            glossary_md = ""
+            build = getattr(generator, "build_glossary_markdown", None)
+            if callable(build):
                 try:
-                    page = self.search_client.get_page_content(url)
-                except Exception:
-                    continue
-                text = getattr(page, "text_content", "") or ""
-                if len(text) < 200:
-                    continue
-                # attach to the sections that raised the issues
-                target_sections = list(per_issue_sections.keys()) or \
-                    [sid for sid in section_evidence.keys()][:1]
-                evidence_locker.add_evidence(
-                    url=url, title=getattr(page, "title", "") or url,
-                    content_excerpt=text[:500], extracted_text=text,
-                    evidence_type=EvidenceType.WEB_PAGE,
-                    search_query=q,
-                    section_reference=target_sections[0],
-                )
-                new_sources += 1
-                for sid in target_sections:
-                    entry = {"title": getattr(page, "title", "") or url,
-                             "url": url, "content": text[:2000],
-                             "raw_content": text, "key_points": [],
-                             "relevance_score": 0.5}
-                    section_evidence.setdefault(sid, []).append(entry)
-                    sdata = session.section_contents.get(sid)
-                    if sdata is not None:
-                        sdata.setdefault("extracted_content", []).append(entry)
-                        sdata.setdefault("sources", []).append(url)
-                    citation_mgr.append_evidence(sid, url)
-                    if sid not in changed_sections:
-                        changed_sections.append(sid)
-        return {"new_sources": new_sources,
-                "changed_sections": changed_sections}
+                    glossary_md = build(result) or ""
+                except Exception as e:
+                    print(f"[Finalize] glossary build failed: {e}")
+            if glossary_md.strip():
+                num = "付録B" if ja else "Appendix B"
+                extras[num] = glossary_md
+                flags["glossary"] = True
 
-    def _final_edit_section(self, sid, issues, session, citation_mgr,
-                            mode="rewrite"):
-        """LLM edit of ONE section from its EXISTING evidence.
+        collector = ResearchWarnings.get_instance()
+        self._warnings_included_count = collector.count()
+        if collector.has_warnings():
+            num = "付録C" if ja else "Appendix C"
+            extras[num] = collector.to_report_section(language).strip()
+            flags["warnings"] = True
 
-        mode: rewrite  (deepen using unused evidence, no new facts)
-              compress (remove redundancy, keep claims & citations)
-              hedge    (soften unresolved assertions, state limitations)
-        The controller machine-validates citations before accepting.
-        """
-        sdata = session.section_contents.get(sid) or {}
-        # live text: the controller mutates this shared dict across rounds
-        current = getattr(self, "_finalize_current_chapters", {}).get(sid, "")
-        if not current:
-            current = sdata.get("content", "")
-        if not current:
-            return None
+        return extras, flags
 
-        extracted = sdata.get("extracted_content") or []
-        blocks = []
-        for i, ec in enumerate(extracted[:15], 1):
-            body = (ec.get("raw_content") or ec.get("content") or "")[:1200]
-            blocks.append(f"[SOURCE {i}] {ec.get('title', '')}\n{body}")
-        evidence_text = "\n---\n".join(blocks)
-        issue_text = "\n".join(
-            f"- ({i.type}) {i.claim or i.reason}" for i in issues[:8])
+    def _late_warnings_section(self, collector, language) -> str:
+        """Warnings raised AFTER finalization, rendered deterministically.
 
-        lang_ja = self.config.research.language == "ja"
-        if mode == "rewrite":
-            instruction = (
-                "既存のエビデンスだけを使い、以下の不足点を解消するように本文を増補・再構成してください。"
-                "外部の新しい情報を創作しない。[SOURCE N] は上記の番号のみ使用し、既存の引用は維持する。"
-                if lang_ja else
-                "Using ONLY the evidence above, expand/restructure the text to fix the issues. "
-                "Do not invent facts. Use only the [SOURCE N] numbers listed; keep existing citations.")
-        elif mode == "compress":
-            instruction = (
-                "重要な主張と引用 [SOURCE N] をすべて維持したまま、重複・冗長・低重要度の記述を圧縮してください。"
-                "引用だけ残して主張を消さない。新しい情報を加えない。"
-                if lang_ja else
-                "Compress redundancy while KEEPING every important claim and its [SOURCE N] citations. "
-                "Never leave a citation whose claim was removed. Add nothing new.")
-        else:  # hedge
-            instruction = (
-                "以下の未解決の主張について、断定を避けた限定表現（「〜の可能性がある」「公開情報では確認できなかった」等）に"
-                "修正してください。それ以外の本文・引用は変更しない。"
-                if lang_ja else
-                "Soften the unresolved assertions below into hedged statements. "
-                "Change nothing else; keep all citations.")
-
-        prompt = (f"{'あなたはレポート編集者です。' if lang_ja else 'You are a report editor.'}\n\n"
-                  f"{'【対象セクション本文】' if lang_ja else '[SECTION TEXT]'}\n{current}\n\n"
-                  f"{'【エビデンス】' if lang_ja else '[EVIDENCE]'}\n{evidence_text}\n\n"
-                  f"{'【指摘事項】' if lang_ja else '[ISSUES]'}\n{issue_text or '-'}\n\n"
-                  f"{'【指示】' if lang_ja else '[INSTRUCTIONS]'}\n{instruction}\n\n"
-                  f"{'修正後の本文のみを出力（見出しを含め、JSON・前置き不要）:' if lang_ja else 'Output only the revised section text:'}")
-
-        llm = self.stage_llm_clients.get("writing", self.llm_client)
-        try:
-            response = llm.generate(prompt)
-            text = (response.content or "").strip()
-            return text or None
-        except Exception as e:
-            print(f"[Finalize] section edit failed ({mode}, {sid}): {e}")
-            return None
-
-    def _write_claim_verification_html(self, verdict, outcome, path) -> None:
-        """Deterministic HTML report of the final verification."""
-        import html as _html
-        m = verdict.metrics
-        rows = "".join(
-            f"<tr><td>{_html.escape(i.section_id)}</td>"
-            f"<td>{_html.escape(i.claim_id)}</td>"
-            f"<td>{_html.escape(i.type)}</td>"
-            f"<td>{_html.escape(i.severity)}</td>"
-            f"<td>{_html.escape((i.claim or '')[:120])}</td>"
-            f"<td>{_html.escape((i.reason or '')[:160])}</td></tr>"
-            for i in verdict.issues)
-        history = "".join(
-            f"<li>round {h['round']}: {h['decision']} "
-            f"(score={h['score']:.2f}, issues={h['issues']})</li>"
-            for h in outcome.get("history", []))
-        doc = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
-<title>Final Verification</title>
-<style>body{{font-family:sans-serif;margin:2em}}table{{border-collapse:collapse}}
-td,th{{border:1px solid #ccc;padding:4px 8px;font-size:13px}}</style></head><body>
-<h1>最終検証レポート</h1>
-<p>判定: <b>{_html.escape(outcome.get('decision', ''))}</b></p>
-<ul>
-<li>claim support score: {m.claim_support_score:.3f}</li>
-<li>unsupported: {m.unsupported_count}（うちcritical: {m.unsupported_critical_claims}）</li>
-<li>contradicted: {m.contradicted_count}</li>
-<li>critical question coverage: {m.critical_question_coverage:.2f}</li>
-<li>citations valid: {m.citations_valid}</li>
-<li>body chars: {m.actual_body_chars}
- (recommended {m.recommended_min_chars}–{m.recommended_max_chars})</li>
-</ul>
-<h2>判定履歴</h2><ol>{history}</ol>
-<h2>Issues ({len(verdict.issues)})</h2>
-<table><tr><th>section</th><th>claim</th><th>type</th><th>severity</th>
-<th>claim text</th><th>reason</th></tr>{rows}</table>
-</body></html>"""
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(doc, encoding="utf-8")
+        The pre-finalization snapshot is already inside the verified body;
+        only newer entries are appended here."""
+        included = getattr(self, "_warnings_included_count", 0)
+        entries = collector.to_dict_list()[included:]
+        if not entries:
+            return ""
+        if language == "ja":
+            lines = ["\n\n---\n", "## 処理中の警告（レポート確定後）", ""]
+        else:
+            lines = ["\n\n---\n", "## Processing Warnings (post-finalization)", ""]
+        for w in entries:
+            lines.append(f"- [{w.get('severity', '')}] "
+                         f"{w.get('source', '')}: {w.get('message', '')}")
+        return "\n".join(lines)
 
     def _enhance_sections_with_full_evidence(
         self,
@@ -3150,36 +3099,36 @@ def run_manual_research(
                 "confidence": result.overall_confidence,
             }
 
-    # Export evidence
-    evidence_json = evidence_locker.export_to_json()
-    evidence_csv = evidence_locker.export_to_csv()
+    # Evidence export happens AFTER finalization (below), so exports
+    # include everything referenced by the finalized report.
+    evidence_json = None
+    evidence_csv = None
 
-    # Verification
+    # Verification: manual mode runs the SAME finalization pipeline as
+    # run() (common chapter form -> verify -> decide -> act -> freeze).
+    # There is no search client, so unresolved evidence problems end in
+    # FINALIZE_WITH_LIMITATIONS instead of research rounds.
     verification_html = None
     verification_result = None
-    if enable_verification:
-        verifier = Verifier(
-            llm_client=llm_client,
-            language=config.research.language,
-        )
 
-        content_parts = []
-        for section_num, section_data in session.section_contents.items():
-            if section_num.startswith("_"):
-                continue
-            content_parts.append(section_data.get("content", ""))
-
-        content_for_verification = "\n\n".join(content_parts)
-
-        verification_result = verifier.verify_content(
-            content=content_for_verification,
+    def _finalize_manual(chapters, chapter_citation_callback=None):
+        from .report.finalization_runner import FinalizationRunner
+        runner = FinalizationRunner(
             evidence_locker=evidence_locker,
-            document_title=topic,
-            strictness=config.verification_strictness,
+            session_contents=session.section_contents,
+            research_plan=session.research_plan,
+            query=topic,
+            requirements=requirements,
+            language=config.research.language,
+            llm_client=llm_client,
+            search_client=None,
+            report_config=config.report,
+            research_config=config.research,
+            output_dir=config.report.output_dir,
+            session_id=session.session_id,
+            chapter_citation_callback=chapter_citation_callback,
         )
-
-        verification_html = config.report.output_dir / f"verification_{session.session_id}.html"
-        verifier.generate_verification_report_html(verification_result, verification_html)
+        return runner.run(chapters)
 
     # Generate report
     generator, version_tag = _create_report_generator(
@@ -3195,6 +3144,21 @@ def run_manual_research(
             research_plan=session.research_plan,
             section_contents=session.section_contents,
         )
+
+        if enable_verification:
+            def _cb(sid, evidence):
+                ch = result.chapters.get(sid)
+                if ch is not None and evidence.url not in ch.citations:
+                    ch.citations.append(evidence.url)
+            chapters = {sid: ch.content
+                        for sid, ch in result.chapters.items()}
+            outcome = _finalize_manual(chapters, _cb)
+            for sid, text in outcome["chapters"].items():
+                if sid in result.chapters:
+                    result.chapters[sid].content = text
+                    result.chapters[sid].word_count = len(text)
+            verification_result = outcome["verdict"]
+            verification_html = outcome["html_path"]
 
         # Pre-generate figures if auto_figures is enabled
         figure_collection = None
@@ -3241,7 +3205,24 @@ def run_manual_research(
             research_plan=session.research_plan,
             section_contents=session.section_contents,
         )
-        # Generate final document
+
+        if enable_verification:
+            def _cb(sid, evidence):
+                ch = result.chapters.get(sid)
+                if ch is not None and evidence.url not in ch.citations:
+                    ch.citations.append(evidence.url)
+            chapters = {sid: ch.content
+                        for sid, ch in result.chapters.items()}
+            outcome = _finalize_manual(chapters, _cb)
+            for sid, text in outcome["chapters"].items():
+                if sid in result.chapters:
+                    result.chapters[sid].content = text
+                    result.chapters[sid].word_count = len(text)
+            verification_result = outcome["verdict"]
+            verification_html = outcome["html_path"]
+
+        # Generate final document (deterministic rendering of the
+        # frozen chapters)
         final_doc = generator.generate_final_document(
             result,
             include_glossary=config.report.v2_include_glossary,
@@ -3257,15 +3238,36 @@ def run_manual_research(
             strict_format=config.report.strict_format,
         )
     else:
-        # V1: Original generation flow
+        # V1: common finalization on the session sections, then the
+        # deterministic V1 render (no post-verification length edits)
+        if enable_verification:
+            chapters = {
+                sid: sdata.get("content", "")
+                for sid, sdata in session.section_contents.items()
+                if not sid.startswith("_") and sdata.get("content")
+            }
+            if chapters:
+                outcome = _finalize_manual(chapters)
+                for sid, text in outcome["chapters"].items():
+                    if sid in session.section_contents:
+                        session.section_contents[sid]["content"] = text
+                verification_result = outcome["verdict"]
+                verification_html = outcome["html_path"]
+
         report_path = generator.generate_report(
             session=session,
             evidence_locker=evidence_locker,
             format=config.report.format,
-            verification_result=verification_result,
-            target_pages=target_pages,
-            target_characters=target_characters,
+            verification_result=None,
+            target_pages=None if enable_verification else target_pages,
+            target_characters=(None if enable_verification
+                               else target_characters),
         )
+
+    # Export evidence AFTER finalization: exports and the references
+    # registry include everything the finalized report cites
+    evidence_json = evidence_locker.export_to_json()
+    evidence_csv = evidence_locker.export_to_csv()
 
     # Get token stats
     token_stats = get_token_stats()

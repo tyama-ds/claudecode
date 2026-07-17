@@ -69,7 +69,7 @@ _CONFIG_PARAM_MAP = {
     "search_languages": "search_languages",
     "use_enhanced_synthesis": "use_enhanced_synthesis",
     "figure_max_workers": "figure_max_workers",
-    # Adaptive length + finalization loop settings
+    # Adaptive length + finalization loop settings (all 12)
     "length_mode": "length_mode",
     "preferred_body_chars": "preferred_body_chars",
     "hard_min_body_chars": "hard_min_body_chars",
@@ -77,7 +77,62 @@ _CONFIG_PARAM_MAP = {
     "length_tolerance": "length_tolerance",
     "max_final_research_rounds": "max_final_research_rounds",
     "max_final_revision_rounds": "max_final_revision_rounds",
+    "max_no_improvement_rounds": "max_no_improvement_rounds",
+    "min_score_improvement": "min_score_improvement",
+    "min_new_independent_sources": "min_new_independent_sources",
     "min_claim_support_score": "min_claim_support_score",
+    "required_critical_coverage": "required_critical_coverage",
+}
+
+
+def _int_ge0(value, name):
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be an integer (got {value!r})")
+    if n < 0:
+        raise ValueError(f"{name} must be >= 0 (got {n})")
+    return n
+
+
+def _float_range(lo, hi, inclusive_hi=True):
+    def convert(value, name):
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} must be a number (got {value!r})")
+        ok = (lo <= f <= hi) if inclusive_hi else (lo <= f < hi)
+        if not ok:
+            op = "<=" if inclusive_hi else "<"
+            raise ValueError(
+                f"{name} must satisfy {lo} <= value {op} {hi} (got {f})")
+        return f
+    return convert
+
+
+def _length_mode(value, name):
+    v = str(value).strip().lower()
+    if v not in ("adaptive", "fixed"):
+        raise ValueError(f"{name} must be 'adaptive' or 'fixed' (got {value!r})")
+    return v
+
+
+# Server-side type conversion & validation for length/loop settings.
+# Empty strings are dropped BEFORE conversion (=> config defaults / None);
+# invalid values raise ValueError -> HTTP 400 before the job starts.
+_PARAM_CONVERTERS = {
+    "length_mode": _length_mode,
+    "preferred_body_chars": _int_ge0,
+    "hard_min_body_chars": _int_ge0,
+    "hard_max_body_chars": _int_ge0,
+    "length_tolerance": _float_range(0.0, 1.0, inclusive_hi=False),
+    "max_final_research_rounds": _int_ge0,
+    "max_final_revision_rounds": _int_ge0,
+    "max_no_improvement_rounds": _int_ge0,
+    "min_score_improvement": _float_range(0.0, 1.0),
+    "min_new_independent_sources": _int_ge0,
+    "min_claim_support_score": _float_range(0.0, 1.0),
+    "required_critical_coverage": _float_range(0.0, 1.0),
 }
 
 
@@ -86,7 +141,10 @@ def build_config_kwargs(params: Dict[str, Any]) -> Dict[str, Any]:
     Map UI request parameters to create_config kwargs.
 
     Unknown keys are ignored; empty strings are dropped so config defaults
-    apply. Per-stage LLM overrides arrive as params["stage_llm"] =
+    apply (e.g. an empty hard_max_body_chars becomes None). Length/loop
+    settings are type-converted and validated server-side; an invalid
+    value raises ValueError (the API returns HTTP 400 without starting a
+    job). Per-stage LLM overrides arrive as params["stage_llm"] =
     {stage: {"provider": ..., "model": ..., "api_key": ...}} and are passed
     through with empty entries removed.
     """
@@ -97,7 +155,18 @@ def build_config_kwargs(params: Dict[str, Any]) -> Dict[str, Any]:
         value = params[ui_key]
         if value is None or value == "":
             continue
+        converter = _PARAM_CONVERTERS.get(ui_key)
+        if converter is not None:
+            value = converter(value, ui_key)
         kwargs[config_key] = value
+
+    # cross-field check mirrored from Config.validate()
+    hard_min = kwargs.get("hard_min_body_chars")
+    hard_max = kwargs.get("hard_max_body_chars")
+    if hard_min is not None and hard_max is not None and hard_min > hard_max:
+        raise ValueError(
+            f"hard_min_body_chars ({hard_min}) must be <= "
+            f"hard_max_body_chars ({hard_max})")
 
     # source_mode 'local' without web never touches the network; documents
     # themselves are passed to tool.run, not create_config
@@ -529,6 +598,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
 
         if not (params.get("query") or "").strip():
             self._send_json({"error": "query is required"}, 400)
+            return
+
+        # Server-side validation BEFORE the job starts: invalid length /
+        # loop settings are rejected with 400, not a failed job
+        try:
+            build_config_kwargs(params)
+        except ValueError as e:
+            self._send_json({"error": f"invalid parameter: {e}"}, 400)
             return
 
         try:

@@ -481,7 +481,12 @@ class TestMainWiring(unittest.TestCase):
         # final body verified, frozen back into the result, HTML written
         self.assertEqual(verdict.metrics.unsupported_count, 0)
         self.assertTrue(verdict.metrics.citations_valid)
-        self.assertIn("[SOURCE 1]", result.chapters["1"].content)
+        # render_numbering is CONNECTED to the real output: the frozen
+        # chapter carries the display number, no editing tags remain
+        self.assertIn("[1]", result.chapters["1"].content)
+        self.assertNotIn("[SOURCE", result.chapters["1"].content)
+        # references follow first-use order (locker reordered)
+        locker.reorder.assert_called_once()
         self.assertTrue(html_path and Path(html_path).exists())
         html = Path(html_path).read_text(encoding="utf-8")
         self.assertIn("accept", html)

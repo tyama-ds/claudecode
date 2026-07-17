@@ -152,6 +152,60 @@ def cli():
     help="Absolute maximum body characters (enforced only when set)"
 )
 @click.option(
+    "--report-version",
+    type=click.Choice(["v1", "v2", "v3"]),
+    default="v1",
+    help="Report generator version (all versions run the finalization pipeline)"
+)
+@click.option(
+    "--length-tolerance",
+    type=float,
+    default=0.20,
+    help="+/- band around recommended lengths (0 <= value < 1, default 0.20)"
+)
+@click.option(
+    "--max-final-research-rounds",
+    type=int,
+    default=2,
+    help="Additional research rounds in the final verification loop (default: 2)"
+)
+@click.option(
+    "--max-final-revision-rounds",
+    type=int,
+    default=2,
+    help="Rewrite/compress rounds in the final verification loop (default: 2)"
+)
+@click.option(
+    "--max-no-improvement-rounds",
+    type=int,
+    default=1,
+    help="Stop the final loop after this many stagnant rounds (default: 1)"
+)
+@click.option(
+    "--min-score-improvement",
+    type=float,
+    default=0.03,
+    help="Minimum claim-support-score gain that counts as progress (default: 0.03)"
+)
+@click.option(
+    "--min-new-independent-sources",
+    type=int,
+    default=1,
+    help="New independent sources a research round must add to count as progress"
+)
+@click.option(
+    "--min-claim-support-score",
+    type=float,
+    default=0.85,
+    help="Acceptance threshold for the weighted claim support score (0-1)"
+)
+@click.option(
+    "--required-critical-coverage",
+    type=float,
+    default=1.0,
+    help="Required coverage of critical questions for acceptance (0-1)"
+)
+@click.option(
     "--extended-mode",
     is_flag=True,
     default=False,
@@ -276,6 +330,15 @@ def research(
     preferred_body_chars: Optional[int],
     hard_min_body_chars: Optional[int],
     hard_max_body_chars: Optional[int],
+    report_version: str,
+    length_tolerance: float,
+    max_final_research_rounds: int,
+    max_final_revision_rounds: int,
+    max_no_improvement_rounds: int,
+    min_score_improvement: float,
+    min_new_independent_sources: int,
+    min_claim_support_score: float,
+    required_critical_coverage: float,
     extended_mode: bool,
     crawl_max_pages: int,
     crawl_max_depth: int,
@@ -325,6 +388,15 @@ def research(
         preferred_body_chars=preferred_body_chars,
         hard_min_body_chars=hard_min_body_chars,
         hard_max_body_chars=hard_max_body_chars,
+        report_generator_version=report_version,
+        length_tolerance=length_tolerance,
+        max_final_research_rounds=max_final_research_rounds,
+        max_final_revision_rounds=max_final_revision_rounds,
+        max_no_improvement_rounds=max_no_improvement_rounds,
+        min_score_improvement=min_score_improvement,
+        min_new_independent_sources=min_new_independent_sources,
+        min_claim_support_score=min_claim_support_score,
+        required_critical_coverage=required_critical_coverage,
         extended_mode=extended_mode,
         crawl_max_pages=crawl_max_pages,
         crawl_max_depth=crawl_max_depth,
@@ -452,6 +524,10 @@ def report(
     output_format: Optional[str],
     target_pages: Optional[int],
     target_characters: Optional[int],
+    length_mode: str,
+    preferred_body_chars: Optional[int],
+    hard_min_body_chars: Optional[int],
+    hard_max_body_chars: Optional[int],
 ):
     """
     Generate a report from a saved research session.
@@ -462,6 +538,7 @@ def report(
         deep-research report session.json --output-format pdf
         deep-research report session.json --target-pages 10
         deep-research report session.json --target-characters 25000
+        deep-research report session.json --length-mode fixed --preferred-body-chars 20000
     """
     print_banner()
 
@@ -469,6 +546,33 @@ def report(
         from .research.researcher import ResearchSession
         from .evidence.locker import EvidenceLocker
         from .report.generator import ReportGenerator, ReportFormat
+
+        # Validate length options (same rules as config validation)
+        for name, value in (
+            ("--preferred-body-chars", preferred_body_chars),
+            ("--hard-min-body-chars", hard_min_body_chars),
+            ("--hard-max-body-chars", hard_max_body_chars),
+        ):
+            if value is not None and value < 0:
+                console.print(f"[red]Error: {name} must be >= 0[/red]")
+                sys.exit(1)
+        if (hard_min_body_chars is not None and hard_max_body_chars is not None
+                and hard_min_body_chars > hard_max_body_chars):
+            console.print("[red]Error: --hard-min-body-chars must be <= "
+                          "--hard-max-body-chars[/red]")
+            sys.exit(1)
+        if length_mode == "fixed" and not (preferred_body_chars
+                                           or target_characters):
+            console.print("[red]Error: --length-mode fixed requires "
+                          "--preferred-body-chars or --target-characters[/red]")
+            sys.exit(1)
+
+        # In fixed mode the preferred length acts as the render target;
+        # in adaptive mode it stays a soft preference (no re-cutting of
+        # an already finalized body)
+        if length_mode == "fixed" and preferred_body_chars \
+                and not target_characters:
+            target_characters = preferred_body_chars
 
         # Load session
         session = ResearchSession.load(Path(session_path))
@@ -496,6 +600,23 @@ def report(
         # Show current length info before adjustment
         length_info = generator.get_length_info(session, fmt)
         console.print(f"Current content: {length_info.total_characters:,} characters (~{length_info.estimated_pages:.1f} pages)")
+
+        # Hard bounds (absolute only because the user set them explicitly)
+        if hard_max_body_chars and \
+                length_info.total_characters > hard_max_body_chars:
+            target_characters = min(
+                target_characters or hard_max_body_chars,
+                hard_max_body_chars)
+            console.print(
+                f"[yellow]Content exceeds hard max "
+                f"({hard_max_body_chars:,} chars); compressing to fit[/yellow]")
+        if hard_min_body_chars and \
+                length_info.total_characters < hard_min_body_chars:
+            console.print(
+                f"[yellow]Warning: content "
+                f"({length_info.total_characters:,} chars) is below the "
+                f"hard minimum ({hard_min_body_chars:,}). Padding is never "
+                f"applied — run more research to add evidence.[/yellow]")
 
         if target_pages or target_characters:
             target_desc = f"{target_pages} pages" if target_pages else f"{target_characters:,} characters"
