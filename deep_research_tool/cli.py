@@ -259,6 +259,15 @@ def cli():
          "requires --documents), or hybrid (documents + web)"
 )
 @click.option(
+    "--region",
+    "regions",
+    multiple=True,
+    help="Locale (region) search: collect LOCAL information from these "
+         "regions (e.g. --region de --region th). Queries are localized "
+         "into the local language/terminology and local sources are "
+         "prioritized. See REGION_LOCALE_MAP for valid codes"
+)
+@click.option(
     "--crawl-mode",
     type=click.Choice([
         "standard", "fast_batch", "fast_parallel", "aicrawl", "ai_crawl_selenium",
@@ -356,6 +365,7 @@ def research(
     https_proxy: Optional[str],
     no_verify_ssl: bool,
     source_mode: str,
+    regions: tuple,
     crawl_mode: str,
     ai_crawl_max_pages: int,
     ai_crawl_site_depth: int,
@@ -415,6 +425,7 @@ def research(
         https_proxy=https_proxy,
         verify_ssl=not no_verify_ssl,
         source_mode=source_mode,
+        search_regions=list(regions) if regions else None,
         crawl_mode=crawl_mode,
         ai_crawl_max_total_pages=ai_crawl_max_pages,
         ai_crawl_site_depth=ai_crawl_site_depth,

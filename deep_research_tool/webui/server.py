@@ -69,6 +69,7 @@ _CONFIG_PARAM_MAP = {
     "fermi_estimation": "fermi_estimation",
     "multilingual": "multilingual",
     "search_languages": "search_languages",
+    "search_regions": "search_regions",
     "use_enhanced_synthesis": "use_enhanced_synthesis",
     "figure_max_workers": "figure_max_workers",
     # Adaptive length + finalization loop settings (all 12)

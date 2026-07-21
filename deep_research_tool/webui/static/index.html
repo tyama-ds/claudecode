@@ -340,13 +340,53 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
         <label class="switch"><input type="checkbox" id="feat_verification" checked><span class="slider"></span></label>
       </div>
 
-      <div class="feat-row" data-tip="選択した言語で同時に検索し、結果を統合・翻訳します（クエリはLLMが各言語に翻訳）。海外動向・グローバル市場など、日本語ソースだけでは不足するテーマで有効です。言語数に応じて検索時間が増加します。">
-        <div class="feat-info"><span class="feat-name">🌍 多言語検索</span>
+      <div class="feat-row" data-tip="地域（ロケール）または言語を指定して同時検索します。地域指定では、その国の検索ロケールに切り替え、クエリを現地の言い回し・機関名に現地化し、現地ドメインのソースを優先します（例: ドイツの補助金制度を現地名で検索）。地域/言語数に応じて検索時間が増加します。">
+        <div class="feat-info"><span class="feat-name">🌍 多言語・地域検索</span>
           <span class="feat-sub" id="langSummary">対象言語は下のタブで選択</span></div>
         <label class="switch"><input type="checkbox" id="feat_multilingual"><span class="slider"></span></label>
       </div>
 
       <div id="langPanel" style="display:none">
+        <label style="margin-top:6px">🌏 調査地域（ロケール）で指定 — 選ぶと言語指定より優先。各地域の検索ロケールで、クエリを現地の言い回し・機関名に「現地化」して検索し、現地ドメインを優先します</label>
+        <div class="lang-tabs">
+          <button class="lang-tab sel" data-pane="regAsia">アジア</button>
+          <button class="lang-tab" data-pane="regWest">欧州</button>
+          <button class="lang-tab" data-pane="regAmericas">米州・中東・他</button>
+        </div>
+        <div id="regAsia" class="lang-pane">
+          <label class="lang-chip"><input type="checkbox" data-region="jp">日本 <span class="native">jp</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="cn">中国 <span class="native">cn</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="tw">台湾 <span class="native">tw</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="hk">香港 <span class="native">hk</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="kr">韓国 <span class="native">kr</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="th">タイ <span class="native">th</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="vn">ベトナム <span class="native">vn</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="id">インドネシア <span class="native">id</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="my">マレーシア <span class="native">my</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="sg">シンガポール <span class="native">sg</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="in">インド <span class="native">in</span></label>
+        </div>
+        <div id="regWest" class="lang-pane" style="display:none">
+          <label class="lang-chip"><input type="checkbox" data-region="uk">英国 <span class="native">uk</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="de">ドイツ <span class="native">de</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="fr">フランス <span class="native">fr</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="es">スペイン <span class="native">es</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="it">イタリア <span class="native">it</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="nl">オランダ <span class="native">nl</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="pl">ポーランド <span class="native">pl</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="ru">ロシア <span class="native">ru</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="tr">トルコ <span class="native">tr</span></label>
+        </div>
+        <div id="regAmericas" class="lang-pane" style="display:none">
+          <label class="lang-chip"><input type="checkbox" data-region="us">米国 <span class="native">us</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="ca">カナダ <span class="native">ca</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="br">ブラジル <span class="native">br</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="mx">メキシコ <span class="native">mx</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="au">豪州 <span class="native">au</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="sa">サウジアラビア <span class="native">sa</span></label>
+          <label class="lang-chip"><input type="checkbox" data-region="ae">UAE <span class="native">ae</span></label>
+        </div>
+        <label style="margin-top:10px">🌍 または言語で指定（従来の多言語検索。地域が1つでも選ばれていると無視されます）</label>
         <div class="lang-tabs">
           <button class="lang-tab sel" data-pane="langAsia">アジア</button>
           <button class="lang-tab" data-pane="langWest">欧州・米州</button>
@@ -679,6 +719,7 @@ function loadSettings() {
   }
   if (saved.figure_max_workers) $('feat_fig_workers').value = saved.figure_max_workers;
   if (Array.isArray(saved.search_languages)) setSelectedLangs(saved.search_languages);
+  if (Array.isArray(saved.search_regions)) setSelectedRegions(saved.search_regions);
   syncLangUI();
   return saved;
 }
@@ -694,6 +735,7 @@ function saveSettings() {
   }
   s.figure_max_workers = parseInt($('feat_fig_workers').value) || 8;
   s.search_languages = selectedLangs();
+  s.search_regions = selectedRegions();
   localStorage.setItem('drt_settings', JSON.stringify(s));
   return s;
 }
@@ -709,8 +751,13 @@ function settingsParams() {
     p[key] = $(el).checked;
   }
   if (p.multilingual) {
-    const langs = selectedLangs();
-    p.search_languages = langs.length ? langs : ['ja', 'en'];
+    const regions = selectedRegions();
+    if (regions.length) {
+      p.search_regions = regions;      // 地域指定が言語指定より優先
+    } else {
+      const langs = selectedLangs();
+      p.search_languages = langs.length ? langs : ['ja', 'en'];
+    }
   }
   p.figure_max_workers = Math.min(16, Math.max(1, parseInt($('feat_fig_workers').value) || 8));
   return p;
@@ -741,25 +788,50 @@ document.querySelectorAll('.lang-tab').forEach(tab => {
   });
 });
 
+const REGION_NAMES = {jp:'日本', us:'米国', uk:'英国', au:'豪州', ca:'カナダ',
+  sg:'シンガポール', in:'インド', de:'ドイツ', fr:'フランス', es:'スペイン',
+  it:'イタリア', nl:'オランダ', pl:'ポーランド', ru:'ロシア', tr:'トルコ',
+  cn:'中国', tw:'台湾', hk:'香港', kr:'韓国', th:'タイ', vn:'ベトナム',
+  id:'インドネシア', my:'マレーシア', br:'ブラジル', mx:'メキシコ',
+  sa:'サウジ', ae:'UAE'};
+
 function selectedLangs() {
-  return Array.from(document.querySelectorAll('.lang-chip input:checked'))
+  return Array.from(document.querySelectorAll('.lang-chip input[data-lang]:checked'))
     .map(cb => cb.dataset.lang);
 }
 
 function setSelectedLangs(langs) {
-  document.querySelectorAll('.lang-chip input').forEach(cb => {
+  document.querySelectorAll('.lang-chip input[data-lang]').forEach(cb => {
     cb.checked = langs.includes(cb.dataset.lang);
+  });
+}
+
+function selectedRegions() {
+  return Array.from(document.querySelectorAll('.lang-chip input[data-region]:checked'))
+    .map(cb => cb.dataset.region);
+}
+
+function setSelectedRegions(regions) {
+  document.querySelectorAll('.lang-chip input[data-region]').forEach(cb => {
+    cb.checked = regions.includes(cb.dataset.region);
   });
 }
 
 function syncLangUI() {
   const on = $('feat_multilingual').checked;
   $('langPanel').style.display = on ? 'block' : 'none';
+  const regions = selectedRegions();
   const langs = selectedLangs();
-  $('langSummary').textContent = on
-    ? (langs.length ? '対象: ' + langs.map(l => LANG_NAMES[l] || l).join('・')
-                    : '言語を1つ以上選択してください')
-    : '対象言語は下のタブで選択（全16言語）';
+  if (!on) {
+    $('langSummary').textContent = '対象の地域/言語は下のタブで選択';
+  } else if (regions.length) {
+    $('langSummary').textContent =
+      '地域: ' + regions.map(r => REGION_NAMES[r] || r).join('・');
+  } else {
+    $('langSummary').textContent = langs.length
+      ? '対象: ' + langs.map(l => LANG_NAMES[l] || l).join('・')
+      : '地域または言語を1つ以上選択してください';
+  }
 }
 $('feat_multilingual').addEventListener('change', syncLangUI);
 document.querySelectorAll('.lang-chip input').forEach(cb =>

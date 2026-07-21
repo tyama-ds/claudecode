@@ -294,7 +294,11 @@ class Researcher:
                 llm_client=llm_client,
                 progress_callback=progress_callback,
             )
-            print(f"[Researcher] Multilingual search enabled: languages={multilingual_config.search_languages}")
+            if multilingual_config.search_regions:
+                print(f"[Researcher] Locale (region) search enabled: "
+                      f"regions={multilingual_config.search_regions}")
+            else:
+                print(f"[Researcher] Multilingual search enabled: languages={multilingual_config.search_languages}")
 
         # Extended mode settings
         self.extended_mode = extended_mode
@@ -888,6 +892,7 @@ class Researcher:
                                 snippet=mr.snippet,
                                 metadata={
                                     "source_language": mr.source_language,
+                                    "region": mr.region,
                                     "is_translated": mr.is_translated,
                                     "translation_confidence": mr.translation_confidence,
                                     "relevance_score": mr.relevance_score,
@@ -1029,6 +1034,12 @@ class Researcher:
                                     evidence_kwargs["source_language"] = result_meta["source_language"]
                                     evidence_kwargs["is_translated"] = result_meta.get("is_translated", False)
                                     evidence_kwargs["translation_confidence"] = result_meta.get("translation_confidence", 1.0)
+                                if result_meta.get("region"):
+                                    # locale search: which region the source
+                                    # was collected from (report grouping,
+                                    # exports, local-source auditing)
+                                    evidence_kwargs.setdefault("metadata", {})[
+                                        "region"] = result_meta["region"]
 
                                 self.evidence_locker.add_evidence(**evidence_kwargs)
                             else:
@@ -1894,6 +1905,7 @@ Return as JSON:
                                     snippet=mr.snippet,
                                     metadata={
                                         "source_language": mr.source_language,
+                                        "region": mr.region,
                                         "is_translated": mr.is_translated,
                                     },
                                 )
