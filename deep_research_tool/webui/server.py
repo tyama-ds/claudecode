@@ -58,6 +58,7 @@ _CONFIG_PARAM_MAP = {
     "report_version": "report_generator_version",
     "v2_writing_style": "v2_writing_style",
     "v2_enable_polish": "v2_enable_polish",
+    "live_report_word": "live_report_word",
     "chart_library": "chart_library",
     "auto_figures": "auto_figures",
     "enable_verification": "enable_verification",
@@ -224,6 +225,8 @@ class ResearchJob:
         self.error: Optional[str] = None
         self.started_at = time.time()
         self._lock = threading.Lock()
+        # Live report preview (WebUILiveSink), set by the worker thread
+        self.live_sink = None
         # Plan review state (state == "plan_review")
         self.plan: Optional[Dict[str, Any]] = None
         self.plan_review_deadline: Optional[float] = None
@@ -420,12 +423,18 @@ class JobManager:
                     job.update("修正回数の上限に達しました。この計画で開始します", 10)
                     return current if changed else None
 
+            # Live report preview: the UI polls /api/live-report for the
+            # chapters/figures as they are written
+            from ..report.live_report import WebUILiveSink
+            job.live_sink = WebUILiveSink()
+
             result = tool.run(
                 query=params.get("query", ""),
                 requirements=params.get("requirements", ""),
                 additional_documents=documents or None,
                 progress_callback=job.update,
                 plan_review_callback=plan_cb,
+                live_sink=job.live_sink,
             )
 
             job.result = {
@@ -524,6 +533,19 @@ class WebUIHandler(BaseHTTPRequestHandler):
             else:
                 data = job.to_dict()
                 data["version"] = __version__
+                self._send_json(data)
+        elif route == "/api/live-report":
+            manager: JobManager = self.server.job_manager
+            query = parse_qs(parsed.query)
+            job_id = (query.get("job_id") or [""])[0]
+            job = manager.get(job_id) if job_id else manager.current
+            if job is None or job.live_sink is None:
+                self._send_json({"available": False})
+            else:
+                data = job.live_sink.snapshot()
+                data["available"] = True
+                data["job_id"] = job.job_id
+                data["state"] = job.state
                 self._send_json(data)
         elif route == "/api/reports":
             # Recursive: parallel jobs write under output/<job-id>/reports/

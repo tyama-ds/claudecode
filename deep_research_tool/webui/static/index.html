@@ -498,6 +498,8 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
         </div>
         <label class="check"><input type="checkbox" id="auto_figures" checked> 図表を自動生成してレポートに挿入する（数値データが少ないテーマでは生成されないことがあります）</label>
         <label class="check"><input type="checkbox" id="v2_enable_polish" checked> 日本語の自然さを磨く推敲パス（V2）</label>
+        <label class="check"><input type="checkbox" id="live_report_word"> 🖋 Wordへライブ書き込み（このサーバーがWindows + Microsoft Word + pywin32 の場合のみ。Wordが起動し、章・グラフが順次書き込まれます）</label>
+        <p class="hint">検証前の内容には【草稿】マークが付き、最終確定時に検証済み本文へ自動で置き換わります。下の「ライブレポート」ペインはどの環境でも利用できます。</p>
       </div>
     </details>
 
@@ -615,6 +617,14 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
           <button id="planReviseBtn">✏ 修正を依頼</button>
         </div>
       </div>
+
+      <details id="livePanel" style="margin-top:14px">
+        <summary>📖 ライブレポート（書き上がった章から順次表示）</summary>
+        <div id="liveMeta" class="hint" style="margin:6px 0"></div>
+        <div id="liveContent" style="max-height:420px;overflow-y:auto;
+             border:1px solid var(--border,#ddd);border-radius:8px;
+             padding:12px 16px;font-size:13.5px;line-height:1.8"></div>
+      </details>
 
       <div class="log" id="log"></div>
 
@@ -844,6 +854,7 @@ function collectParams() {
     auto_figures: $('auto_figures').checked,
     plan_review: $('plan_review').checked,
     plan_review_timeout: 60,
+    live_report_word: $('live_report_word').checked,
     // provider credentials / endpoints / proxy from the ⚙ settings modal:
     // all providers' keys are sent so per-stage overrides can mix providers
     ...settingsParams(),
@@ -1091,6 +1102,77 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c =>
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
+
+// ==================== ライブレポート ====================
+let liveRev = -1;
+let liveJobId = null;
+
+// minimal markdown -> HTML for the live preview (headings / paragraphs)
+function liveMd(text) {
+  return String(text || '').split('\n').map(line => {
+    const t = line.trim();
+    if (!t) return '';
+    const h = t.match(/^(#{1,6})\s*(.*)$/);
+    if (h) return `<h4 style="margin:10px 0 4px">${escapeHtml(h[2])}</h4>`;
+    if (t.startsWith('- ') || t.startsWith('* '))
+      return `<div>・${escapeHtml(t.slice(2))}</div>`;
+    return `<p style="margin:4px 0">${escapeHtml(t)}</p>`;
+  }).join('');
+}
+
+function renderLive(data) {
+  const secs = data.sections || {};
+  const ids = Object.keys(secs).sort((a, b) =>
+    a.localeCompare(b, undefined, {numeric: true}));
+  const parts = [];
+  if (data.title) parts.push(`<h3 style="margin:4px 0">${escapeHtml(data.title)}</h3>`);
+  for (const sid of ids) {
+    const s = secs[sid];
+    const badge = s.draft
+      ? '<span style="color:#b8860b;font-size:11px;border:1px solid #b8860b;border-radius:4px;padding:0 4px;margin-left:6px">草稿</span>'
+      : '<span style="color:#2e7d32;font-size:11px;border:1px solid #2e7d32;border-radius:4px;padding:0 4px;margin-left:6px">確定</span>';
+    parts.push(`<h4 style="margin:14px 0 4px;border-bottom:1px solid #eee">`
+      + `${escapeHtml(sid)}. ${escapeHtml(s.title || '')}${badge}</h4>`);
+    parts.push(liveMd(s.text));
+    for (const f of (s.figures || [])) {
+      parts.push(`<div style="margin:8px 0"><img style="max-width:100%" `
+        + `src="/api/report-file?path=${encodeURIComponent(f.path)}">`
+        + `<div class="hint">${escapeHtml(f.caption || '')}</div></div>`);
+    }
+  }
+  if (data.finalized && (data.references || []).length) {
+    parts.push('<h4 style="margin:14px 0 4px">参考文献</h4>');
+    data.references.forEach((r, i) =>
+      parts.push(`<div style="font-size:12px">${i + 1}. ${escapeHtml(r)}</div>`));
+  }
+  $('liveContent').innerHTML = parts.join('') ||
+    '<p class="hint">章が書き上がるとここに表示されます…</p>';
+  $('liveMeta').textContent = data.finalized
+    ? '✅ 検証済みの最終本文です'
+    : `章 ${ids.length} 件を表示中（検証前の草稿。最終確定時に置き換わります）`;
+}
+
+async function pollLiveReport() {
+  if (!$('livePanel').open || !selectedJobId) return;
+  try {
+    const res = await fetch(`/api/live-report?job_id=${encodeURIComponent(selectedJobId)}`);
+    const data = await res.json();
+    if (!data.available) {
+      $('liveMeta').textContent = 'このジョブのライブレポートはありません';
+      return;
+    }
+    if (selectedJobId !== liveJobId || data.rev !== liveRev) {
+      liveJobId = selectedJobId;
+      liveRev = data.rev;
+      renderLive(data);
+    }
+  } catch (e) { /* keep polling */ }
+}
+setInterval(pollLiveReport, 2000);
+$('livePanel').addEventListener('toggle', () => {
+  liveRev = -1;          // force re-render when reopened
+  pollLiveReport();
+});
 
 async function pollJobs() {
   try {

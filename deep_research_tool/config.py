@@ -521,6 +521,12 @@ class ReportConfig:
     # Chart rendering library ("matplotlib" or "seaborn")
     chart_library: str = "matplotlib"
 
+    # Live report: progressively write the report into a visible
+    # Microsoft Word window while research runs (Windows + Word + pywin32;
+    # silently disabled elsewhere). The Web UI live preview is always
+    # available regardless of this flag.
+    live_report_word: bool = False
+
     # Auto figure/table generation settings
     auto_figures: bool = False  # Auto-generate figures/tables during run_research
     # Parallel workers for the figure stage (per-section image/table
@@ -775,6 +781,8 @@ def create_config(
     chart_library: str = "matplotlib",
     # Per-stage LLM overrides
     stage_llm: Optional[Dict[str, Dict[str, Any]]] = None,
+    # Live report parameters
+    live_report_word: bool = False,
     # Auto figure/table generation parameters
     auto_figures: bool = False,
     figure_max_workers: int = 8,
@@ -944,6 +952,10 @@ def create_config(
             Example: {"planning": {"provider": "openai", "model": "gpt-5-mini"},
                       "writing": {"provider": "anthropic",
                                   "model": "claude-3-5-sonnet-20241022"}}
+        live_report_word: Progressively write the report into a visible
+            Microsoft Word window while research runs (Windows + Word +
+            pywin32 required; disabled gracefully elsewhere). Drafts are
+            watermarked and replaced by the verified final body
         auto_figures: Auto-generate figures/tables during run_research
         length_mode: 'adaptive' (length as an information-driven range,
             default) or 'fixed' (legacy fixed-quota behavior)
@@ -1086,6 +1098,7 @@ def create_config(
         v2_include_glossary=v2_include_glossary,
         v2_enable_polish=v2_enable_polish,
         chart_library=chart_library,
+        live_report_word=live_report_word,
         auto_figures=auto_figures,
         figure_max_workers=figure_max_workers,
         length_mode=length_mode,

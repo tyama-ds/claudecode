@@ -386,6 +386,7 @@ class DeepResearchTool:
         additional_documents: List[str] = None,
         progress_callback: Callable[[str, float], None] = None,
         plan_review_callback: Callable = None,
+        live_sink=None,
     ) -> Dict[str, Any]:
         """
         Run the complete research workflow.
@@ -507,6 +508,18 @@ class DeepResearchTool:
 
         evidence_locker = self.researcher.get_evidence_locker()
 
+        # --- live report sinks (Web UI preview and/or Word COM) ---
+        # Everything emitted before on_finalized is a watermarked DRAFT;
+        # the verified final body replaces it at freeze.
+        self.finalization_outcome = None
+        live_sink = self._build_live_sink(live_sink, session)
+        self.live_sink = live_sink
+        if live_sink is not None and session.research_plan:
+            toc = [{"section": it.section, "title": it.title}
+                   for it in (session.research_plan.table_of_contents
+                              .get_flat_sections())]
+            live_sink.on_plan(session.research_plan.title, toc)
+
         # Check if content expansion is needed (target specified and content too short)
         session = self._expand_if_needed(
             session=session,
@@ -563,6 +576,13 @@ class DeepResearchTool:
                 evidence_locker=evidence_locker,
                 query=query,
             )
+            # live report: V1 section drafts become visible here
+            if live_sink is not None:
+                for _sid, _sdata in session.section_contents.items():
+                    if _sid.startswith("_") or not _sdata.get("content"):
+                        continue
+                    live_sink.on_section(_sid, _sdata.get("title", _sid),
+                                         _sdata["content"], draft=True)
             # V1 verification now runs through the SAME finalization
             # pipeline as V2/V3 — in the V1 branch below, after the Fermi
             # section exists, immediately before rendering.
@@ -577,6 +597,10 @@ class DeepResearchTool:
             output_dir=self.config.report.output_dir / "reports",
         )
         self.report_generator = generator
+        # live report: V2/V3 emit every chapter draft/update as it is
+        # written (V1 sections were emitted after enhancement above)
+        if hasattr(generator, "live_sink"):
+            generator.live_sink = live_sink
 
         # Stage-1 adaptive length: the pre-draft allocation from the
         # research plan feeds draft generation (audit item 10). V2/V3
@@ -665,6 +689,7 @@ class DeepResearchTool:
                         session=session,
                         evidence_locker=evidence_locker,
                     )
+                    self._emit_live_figures(live_sink, figure_collection)
                 except Exception as e:
                     print(f"[V3/AutoFigures] Failed: {e}. Continuing without figures.")
                     ResearchWarnings.get_instance().add(
@@ -868,6 +893,29 @@ class DeepResearchTool:
         if version_tag == "v1" and warnings_collector.has_warnings():
             self._append_warnings_to_report(
                 active_report_path, warnings_collector)
+
+        # Live report: deliver the VERIFIED final body (replaces drafts,
+        # removes watermarks, appends references) and release the sinks.
+        if live_sink is not None:
+            try:
+                refs = [e.citation_text
+                        for e in evidence_locker.get_all_evidence()]
+                outcome = getattr(self, "finalization_outcome", None)
+                if outcome is not None:
+                    live_sink.on_finalized(outcome["chapters"], refs)
+                else:
+                    final_chapters = {
+                        sid: sd.get("content", "")
+                        for sid, sd in session.section_contents.items()
+                        if not sid.startswith("_") and sd.get("content")}
+                    live_sink.on_finalized(final_chapters, refs)
+            except Exception as e:
+                print(f"[LiveReport] finalize event failed: {e}")
+            finally:
+                try:
+                    live_sink.close()
+                except Exception:
+                    pass
 
         # Get token usage statistics
         token_stats = get_token_stats()
@@ -1262,6 +1310,49 @@ class DeepResearchTool:
             content_parts.append(section_data.get("content", ""))
 
         return "\n\n".join(content_parts)
+
+    # ------------------------------------------------------------------
+    # Live report (progressive writing while research runs)
+    # ------------------------------------------------------------------
+
+    def _build_live_sink(self, external_sink, session):
+        """Combine the caller's sink (Web UI preview) with the Word COM
+        sink when config.report.live_report_word is on. Returns None when
+        no live output is wanted."""
+        from .report.live_report import CompositeSink, WordComSink
+        sinks = []
+        if external_sink is not None:
+            sinks.append(external_sink)
+        if self.config.report.live_report_word:
+            out_dir = self.config.report.output_dir / "reports"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            sinks.append(WordComSink(
+                output_path=out_dir / f"report_live_{session.session_id}.docx",
+                language=self.config.research.language,
+            ))
+        if not sinks:
+            return None
+        return CompositeSink(sinks)
+
+    @staticmethod
+    def _emit_live_figures(live_sink, collection) -> None:
+        """Emit generated charts/figures to the live report."""
+        if live_sink is None or collection is None:
+            return
+        try:
+            for fig in list(getattr(collection, "charts", []) or []) + \
+                    list(getattr(collection, "figures", []) or []):
+                path = getattr(fig, "image_path", None)
+                if not path:
+                    continue
+                live_sink.on_figure(
+                    getattr(fig, "section_id", "") or "",
+                    str(path),
+                    getattr(fig, "caption", "") or
+                    getattr(fig, "title", "") or "",
+                )
+        except Exception as e:
+            print(f"[LiveReport] figure emit failed: {e}")
 
     # ------------------------------------------------------------------
     # Finalization (common pipeline for V1 / V2 / V3 / manual mode)
@@ -1927,6 +2018,9 @@ Output only the text (no JSON, no heading):"""
                 f"Report will not contain any auto-generated visual elements. Error: {e}",
             )
             return None
+
+        # live report: charts/figures become visible as soon as generated
+        self._emit_live_figures(getattr(self, "live_sink", None), collection)
 
         # Guarantee layer: sections whose table extraction came up empty
         # still get a 主要数値一覧 table synthesized from the numerical store

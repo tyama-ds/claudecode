@@ -293,6 +293,14 @@ def cli():
     help="Auto-generate figures/tables and embed in report"
 )
 @click.option(
+    "--live-word",
+    is_flag=True,
+    default=False,
+    help="Write the report progressively into a visible Microsoft Word "
+         "window while research runs (Windows + Word + pywin32; drafts "
+         "are watermarked and replaced by the verified final body)"
+)
+@click.option(
     "--chart-library",
     type=click.Choice(["matplotlib", "seaborn"]),
     default="matplotlib",
@@ -353,6 +361,7 @@ def research(
     ai_crawl_site_depth: int,
     gap_fill_rounds: int,
     auto_figures: bool,
+    live_word: bool,
     chart_library: str,
     verbose: bool,
     openai_key: Optional[str],
@@ -411,6 +420,7 @@ def research(
         ai_crawl_site_depth=ai_crawl_site_depth,
         max_gap_fill_rounds=gap_fill_rounds,
         auto_figures=auto_figures,
+        live_report_word=live_word,
         chart_library=chart_library,
     )
 
