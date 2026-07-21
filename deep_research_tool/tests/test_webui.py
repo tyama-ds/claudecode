@@ -127,6 +127,30 @@ class TestEndpoints:
         assert status == 200
         assert json.loads(body)["reports"] == []
 
+    def test_live_report_unavailable_without_job(self, server):
+        status, body = get(server, "/api/live-report")
+        assert status == 200
+        assert json.loads(body)["available"] is False
+
+    def test_live_report_serves_job_snapshot(self, server):
+        from deep_research_tool.report.live_report import WebUILiveSink
+
+        manager = server.job_manager
+        job = ResearchJob("job-live", "テーマ")
+        manager.jobs[job.job_id] = job
+        job.live_sink = WebUILiveSink()
+        job.live_sink.on_plan("ライブタイトル", [{"section": "1", "title": "章"}])
+        job.live_sink.on_section("1", "章", "草稿本文", draft=True)
+
+        status, body = get(server, "/api/live-report?job_id=job-live")
+        assert status == 200
+        data = json.loads(body)
+        assert data["available"] is True
+        assert data["title"] == "ライブタイトル"
+        assert data["sections"]["1"]["text"] == "草稿本文"
+        assert data["sections"]["1"]["draft"] is True
+        assert data["rev"] >= 2
+
     def test_reports_lists_files(self, server, tmp_path):
         reports_dir = tmp_path / "reports"
         reports_dir.mkdir()

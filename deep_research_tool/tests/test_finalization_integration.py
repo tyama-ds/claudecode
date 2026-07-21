@@ -1013,6 +1013,21 @@ class TestWebUIParams(unittest.TestCase):
         self.assertEqual(kwargs["min_claim_support_score"], 0.9)
         self.assertEqual(kwargs["length_mode"], "fixed")
 
+    def test_local_llm_api_key_reaches_config(self):
+        """The settings modal's ローカルLLM APIキー flows UI -> server map
+        -> create_config -> the active key for provider='local'."""
+        from deep_research_tool.webui.server import build_config_kwargs
+        kwargs = build_config_kwargs({
+            "provider": "local",
+            "local_base_url": "http://192.168.1.10/v1",
+            "local_api_key": "token-xyz",
+            "local_backend": "openai_compatible",
+        })
+        self.assertEqual(kwargs["local_api_key"], "token-xyz")
+        config = create_config(**kwargs)
+        self.assertEqual(config.api.local_api_key, "token-xyz")
+        self.assertEqual(config.api.get_active_api_key(), "token-xyz")
+
     def test_invalid_values_rejected(self):
         from deep_research_tool.webui.server import build_config_kwargs
         for bad in (

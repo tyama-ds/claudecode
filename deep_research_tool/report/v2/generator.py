@@ -225,10 +225,25 @@ class ReportGeneratorV2:
         # When set, each chapter's length instruction uses its own target
         # instead of the uniform per-chapter average.
         self.section_char_targets: Dict[str, int] = {}
+        # Optional live-report sink: notified after every chapter draft
+        # and after refine/polish updates (content is a DRAFT until the
+        # finalization pipeline freezes it)
+        self.live_sink = None
 
         # Initialize components
         self.glossary_manager = GlossaryManager(llm_client, language)
         self.consistency_checker = ConsistencyChecker(llm_client, language)
+
+    def _notify_live(self, section_number: str, section_title: str,
+                     content: str) -> None:
+        if self.live_sink is None:
+            return
+        try:
+            self.live_sink.on_section(section_number, section_title,
+                                      content, draft=True)
+        except Exception as e:
+            print(f"[ReportGeneratorV2] live sink failed: {e}")
+            self.live_sink = None
 
     def generate_report(
         self,
@@ -324,6 +339,7 @@ class ReportGeneratorV2:
             )
 
             chapters[section_num] = chapter
+            self._notify_live(section_num, section_title, chapter.content)
 
             # Update context with chapter summary
             summary = self._extract_chapter_summary(chapter)
@@ -760,6 +776,8 @@ Output only the revised content (no JSON):"""
                 chapter.content = strip_label_prefixes(refined_content)
                 chapter.word_count = len(refined_content)
                 chapter.is_draft = False
+                self._notify_live(section_num, chapter.section_title,
+                                  chapter.content)
 
             except Exception as e:
                 print(f"[ReportGeneratorV2] Refinement failed for {section_num}: {e}")
@@ -842,6 +860,8 @@ Output only the polished body (no preamble, no JSON, no code block):"""
                     chapter.content = polished
                     chapter.word_count = len(polished)
                     chapter.is_draft = False
+                    self._notify_live(section_num, chapter.section_title,
+                                      chapter.content)
                 else:
                     print(f"[ReportGeneratorV2] Polish rejected for {section_num} "
                           f"(length {len(polished)} vs original {original_len})")

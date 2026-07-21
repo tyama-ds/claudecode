@@ -13,16 +13,22 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Callable, Any, Tuple
 from difflib import SequenceMatcher
 
-from ..config import MultilingualSearchConfig, LANGUAGE_REGION_MAP
+from ..config import (
+    LANGUAGE_REGION_MAP,
+    MultilingualSearchConfig,
+    REGION_LOCALE_MAP,
+)
 
 
 @dataclass
 class TranslatedQuery:
-    """A query translated to a specific language."""
+    """A query translated (or localized) for a language/region."""
     original_query: str
     translated_query: str
     target_language: str
     confidence: float = 1.0
+    # region-first mode: the locale this query targets ("" in language mode)
+    region: str = ""
 
 
 @dataclass
@@ -34,6 +40,8 @@ class MultilingualSearchResult:
     source_language: str
     search_query: str
     relevance_score: float = 0.0
+    # locale the result was found from (region-first mode)
+    region: str = ""
 
     # Original content before translation
     original_title: str = ""
@@ -54,6 +62,7 @@ class MultilingualSearchStats:
     """Statistics for multilingual search."""
     total_results: int = 0
     results_by_language: Dict[str, int] = field(default_factory=dict)
+    results_by_region: Dict[str, int] = field(default_factory=dict)
     duplicates_removed: int = 0
     queries_translated: int = 0
     translation_errors: int = 0
@@ -62,6 +71,7 @@ class MultilingualSearchStats:
         return {
             "total_results": self.total_results,
             "results_by_language": self.results_by_language,
+            "results_by_region": self.results_by_region,
             "duplicates_removed": self.duplicates_removed,
             "queries_translated": self.queries_translated,
             "translation_errors": self.translation_errors,
@@ -111,6 +121,17 @@ class MultilingualSearcher:
         if self.progress_callback:
             self.progress_callback(message, progress)
 
+    def _llm_text(self, prompt: str, max_tokens: int = 200) -> str:
+        """LLM call returning plain text.
+
+        LLM clients return a response OBJECT with a .content attribute;
+        the previous code called .strip() on the object, which raised and
+        silently fell back to the untranslated query on every call.
+        """
+        response = self.llm_client.generate(prompt, max_tokens=max_tokens)
+        text = getattr(response, "content", response)
+        return str(text or "").strip()
+
     def translate_query(self, query: str, target_language: str) -> TranslatedQuery:
         """
         Translate a query to the target language using LLM.
@@ -142,8 +163,9 @@ Query: {query}
 
 Translated query:"""
 
-            response = self.llm_client.generate(prompt, max_tokens=200)
-            translated = response.strip()
+            translated = self._llm_text(prompt)
+            if not translated:
+                raise ValueError("empty translation")
 
             self.stats.queries_translated += 1
 
@@ -154,7 +176,7 @@ Translated query:"""
                 confidence=0.9
             )
 
-        except Exception as e:
+        except Exception:
             self.stats.translation_errors += 1
             # Fall back to original query
             return TranslatedQuery(
@@ -162,6 +184,61 @@ Translated query:"""
                 translated_query=query,
                 target_language=target_language,
                 confidence=0.3
+            )
+
+    def localize_query(self, query: str, region: str) -> TranslatedQuery:
+        """LOCALIZE a query for one region (not a mere translation).
+
+        The output uses the locale's language AND local vocabulary: how
+        locals actually refer to the topic — local institution names,
+        program/subsidy names, common local phrasing — so the search
+        surfaces genuinely local sources.
+        """
+        info = REGION_LOCALE_MAP.get(region, {})
+        language = info.get("language", "en")
+        if not self.llm_client or not self.config.localize_queries:
+            translated = (self.translate_query(query, language)
+                          if self.llm_client else None)
+            return TranslatedQuery(
+                original_query=query,
+                translated_query=(translated.translated_query
+                                  if translated else query),
+                target_language=language,
+                confidence=translated.confidence if translated else 0.5,
+                region=region,
+            )
+
+        try:
+            prompt = f"""You are localizing a web search query for {info.get('name', region)}.
+Rewrite the query in {info.get('lang_name', language)} the way A LOCAL
+would search for this topic in {info.get('name', region)}:
+- use the LOCAL names of institutions, agencies, programs, subsidies,
+  regulations or products related to the topic (not literal translations)
+- use the vocabulary locals actually use
+- keep it concise and suitable for a web search engine
+
+Original query: {query}
+
+Output ONLY the localized query, nothing else."""
+            localized = self._llm_text(prompt)
+            if not localized:
+                raise ValueError("empty localization")
+            self.stats.queries_translated += 1
+            return TranslatedQuery(
+                original_query=query,
+                translated_query=localized,
+                target_language=language,
+                confidence=0.9,
+                region=region,
+            )
+        except Exception:
+            self.stats.translation_errors += 1
+            return TranslatedQuery(
+                original_query=query,
+                translated_query=query,
+                target_language=language,
+                confidence=0.3,
+                region=region,
             )
 
     def translate_queries(self, query: str) -> List[TranslatedQuery]:
@@ -175,6 +252,19 @@ Translated query:"""
             List of TranslatedQuery objects
         """
         translations = []
+
+        # REGION-FIRST mode: one localized query per region
+        if self.config.search_regions:
+            for region in self.config.search_regions:
+                if self.config.query_translation == "llm":
+                    translations.append(self.localize_query(query, region))
+                else:
+                    info = REGION_LOCALE_MAP.get(region, {})
+                    translations.append(TranslatedQuery(
+                        original_query=query, translated_query=query,
+                        target_language=info.get("language", "en"),
+                        confidence=1.0, region=region))
+            return translations
 
         for lang in self.config.search_languages:
             if self.config.query_translation == "llm":
@@ -204,11 +294,18 @@ Translated query:"""
         Returns:
             List of MultilingualSearchResult objects
         """
-        region = self.config.get_region_for_language(query.target_language)
-        print(f"[Multilingual] Searching ({query.target_language}): {query.translated_query}")
+        if query.region:
+            # region-first: the locale's DuckDuckGo region code (kl)
+            info = REGION_LOCALE_MAP.get(query.region, {})
+            region = info.get("kl", "wt-wt")
+            label = f"{query.region}/{query.target_language}"
+        else:
+            region = self.config.get_region_for_language(query.target_language)
+            label = query.target_language
+        print(f"[Multilingual] Searching ({label}): {query.translated_query}")
 
         try:
-            # Use the search client with language-specific region
+            # Use the search client with the locale-specific region
             raw_results = self.search_client.search(
                 query.translated_query,
                 max_results=self.config.results_per_language,
@@ -225,6 +322,7 @@ Translated query:"""
                     search_query=query.translated_query,
                     original_title=r.title if hasattr(r, 'title') else r.get('title', ''),
                     original_snippet=r.snippet if hasattr(r, 'snippet') else r.get('snippet', ''),
+                    region=query.region,
                 )
                 results.append(result)
 
@@ -253,12 +351,15 @@ Translated query:"""
         self._report_progress("Translating queries...", 10)
         translated_queries = self.translate_queries(query)
 
-        # Search in parallel
+        # Search in parallel (one task per query: regions or languages)
         all_results = []
-        max_workers = min(self.config.max_concurrent_searches,
-                         len(self.config.search_languages))
+        max_workers = max(1, min(self.config.max_concurrent_searches,
+                                 len(translated_queries)))
 
-        self._report_progress(f"Searching in {len(self.config.search_languages)} languages...", 20)
+        scope = (f"{len(self.config.search_regions)} regions"
+                 if self.config.search_regions
+                 else f"{len(self.config.search_languages)} languages")
+        self._report_progress(f"Searching in {scope}...", 20)
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
@@ -275,15 +376,26 @@ Translated query:"""
 
                     # Update stats
                     lang = tq.target_language
-                    self.stats.results_by_language[lang] = len(results)
+                    self.stats.results_by_language[lang] = (
+                        self.stats.results_by_language.get(lang, 0)
+                        + len(results))
+                    if tq.region:
+                        self.stats.results_by_region[tq.region] = (
+                            self.stats.results_by_region.get(tq.region, 0)
+                            + len(results))
 
                 except Exception as e:
                     pass
 
                 completed += 1
                 progress = 20 + (60 * completed / len(futures))
-                lang_name = LANGUAGE_REGION_MAP.get(tq.target_language, {}).get("name", tq.target_language)
-                self._report_progress(f"Searched {lang_name}", progress)
+                if tq.region:
+                    label = REGION_LOCALE_MAP.get(tq.region, {}).get(
+                        "name", tq.region)
+                else:
+                    label = LANGUAGE_REGION_MAP.get(
+                        tq.target_language, {}).get("name", tq.target_language)
+                self._report_progress(f"Searched {label}", progress)
 
         # Deduplicate results
         self._report_progress("Deduplicating results...", 85)
@@ -369,8 +481,25 @@ Translated query:"""
 
             result.relevance_score = base_score * lang_weight
 
+            # Region mode: genuinely LOCAL sources (the region's country
+            # TLD) get a boost so local portals/agencies/media outrank
+            # global aggregators
+            if result.region and self.config.prefer_local_sources:
+                if self._is_local_domain(result.url, result.region):
+                    result.relevance_score += self.config.local_source_boost
+
         # Sort by score descending
         return sorted(results, key=lambda r: r.relevance_score, reverse=True)
+
+    @staticmethod
+    def _is_local_domain(url: str, region: str) -> bool:
+        """True when the URL's host ends with the region's country TLD."""
+        tld = REGION_LOCALE_MAP.get(region, {}).get("tld", "")
+        if not tld or not url:
+            return False
+        m = re.match(r"https?://([^/]+)", url)
+        host = (m.group(1) if m else url).split(":")[0].lower()
+        return host.endswith(tld)
 
     def translate_content(
         self,
@@ -419,6 +548,16 @@ Translation:"""
         lines.append(f"**Total Results:** {self.stats.total_results}")
         lines.append(f"**Duplicates Removed:** {self.stats.duplicates_removed}")
         lines.append("")
+
+        if self.stats.results_by_region:
+            lines.append("#### Results by Region (locale search)")
+            lines.append("| Region | Count |")
+            lines.append("|--------|-------|")
+            for region, count in sorted(self.stats.results_by_region.items(),
+                                        key=lambda x: x[1], reverse=True):
+                name = REGION_LOCALE_MAP.get(region, {}).get("name", region)
+                lines.append(f"| {name} | {count} |")
+            lines.append("")
 
         distribution = self.stats.get_language_distribution()
         if distribution:

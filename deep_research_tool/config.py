@@ -11,6 +11,68 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+# Locale (country/region) map for region-first "local information" search.
+# Keys are lowercase ISO-3166-ish region codes the user selects; each entry
+# carries the DuckDuckGo region (kl), the locale's primary language, display
+# names and the country TLD used to boost genuinely local sources.
+REGION_LOCALE_MAP: Dict[str, Dict[str, str]] = {
+    "jp": {"kl": "jp-jp", "language": "ja", "lang_name": "Japanese",
+           "name": "Japan", "native": "日本", "tld": ".jp"},
+    "us": {"kl": "us-en", "language": "en", "lang_name": "English",
+           "name": "United States", "native": "米国", "tld": ".us"},
+    "uk": {"kl": "uk-en", "language": "en", "lang_name": "English",
+           "name": "United Kingdom", "native": "英国", "tld": ".uk"},
+    "au": {"kl": "au-en", "language": "en", "lang_name": "English",
+           "name": "Australia", "native": "豪州", "tld": ".au"},
+    "ca": {"kl": "ca-en", "language": "en", "lang_name": "English",
+           "name": "Canada", "native": "カナダ", "tld": ".ca"},
+    "sg": {"kl": "sg-en", "language": "en", "lang_name": "English",
+           "name": "Singapore", "native": "シンガポール", "tld": ".sg"},
+    "in": {"kl": "in-en", "language": "en", "lang_name": "English",
+           "name": "India", "native": "インド", "tld": ".in"},
+    "de": {"kl": "de-de", "language": "de", "lang_name": "German",
+           "name": "Germany", "native": "ドイツ", "tld": ".de"},
+    "fr": {"kl": "fr-fr", "language": "fr", "lang_name": "French",
+           "name": "France", "native": "フランス", "tld": ".fr"},
+    "es": {"kl": "es-es", "language": "es", "lang_name": "Spanish",
+           "name": "Spain", "native": "スペイン", "tld": ".es"},
+    "it": {"kl": "it-it", "language": "it", "lang_name": "Italian",
+           "name": "Italy", "native": "イタリア", "tld": ".it"},
+    "nl": {"kl": "nl-nl", "language": "nl", "lang_name": "Dutch",
+           "name": "Netherlands", "native": "オランダ", "tld": ".nl"},
+    "pl": {"kl": "pl-pl", "language": "pl", "lang_name": "Polish",
+           "name": "Poland", "native": "ポーランド", "tld": ".pl"},
+    "ru": {"kl": "ru-ru", "language": "ru", "lang_name": "Russian",
+           "name": "Russia", "native": "ロシア", "tld": ".ru"},
+    "tr": {"kl": "tr-tr", "language": "tr", "lang_name": "Turkish",
+           "name": "Turkey", "native": "トルコ", "tld": ".tr"},
+    "cn": {"kl": "cn-zh", "language": "zh", "lang_name": "Simplified Chinese",
+           "name": "China", "native": "中国", "tld": ".cn"},
+    "tw": {"kl": "tw-tzh", "language": "zh", "lang_name": "Traditional Chinese",
+           "name": "Taiwan", "native": "台湾", "tld": ".tw"},
+    "hk": {"kl": "hk-tzh", "language": "zh", "lang_name": "Traditional Chinese",
+           "name": "Hong Kong", "native": "香港", "tld": ".hk"},
+    "kr": {"kl": "kr-kr", "language": "ko", "lang_name": "Korean",
+           "name": "South Korea", "native": "韓国", "tld": ".kr"},
+    "th": {"kl": "th-th", "language": "th", "lang_name": "Thai",
+           "name": "Thailand", "native": "タイ", "tld": ".th"},
+    "vn": {"kl": "vn-vi", "language": "vi", "lang_name": "Vietnamese",
+           "name": "Vietnam", "native": "ベトナム", "tld": ".vn"},
+    "id": {"kl": "id-id", "language": "id", "lang_name": "Indonesian",
+           "name": "Indonesia", "native": "インドネシア", "tld": ".id"},
+    "my": {"kl": "my-ms", "language": "ms", "lang_name": "Malay",
+           "name": "Malaysia", "native": "マレーシア", "tld": ".my"},
+    "br": {"kl": "br-pt", "language": "pt", "lang_name": "Portuguese",
+           "name": "Brazil", "native": "ブラジル", "tld": ".br"},
+    "mx": {"kl": "mx-es", "language": "es", "lang_name": "Spanish",
+           "name": "Mexico", "native": "メキシコ", "tld": ".mx"},
+    "sa": {"kl": "xa-ar", "language": "ar", "lang_name": "Arabic",
+           "name": "Saudi Arabia", "native": "サウジアラビア", "tld": ".sa"},
+    "ae": {"kl": "xa-ar", "language": "ar", "lang_name": "Arabic",
+           "name": "UAE", "native": "アラブ首長国連邦", "tld": ".ae"},
+}
+
+
 # Language to region mapping for multilingual search
 LANGUAGE_REGION_MAP: Dict[str, Dict[str, str]] = {
     "ja": {"region": "jp-jp", "name": "Japanese", "native": "日本語"},
@@ -293,6 +355,19 @@ class MultilingualSearchConfig:
     # Languages to search in (ISO 639-1 codes)
     search_languages: List[str] = field(default_factory=lambda: ["ja", "en"])
 
+    # REGION-FIRST mode (locale search): when non-empty, searches run per
+    # REGION (REGION_LOCALE_MAP keys, e.g. ["de", "th"]) instead of per
+    # language — each region uses its DuckDuckGo locale (kl), queries are
+    # LOCALIZED (local terminology / institution names, not just
+    # translated) and genuinely local sources (country TLD) are boosted.
+    search_regions: List[str] = field(default_factory=list)
+    localize_queries: bool = True       # 現地化 (vs plain translation)
+    prefer_local_sources: bool = True   # boost country-TLD domains
+    local_source_boost: float = 0.3     # score bonus for local domains
+
+    def get_region_info(self, region: str) -> Dict[str, str]:
+        return REGION_LOCALE_MAP.get(region, {})
+
     # Results per language
     results_per_language: int = 10
 
@@ -347,6 +422,12 @@ class DeepThinkConfig:
 
     # Quality thresholds
     fidelity_threshold: float = 0.7
+
+    # Sections processed concurrently (each worker gets its OWN processor
+    # instance — the processor's validator/metrics are not thread-safe).
+    # DeepThink was previously fully sequential: sections one by one,
+    # each with several serial LLM calls.
+    max_workers: int = 4
 
     # Hidden parameters (internal use)
     _expansion_tolerance: float = 0.2
@@ -521,6 +602,12 @@ class ReportConfig:
     # Chart rendering library ("matplotlib" or "seaborn")
     chart_library: str = "matplotlib"
 
+    # Live report: progressively write the report into a visible
+    # Microsoft Word window while research runs (Windows + Word + pywin32;
+    # silently disabled elsewhere). The Web UI live preview is always
+    # available regardless of this flag.
+    live_report_word: bool = False
+
     # Auto figure/table generation settings
     auto_figures: bool = False  # Auto-generate figures/tables during run_research
     # Parallel workers for the figure stage (per-section image/table
@@ -679,6 +766,14 @@ class Config:
                 f"min_score_improvement must be >= 0 "
                 f"(got {rc.min_score_improvement})")
 
+        # --- Region (locale) search validation ---
+        unknown_regions = [r for r in self.multilingual.search_regions
+                           if r not in REGION_LOCALE_MAP]
+        if unknown_regions:
+            errors.append(
+                f"Unknown search_regions: {unknown_regions}. "
+                f"Valid codes: {sorted(REGION_LOCALE_MAP)}")
+
         return errors
 
 
@@ -689,6 +784,7 @@ def create_config(
     openai_base_url: Optional[str] = None,
     anthropic_base_url: Optional[str] = None,
     local_base_url: Optional[str] = None,
+    local_api_key: Optional[str] = None,
     local_backend: str = "ollama",
     model: Optional[str] = None,
     search_method: str = "duckduckgo",
@@ -719,6 +815,7 @@ def create_config(
     # DeepThink parameters
     deep_think: bool = False,
     deep_think_level: float = 0.5,
+    deep_think_max_workers: int = 4,
     reasoning_iterations: int = 3,
     consistency_threshold: float = 0.3,
     consistency_mode: str = "warn",
@@ -726,6 +823,9 @@ def create_config(
     # Multilingual search parameters
     multilingual: bool = False,
     search_languages: Optional[List[str]] = None,
+    search_regions: Optional[List[str]] = None,
+    localize_queries: bool = True,
+    prefer_local_sources: bool = True,
     results_per_language: int = 10,
     query_translation: str = "llm",
     translate_results: bool = True,
@@ -774,6 +874,8 @@ def create_config(
     chart_library: str = "matplotlib",
     # Per-stage LLM overrides
     stage_llm: Optional[Dict[str, Dict[str, Any]]] = None,
+    # Live report parameters
+    live_report_word: bool = False,
     # Auto figure/table generation parameters
     auto_figures: bool = False,
     figure_max_workers: int = 8,
@@ -840,6 +942,9 @@ def create_config(
         local_base_url: Local LLM server URL for provider='local' (optional;
             falls back to LOCAL_LLM_BASE_URL env var, then the backend default,
             e.g. http://localhost:11434 for Ollama)
+        local_api_key: Auth token for the local LLM server (optional; falls
+            back to the LOCAL_LLM_API_KEY env var). Most local servers need
+            no key; corporate LLM gateways often do
         local_backend: Local LLM backend type ('ollama', 'vllm', or
             'openai_compatible')
         model: Model name to use (optional, uses default for provider)
@@ -879,12 +984,26 @@ def create_config(
         verify_ssl: Verify SSL certificates (set False for self-signed certs)
         deep_think: Enable DeepThink reasoning enhancement
         deep_think_level: Reasoning depth level (0.0-1.0, 0=conservative, 1=exploratory)
+        deep_think_max_workers: Sections processed concurrently by
+            DeepThink (default 4; each section runs its own processor so
+            LLM calls overlap instead of running strictly one by one)
         reasoning_iterations: Number of reasoning iterations for DeepThink
         consistency_threshold: Threshold for consistency check (0.0-1.0)
         consistency_mode: How to handle consistency issues ('warn', 'revise', 'strict')
         fidelity_threshold: Minimum source fidelity score (0.0-1.0)
         multilingual: Enable multilingual search mode
         search_languages: List of language codes to search (e.g., ['ja', 'en', 'zh'])
+        search_regions: REGION-FIRST locale search: list of region codes
+            (REGION_LOCALE_MAP keys, e.g. ['de', 'th', 'us']). Each region
+            searches with its DuckDuckGo locale, localized queries and a
+            local-source (country TLD) boost. Setting this enables the
+            multilingual machinery even when `multilingual` is False and
+            takes precedence over search_languages
+        localize_queries: In region mode, generate LOCALIZED queries
+            (local terminology, institution names, local program names)
+            instead of plain translations (default True)
+        prefer_local_sources: Boost results on the region's country TLD
+            so genuinely local sources rank higher (default True)
         results_per_language: Number of results per language
         query_translation: Query translation method ('llm' or 'none')
         translate_results: Whether to translate results to output language
@@ -940,6 +1059,10 @@ def create_config(
             Example: {"planning": {"provider": "openai", "model": "gpt-5-mini"},
                       "writing": {"provider": "anthropic",
                                   "model": "claude-3-5-sonnet-20241022"}}
+        live_report_word: Progressively write the report into a visible
+            Microsoft Word window while research runs (Windows + Word +
+            pywin32 required; disabled gracefully elsewhere). Drafts are
+            watermarked and replaced by the verified final body
         auto_figures: Auto-generate figures/tables during run_research
         length_mode: 'adaptive' (length as an information-driven range,
             default) or 'fixed' (legacy fixed-quota behavior)
@@ -1000,6 +1123,7 @@ def create_config(
         openai_base_url=openai_base_url,
         anthropic_base_url=anthropic_base_url,
         local_base_url=local_base_url,
+        local_api_key=local_api_key,
         local_backend=LocalLLMBackend(local_backend),
         stage_overrides=dict(stage_llm) if stage_llm else {},
     )
@@ -1081,6 +1205,7 @@ def create_config(
         v2_include_glossary=v2_include_glossary,
         v2_enable_polish=v2_enable_polish,
         chart_library=chart_library,
+        live_report_word=live_report_word,
         auto_figures=auto_figures,
         figure_max_workers=figure_max_workers,
         length_mode=length_mode,
@@ -1116,6 +1241,7 @@ def create_config(
     deep_think_config = DeepThinkConfig(
         enabled=deep_think,
         level=deep_think_level,
+        max_workers=max(1, deep_think_max_workers),
         reasoning_iterations=reasoning_iterations,
         consistency_threshold=consistency_threshold,
         consistency_mode=consistency_mode,
@@ -1125,8 +1251,13 @@ def create_config(
     )
 
     multilingual_config = MultilingualSearchConfig(
-        enabled=multilingual,
+        # region-first locale search implies multilingual machinery even
+        # when the plain multilingual toggle is off
+        enabled=multilingual or bool(search_regions),
         search_languages=search_languages if search_languages else ["ja", "en"],
+        search_regions=[r.lower() for r in (search_regions or [])],
+        localize_queries=localize_queries,
+        prefer_local_sources=prefer_local_sources,
         results_per_language=results_per_language,
         query_translation=query_translation,
         translate_results=translate_results,

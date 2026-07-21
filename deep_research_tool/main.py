@@ -226,6 +226,9 @@ class DeepResearchTool:
             _deviation_weights=self.config.deep_think._deviation_weights,
         )
 
+        # kept for per-section cloning: the processor's validator/metrics
+        # are stateful, so parallel sections each get their own instance
+        self._thinking_config = thinking_config
         self.deep_think_processor = DeepThinkProcessor(
             llm_client=self.llm_client,
             config=thinking_config,
@@ -386,6 +389,7 @@ class DeepResearchTool:
         additional_documents: List[str] = None,
         progress_callback: Callable[[str, float], None] = None,
         plan_review_callback: Callable = None,
+        live_sink=None,
     ) -> Dict[str, Any]:
         """
         Run the complete research workflow.
@@ -507,6 +511,18 @@ class DeepResearchTool:
 
         evidence_locker = self.researcher.get_evidence_locker()
 
+        # --- live report sinks (Web UI preview and/or Word COM) ---
+        # Everything emitted before on_finalized is a watermarked DRAFT;
+        # the verified final body replaces it at freeze.
+        self.finalization_outcome = None
+        live_sink = self._build_live_sink(live_sink, session)
+        self.live_sink = live_sink
+        if live_sink is not None and session.research_plan:
+            toc = [{"section": it.section, "title": it.title}
+                   for it in (session.research_plan.table_of_contents
+                              .get_flat_sections())]
+            live_sink.on_plan(session.research_plan.title, toc)
+
         # Check if content expansion is needed (target specified and content too short)
         session = self._expand_if_needed(
             session=session,
@@ -563,6 +579,13 @@ class DeepResearchTool:
                 evidence_locker=evidence_locker,
                 query=query,
             )
+            # live report: V1 section drafts become visible here
+            if live_sink is not None:
+                for _sid, _sdata in session.section_contents.items():
+                    if _sid.startswith("_") or not _sdata.get("content"):
+                        continue
+                    live_sink.on_section(_sid, _sdata.get("title", _sid),
+                                         _sdata["content"], draft=True)
             # V1 verification now runs through the SAME finalization
             # pipeline as V2/V3 — in the V1 branch below, after the Fermi
             # section exists, immediately before rendering.
@@ -577,6 +600,10 @@ class DeepResearchTool:
             output_dir=self.config.report.output_dir / "reports",
         )
         self.report_generator = generator
+        # live report: V2/V3 emit every chapter draft/update as it is
+        # written (V1 sections were emitted after enhancement above)
+        if hasattr(generator, "live_sink"):
+            generator.live_sink = live_sink
 
         # Stage-1 adaptive length: the pre-draft allocation from the
         # research plan feeds draft generation (audit item 10). V2/V3
@@ -665,6 +692,7 @@ class DeepResearchTool:
                         session=session,
                         evidence_locker=evidence_locker,
                     )
+                    self._emit_live_figures(live_sink, figure_collection)
                 except Exception as e:
                     print(f"[V3/AutoFigures] Failed: {e}. Continuing without figures.")
                     ResearchWarnings.get_instance().add(
@@ -868,6 +896,29 @@ class DeepResearchTool:
         if version_tag == "v1" and warnings_collector.has_warnings():
             self._append_warnings_to_report(
                 active_report_path, warnings_collector)
+
+        # Live report: deliver the VERIFIED final body (replaces drafts,
+        # removes watermarks, appends references) and release the sinks.
+        if live_sink is not None:
+            try:
+                refs = [e.citation_text
+                        for e in evidence_locker.get_all_evidence()]
+                outcome = getattr(self, "finalization_outcome", None)
+                if outcome is not None:
+                    live_sink.on_finalized(outcome["chapters"], refs)
+                else:
+                    final_chapters = {
+                        sid: sd.get("content", "")
+                        for sid, sd in session.section_contents.items()
+                        if not sid.startswith("_") and sd.get("content")}
+                    live_sink.on_finalized(final_chapters, refs)
+            except Exception as e:
+                print(f"[LiveReport] finalize event failed: {e}")
+            finally:
+                try:
+                    live_sink.close()
+                except Exception:
+                    pass
 
         # Get token usage statistics
         token_stats = get_token_stats()
@@ -1262,6 +1313,49 @@ class DeepResearchTool:
             content_parts.append(section_data.get("content", ""))
 
         return "\n\n".join(content_parts)
+
+    # ------------------------------------------------------------------
+    # Live report (progressive writing while research runs)
+    # ------------------------------------------------------------------
+
+    def _build_live_sink(self, external_sink, session):
+        """Combine the caller's sink (Web UI preview) with the Word COM
+        sink when config.report.live_report_word is on. Returns None when
+        no live output is wanted."""
+        from .report.live_report import CompositeSink, WordComSink
+        sinks = []
+        if external_sink is not None:
+            sinks.append(external_sink)
+        if self.config.report.live_report_word:
+            out_dir = self.config.report.output_dir / "reports"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            sinks.append(WordComSink(
+                output_path=out_dir / f"report_live_{session.session_id}.docx",
+                language=self.config.research.language,
+            ))
+        if not sinks:
+            return None
+        return CompositeSink(sinks)
+
+    @staticmethod
+    def _emit_live_figures(live_sink, collection) -> None:
+        """Emit generated charts/figures to the live report."""
+        if live_sink is None or collection is None:
+            return
+        try:
+            for fig in list(getattr(collection, "charts", []) or []) + \
+                    list(getattr(collection, "figures", []) or []):
+                path = getattr(fig, "image_path", None)
+                if not path:
+                    continue
+                live_sink.on_figure(
+                    getattr(fig, "section_id", "") or "",
+                    str(path),
+                    getattr(fig, "caption", "") or
+                    getattr(fig, "title", "") or "",
+                )
+        except Exception as e:
+            print(f"[LiveReport] figure emit failed: {e}")
 
     # ------------------------------------------------------------------
     # Finalization (common pipeline for V1 / V2 / V3 / manual mode)
@@ -1928,6 +2022,9 @@ Output only the text (no JSON, no heading):"""
             )
             return None
 
+        # live report: charts/figures become visible as soon as generated
+        self._emit_live_figures(getattr(self, "live_sink", None), collection)
+
         # Guarantee layer: sections whose table extraction came up empty
         # still get a 主要数値一覧 table synthesized from the numerical store
         if self.config.report.auto_figures_include_tables and numerical_store:
@@ -2219,60 +2316,92 @@ Output only the text (no JSON, no heading):"""
             if evidence.id and evidence.content_excerpt:
                 source_texts[evidence.id] = evidence.content_excerpt
 
-        # Process each section
         deep_think_results = {}
-        section_count = len([k for k in session.section_contents.keys() if not k.startswith("_")])
+        targets = [
+            (sid, sdata.get("content", ""))
+            for sid, sdata in session.section_contents.items()
+            if not sid.startswith("_") and sdata.get("content")
+        ]
 
         # Handle empty session gracefully
-        if section_count == 0:
+        if not targets:
             if progress_callback:
                 progress_callback("DeepThink: No sections to process", 90)
             return session, deep_think_results
 
-        processed = 0
+        # Sections run CONCURRENTLY: DeepThink was fully sequential
+        # (sections one by one, each with several serial LLM calls),
+        # which dominated the runtime. The processor's validator/metrics
+        # are stateful, so every worker gets its OWN processor instance.
+        max_workers = max(1, min(self.config.deep_think.max_workers,
+                                 len(targets)))
+        print(f"[DeepThink] processing {len(targets)} sections with "
+              f"{max_workers} parallel worker(s)")
 
-        for section_num, section_data in session.section_contents.items():
-            if section_num.startswith("_"):
-                continue
-
-            content = section_data.get("content", "")
-            if not content:
-                continue
-
-            # Progress update
-            processed += 1
-            if progress_callback:
-                progress = 85 + (processed / max(section_count, 1) * 5)
-                progress_callback(f"DeepThink: Processing section {section_num}...", progress)
-
-            # Apply DeepThink
-            result = self.deep_think_processor.process(
-                content=content,
-                source_texts=source_texts,
-            )
-
-            # Keep the section's full prose and APPEND DeepThink's synthesized
-            # conclusion. Replacing the content wholesale destroyed the
-            # section text: processed_content is a short conclusion-only blob
-            # (produced by 「最終結論:」-style prompts), which downstream report
-            # generation then rendered as fragmentary 結論-labeled chapters.
-            conclusion = (result.processed_content or "").strip()
-            if conclusion and conclusion not in content:
-                session.section_contents[section_num]["content"] = (
-                    content.rstrip() + "\n\n" + conclusion
+        def _process_one(section_num, content):
+            if max_workers > 1:
+                processor = DeepThinkProcessor(
+                    llm_client=self.llm_client,
+                    config=self._thinking_config,
+                    language=self.config.research.language,
                 )
-            session.section_contents[section_num]["deep_think_conclusion"] = conclusion
+            else:
+                processor = self.deep_think_processor
+            return processor.process(content=content,
+                                     source_texts=source_texts)
 
-            # Store result metrics
-            deep_think_results[section_num] = {
-                "is_valid": result.is_valid,
-                "confidence": result.overall_confidence,
-                "metrics": result.metrics_summary,
-                "consistency": result.consistency_result.to_dict() if result.consistency_result else None,
+        import concurrent.futures
+        completed = 0
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_process_one, sid, content): (sid, content)
+                for sid, content in targets
             }
+            for future in concurrent.futures.as_completed(futures):
+                section_num, content = futures[future]
+                try:
+                    result = future.result()
+                except Exception as e:
+                    print(f"[DeepThink] section {section_num} failed: {e}")
+                    ResearchWarnings.get_instance().add(
+                        ResearchWarnings.MEDIUM, "DeepThink",
+                        f"Section {section_num} DeepThink processing "
+                        f"failed; the section keeps its original text. "
+                        f"Error: {e}",
+                    )
+                    continue
 
-            # Add DeepThink info to section data
-            session.section_contents[section_num]["deep_think"] = deep_think_results[section_num]
+                # Keep the section's full prose and APPEND DeepThink's
+                # synthesized conclusion. Replacing the content wholesale
+                # destroyed the section text: processed_content is a short
+                # conclusion-only blob (produced by 「最終結論:」-style
+                # prompts), which downstream report generation then
+                # rendered as fragmentary 結論-labeled chapters.
+                conclusion = (result.processed_content or "").strip()
+                if conclusion and conclusion not in content:
+                    session.section_contents[section_num]["content"] = (
+                        content.rstrip() + "\n\n" + conclusion
+                    )
+                session.section_contents[section_num]["deep_think_conclusion"] = conclusion
+
+                # Store result metrics
+                deep_think_results[section_num] = {
+                    "is_valid": result.is_valid,
+                    "confidence": result.overall_confidence,
+                    "metrics": result.metrics_summary,
+                    "consistency": result.consistency_result.to_dict() if result.consistency_result else None,
+                }
+
+                # Add DeepThink info to section data
+                session.section_contents[section_num]["deep_think"] = deep_think_results[section_num]
+
+                completed += 1
+                if progress_callback:
+                    progress = 85 + (completed / len(targets) * 5)
+                    progress_callback(
+                        f"DeepThink: {completed}/{len(targets)} sections done",
+                        progress)
 
         if progress_callback:
             avg_confidence = sum(r["confidence"] for r in deep_think_results.values()) / len(deep_think_results) if deep_think_results else 0

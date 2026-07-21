@@ -259,6 +259,15 @@ def cli():
          "requires --documents), or hybrid (documents + web)"
 )
 @click.option(
+    "--region",
+    "regions",
+    multiple=True,
+    help="Locale (region) search: collect LOCAL information from these "
+         "regions (e.g. --region de --region th). Queries are localized "
+         "into the local language/terminology and local sources are "
+         "prioritized. See REGION_LOCALE_MAP for valid codes"
+)
+@click.option(
     "--crawl-mode",
     type=click.Choice([
         "standard", "fast_batch", "fast_parallel", "aicrawl", "ai_crawl_selenium",
@@ -291,6 +300,14 @@ def cli():
     "--auto-figures/--no-auto-figures",
     default=False,
     help="Auto-generate figures/tables and embed in report"
+)
+@click.option(
+    "--live-word",
+    is_flag=True,
+    default=False,
+    help="Write the report progressively into a visible Microsoft Word "
+         "window while research runs (Windows + Word + pywin32; drafts "
+         "are watermarked and replaced by the verified final body)"
 )
 @click.option(
     "--chart-library",
@@ -348,11 +365,13 @@ def research(
     https_proxy: Optional[str],
     no_verify_ssl: bool,
     source_mode: str,
+    regions: tuple,
     crawl_mode: str,
     ai_crawl_max_pages: int,
     ai_crawl_site_depth: int,
     gap_fill_rounds: int,
     auto_figures: bool,
+    live_word: bool,
     chart_library: str,
     verbose: bool,
     openai_key: Optional[str],
@@ -406,11 +425,13 @@ def research(
         https_proxy=https_proxy,
         verify_ssl=not no_verify_ssl,
         source_mode=source_mode,
+        search_regions=list(regions) if regions else None,
         crawl_mode=crawl_mode,
         ai_crawl_max_total_pages=ai_crawl_max_pages,
         ai_crawl_site_depth=ai_crawl_site_depth,
         max_gap_fill_rounds=gap_fill_rounds,
         auto_figures=auto_figures,
+        live_report_word=live_word,
         chart_library=chart_library,
     )
 

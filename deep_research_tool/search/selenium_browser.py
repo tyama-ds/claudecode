@@ -11,6 +11,35 @@ from bs4 import BeautifulSoup
 from .base import BaseSearchClient, SearchResult, PageContent
 
 
+# DuckDuckGo kl language part -> Google hl code (locale search support)
+_KL_LANG_TO_GOOGLE_HL = {
+    "jp": "ja", "kr": "ko", "tzh": "zh-TW", "zh": "zh-CN",
+    "pt": "pt-BR", "en": "en", "de": "de", "fr": "fr", "es": "es",
+    "it": "it", "nl": "nl", "pl": "pl", "ru": "ru", "tr": "tr",
+    "th": "th", "vi": "vi", "id": "id", "ms": "ms", "ar": "ar",
+}
+
+
+def ddg_search_url(query: str, region: str) -> str:
+    """Direct DuckDuckGo results URL with a locale (kl) parameter."""
+    from urllib.parse import quote_plus
+    return f"https://duckduckgo.com/?q={quote_plus(query)}&kl={region}"
+
+
+def google_search_url(query: str, region: str) -> str:
+    """Direct Google results URL with gl (country) / hl (UI language)
+    derived from a DuckDuckGo-style region code like 'de-de' or 'jp-jp'."""
+    from urllib.parse import quote_plus
+    parts = (region or "").split("-", 1)
+    cc = parts[0] if parts else ""
+    lang = parts[1] if len(parts) > 1 else ""
+    hl = _KL_LANG_TO_GOOGLE_HL.get(lang, lang or "en")
+    params = f"q={quote_plus(query)}&hl={hl}"
+    if cc and cc not in ("wt", "xa"):    # wt-wt: worldwide, xa-*: no country
+        params += f"&gl={cc}"
+    return f"https://www.google.com/search?{params}"
+
+
 class SeleniumBrowser(BaseSearchClient):
     """Selenium-based browser for dynamic content extraction."""
 
@@ -289,12 +318,18 @@ class SeleniumBrowser(BaseSearchClient):
         """
         driver = self._get_driver()
         max_results = max_results or self.max_results
-        print(f"[Selenium/{search_engine}] Searching: {query}")
+        region = kwargs.get("region") or None
+        if region in ("wt-wt", ""):
+            region = None
+        label = f" [{region}]" if region else ""
+        print(f"[Selenium/{search_engine}] Searching{label}: {query}")
 
         if search_engine.lower() == "duckduckgo":
-            return self._search_duckduckgo(driver, query, max_results)
+            return self._search_duckduckgo(driver, query, max_results,
+                                           region=region)
         elif search_engine.lower() == "google":
-            return self._search_google(driver, query, max_results)
+            return self._search_google(driver, query, max_results,
+                                       region=region)
         else:
             raise ValueError(f"Unsupported search engine: {search_engine}")
 
@@ -302,25 +337,30 @@ class SeleniumBrowser(BaseSearchClient):
         self,
         driver,
         query: str,
-        max_results: int
+        max_results: int,
+        region: Optional[str] = None,
     ) -> List[SearchResult]:
-        """Search using DuckDuckGo."""
+        """Search using DuckDuckGo (locale search via the kl parameter)."""
         from selenium.webdriver.common.by import By
         from selenium.webdriver.common.keys import Keys
         from selenium.webdriver.support.ui import WebDriverWait
         from selenium.webdriver.support import expected_conditions as EC
 
         try:
-            # Navigate to DuckDuckGo
-            driver.get("https://duckduckgo.com/")
+            if region:
+                # locale search: navigate straight to region-scoped results
+                driver.get(ddg_search_url(query, region))
+            else:
+                # Navigate to DuckDuckGo
+                driver.get("https://duckduckgo.com/")
 
-            # Find search box and enter query
-            search_box = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.NAME, "q"))
-            )
-            search_box.clear()
-            search_box.send_keys(query)
-            search_box.send_keys(Keys.RETURN)
+                # Find search box and enter query
+                search_box = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.NAME, "q"))
+                )
+                search_box.clear()
+                search_box.send_keys(query)
+                search_box.send_keys(Keys.RETURN)
 
             # Wait for results
             time.sleep(2)
@@ -364,33 +404,45 @@ class SeleniumBrowser(BaseSearchClient):
         self,
         driver,
         query: str,
-        max_results: int
+        max_results: int,
+        region: Optional[str] = None,
     ) -> List[SearchResult]:
-        """Search using Google."""
+        """Search using Google (locale search via gl / hl parameters)."""
         from selenium.webdriver.common.by import By
         from selenium.webdriver.common.keys import Keys
         from selenium.webdriver.support.ui import WebDriverWait
         from selenium.webdriver.support import expected_conditions as EC
 
         try:
-            # Navigate to Google
-            driver.get("https://www.google.com/")
+            if region:
+                # locale search: results scoped to the region's country
+                # (gl) and language (hl)
+                driver.get(google_search_url(query, region))
+                try:
+                    consent_button = driver.find_element(By.ID, "L2AGLb")
+                    consent_button.click()
+                    time.sleep(1)
+                except Exception:
+                    pass
+            else:
+                # Navigate to Google
+                driver.get("https://www.google.com/")
 
-            # Handle consent if present
-            try:
-                consent_button = driver.find_element(By.ID, "L2AGLb")
-                consent_button.click()
-                time.sleep(1)
-            except Exception:
-                pass
+                # Handle consent if present
+                try:
+                    consent_button = driver.find_element(By.ID, "L2AGLb")
+                    consent_button.click()
+                    time.sleep(1)
+                except Exception:
+                    pass
 
-            # Find search box and enter query
-            search_box = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.NAME, "q"))
-            )
-            search_box.clear()
-            search_box.send_keys(query)
-            search_box.send_keys(Keys.RETURN)
+                # Find search box and enter query
+                search_box = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.NAME, "q"))
+                )
+                search_box.clear()
+                search_box.send_keys(query)
+                search_box.send_keys(Keys.RETURN)
 
             # Wait for results
             time.sleep(2)

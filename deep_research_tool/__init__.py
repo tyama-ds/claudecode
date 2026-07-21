@@ -17,7 +17,7 @@ Features:
 - GUI for easy configuration
 """
 
-__version__ = "0.7.0"
+__version__ = "0.9.1"
 __author__ = "Deep Research Tool Team"
 
 # Harden console output as early as possible: on Japanese Windows the console
