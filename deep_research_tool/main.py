@@ -226,6 +226,9 @@ class DeepResearchTool:
             _deviation_weights=self.config.deep_think._deviation_weights,
         )
 
+        # kept for per-section cloning: the processor's validator/metrics
+        # are stateful, so parallel sections each get their own instance
+        self._thinking_config = thinking_config
         self.deep_think_processor = DeepThinkProcessor(
             llm_client=self.llm_client,
             config=thinking_config,
@@ -2313,60 +2316,92 @@ Output only the text (no JSON, no heading):"""
             if evidence.id and evidence.content_excerpt:
                 source_texts[evidence.id] = evidence.content_excerpt
 
-        # Process each section
         deep_think_results = {}
-        section_count = len([k for k in session.section_contents.keys() if not k.startswith("_")])
+        targets = [
+            (sid, sdata.get("content", ""))
+            for sid, sdata in session.section_contents.items()
+            if not sid.startswith("_") and sdata.get("content")
+        ]
 
         # Handle empty session gracefully
-        if section_count == 0:
+        if not targets:
             if progress_callback:
                 progress_callback("DeepThink: No sections to process", 90)
             return session, deep_think_results
 
-        processed = 0
+        # Sections run CONCURRENTLY: DeepThink was fully sequential
+        # (sections one by one, each with several serial LLM calls),
+        # which dominated the runtime. The processor's validator/metrics
+        # are stateful, so every worker gets its OWN processor instance.
+        max_workers = max(1, min(self.config.deep_think.max_workers,
+                                 len(targets)))
+        print(f"[DeepThink] processing {len(targets)} sections with "
+              f"{max_workers} parallel worker(s)")
 
-        for section_num, section_data in session.section_contents.items():
-            if section_num.startswith("_"):
-                continue
-
-            content = section_data.get("content", "")
-            if not content:
-                continue
-
-            # Progress update
-            processed += 1
-            if progress_callback:
-                progress = 85 + (processed / max(section_count, 1) * 5)
-                progress_callback(f"DeepThink: Processing section {section_num}...", progress)
-
-            # Apply DeepThink
-            result = self.deep_think_processor.process(
-                content=content,
-                source_texts=source_texts,
-            )
-
-            # Keep the section's full prose and APPEND DeepThink's synthesized
-            # conclusion. Replacing the content wholesale destroyed the
-            # section text: processed_content is a short conclusion-only blob
-            # (produced by 「最終結論:」-style prompts), which downstream report
-            # generation then rendered as fragmentary 結論-labeled chapters.
-            conclusion = (result.processed_content or "").strip()
-            if conclusion and conclusion not in content:
-                session.section_contents[section_num]["content"] = (
-                    content.rstrip() + "\n\n" + conclusion
+        def _process_one(section_num, content):
+            if max_workers > 1:
+                processor = DeepThinkProcessor(
+                    llm_client=self.llm_client,
+                    config=self._thinking_config,
+                    language=self.config.research.language,
                 )
-            session.section_contents[section_num]["deep_think_conclusion"] = conclusion
+            else:
+                processor = self.deep_think_processor
+            return processor.process(content=content,
+                                     source_texts=source_texts)
 
-            # Store result metrics
-            deep_think_results[section_num] = {
-                "is_valid": result.is_valid,
-                "confidence": result.overall_confidence,
-                "metrics": result.metrics_summary,
-                "consistency": result.consistency_result.to_dict() if result.consistency_result else None,
+        import concurrent.futures
+        completed = 0
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_process_one, sid, content): (sid, content)
+                for sid, content in targets
             }
+            for future in concurrent.futures.as_completed(futures):
+                section_num, content = futures[future]
+                try:
+                    result = future.result()
+                except Exception as e:
+                    print(f"[DeepThink] section {section_num} failed: {e}")
+                    ResearchWarnings.get_instance().add(
+                        ResearchWarnings.MEDIUM, "DeepThink",
+                        f"Section {section_num} DeepThink processing "
+                        f"failed; the section keeps its original text. "
+                        f"Error: {e}",
+                    )
+                    continue
 
-            # Add DeepThink info to section data
-            session.section_contents[section_num]["deep_think"] = deep_think_results[section_num]
+                # Keep the section's full prose and APPEND DeepThink's
+                # synthesized conclusion. Replacing the content wholesale
+                # destroyed the section text: processed_content is a short
+                # conclusion-only blob (produced by 「最終結論:」-style
+                # prompts), which downstream report generation then
+                # rendered as fragmentary 結論-labeled chapters.
+                conclusion = (result.processed_content or "").strip()
+                if conclusion and conclusion not in content:
+                    session.section_contents[section_num]["content"] = (
+                        content.rstrip() + "\n\n" + conclusion
+                    )
+                session.section_contents[section_num]["deep_think_conclusion"] = conclusion
+
+                # Store result metrics
+                deep_think_results[section_num] = {
+                    "is_valid": result.is_valid,
+                    "confidence": result.overall_confidence,
+                    "metrics": result.metrics_summary,
+                    "consistency": result.consistency_result.to_dict() if result.consistency_result else None,
+                }
+
+                # Add DeepThink info to section data
+                session.section_contents[section_num]["deep_think"] = deep_think_results[section_num]
+
+                completed += 1
+                if progress_callback:
+                    progress = 85 + (completed / len(targets) * 5)
+                    progress_callback(
+                        f"DeepThink: {completed}/{len(targets)} sections done",
+                        progress)
 
         if progress_callback:
             avg_confidence = sum(r["confidence"] for r in deep_think_results.values()) / len(deep_think_results) if deep_think_results else 0

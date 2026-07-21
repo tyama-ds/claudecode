@@ -423,6 +423,12 @@ class DeepThinkConfig:
     # Quality thresholds
     fidelity_threshold: float = 0.7
 
+    # Sections processed concurrently (each worker gets its OWN processor
+    # instance — the processor's validator/metrics are not thread-safe).
+    # DeepThink was previously fully sequential: sections one by one,
+    # each with several serial LLM calls.
+    max_workers: int = 4
+
     # Hidden parameters (internal use)
     _expansion_tolerance: float = 0.2
     _deviation_weights: tuple = (0.4, 0.4, 0.2)  # semantic, logical, contradiction
@@ -809,6 +815,7 @@ def create_config(
     # DeepThink parameters
     deep_think: bool = False,
     deep_think_level: float = 0.5,
+    deep_think_max_workers: int = 4,
     reasoning_iterations: int = 3,
     consistency_threshold: float = 0.3,
     consistency_mode: str = "warn",
@@ -977,6 +984,9 @@ def create_config(
         verify_ssl: Verify SSL certificates (set False for self-signed certs)
         deep_think: Enable DeepThink reasoning enhancement
         deep_think_level: Reasoning depth level (0.0-1.0, 0=conservative, 1=exploratory)
+        deep_think_max_workers: Sections processed concurrently by
+            DeepThink (default 4; each section runs its own processor so
+            LLM calls overlap instead of running strictly one by one)
         reasoning_iterations: Number of reasoning iterations for DeepThink
         consistency_threshold: Threshold for consistency check (0.0-1.0)
         consistency_mode: How to handle consistency issues ('warn', 'revise', 'strict')
@@ -1231,6 +1241,7 @@ def create_config(
     deep_think_config = DeepThinkConfig(
         enabled=deep_think,
         level=deep_think_level,
+        max_workers=max(1, deep_think_max_workers),
         reasoning_iterations=reasoning_iterations,
         consistency_threshold=consistency_threshold,
         consistency_mode=consistency_mode,

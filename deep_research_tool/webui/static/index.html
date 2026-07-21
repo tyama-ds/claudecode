@@ -328,6 +328,12 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
         <label class="switch"><input type="checkbox" id="feat_deep_think"><span class="slider"></span></label>
       </div>
 
+      <div class="feat-row" data-tip="DeepThinkで同時に処理する章の数です。章ごとに独立した推論器を割り当てて並行実行するため、章数が多いほど効きます（例: 8章×4並列で約4倍）。LLMのレート制限に注意してください（目安: 3〜6）。">
+        <div class="feat-info"><span class="feat-name">⚡ DeepThink並列ワーカー数</span>
+          <span class="feat-sub">同時に推論する章の数</span></div>
+        <input type="number" id="feat_dt_workers" value="4" min="1" max="8" style="width:80px">
+      </div>
+
       <div class="feat-row" data-tip="統計が公表されていない数値（市場規模・将来予測など）を要素分解して推定します。分解木・収集エビデンスとの照合・感度分析・モンテカルロシミュレーション付きで、推定根拠をレポートに明記します。">
         <div class="feat-info"><span class="feat-name">🧮 フェルミ推定</span>
           <span class="feat-sub">統計のない数値を分解推定</span></div>
@@ -718,6 +724,7 @@ function loadSettings() {
     if (saved[key] !== undefined) $(el).checked = !!saved[key];
   }
   if (saved.figure_max_workers) $('feat_fig_workers').value = saved.figure_max_workers;
+  if (saved.deep_think_max_workers) $('feat_dt_workers').value = saved.deep_think_max_workers;
   if (Array.isArray(saved.search_languages)) setSelectedLangs(saved.search_languages);
   if (Array.isArray(saved.search_regions)) setSelectedRegions(saved.search_regions);
   syncLangUI();
@@ -734,6 +741,7 @@ function saveSettings() {
     s[key] = $(el).checked;
   }
   s.figure_max_workers = parseInt($('feat_fig_workers').value) || 8;
+  s.deep_think_max_workers = parseInt($('feat_dt_workers').value) || 4;
   s.search_languages = selectedLangs();
   s.search_regions = selectedRegions();
   localStorage.setItem('drt_settings', JSON.stringify(s));
@@ -760,6 +768,7 @@ function settingsParams() {
     }
   }
   p.figure_max_workers = Math.min(16, Math.max(1, parseInt($('feat_fig_workers').value) || 8));
+  p.deep_think_max_workers = Math.min(8, Math.max(1, parseInt($('feat_dt_workers').value) || 4));
   return p;
 }
 

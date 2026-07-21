@@ -72,6 +72,7 @@ _CONFIG_PARAM_MAP = {
     "search_regions": "search_regions",
     "use_enhanced_synthesis": "use_enhanced_synthesis",
     "figure_max_workers": "figure_max_workers",
+    "deep_think_max_workers": "deep_think_max_workers",
     # Adaptive length + finalization loop settings (all 12)
     "length_mode": "length_mode",
     "preferred_body_chars": "preferred_body_chars",
