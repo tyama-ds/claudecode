@@ -45,6 +45,7 @@ _CONFIG_PARAM_MAP = {
     "https_proxy": "https_proxy",
     "verify_ssl": "verify_ssl",
     "iterations": "research_iterations",
+    "parallel_max_workers": "parallel_max_workers",
     "output_format": "output_format",
     "output_dir": "output_dir",
     "language": "language",
@@ -121,10 +122,18 @@ def _length_mode(value, name):
     return v
 
 
+def _strict_workers(value, name):
+    """Strict app-wide worker validation (1..16; bool/float/junk rejected;
+    NEVER clamped — invalid input is a 400, not a silently adjusted value)."""
+    from ..utils.concurrency import validate_parallel_max_workers
+    return validate_parallel_max_workers(value, source=name)
+
+
 # Server-side type conversion & validation for length/loop settings.
 # Empty strings are dropped BEFORE conversion (=> config defaults / None);
 # invalid values raise ValueError -> HTTP 400 before the job starts.
 _PARAM_CONVERTERS = {
+    "parallel_max_workers": _strict_workers,
     "length_mode": _length_mode,
     "preferred_body_chars": _int_ge0,
     "hard_min_body_chars": _int_ge0,

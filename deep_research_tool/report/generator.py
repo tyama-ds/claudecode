@@ -369,14 +369,18 @@ class ReportGenerator:
                 else:
                     content_parts.append(f"\n*Note: This report uses {len(evidence_list)}/{total_all} evidence items after quality filtering.*\n")
 
-        # References
+        # References. The body's [N] markers were converted to markdown
+        # footnote links [^N] (_process_citations), so matching footnote
+        # DEFINITIONS [^N]: ... are emitted — a [^1] without a [^1]:
+        # definition renders as a broken link in markdown viewers.
         if self.include_citations:
             content_parts.append("\n---\n")
             content_parts.append("## References\n")
 
             for i, evidence in enumerate(evidence_list, 1):
                 quality_badge = self._get_quality_badge(evidence.quality_category)
-                content_parts.append(f"{i}. {quality_badge} {evidence.citation_text}\n")
+                content_parts.append(
+                    f"[^{i}]: {quality_badge} {evidence.citation_text}\n")
 
         # Write file
         filepath = self.output_dir / f"{filename}.md"

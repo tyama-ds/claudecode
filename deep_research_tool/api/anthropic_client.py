@@ -149,8 +149,11 @@ class AnthropicClient(BaseLLMClient):
         if temp != 1.0:  # Anthropic default is 1.0
             api_params["temperature"] = temp
 
-        # Make API call
-        response = self._client.messages.create(**api_params)
+        # Make API call — leaf operation: one composed run+process
+        # concurrency permit. The Anthropic SDK client is thread-safe and
+        # retries 429/5xx internally with exponential backoff + jitter.
+        with self._leaf_permit():
+            response = self._client.messages.create(**api_params)
 
         # Extract response
         content = ""
@@ -171,7 +174,7 @@ class AnthropicClient(BaseLLMClient):
             total_tokens=response.usage.input_tokens + response.usage.output_tokens,
             model=response.model,
         )
-        get_token_stats().add_usage(token_usage)
+        self._record_usage(token_usage)
 
         return LLMResponse(
             content=content,

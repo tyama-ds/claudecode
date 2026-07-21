@@ -495,6 +495,16 @@ class CrawlMode(str, Enum):
 class ResearchConfig:
     """Configuration for research process."""
 
+    # Application-wide parallelism knob: the maximum number of
+    # SIMULTANEOUS leaf operations (LLM calls, HTTP fetches) in one
+    # research run. Default 8 (recommended, not a minimum); allowed
+    # 1..16 with a hard cap of 16. Stage-specific caps (deep_think
+    # max_workers, figure_max_workers, fast_crawl_workers, ...) remain
+    # as per-stage CEILINGS: every stage uses
+    # min(parallel_max_workers, stage_cap, task_count), and a shared
+    # ConcurrencyLimiter enforces the run-wide and process-wide totals.
+    parallel_max_workers: int = 8
+
     # Research loop settings
     min_iterations: int = 3
     max_iterations: int = 10
@@ -766,6 +776,13 @@ class Config:
                 f"min_score_improvement must be >= 0 "
                 f"(got {rc.min_score_improvement})")
 
+        # --- Parallelism validation (strict, no clamping) ---
+        try:
+            from .utils.concurrency import validate_parallel_max_workers
+            validate_parallel_max_workers(rc.parallel_max_workers)
+        except ValueError as e:
+            errors.append(str(e))
+
         # --- Region (locale) search validation ---
         unknown_regions = [r for r in self.multilingual.search_regions
                            if r not in REGION_LOCALE_MAP]
@@ -794,6 +811,7 @@ def create_config(
     driver_path: Optional[str] = None,
     waf_mitigation: bool = True,
     per_domain_delay: float = 1.0,
+    parallel_max_workers: int = 8,
     research_iterations: int = 3,
     output_format: str = "markdown",
     output_dir: str = "./output",
@@ -964,6 +982,10 @@ def create_config(
             detection with one re-fetch). Default True
         per_domain_delay: Base seconds between fetches to the same domain
             (jittered ±50%) to avoid WAF rate-limit triggers; 0 disables it
+        parallel_max_workers: Application-wide limit on simultaneous LLM /
+            network operations per research run (default 8, allowed 1..16,
+            hard cap 16). Stage caps stay as ceilings; invalid values
+            (bool, float, 0, negative, >16, non-numeric) raise ValueError
         research_iterations: Number of research iterations
         output_format: Report format ('docx', 'pdf', or 'markdown')
         output_dir: Output directory path
@@ -1149,7 +1171,13 @@ def create_config(
         per_domain_delay=per_domain_delay,
     )
 
+    # Strict validation: bool/float/0/negative/>16/non-numeric are
+    # rejected with a clear error — NEVER silently clamped.
+    from .utils.concurrency import validate_parallel_max_workers
+    parallel_max_workers = validate_parallel_max_workers(parallel_max_workers)
+
     research_config = ResearchConfig(
+        parallel_max_workers=parallel_max_workers,
         min_iterations=research_iterations,
         max_iterations=kwargs.get("max_iterations", research_iterations + 5),
         max_queries_per_iteration=max_queries_per_iteration,

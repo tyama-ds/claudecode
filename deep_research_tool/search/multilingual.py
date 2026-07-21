@@ -109,11 +109,14 @@ class MultilingualSearcher:
         search_client: Any,
         llm_client: Optional[Any] = None,
         progress_callback: Optional[Callable[[str, float], None]] = None,
+        max_parallel_workers: Optional[int] = None,
     ):
         self.config = config
         self.search_client = search_client
         self.llm_client = llm_client
         self.progress_callback = progress_callback
+        # app-wide parallelism ceiling (parallel_max_workers)
+        self.max_parallel_workers = max_parallel_workers
         self.stats = MultilingualSearchStats()
 
     def _report_progress(self, message: str, progress: float):
@@ -353,8 +356,10 @@ Output ONLY the localized query, nothing else."""
 
         # Search in parallel (one task per query: regions or languages)
         all_results = []
-        max_workers = max(1, min(self.config.max_concurrent_searches,
-                                 len(translated_queries)))
+        from ..utils.concurrency import effective_workers
+        max_workers = effective_workers(self.max_parallel_workers,
+                                        self.config.max_concurrent_searches,
+                                        len(translated_queries))
 
         scope = (f"{len(self.config.search_regions)} regions"
                  if self.config.search_regions

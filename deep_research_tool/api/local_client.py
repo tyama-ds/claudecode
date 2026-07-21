@@ -9,6 +9,8 @@ Supports:
 
 import os
 import json
+import threading
+import time
 from typing import Optional, List, Dict, Any
 
 from .base import (
@@ -150,6 +152,13 @@ class LocalLLMClient(BaseLLMClient):
         self._verify_ssl = verify_ssl
 
         self._client = None
+        # base-class attributes (this __init__ does not chain to super)
+        self.concurrency_limiter = None
+        self.token_stats = None
+        # requests.Session is NOT documented as thread-safe for concurrent
+        # use; parallel workers each get a thread-local Session built with
+        # the same proxies/verify/header configuration
+        self._thread_local = threading.local()
         self._initialize_client()
 
     def _detect_backend(self, model: str) -> str:
@@ -170,31 +179,86 @@ class LocalLLMClient(BaseLLMClient):
         # Default to OpenAI-compatible
         return LocalLLMBackend.OPENAI_COMPATIBLE
 
+    def _build_session(self):
+        """Build one configured requests.Session (proxies/TLS/auth)."""
+        import requests
+        session = requests.Session()
+
+        # Set up proxies if provided
+        if self._http_proxy or self._https_proxy:
+            session.proxies = {}
+            if self._http_proxy:
+                session.proxies["http"] = self._http_proxy
+            if self._https_proxy:
+                session.proxies["https"] = self._https_proxy
+
+        session.verify = self._verify_ssl
+
+        # Set up headers
+        session.headers.update({
+            "Content-Type": "application/json",
+        })
+        if self.api_key:
+            session.headers["Authorization"] = f"Bearer {self.api_key}"
+        return session
+
+    @property
+    def _session(self):
+        """Thread-local Session: safe under parallel workers.
+
+        requests.Session is not guaranteed thread-safe for concurrent
+        requests, so each worker thread lazily gets its own Session with
+        identical configuration.
+        """
+        session = getattr(self._thread_local, "session", None)
+        if session is None:
+            session = self._build_session()
+            self._thread_local.session = session
+        return session
+
     def _initialize_client(self) -> None:
-        """Initialize the HTTP client."""
+        """Initialize the HTTP client (validates that requests exists)."""
         try:
-            import requests
-            self._session = requests.Session()
-
-            # Set up proxies if provided
-            if self._http_proxy or self._https_proxy:
-                self._session.proxies = {}
-                if self._http_proxy:
-                    self._session.proxies["http"] = self._http_proxy
-                if self._https_proxy:
-                    self._session.proxies["https"] = self._https_proxy
-
-            self._session.verify = self._verify_ssl
-
-            # Set up headers
-            self._session.headers.update({
-                "Content-Type": "application/json",
-            })
-            if self.api_key:
-                self._session.headers["Authorization"] = f"Bearer {self.api_key}"
-
+            import requests  # noqa: F401
         except ImportError:
             raise ImportError("requests library is required for LocalLLMClient")
+        # Build the calling thread's session eagerly so configuration
+        # errors surface at construction time
+        _ = self._session
+
+    # HTTP statuses retried with exponential backoff + jitter
+    _RETRY_STATUSES = {429, 502, 503, 504}
+    _MAX_RETRIES = 3
+
+    def _post_with_retry(self, url: str, payload: dict):
+        """POST with bounded exponential backoff + jitter on 429/5xx.
+
+        The concurrency permit is held only around each attempt (a leaf
+        operation); it is released while sleeping between retries.
+        """
+        import random
+        import requests
+
+        last_error = None
+        for attempt in range(self._MAX_RETRIES + 1):
+            try:
+                with self._leaf_permit():
+                    response = self._session.post(
+                        url, json=payload, timeout=self.timeout)
+                if response.status_code in self._RETRY_STATUSES:
+                    last_error = RuntimeError(
+                        f"HTTP {response.status_code} from local LLM server")
+                else:
+                    response.raise_for_status()
+                    return response
+            except requests.RequestException as e:
+                last_error = e
+            if attempt < self._MAX_RETRIES:
+                delay = (2 ** attempt) * 0.8 + random.uniform(0, 0.4)
+                time.sleep(delay)
+        raise RuntimeError(
+            f"local LLM request failed after {self._MAX_RETRIES + 1} "
+            f"attempts: {self._sanitize_error(last_error)}")
 
     def _base_has_version_segment(self) -> bool:
         """Whether base_url already ends with a REST version segment (/v1, /v2...)."""
@@ -325,12 +389,7 @@ class LocalLLMClient(BaseLLMClient):
         }
 
         try:
-            response = self._session.post(
-                url,
-                json=payload,
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
+            response = self._post_with_retry(url, payload)
             data = response.json()
 
             # Extract response
@@ -354,7 +413,7 @@ class LocalLLMClient(BaseLLMClient):
                 total_tokens=total_tokens,
                 model=self.model,
             )
-            get_token_stats().add_usage(token_usage)
+            self._record_usage(token_usage)
 
             return LLMResponse(
                 content=content,
@@ -365,7 +424,7 @@ class LocalLLMClient(BaseLLMClient):
             )
 
         except Exception as e:
-            raise RuntimeError(f"Ollama API error: {e}")
+            raise RuntimeError(f"Ollama API error: {self._sanitize_error(e)}")
 
     def _send_openai_compatible_request(
         self,
@@ -392,12 +451,7 @@ class LocalLLMClient(BaseLLMClient):
             payload["presence_penalty"] = kwargs["presence_penalty"]
 
         try:
-            response = self._session.post(
-                url,
-                json=payload,
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
+            response = self._post_with_retry(url, payload)
             data = response.json()
 
             # Extract response (OpenAI format)
@@ -423,7 +477,7 @@ class LocalLLMClient(BaseLLMClient):
                 total_tokens=total_tokens,
                 model=data.get("model", self.model),
             )
-            get_token_stats().add_usage(token_usage)
+            self._record_usage(token_usage)
 
             return LLMResponse(
                 content=content,
@@ -434,7 +488,7 @@ class LocalLLMClient(BaseLLMClient):
             )
 
         except Exception as e:
-            raise RuntimeError(f"Local LLM API error: {e}")
+            raise RuntimeError(f"Local LLM API error: {self._sanitize_error(e)}")
 
     def _models_url(self) -> str:
         """Build the model-list URL, mirroring _get_api_url version handling."""

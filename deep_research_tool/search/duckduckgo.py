@@ -204,23 +204,27 @@ class DuckDuckGoSearch(BaseSearchClient):
     def _fetch(self, url: str, headers: dict):
         """WAF-aware GET: polite delay, session+retry, one re-fetch on block."""
         if not self.waf_mitigation:
-            return requests.get(
-                url, headers=headers, timeout=self.timeout,
-                allow_redirects=True, proxies=self.proxies, verify=self.verify_ssl,
-            )
+            with self._leaf_permit():
+                return requests.get(
+                    url, headers=headers, timeout=self.timeout,
+                    allow_redirects=True, proxies=self.proxies, verify=self.verify_ssl,
+                )
 
         session = self._get_session()
         self._polite_wait(url)
-        response = session.get(
-            url, headers=headers, timeout=self.timeout, allow_redirects=True,
-        )
+        with self._leaf_permit():
+            response = session.get(
+                url, headers=headers, timeout=self.timeout, allow_redirects=True,
+            )
         # One re-fetch on a soft block: some WAFs pass a client on the second
         # hit once the connection/cookies are established.
         if self._is_waf_blocked(response):
             time.sleep(random.uniform(1.5, 3.0))
-            response = session.get(
-                url, headers=headers, timeout=self.timeout, allow_redirects=True,
-            )
+            with self._leaf_permit():
+                response = session.get(
+                    url, headers=headers, timeout=self.timeout,
+                    allow_redirects=True,
+                )
         return response
 
     def _get_ddgs_class(self):
@@ -373,12 +377,13 @@ class DuckDuckGoSearch(BaseSearchClient):
                 ddgs = self._get_ddgs(force_new=(attempt > 0))
 
                 # Try to perform the search
-                results = ddgs.text(
-                    query,
-                    region=kwargs.get("region", self.region),
-                    safesearch=kwargs.get("safe_search", self.safe_search),
-                    max_results=max_results,
-                )
+                with self._leaf_permit():
+                    results = ddgs.text(
+                        query,
+                        region=kwargs.get("region", self.region),
+                        safesearch=kwargs.get("safe_search", self.safe_search),
+                        max_results=max_results,
+                    )
 
                 # Convert generator/list to list
                 results_list = list(results) if results else []

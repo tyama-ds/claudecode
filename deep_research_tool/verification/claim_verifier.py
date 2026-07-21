@@ -45,6 +45,7 @@ from ..report.finalization import (
     ISSUE_CONTRADICTED,
     ISSUE_INVALID_CITATION,
     ISSUE_ORPHAN_CITATION,
+    ISSUE_REDUNDANCY,
     ISSUE_ALL_CITATIONS_DELETED,
     ISSUE_STALE_OR_NON_PRIMARY,
     ISSUE_UNANSWERED_QUESTION,
@@ -137,10 +138,18 @@ class Claim:
     cited_source_numbers: Optional[List[int]] = None
     # (evidence_id, char_offset) pairs of the chunks the judgement used
     evidence_provenance: List[Tuple[str, int]] = field(default_factory=list)
+    # citation integrity (cited-first verification)
+    citation_mismatch: bool = False    # cited evidence does NOT support
+    citation_missing: bool = False     # critical/important claim w/o citation
+    # uncited evidence that DOES support the claim — used ONLY as
+    # citation-replacement candidates for the rewrite, never as support
+    replacement_source_ids: List[str] = field(default_factory=list)
 
 
 class ClaimVerifier:
     """Full-text, claim-level verification against the evidence locker."""
+
+    EXTRACT_RETRIES = 2      # extra attempts per extraction chunk
 
     def __init__(self, llm_client, language: str = "ja",
                  evidence_per_claim: int = EVIDENCE_PER_CLAIM,
@@ -168,16 +177,28 @@ class ClaimVerifier:
         for ci, chunk in enumerate(chunks):
             self.chunks_total += 1
             prompt = self._claim_prompt(section_id, chunk, ci + 1, len(chunks))
-            try:
-                response = self.llm.generate(prompt)
-                data = extract_json_from_response(response.content)
-            except Exception as e:
+            data = None
+            last_error = None
+            # bounded per-chunk retry: a transient LLM failure must not
+            # silently leave part of the body unverified
+            for _attempt in range(self.EXTRACT_RETRIES + 1):
+                try:
+                    response = self.llm.generate(prompt)
+                    data = extract_json_from_response(response.content)
+                    break
+                except Exception as e:
+                    last_error = e
+            if data is None:
                 self.chunks_failed += 1
                 self.extraction_errors.append(
-                    f"claim extraction failed ({section_id} "
-                    f"chunk {ci + 1}/{len(chunks)}): {e}")
+                    f"claim extraction failed after "
+                    f"{self.EXTRACT_RETRIES + 1} attempts ({section_id} "
+                    f"chunk {ci + 1}/{len(chunks)}, chars "
+                    f"{ci * self.chunk_chars}-"
+                    f"{min(len(text), (ci + 1) * self.chunk_chars)}): "
+                    f"{last_error}")
                 print(f"[ClaimVerifier] claim extraction failed "
-                      f"({section_id} chunk {ci + 1}): {e}")
+                      f"({section_id} chunk {ci + 1}): {last_error}")
                 continue
             for item in data.get("claims", []):
                 if not isinstance(item, dict):
@@ -244,6 +265,41 @@ Respond as JSON:
   "source_numbers": [the N of [SOURCE N] citations next to the claim, or []]}}]}}
 
 Do not include opinions or generic statements. JSON only."""
+
+    # ------------------------------------------------------------------
+    # Deterministic claim -> [SOURCE N] association
+    # ------------------------------------------------------------------
+
+    CITATION_TAG_RE = re.compile(r"\[SOURCE:?\s*(\d+)\]")
+
+    @classmethod
+    def parse_cited_numbers(cls, claim_text: str,
+                            section_text: str) -> List[int]:
+        """Deterministically associate a claim with the [SOURCE N]
+        citations of its best-matching sentence (fallback: paragraph).
+
+        This parser — not the LLM — is the primary authority on which
+        citations a claim carries; the LLM-reported numbers are merged in
+        as a secondary signal.
+        """
+        text = section_text or ""
+        if not text or not claim_text:
+            return []
+        claim_bi = _bigrams(claim_text)
+        best_sent, best_para, best_score = "", "", 0.0
+        for para in text.split("\n\n"):
+            for sent in re.split(r"(?<=[。．！？!?.])\s*", para):
+                if len(sent.strip()) < 8:
+                    continue
+                score = _containment(claim_bi, _bigrams(sent))
+                if score > best_score:
+                    best_score, best_sent, best_para = score, sent, para
+        if best_score < 0.3:
+            return []
+        nums = [int(n) for n in cls.CITATION_TAG_RE.findall(best_sent)]
+        if not nums:
+            nums = [int(n) for n in cls.CITATION_TAG_RE.findall(best_para)]
+        return sorted(set(nums))
 
     # ------------------------------------------------------------------
     # Evidence chunk index (whole locker, whole texts)
@@ -343,50 +399,168 @@ Do not include opinions or generic statements. JSON only."""
     def verify_claims(self, claims: List[Claim], evidence_list: List,
                       chunk_index: Optional[List[EvidenceChunk]] = None,
                       cited_ids_by_claim: Optional[Dict[str, List[str]]] = None,
+                      enforce_citations: bool = False,
                       ) -> List[Claim]:
-        """Judge each claim against ITS OWN selected evidence chunks."""
+        """Judge each claim against ITS OWN evidence — CITED FIRST.
+
+        With ``enforce_citations`` (the production path, i.e. whenever a
+        citation registry exists):
+        - a claim WITH citations is judged first against ONLY the
+          evidence it cites; "supported" requires at least one id that is
+          BOTH cited in the body AND judged to actually support it;
+        - cited-but-unsupporting is a citation mismatch — uncited
+          evidence that happens to support the claim NEVER turns it into
+          a pass; it is recorded only as a replacement candidate for the
+          rewrite;
+        - critical/important factual claims WITHOUT citations are never
+          supported (citation required, regardless of registry size).
+        Without ``enforce_citations`` (no registry available), the legacy
+        whole-locker judgement applies.
+        """
         if chunk_index is None:
             chunk_index = self.build_chunk_index(evidence_list)
         cited_ids_by_claim = cited_ids_by_claim or {}
         for claim in claims:
-            selected = self.select_evidence(
-                claim, evidence_list, chunk_index=chunk_index,
-                cited_evidence_ids=cited_ids_by_claim.get(claim.claim_id))
-            claim.evidence_provenance = [
-                (c.evidence_id, c.offset) for c in selected]
-            claim.supporting_source_ids = list(dict.fromkeys(
-                c.evidence_id for c in selected))
-            if not selected:
+            cited_ids = cited_ids_by_claim.get(claim.claim_id) or []
+            if enforce_citations and cited_ids:
+                self._verify_cited_claim(claim, cited_ids, chunk_index)
+            elif enforce_citations and claim.importance in ("critical",
+                                                            "important"):
                 claim.status = "unsupported"
-                claim.reason = ("関連するエビデンスが見つかりません"
-                                if self.language == "ja"
-                                else "no relevant evidence found")
-                continue
-            try:
-                verdict = self._judge_claim(claim, selected)
-            except Exception as e:
-                claim.status = "uncertain"
-                claim.reason = f"verification error: {e}"
-                self.extraction_errors.append(
-                    f"claim judgement failed ({claim.claim_id}): {e}")
-                continue
-            status = verdict.get("status", "uncertain")
-            if status not in _VALID_STATUSES:
-                status = "uncertain"     # unknown status is never "fine"
-            claim.status = status
-            claim.reason = verdict.get("reason", "")
-            ids = verdict.get("supporting_source_ids")
-            valid = {c.evidence_id for c in selected}
-            if isinstance(ids, list):
-                claim.supporting_source_ids = [i for i in ids if i in valid]
-            # "supported" with zero valid supporting sources is a
-            # contradiction in terms -> downgrade to uncertain
-            if claim.status == "supported" and not claim.supporting_source_ids:
-                claim.status = "uncertain"
-                claim.reason = (claim.reason + " / 有効な支持ソースなし"
-                                if self.language == "ja"
-                                else claim.reason + " / no valid sources")
+                claim.citation_missing = True
+                claim.reason = (
+                    "引用がありません（critical/important の事実主張には"
+                    "引用が必須です）" if self.language == "ja" else
+                    "no citation (critical/important factual claims "
+                    "require one)")
+                claim.supporting_source_ids = []
+                self._find_replacements(claim, chunk_index, exclude=set())
+            else:
+                self._verify_open_claim(claim, evidence_list, chunk_index,
+                                        cited_ids)
         return claims
+
+    def _verify_open_claim(self, claim, evidence_list, chunk_index,
+                           cited_ids) -> None:
+        """Legacy whole-locker judgement (minor claims / no registry)."""
+        selected = self.select_evidence(
+            claim, evidence_list, chunk_index=chunk_index,
+            cited_evidence_ids=cited_ids)
+        claim.evidence_provenance = [
+            (c.evidence_id, c.offset) for c in selected]
+        claim.supporting_source_ids = list(dict.fromkeys(
+            c.evidence_id for c in selected))
+        if not selected:
+            claim.status = "unsupported"
+            claim.reason = ("関連するエビデンスが見つかりません"
+                            if self.language == "ja"
+                            else "no relevant evidence found")
+            return
+        try:
+            verdict = self._judge_claim(claim, selected)
+        except Exception as e:
+            claim.status = "uncertain"
+            claim.reason = f"verification error: {e}"
+            self.extraction_errors.append(
+                f"claim judgement failed ({claim.claim_id}): {e}")
+            return
+        status = verdict.get("status", "uncertain")
+        if status not in _VALID_STATUSES:
+            status = "uncertain"     # unknown status is never "fine"
+        claim.status = status
+        claim.reason = verdict.get("reason", "")
+        ids = verdict.get("supporting_source_ids")
+        valid = {c.evidence_id for c in selected}
+        if isinstance(ids, list):
+            claim.supporting_source_ids = [i for i in ids if i in valid]
+        # "supported" with zero valid supporting sources is a
+        # contradiction in terms -> downgrade to uncertain
+        if claim.status == "supported" and not claim.supporting_source_ids:
+            claim.status = "uncertain"
+            claim.reason = (claim.reason + " / 有効な支持ソースなし"
+                            if self.language == "ja"
+                            else claim.reason + " / no valid sources")
+
+    def _verify_cited_claim(self, claim, cited_ids, chunk_index) -> None:
+        """Cited-first judgement: ONLY the evidence the body cites."""
+        cited_set = set(cited_ids)
+        cited_chunks = [c for c in chunk_index if c.evidence_id in cited_set]
+        selected = self.select_evidence(
+            claim, [], chunk_index=cited_chunks,
+            cited_evidence_ids=cited_ids)
+        claim.evidence_provenance = [
+            (c.evidence_id, c.offset) for c in selected]
+        if not selected:
+            claim.status = "unsupported"
+            claim.citation_mismatch = True
+            claim.supporting_source_ids = []
+            claim.reason = ("引用された出典に該当する本文が見つかりません"
+                            if self.language == "ja" else
+                            "cited evidence has no matching content")
+            self._find_replacements(claim, chunk_index, exclude=cited_set)
+            return
+        try:
+            verdict = self._judge_claim(claim, selected)
+        except Exception as e:
+            claim.status = "uncertain"
+            claim.reason = f"verification error: {e}"
+            self.extraction_errors.append(
+                f"claim judgement failed ({claim.claim_id}): {e}")
+            return
+        status = verdict.get("status", "uncertain")
+        if status not in _VALID_STATUSES:
+            status = "uncertain"
+        ids = verdict.get("supporting_source_ids")
+        valid = {c.evidence_id for c in selected}
+        supporting = [i for i in ids if i in valid] \
+            if isinstance(ids, list) else []
+        # supported REQUIRES: cited-in-body ∩ actually-supporting ≠ ∅
+        if status == "supported" and any(i in cited_set for i in supporting):
+            claim.status = "supported"
+            claim.supporting_source_ids = supporting
+            claim.reason = verdict.get("reason", "")
+            return
+        claim.supporting_source_ids = []
+        claim.reason = verdict.get("reason", "")
+        if status in ("unsupported", "contradicted"):
+            # the citation is real but its content does NOT support the
+            # claim -> invalid/unsupported citation
+            claim.status = status
+            claim.citation_mismatch = True
+            if not claim.reason:
+                claim.reason = ("引用された出典は主張を支持しません"
+                                if self.language == "ja" else
+                                "the cited evidence does not support "
+                                "the claim")
+            self._find_replacements(claim, chunk_index, exclude=cited_set)
+        else:
+            # uncertain / unknown / supported-without-valid-ids
+            claim.status = "uncertain"
+            claim.reason = (claim.reason + " / 有効な支持ソースなし"
+                            if self.language == "ja"
+                            else claim.reason + " / no valid sources")
+
+    def _find_replacements(self, claim, chunk_index, exclude) -> None:
+        """Search UNCITED evidence for citation-replacement candidates.
+
+        The result is stored on the claim for the rewrite step only; it
+        never changes the claim's verification status (a misattributed
+        citation must not pass because some other source agrees).
+        """
+        other = [c for c in chunk_index if c.evidence_id not in exclude]
+        selected = self.select_evidence(claim, [], chunk_index=other)
+        if not selected:
+            return
+        try:
+            verdict = self._judge_claim(claim, selected)
+        except Exception:
+            return
+        if verdict.get("status") == "supported":
+            valid = {c.evidence_id for c in selected}
+            ids = verdict.get("supporting_source_ids")
+            if isinstance(ids, list):
+                claim.replacement_source_ids = [
+                    i for i in ids if i in valid]
 
     def _judge_claim(self, claim: Claim, chunks: List[EvidenceChunk]) -> Dict:
         blocks = []
@@ -437,6 +611,15 @@ JSON only."""
     # Critical-question coverage (all sections; answered vs mentioned)
     # ------------------------------------------------------------------
 
+    # The limitations block QUOTES unresolved questions verbatim — it must
+    # never make a question look answered (lexically or to the LLM)
+    _LIMITATIONS_BLOCK_RE = re.compile(
+        r"###\s*(?:調査上の限界|Research Limitations)[\s\S]*\Z")
+
+    @classmethod
+    def _strip_limitations(cls, text: str) -> str:
+        return cls._LIMITATIONS_BLOCK_RE.sub("", text or "")
+
     def judge_coverage(self, questions: List[str],
                        chapters: Dict[str, str]) -> List[Dict]:
         """LLM-judged coverage with a lexical fallback.
@@ -444,6 +627,9 @@ JSON only."""
         Returns one dict per question:
         {"question", "answered", "section_id", "missing", "search_queries"}
         """
+        # a limitations note about an UNRESOLVED question is not an answer
+        chapters = {sid: self._strip_limitations(text)
+                    for sid, text in chapters.items()}
         results = []
         llm_results = None
         try:
@@ -475,6 +661,24 @@ JSON only."""
                     "missing": "" if best >= 0.6 else q,
                     "search_queries": [q[:60]],
                 }
+            elif not entry.get("answered"):
+                # lexical CROSS-CHECK of an LLM "unanswered" verdict: a
+                # very strong lexical presence in some section suggests
+                # the LLM missed it (e.g. window boundaries) — overturn
+                # and note the disagreement
+                q_bi = _bigrams(q)
+                best_sid, best = "", 0.0
+                for sid, bi in section_bigrams.items():
+                    c = _containment(q_bi, bi)
+                    if c > best:
+                        best_sid, best = sid, c
+                if best >= 0.7:
+                    self.extraction_errors.append(
+                        f"coverage cross-check: LLM marked unanswered but "
+                        f"lexical containment {best:.2f} in section "
+                        f"{best_sid} — treated as answered")
+                    entry = {"answered": True, "section_id": best_sid,
+                             "missing": "", "search_queries": []}
             queries = [s for s in (entry.get("search_queries") or []) if s]
             if not queries:
                 queries = [q[:60]]
@@ -487,20 +691,64 @@ JSON only."""
             })
         return results
 
+    # Per-LLM-call body budget for coverage judging; the FULL text is
+    # covered via map-reduce over windows of this size (no 3,000-char
+    # per-section or 24,000-char whole-report truncation)
+    COVERAGE_WINDOW_CHARS = 20000
+
     def _judge_coverage_llm(self, questions: List[str],
                             chapters: Dict[str, str]) -> Dict[int, Dict]:
-        q_lines = "\n".join(f"{i}. {q}" for i, q in enumerate(questions))
-        parts = []
-        budget = 24000
+        """Map-reduce coverage over the WHOLE body.
+
+        The body is split into windows; every window is judged for every
+        question; a question is answered if ANY window answers it — a
+        critical question addressed only at the end of a long report is
+        found.
+        """
+        # map: build windows covering ALL text of ALL sections
+        windows: List[str] = []
+        current: List[str] = []
+        used = 0
         for sid, text in chapters.items():
-            excerpt = (text or "")[:3000]
-            parts.append(f"### セクション {sid}\n{excerpt}"
-                         if self.language == "ja"
-                         else f"### Section {sid}\n{excerpt}")
-            budget -= len(excerpt)
-            if budget <= 0:
-                break
-        body = "\n\n".join(parts)
+            text = text or ""
+            pos = 0
+            while pos < len(text) or (pos == 0 and not text):
+                room = self.COVERAGE_WINDOW_CHARS - used
+                piece = text[pos:pos + max(room, 1000)]
+                header = (f"### セクション {sid}"
+                          f"（{pos}字目〜）" if self.language == "ja"
+                          else f"### Section {sid} (from char {pos})")
+                current.append(f"{header}\n{piece}")
+                used += len(piece)
+                pos += len(piece)
+                if used >= self.COVERAGE_WINDOW_CHARS:
+                    windows.append("\n\n".join(current))
+                    current, used = [], 0
+                if not text:
+                    break
+        if current:
+            windows.append("\n\n".join(current))
+
+        merged: Dict[int, Dict] = {}
+        for window in windows:
+            try:
+                result = self._judge_coverage_window(questions, window)
+            except Exception as e:
+                self.extraction_errors.append(
+                    f"coverage window judgement failed: {e}")
+                continue
+            if not result:
+                continue
+            for idx, entry in result.items():
+                prev = merged.get(idx)
+                if prev is None or (entry.get("answered")
+                                    and not prev.get("answered")):
+                    merged[idx] = entry
+        return merged or None
+
+    def _judge_coverage_window(self, questions: List[str],
+                               body: str) -> Optional[Dict[int, Dict]]:
+        q_lines = "\n".join(f"{i}. {q}" for i, q in enumerate(questions))
 
         if self.language == "ja":
             prompt = f"""以下のレポート本文が、各「重要な問い」に実質的に回答しているか判定してください。
@@ -619,21 +867,29 @@ JSON only."""
             counter += len(claims)
             all_claims.extend(claims)
 
-        # resolve each claim's cited [SOURCE N] numbers to evidence ids
+        # resolve each claim's cited [SOURCE N] numbers to evidence ids.
+        # The DETERMINISTIC parser (sentence/paragraph association) is the
+        # primary source; LLM-reported numbers are merged in on top.
+        enforce_citations = citation_manager is not None
         cited_ids_by_claim: Dict[str, List[str]] = {}
-        if citation_manager is not None:
+        if enforce_citations:
             for claim in all_claims:
-                if claim.cited_source_numbers:
+                parsed = self.parse_cited_numbers(
+                    claim.text, chapters.get(claim.section_id, ""))
+                nums = sorted(set(parsed)
+                              | set(claim.cited_source_numbers or []))
+                claim.cited_source_numbers = nums
+                if nums:
                     mapping = citation_manager.mapping(claim.section_id)
-                    ids = [mapping[n] for n in claim.cited_source_numbers
-                           if n in mapping]
+                    ids = [mapping[n] for n in nums if n in mapping]
                     if ids:
                         cited_ids_by_claim[claim.claim_id] = ids
 
         chunk_index = self.build_chunk_index(evidence_list)
         self.verify_claims(all_claims, evidence_list,
                            chunk_index=chunk_index,
-                           cited_ids_by_claim=cited_ids_by_claim)
+                           cited_ids_by_claim=cited_ids_by_claim,
+                           enforce_citations=enforce_citations)
 
         # --- aggregate: unsupported / contradicted / uncertain SEPARATELY ---
         weighted_total = 0.0
@@ -644,20 +900,40 @@ JSON only."""
             if claim.status == "supported":
                 weighted_supported += weight
             elif claim.status == "unsupported":
-                verdict.metrics.unsupported_count += 1
-                if claim.importance == "critical":
-                    verdict.metrics.unsupported_critical_claims += 1
-                verdict.issues.append(VerificationIssue(
-                    section_id=claim.section_id,
-                    claim_id=claim.claim_id,
-                    type=ISSUE_UNSUPPORTED,
-                    severity=claim.importance,
-                    claim=claim.text,
-                    reason=claim.reason,
-                    supporting_source_ids=claim.supporting_source_ids,
-                    needed_evidence=claim.text,
-                    search_queries=[claim.text[:60]],
-                ))
+                fixable = bool(claim.replacement_source_ids)
+                if (claim.citation_mismatch or claim.citation_missing) \
+                        and fixable:
+                    # the correct source already exists in the locker:
+                    # this is a citation defect fixable by REWRITE (the
+                    # rewrite swaps in the replacement candidates); it is
+                    # NOT counted as an evidence gap needing research
+                    verdict.issues.append(VerificationIssue(
+                        section_id=claim.section_id,
+                        claim_id=claim.claim_id,
+                        type=ISSUE_INVALID_CITATION,
+                        severity=claim.importance,
+                        claim=claim.text,
+                        reason=(claim.reason or "") + (
+                            "／正しい出典候補あり" if self.language == "ja"
+                            else " / replacement candidates available"),
+                        supporting_source_ids=claim.replacement_source_ids,
+                        fallback_action="replace_citation",
+                    ))
+                else:
+                    verdict.metrics.unsupported_count += 1
+                    if claim.importance == "critical":
+                        verdict.metrics.unsupported_critical_claims += 1
+                    verdict.issues.append(VerificationIssue(
+                        section_id=claim.section_id,
+                        claim_id=claim.claim_id,
+                        type=ISSUE_UNSUPPORTED,
+                        severity=claim.importance,
+                        claim=claim.text,
+                        reason=claim.reason,
+                        supporting_source_ids=claim.supporting_source_ids,
+                        needed_evidence=claim.text,
+                        search_queries=[claim.text[:60]],
+                    ))
             elif claim.status == "contradicted":
                 verdict.metrics.contradicted_count += 1
                 verdict.metrics.unresolved_contradictions += 1
@@ -683,11 +959,11 @@ JSON only."""
                     reason=claim.reason,
                     supporting_source_ids=claim.supporting_source_ids,
                 ))
-            # claim with citations reported absent -> integrity issue
-            if (claim.cited_source_numbers is not None
+            # claim without citations -> integrity issue. Required for
+            # critical/important claims REGARDLESS of whether the section
+            # registry happens to be empty.
+            if (enforce_citations
                     and not claim.cited_source_numbers
-                    and citation_manager is not None
-                    and citation_manager.evidence_ids(claim.section_id)
                     and claim.importance in ("critical", "important")):
                 verdict.issues.append(VerificationIssue(
                     section_id=claim.section_id,
@@ -703,6 +979,28 @@ JSON only."""
         verdict.metrics.claims_total = len(all_claims)
         verdict.metrics.chunks_total = self.chunks_total
         verdict.metrics.chunks_failed = self.chunks_failed
+        # ALWAYS transcribed: callers read metrics, not verifier state
+        verdict.metrics.extraction_errors = list(self.extraction_errors)
+
+        # any unverified chunk after retries is a CRITICAL failure — a
+        # partial extraction success is never treated as full-body success
+        if self.chunks_failed > 0:
+            verdict.issues.append(VerificationIssue(
+                type=ISSUE_VERIFICATION_FAILURE, severity="critical",
+                reason=(f"未検証の本文範囲が残っています（抽出チャンク "
+                        f"{self.chunks_failed}/{self.chunks_total} 失敗、"
+                        f"リトライ{self.EXTRACT_RETRIES}回後）"
+                        if self.language == "ja" else
+                        f"unverified body ranges remain: "
+                        f"{self.chunks_failed}/{self.chunks_total} "
+                        f"extraction chunks failed after "
+                        f"{self.EXTRACT_RETRIES} retries"),
+            ))
+
+        # citation mismatches invalidate the citation gate even when every
+        # [SOURCE N] number technically resolves
+        has_mismatch = any(c.citation_mismatch or c.citation_missing
+                           for c in all_claims)
         verdict.metrics.claim_support_score = (
             weighted_supported / weighted_total if weighted_total else 0.0)
 
@@ -759,7 +1057,7 @@ JSON only."""
             orphans = citation_manager.report_orphans(chapters)
             lost = citation_manager.sections_that_lost_all_citations(chapters)
             verdict.metrics.citations_valid = not (
-                problems or orphans or lost)
+                problems or orphans or lost or has_mismatch)
             for sid, numbers in problems.items():
                 verdict.issues.append(VerificationIssue(
                     section_id=sid,
@@ -783,9 +1081,22 @@ JSON only."""
                     reason="登録済みエビデンスがあるのに引用が全て削除されています",
                 ))
 
-        # --- primary / freshness (3-state) ---
+        # --- primary / freshness (3-state), tied to the evidence that the
+        #     IMPORTANT claims actually rely on (cited + supporting), not
+        #     to the whole locker — one fresh but irrelevant source can
+        #     never satisfy the gate. Falls back to all evidence when no
+        #     claim-level linkage exists. ---
+        relevant_ids: set = set()
+        for claim in all_claims:
+            if claim.importance in ("critical", "important"):
+                relevant_ids.update(claim.supporting_source_ids or [])
+                relevant_ids.update(
+                    cited_ids_by_claim.get(claim.claim_id, []))
+        freshness_evidence = [ev for ev in evidence_list
+                              if getattr(ev, "id", "") in relevant_ids] \
+            if relevant_ids else evidence_list
         state, why = self.assess_primary_freshness(
-            evidence_list, required=primary_freshness_required)
+            freshness_evidence, required=primary_freshness_required)
         verdict.metrics.primary_freshness = state
         if state == FRESHNESS_FAIL:
             verdict.issues.append(VerificationIssue(
@@ -812,10 +1123,30 @@ JSON only."""
         verdict.section_assessments = self._build_section_assessments(
             chapters, verdict, citation_manager, length_plans,
             evidence_list, exclude_references)
+        # Aggregate the per-section assessments into DOCUMENT metrics —
+        # these drive the Python decision logic (REWRITE / RESEARCH /
+        # COMPRESS / ACCEPT), they are not informational output.
         unused_all: List[str] = []
+        missing_all: List[str] = []
+        redundant_all: List[str] = []
         for a in verdict.section_assessments.values():
             unused_all.extend(a.unused_evidence_ids)
+            missing_all.extend(a.missing_content_units)
+            redundant_all.extend(a.redundant_passages)
         verdict.metrics.unused_high_importance_evidence_ids = unused_all
+        verdict.metrics.missing_content_units = missing_all
+        verdict.metrics.redundant_passages = redundant_all
+        for a in verdict.section_assessments.values():
+            if a.redundant_passages:
+                verdict.issues.append(VerificationIssue(
+                    section_id=a.section_id,
+                    type=ISSUE_REDUNDANCY,
+                    severity="minor",
+                    reason=(f"重複記述: {a.redundant_passages[0][:80]}"
+                            if self.language == "ja" else
+                            f"redundant passage: "
+                            f"{a.redundant_passages[0][:80]}"),
+                ))
 
         return verdict
 

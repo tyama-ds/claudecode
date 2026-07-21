@@ -207,7 +207,11 @@ class OpenAIClient(BaseLLMClient):
         token_param_key = "max_completion_tokens" if self._requires_max_completion_tokens(model) else "max_tokens"
 
         while True:
-            response = self._client.chat.completions.create(**api_params)
+            # leaf API call: one composed run+process concurrency permit.
+            # The OpenAI SDK client is thread-safe and retries 429/5xx
+            # internally with exponential backoff + jitter.
+            with self._leaf_permit():
+                response = self._client.chat.completions.create(**api_params)
 
             # Extract response - handle missing/empty choices
             if not response.choices:
@@ -258,7 +262,7 @@ class OpenAIClient(BaseLLMClient):
                             total_tokens=response.usage.total_tokens,
                             model=response.model,
                         )
-                        get_token_stats().add_usage(token_usage)
+                        self._record_usage(token_usage)
                     continue  # Retry with higher limit
 
                 if not content.strip():
@@ -283,7 +287,7 @@ class OpenAIClient(BaseLLMClient):
                 total_tokens=response.usage.total_tokens,
                 model=response.model,
             )
-            get_token_stats().add_usage(token_usage)
+            self._record_usage(token_usage)
 
         return LLMResponse(
             content=content,

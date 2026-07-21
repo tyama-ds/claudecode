@@ -160,6 +160,7 @@ class Researcher:
         filter_mode: str = "moderate",
         crawl_mode: CrawlMode = CrawlMode.STANDARD,
         fast_crawl_workers: int = 10,
+        parallel_max_workers: int = 8,
         fast_crawl_batch_size: int = 5,
         ai_crawl_max_total_pages: int = 15,
         ai_crawl_max_depth: int = 3,
@@ -271,9 +272,11 @@ class Researcher:
         self._target_characters = target_characters
         # ContentExtractor is created without per-section target initially;
         # it will be updated in _execute_research_loop once we know the section count.
+        self.parallel_max_workers = parallel_max_workers
         self.content_extractor = ContentExtractor(
             self.writing_llm, language,
             evaluation_llm_client=self.evaluation_llm,
+            max_parallel_workers=parallel_max_workers,
         )
 
         # Use enhanced multi-pass content generation for better quality
@@ -293,6 +296,7 @@ class Researcher:
                 search_client=search_client,
                 llm_client=llm_client,
                 progress_callback=progress_callback,
+                max_parallel_workers=parallel_max_workers,
             )
             if multilingual_config.search_regions:
                 print(f"[Researcher] Locale (region) search enabled: "
@@ -342,7 +346,7 @@ class Researcher:
                 llm_client=self.crawling_llm,
                 evaluation_mode=eval_mode,
                 content_filter=self.content_filter,
-                max_workers=fast_crawl_workers,
+                max_workers=min(fast_crawl_workers, parallel_max_workers),
                 batch_size=fast_crawl_batch_size,
                 language=language,
             )
