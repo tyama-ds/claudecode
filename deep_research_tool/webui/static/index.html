@@ -297,6 +297,8 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
         <div class="prov-title">ローカルLLM</div>
         <label>サーバーURL</label>
         <input type="text" id="set_local_url" placeholder="http://localhost:11434 / http://192.168.x.x/v1">
+        <label>APIキー（認証不要のサーバーは空欄）</label>
+        <input type="password" id="set_local_key" placeholder="社内LLMゲートウェイ等で認証が必要な場合のみ">
         <label>バックエンド</label>
         <select id="set_local_backend">
           <option value="ollama">Ollama（/api/chat）</option>
@@ -640,6 +642,7 @@ const SETTINGS_FIELDS = {
   set_anthropic_key: 'anthropic_api_key',
   set_anthropic_url: 'anthropic_base_url',
   set_local_url: 'local_base_url',
+  set_local_key: 'local_api_key',
   set_local_backend: 'local_backend',
   set_https_proxy: 'https_proxy',
   set_http_proxy: 'http_proxy',

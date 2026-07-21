@@ -689,6 +689,7 @@ def create_config(
     openai_base_url: Optional[str] = None,
     anthropic_base_url: Optional[str] = None,
     local_base_url: Optional[str] = None,
+    local_api_key: Optional[str] = None,
     local_backend: str = "ollama",
     model: Optional[str] = None,
     search_method: str = "duckduckgo",
@@ -840,6 +841,9 @@ def create_config(
         local_base_url: Local LLM server URL for provider='local' (optional;
             falls back to LOCAL_LLM_BASE_URL env var, then the backend default,
             e.g. http://localhost:11434 for Ollama)
+        local_api_key: Auth token for the local LLM server (optional; falls
+            back to the LOCAL_LLM_API_KEY env var). Most local servers need
+            no key; corporate LLM gateways often do
         local_backend: Local LLM backend type ('ollama', 'vllm', or
             'openai_compatible')
         model: Model name to use (optional, uses default for provider)
@@ -1000,6 +1004,7 @@ def create_config(
         openai_base_url=openai_base_url,
         anthropic_base_url=anthropic_base_url,
         local_base_url=local_base_url,
+        local_api_key=local_api_key,
         local_backend=LocalLLMBackend(local_backend),
         stage_overrides=dict(stage_llm) if stage_llm else {},
     )

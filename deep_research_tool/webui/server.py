@@ -34,6 +34,7 @@ _CONFIG_PARAM_MAP = {
     "openai_base_url": "openai_base_url",
     "anthropic_base_url": "anthropic_base_url",
     "local_base_url": "local_base_url",
+    "local_api_key": "local_api_key",
     "local_backend": "local_backend",
     "search_method": "search_method",
     "browser": "browser",
