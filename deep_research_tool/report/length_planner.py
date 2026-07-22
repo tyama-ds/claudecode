@@ -56,6 +56,23 @@ def dedupe_units(units: List[str]) -> List[str]:
 
 _NUMBER_RE = re.compile(r"\d[\d,.]*\s*(?:%|％|億|兆|万|円|ドル|人|件|台|年)?")
 
+# Information units beyond key points and numbers: comparisons,
+# contradictions, uncertainties and causal explanations all take prose
+# space and are counted as units (capped per section).
+_COMPARISON_RE = re.compile(
+    r"比較|対比|に対して|より[も高低多少大小]|上回|下回|versus|vs\.?|compared",
+    re.IGNORECASE)
+_CONTRADICTION_RE = re.compile(
+    r"一方で?|矛盾|相反|逆に|とは異なり|however|in contrast|contradict",
+    re.IGNORECASE)
+_UNCERTAINTY_RE = re.compile(
+    r"不確実|不透明|不明|未確定|可能性|見込み|推定|とみられる|uncertain|estimated|likely",
+    re.IGNORECASE)
+_CAUSALITY_RE = re.compile(
+    r"のため|ことにより|要因|背景には|起因|につながる|therefore|because|due to|leads? to",
+    re.IGNORECASE)
+_UNIT_PATTERN_CAP = 6      # per-section cap per pattern type
+
 
 @dataclass
 class SectionUnits:
@@ -66,13 +83,14 @@ class SectionUnits:
     comparisons: int = 0
     contradictions: int = 0
     uncertainties: int = 0
+    causal_links: int = 0
     unique_sources: int = 0
 
     @property
     def total_units(self) -> int:
         return (len(self.key_points) + len(self.numbers)
                 + self.comparisons + self.contradictions
-                + self.uncertainties)
+                + self.uncertainties + self.causal_links)
 
 
 @dataclass
@@ -195,10 +213,22 @@ class LengthPlanner:
         # unique sources: near-identical source contents count once
         unique_source_contents = dedupe_units([c[:400] for c in contents])
 
+        # comparisons / contradictions / uncertainties / causal links are
+        # information units too — each needs explanatory prose
+        all_text = "\n".join(unique_points) + "\n" + \
+            "\n".join(c[:2000] for c in contents)
         return SectionUnits(
             section_id=section_id,
             key_points=unique_points,
             numbers=unique_numbers,
+            comparisons=min(_UNIT_PATTERN_CAP,
+                            len(_COMPARISON_RE.findall(all_text))),
+            contradictions=min(_UNIT_PATTERN_CAP,
+                               len(_CONTRADICTION_RE.findall(all_text))),
+            uncertainties=min(_UNIT_PATTERN_CAP,
+                              len(_UNCERTAINTY_RE.findall(all_text))),
+            causal_links=min(_UNIT_PATTERN_CAP,
+                             len(_CAUSALITY_RE.findall(all_text))),
             unique_sources=len(unique_source_contents),
         )
 

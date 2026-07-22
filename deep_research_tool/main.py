@@ -421,6 +421,29 @@ class DeepResearchTool:
         # already active, so parallel Web UI jobs don't wipe each other)
         ResearchWarnings.reset_if_idle()
 
+        # --- run-scoped concurrency + token accounting ---
+        # One RunLimits per run: every leaf LLM/HTTP call takes a composed
+        # permit (run cap = parallel_max_workers, process cap = 16 shared
+        # by all Web UI jobs in this server process). One run-local
+        # TokenUsageStats per run: parallel jobs never mix their numbers
+        # and another job's reset cannot clear them.
+        from .utils.concurrency import RunLimits
+        from .api.base import TokenUsageStats
+        run_limits = RunLimits(self.config.research.parallel_max_workers)
+        self.run_limits = run_limits
+        run_token_stats = TokenUsageStats()
+        self.run_token_stats = run_token_stats
+        for _client in [self.llm_client, *self.stage_llm_clients.values()]:
+            try:
+                _client.concurrency_limiter = run_limits
+                _client.token_stats = run_token_stats
+            except Exception:
+                pass
+        try:
+            self.search_client.concurrency_limiter = run_limits
+        except Exception:
+            pass
+
         # Log informational note when both enhanced_synthesis and V2 two_phase are active
         if (self.config.research.use_enhanced_synthesis
                 and self.config.report.generator_version == ReportGeneratorVersion.V2
@@ -474,6 +497,7 @@ class DeepResearchTool:
             filter_mode=self.config.research.content_filter_mode.value,
             crawl_mode=self.config.research.crawl_mode,
             fast_crawl_workers=self.config.research.fast_crawl_workers,
+            parallel_max_workers=self.config.research.parallel_max_workers,
             fast_crawl_batch_size=self.config.research.fast_crawl_batch_size,
             ai_crawl_max_total_pages=self.config.research.ai_crawl_max_total_pages,
             ai_crawl_max_depth=self.config.research.ai_crawl_max_depth,
@@ -646,7 +670,33 @@ class DeepResearchTool:
                 pre_deep_think_content=_pre_deep_think_content,
             )
 
+        # --- ALL semantic figure work happens BEFORE finalization -------
+        # Chart data, titles, captions and table cells are generated (and
+        # PNGs rendered) here, so the figure semantics join the body for
+        # verification and are FROZEN with it. After the freeze, figures
+        # are only INSERTED deterministically.
+        figure_collection = None
+        fig_generator = None
+        if self.config.report.auto_figures:
+            if progress_callback:
+                progress_callback("Generating figures and tables...", 94)
+            try:
+                figure_collection, fig_generator = \
+                    self._generate_figure_collection(
+                        session=session, evidence_locker=evidence_locker)
+            except Exception as e:
+                print(f"[AutoFigures] Failed with error: {e}. "
+                      f"Continuing without figures.")
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.MEDIUM, "AutoFigures",
+                    f"Figure/table generation failed entirely. Report will "
+                    f"not contain auto-generated figures or tables. "
+                    f"Error: {e}",
+                )
+                figure_collection, fig_generator = None, None
+
         extras_flags = {}
+        semantic_freeze_hash = None
         if version_tag == "v3":
             # V3: DOCX-native generation flow
             result = generator.generate_report(
@@ -656,11 +706,12 @@ class DeepResearchTool:
             )
 
             # Finalization loop: verify the final candidate body — with
-            # Fermi / glossary / warnings already IN it — and only then
-            # freeze it (V3 rendering below is deterministic)
+            # Fermi / glossary / warnings / FIGURE SEMANTICS already IN
+            # it — and only then freeze it (V3 rendering is deterministic)
             if self.config.enable_verification:
                 extra_chapters, extras_flags = self._build_extra_chapters(
-                    generator, result, fermi_markdown)
+                    generator, result, fermi_markdown,
+                    figure_collection=figure_collection)
                 verification_result, verification_html = \
                     self._run_finalization_loop(
                         result=result,
@@ -670,37 +721,13 @@ class DeepResearchTool:
                         requirements=requirements,
                         progress_callback=progress_callback,
                         extra_chapters=extra_chapters,
+                        render_only=extras_flags.get("figures_key"),
                     )
                 if extras_flags.get("fermi"):
                     fermi_markdown = ""    # already in the verified body
-
-            # Pre-generate figures if auto_figures is enabled
-            figure_collection = None
-            if self.config.report.auto_figures:
-                if progress_callback:
-                    progress_callback("Generating figures and tables...", 97)
-                try:
-                    fig_generator = FigureTableGenerator(
-                        llm_client=self.llm_client,
-                        output_dir=self.config.report.output_dir / "reports" / "figures",
-                        language=self.config.research.language,
-                        proxies=self.config.proxy.get_proxies_dict(),
-                        verify_ssl=self.config.proxy.verify_ssl,
-                        max_workers=self.config.report.figure_max_workers,
-                    )
-                    figure_collection = fig_generator.generate_figures_and_tables(
-                        session=session,
-                        evidence_locker=evidence_locker,
-                    )
-                    self._emit_live_figures(live_sink, figure_collection)
-                except Exception as e:
-                    print(f"[V3/AutoFigures] Failed: {e}. Continuing without figures.")
-                    ResearchWarnings.get_instance().add(
-                        ResearchWarnings.MEDIUM,
-                        "V3/AutoFigures",
-                        f"Figure/table generation failed. Report will not contain "
-                        f"auto-generated figures or tables. Error: {e}",
-                    )
+                semantic_freeze_hash = self._freeze_semantics(
+                    {sid: ch.content for sid, ch in result.chapters.items()},
+                    figure_collection)
 
             # Build warnings text. When the warnings snapshot was already
             # verified inside the body, only warnings raised AFTER the
@@ -745,7 +772,8 @@ class DeepResearchTool:
             # rendering (markdown assembly, format conversion).
             if self.config.enable_verification:
                 extra_chapters, extras_flags = self._build_extra_chapters(
-                    generator, result, fermi_markdown)
+                    generator, result, fermi_markdown,
+                    figure_collection=figure_collection)
                 verification_result, verification_html = \
                     self._run_finalization_loop(
                         result=result,
@@ -755,9 +783,13 @@ class DeepResearchTool:
                         requirements=requirements,
                         progress_callback=progress_callback,
                         extra_chapters=extra_chapters,
+                        render_only=extras_flags.get("figures_key"),
                     )
                 if extras_flags.get("fermi"):
                     fermi_markdown = ""    # already in the verified body
+                semantic_freeze_hash = self._freeze_semantics(
+                    {sid: ch.content for sid, ch in result.chapters.items()},
+                    figure_collection)
 
             # Generate final document as markdown
             final_doc = generator.generate_final_document(
@@ -815,8 +847,14 @@ class DeepResearchTool:
                         query=query,
                         requirements=requirements,
                         progress_callback=progress_callback,
+                        figure_collection=figure_collection,
                     )
                 finalized = True
+                semantic_freeze_hash = self._freeze_semantics(
+                    {sid: sd.get("content", "")
+                     for sid, sd in session.section_contents.items()
+                     if not sid.startswith("_") and sd.get("content")},
+                    figure_collection)
 
             # After finalization the body is FROZEN: the legacy length
             # adjustment must never rewrite a verified body, so the
@@ -847,27 +885,27 @@ class DeepResearchTool:
             if evidence_format in ("csv", "both"):
                 evidence_csv = evidence_locker.export_to_csv()
 
-        # Auto figure/table generation (if enabled)
-        # V3 handles figures inline via generate_and_save(), so skip post-hoc insertion
+        # Deterministic figure INSERTION (V3 embeds inline during
+        # generate_and_save). The collection was generated and verified
+        # BEFORE the freeze; no LLM runs here.
         figures_report_path = None
-        if self.config.report.auto_figures and version_tag != "v3":
+        if figure_collection is not None and version_tag != "v3":
             if progress_callback:
-                progress_callback("Generating figures and tables...", 97)
-
+                progress_callback("Inserting figures and tables...", 97)
             try:
-                figures_report_path = self._auto_generate_figures(
+                figures_report_path = self._insert_figures_into_report(
                     report_path=Path(report_path),
-                    session=session,
-                    evidence_locker=evidence_locker,
+                    collection=figure_collection,
+                    generator=fig_generator,
                 )
             except Exception as e:
-                print(f"[AutoFigures] Failed with error: {e}. "
+                print(f"[AutoFigures] Insertion failed: {e}. "
                       f"Continuing with original report.")
                 ResearchWarnings.get_instance().add(
                     ResearchWarnings.MEDIUM,
                     "AutoFigures",
-                    f"Figure/table generation failed entirely. "
-                    f"Report will not contain auto-generated figures or tables. Error: {e}",
+                    f"Figure insertion failed. The report keeps its "
+                    f"original content without figures. Error: {e}",
                 )
                 figures_report_path = None
 
@@ -896,6 +934,58 @@ class DeepResearchTool:
         if version_tag == "v1" and warnings_collector.has_warnings():
             self._append_warnings_to_report(
                 active_report_path, warnings_collector)
+
+        # Hard length bounds are ABSOLUTE constraints independent of the
+        # verification toggle: with verification off there is no edit
+        # loop to fix a violation (padding / mechanical truncation are
+        # forbidden), so a violation is reported as a CRITICAL warning —
+        # never a silent normal completion.
+        rp_cfg = self.config.report
+        if not self.config.enable_verification and (
+                rp_cfg.hard_min_body_chars or rp_cfg.hard_max_body_chars):
+            from .report.finalization import count_body_chars
+            if version_tag == "v1":
+                _body = "\n\n".join(
+                    sd.get("content", "")
+                    for sid, sd in session.section_contents.items()
+                    if not sid.startswith("_"))
+            else:
+                _body = "\n\n".join(ch.content
+                                    for ch in result.chapters.values())
+            _chars = count_body_chars(
+                _body, exclude_references=rp_cfg.exclude_references_from_count)
+            if rp_cfg.hard_max_body_chars and \
+                    _chars > rp_cfg.hard_max_body_chars:
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.CRITICAL, "LengthBounds",
+                    f"本文({_chars}字)が上限(hard_max_body_chars="
+                    f"{rp_cfg.hard_max_body_chars})を超過しています。検証無効の"
+                    f"ため自動圧縮は行われません。このレポートは正常完了では"
+                    f"ありません。")
+            if rp_cfg.hard_min_body_chars and \
+                    _chars < rp_cfg.hard_min_body_chars:
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.CRITICAL, "LengthBounds",
+                    f"本文({_chars}字)が下限(hard_min_body_chars="
+                    f"{rp_cfg.hard_min_body_chars})に達していません。水増しは"
+                    f"行いません。追加調査で情報を増やしてください。")
+
+        # Semantic freeze check: the content about to ship must hash
+        # IDENTICALLY to the snapshot taken at freeze time. Renderers may
+        # only have done non-semantic work since (layout, format
+        # conversion, deterministic insertion of the frozen figures).
+        semantic_output_hash = None
+        if semantic_freeze_hash:
+            if version_tag == "v1":
+                output_chapters = {
+                    sid: sd.get("content", "")
+                    for sid, sd in session.section_contents.items()
+                    if not sid.startswith("_") and sd.get("content")}
+            else:
+                output_chapters = {sid: ch.content
+                                   for sid, ch in result.chapters.items()}
+            semantic_output_hash = self._check_semantics_at_output(
+                output_chapters, figure_collection, semantic_freeze_hash)
 
         # Live report: deliver the VERIFIED final body (replaces drafts,
         # removes watermarks, appends references) and release the sinks.
@@ -936,7 +1026,10 @@ class DeepResearchTool:
             "verification_result": verification_result,
             "deep_think_results": deep_think_results,
             "fermi_estimation_results": fermi_results,
-            "token_usage": token_stats.to_dict(),
+            "token_usage": run_token_stats.to_dict(),
+            "max_concurrency_observed": run_limits.run_peak,
+            "semantic_manifest_hash_at_freeze": semantic_freeze_hash,
+            "semantic_manifest_hash_at_output": semantic_output_hash,
             "warnings": warnings_collector.to_dict_list(),
             "warning_count": warnings_collector.count(),
         }
@@ -1337,6 +1430,38 @@ class DeepResearchTool:
             return None
         return CompositeSink(sinks)
 
+    def _freeze_semantics(self, chapters, figure_collection) -> str:
+        """Canonical semantic snapshot + hash at FREEZE time."""
+        from .report.semantic_manifest import (
+            build_semantic_manifest, manifest_hash)
+        manifest = build_semantic_manifest(chapters, figure_collection)
+        digest = manifest_hash(manifest)
+        self.semantic_manifest = manifest
+        self.semantic_manifest_hash = digest
+        print(f"[Freeze] semantic manifest hash: {digest[:16]}…")
+        return digest
+
+    def _check_semantics_at_output(self, chapters, figure_collection,
+                                   freeze_hash) -> str:
+        """Recompute the manifest right before the final output.
+
+        Any difference from the freeze-time hash means semantic content
+        was generated or altered AFTER verification — a pipeline defect
+        that is reported as a CRITICAL warning."""
+        from .report.semantic_manifest import (
+            build_semantic_manifest, manifest_hash)
+        digest = manifest_hash(
+            build_semantic_manifest(chapters, figure_collection))
+        if freeze_hash and digest != freeze_hash:
+            print(f"[Freeze] SEMANTIC DRIFT DETECTED: "
+                  f"{freeze_hash[:16]}… -> {digest[:16]}…")
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.CRITICAL, "Freeze",
+                "最終検証後に意味的内容が変更されました（semantic manifest "
+                "hash不一致）。パイプライン不具合の可能性があります。",
+            )
+        return digest
+
     @staticmethod
     def _emit_live_figures(live_sink, collection) -> None:
         """Emit generated charts/figures to the live report."""
@@ -1410,7 +1535,8 @@ class DeepResearchTool:
 
     def _run_finalization_loop(self, result, session, evidence_locker,
                                query, progress_callback=None,
-                               requirements="", extra_chapters=None):
+                               requirements="", extra_chapters=None,
+                               render_only=None):
         """Verify and finalize the exact body that will be rendered
         (V2 / V3 chapter form).
 
@@ -1427,6 +1553,8 @@ class DeepResearchTool:
         runner = self._build_finalization_runner(
             session, evidence_locker, query, requirements,
             progress_callback, chapter_citation_callback=chapter_citation_cb)
+        if render_only:
+            runner.render_only_sections.add(render_only)
         self.finalization_runner = runner
         self.claim_verifier = runner.claim_verifier
 
@@ -1440,7 +1568,11 @@ class DeepResearchTool:
 
         # Freeze: write the verified, display-numbered text back into the
         # generation result (extras become chapters of their own)
+        # Render-only sections (figure semantics) are NOT written back:
+        # rendering uses the frozen collection itself.
         for sid, text in outcome["chapters"].items():
+            if render_only and sid == render_only:
+                continue
             if sid in result.chapters:
                 result.chapters[sid].content = text
                 result.chapters[sid].word_count = len(text)
@@ -1451,10 +1583,12 @@ class DeepResearchTool:
         return outcome["verdict"], outcome["html_path"]
 
     def _run_finalization_v1(self, session, evidence_locker, query,
-                             requirements="", progress_callback=None):
+                             requirements="", progress_callback=None,
+                             figure_collection=None):
         """Common finalization for the V1 path: the session sections ARE
         the chapters; the frozen, display-numbered text is written back
-        before the deterministic V1 render."""
+        before the deterministic V1 render. Figure semantics join the
+        verified body as a render-only section."""
         runner = self._build_finalization_runner(
             session, evidence_locker, query, requirements,
             progress_callback)
@@ -1466,6 +1600,16 @@ class DeepResearchTool:
             for sid, sdata in session.section_contents.items()
             if not sid.startswith("_") and sdata.get("content")
         }
+        if figure_collection is not None:
+            from .report.semantic_manifest import figure_semantics_markdown
+            key = "付録D" if self.config.research.language == "ja" \
+                else "Appendix D"
+            fig_md = figure_semantics_markdown(
+                figure_collection,
+                language=self.config.research.language, section_id=key)
+            if fig_md.strip():
+                chapters[key] = fig_md
+                runner.render_only_sections.add(key)
         if not chapters:
             return None, None
 
@@ -1496,17 +1640,34 @@ class DeepResearchTool:
             is_draft=False,
         )
 
-    def _build_extra_chapters(self, generator, result, fermi_markdown):
-        """Body-bound extras (Fermi / glossary / warnings snapshot) that
-        must be part of the body BEFORE final verification (audit item 5).
+    def _build_extra_chapters(self, generator, result, fermi_markdown,
+                               figure_collection=None):
+        """Body-bound extras (Fermi / glossary / warnings snapshot /
+        FIGURE SEMANTICS) that must be part of the body BEFORE final
+        verification.
+
+        The figure-semantics chapter is verified but marked RENDER-ONLY:
+        the finalization loop may flag issues on it, but never LLM-edits
+        it — rendering always uses the frozen collection, so the verified
+        text and the rendered figures cannot diverge.
 
         Returns (extra_chapters, flags): flags record which extras were
-        included so the renderers do not duplicate them afterwards.
+        included; flags["figures_key"] names the render-only section.
         """
         language = self.config.research.language
         ja = language == "ja"
         extras = {}
         flags = {}
+
+        if figure_collection is not None:
+            from .report.semantic_manifest import figure_semantics_markdown
+            key = "付録D" if ja else "Appendix D"
+            fig_md = figure_semantics_markdown(
+                figure_collection, language=language, section_id=key)
+            if fig_md.strip():
+                extras[key] = fig_md
+                flags["figures"] = True
+                flags["figures_key"] = key
 
         if fermi_markdown and fermi_markdown.strip():
             num = "付録A" if ja else "Appendix A"
@@ -1879,32 +2040,27 @@ Output only the text (no JSON, no heading):"""
             print(f"[Evidence Review] Section generation failed for {section_key}: {e}")
         return None
 
-    def _auto_generate_figures(
+    def _generate_figure_collection(
         self,
-        report_path: Path,
         session: ResearchSession,
         evidence_locker: EvidenceLocker,
-    ) -> Optional[Path]:
-        """
-        Auto-generate figures and tables and embed them into the report.
+    ):
+        """ALL semantic figure work — BEFORE final verification.
+
+        Numerical extraction, chart analysis, chart rendering and every
+        LLM-generated title/caption/insight happen here, so the figure
+        semantics can join the finalization body and be VERIFIED before
+        the freeze. Returns (collection, generator) or (None, None).
 
         Uses intelligent chart analysis when enabled:
         1. Extract numerical data from evidence
         2. Calculate derived metrics (CAGR, growth rates)
         3. Analyze data for chart opportunities
         4. Generate charts with insights
-
-        Args:
-            report_path: Path to the generated report file
-            session: Research session with content
-            evidence_locker: Evidence locker with sources
-
-        Returns:
-            Path to the updated report with figures, or None if failed
         """
         import traceback
 
-        figures_dir = report_path.parent / "figures"
+        figures_dir = self.config.report.output_dir / "reports" / "figures"
         figures_dir.mkdir(parents=True, exist_ok=True)
 
         # Get proxy settings
@@ -1941,7 +2097,9 @@ Output only the text (no JSON, no heading):"""
                 if self.config.report.intelligent_charts and numerical_store:
                     analyzer = ChartAnalyzer(
                         llm_client=self.llm_client if self.config.report.chart_insights else None,
-                        max_workers=self.config.report.figure_max_workers,
+                        max_workers=min(self.config.report.figure_max_workers,
+                                        self.config.research.parallel_max_workers),
+                        concurrency_limiter=getattr(self, "run_limits", None),
                         language=self.config.research.language,
                         min_confidence=self.config.report.numerical_min_confidence,
                         use_llm_analysis=self.config.report.chart_insights,
@@ -1988,7 +2146,9 @@ Output only the text (no JSON, no heading):"""
             proxies=proxies,
             verify_ssl=self.config.proxy.verify_ssl,
             chart_library=self.config.report.chart_library,
-            max_workers=self.config.report.figure_max_workers,
+            max_workers=min(self.config.report.figure_max_workers,
+                                        self.config.research.parallel_max_workers),
+                        concurrency_limiter=getattr(self, "run_limits", None),
         )
 
         # Step 5: Generate figures/tables/charts
@@ -2020,7 +2180,7 @@ Output only the text (no JSON, no heading):"""
                 f"Figure/table/chart generation failed. "
                 f"Report will not contain any auto-generated visual elements. Error: {e}",
             )
-            return None
+            return None, None
 
         # live report: charts/figures become visible as soon as generated
         self._emit_live_figures(getattr(self, "live_sink", None), collection)
@@ -2071,7 +2231,27 @@ Output only the text (no JSON, no heading):"""
                 f"意味のない図（同値の羅列・年同士のプロット等）は品質検定で"
                 f"自動的に除外されます。",
             )
+            return None, None
+
+        return collection, generator
+
+    def _insert_figures_into_report(
+        self,
+        report_path: Path,
+        collection,
+        generator,
+    ) -> Optional[Path]:
+        """DETERMINISTIC insertion of the frozen figure collection.
+
+        Runs AFTER the freeze: no LLM is involved — the images, captions
+        and table cells were generated and verified before finalization;
+        this step only places them into the rendered file.
+        """
+        import traceback
+
+        if collection is None or generator is None:
             return None
+        figures_dir = generator.output_dir
 
         # Step 6: Read the report content (text formats only — .docx/.pdf are
         # binary and their insertion paths below don't need the raw text)
@@ -2196,7 +2376,9 @@ Output only the text (no JSON, no heading):"""
         import re as _re
 
         MAX_NUMERIC_EVIDENCE = 80
-        EXTRACT_WORKERS = max(1, self.config.report.figure_max_workers)
+        EXTRACT_WORKERS = max(1, min(
+            self.config.report.figure_max_workers,
+            self.config.research.parallel_max_workers))
 
         candidates = []
         for evidence in evidence_locker.get_all_evidence():
@@ -2333,8 +2515,10 @@ Output only the text (no JSON, no heading):"""
         # (sections one by one, each with several serial LLM calls),
         # which dominated the runtime. The processor's validator/metrics
         # are stateful, so every worker gets its OWN processor instance.
-        max_workers = max(1, min(self.config.deep_think.max_workers,
-                                 len(targets)))
+        from .utils.concurrency import effective_workers
+        max_workers = effective_workers(
+            self.config.research.parallel_max_workers,
+            self.config.deep_think.max_workers, len(targets))
         print(f"[DeepThink] processing {len(targets)} sections with "
               f"{max_workers} parallel worker(s)")
 
@@ -2553,6 +2737,7 @@ def run_research(
     model: str = None,
     search_method: str = "duckduckgo",
     iterations: int = 3,
+    parallel_max_workers: int = 8,
     output_format: str = "markdown",
     output_dir: str = "./output",
     requirements: str = "",
@@ -2646,6 +2831,8 @@ def run_research(
         model: Model name (optional, uses default)
         search_method: Search method ('duckduckgo' or 'selenium')
         iterations: Research iterations per section
+        parallel_max_workers: App-wide limit on simultaneous LLM/network
+            operations (default 8, allowed 1-16; invalid values raise)
         output_format: Report format ('markdown', 'docx', 'pdf', 'html')
         output_dir: Output directory
         requirements: Research requirements
@@ -2781,6 +2968,7 @@ def run_research(
         model=model,
         search_method=search_method,
         research_iterations=iterations,
+        parallel_max_workers=parallel_max_workers,
         output_format=output_format,
         output_dir=output_dir,
         additional_documents=additional_documents,
@@ -3240,8 +3428,10 @@ def run_manual_research(
     verification_html = None
     verification_result = None
 
-    def _finalize_manual(chapters, chapter_citation_callback=None):
+    def _finalize_manual(chapters, chapter_citation_callback=None,
+                         figure_collection=None):
         from .report.finalization_runner import FinalizationRunner
+        from .report.semantic_manifest import figure_semantics_markdown
         runner = FinalizationRunner(
             evidence_locker=evidence_locker,
             session_contents=session.section_contents,
@@ -3257,6 +3447,15 @@ def run_manual_research(
             session_id=session.session_id,
             chapter_citation_callback=chapter_citation_callback,
         )
+        if figure_collection is not None:
+            key = "付録D" if config.research.language == "ja" \
+                else "Appendix D"
+            fig_md = figure_semantics_markdown(
+                figure_collection, language=config.research.language,
+                section_id=key)
+            if fig_md.strip():
+                chapters[key] = fig_md
+                runner.render_only_sections.add(key)
         return runner.run(chapters)
 
     # Generate report
@@ -3265,6 +3464,29 @@ def run_manual_research(
         llm_client=llm_client,
         output_dir=config.report.output_dir / "reports",
     )
+
+    # ALL semantic figure work happens BEFORE finalization (same as run())
+    figure_collection = None
+    if config.report.auto_figures:
+        try:
+            fig_generator = FigureTableGenerator(
+                llm_client=llm_client,
+                output_dir=config.report.output_dir / "reports" / "figures",
+                language=config.research.language,
+                proxies=config.proxy.get_proxies_dict(),
+                verify_ssl=config.proxy.verify_ssl,
+                max_workers=min(
+                    config.report.figure_max_workers,
+                    config.research.parallel_max_workers),
+            )
+            figure_collection = fig_generator.generate_figures_and_tables(
+                session=session,
+                evidence_locker=evidence_locker,
+            )
+        except Exception as e:
+            if verbose:
+                print(f"[AutoFigures] Failed: {e}. Continuing without figures.")
+            figure_collection = None
 
     if version_tag == "v3":
         # V3: DOCX-native generation flow
@@ -3281,33 +3503,14 @@ def run_manual_research(
                     ch.citations.append(evidence.url)
             chapters = {sid: ch.content
                         for sid, ch in result.chapters.items()}
-            outcome = _finalize_manual(chapters, _cb)
+            outcome = _finalize_manual(chapters, _cb,
+                                       figure_collection=figure_collection)
             for sid, text in outcome["chapters"].items():
                 if sid in result.chapters:
                     result.chapters[sid].content = text
                     result.chapters[sid].word_count = len(text)
             verification_result = outcome["verdict"]
             verification_html = outcome["html_path"]
-
-        # Pre-generate figures if auto_figures is enabled
-        figure_collection = None
-        if config.report.auto_figures:
-            try:
-                fig_generator = FigureTableGenerator(
-                    llm_client=llm_client,
-                    output_dir=config.report.output_dir / "reports" / "figures",
-                    language=config.research.language,
-                    proxies=config.proxy.get_proxies_dict(),
-                    verify_ssl=config.proxy.verify_ssl,
-                    max_workers=config.report.figure_max_workers,
-                )
-                figure_collection = fig_generator.generate_figures_and_tables(
-                    session=session,
-                    evidence_locker=evidence_locker,
-                )
-            except Exception as e:
-                if verbose:
-                    print(f"[V3/AutoFigures] Failed: {e}. Continuing without figures.")
 
         # Build warnings text
         warnings_text = ""
@@ -3342,7 +3545,8 @@ def run_manual_research(
                     ch.citations.append(evidence.url)
             chapters = {sid: ch.content
                         for sid, ch in result.chapters.items()}
-            outcome = _finalize_manual(chapters, _cb)
+            outcome = _finalize_manual(chapters, _cb,
+                                       figure_collection=figure_collection)
             for sid, text in outcome["chapters"].items():
                 if sid in result.chapters:
                     result.chapters[sid].content = text
@@ -3376,7 +3580,8 @@ def run_manual_research(
                 if not sid.startswith("_") and sdata.get("content")
             }
             if chapters:
-                outcome = _finalize_manual(chapters)
+                outcome = _finalize_manual(
+                    chapters, figure_collection=figure_collection)
                 for sid, text in outcome["chapters"].items():
                     if sid in session.section_contents:
                         session.section_contents[sid]["content"] = text

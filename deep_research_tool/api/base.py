@@ -2,6 +2,7 @@
 Base class for LLM API clients.
 """
 
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Callable
@@ -44,7 +45,12 @@ class TokenUsage:
 
 @dataclass
 class TokenUsageStats:
-    """Aggregated token usage statistics."""
+    """Aggregated token usage statistics.
+
+    Thread-safe: parallel workers (DeepThink sections, chunk extraction,
+    figure judging, several Web UI jobs) all record usage concurrently,
+    so every mutation happens under a lock.
+    """
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
     total_tokens: int = 0
@@ -52,21 +58,24 @@ class TokenUsageStats:
     calls_by_model: Dict[str, int] = field(default_factory=dict)
     tokens_by_model: Dict[str, int] = field(default_factory=dict)
     history: List[TokenUsage] = field(default_factory=list)
+    _lock: threading.Lock = field(default_factory=threading.Lock,
+                                  repr=False, compare=False)
 
     def add_usage(self, usage: TokenUsage) -> None:
-        """Add a usage record to the statistics."""
-        self.total_prompt_tokens += usage.prompt_tokens
-        self.total_completion_tokens += usage.completion_tokens
-        self.total_tokens += usage.total_tokens
-        self.total_calls += 1
+        """Add a usage record to the statistics (thread-safe)."""
+        with self._lock:
+            self.total_prompt_tokens += usage.prompt_tokens
+            self.total_completion_tokens += usage.completion_tokens
+            self.total_tokens += usage.total_tokens
+            self.total_calls += 1
 
-        # Track by model
-        model = usage.model or "unknown"
-        self.calls_by_model[model] = self.calls_by_model.get(model, 0) + 1
-        self.tokens_by_model[model] = self.tokens_by_model.get(model, 0) + usage.total_tokens
+            # Track by model
+            model = usage.model or "unknown"
+            self.calls_by_model[model] = self.calls_by_model.get(model, 0) + 1
+            self.tokens_by_model[model] = self.tokens_by_model.get(model, 0) + usage.total_tokens
 
-        # Keep history
-        self.history.append(usage)
+            # Keep history
+            self.history.append(usage)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -112,17 +121,25 @@ class TokenUsageStats:
         return "\n".join(lines)
 
     def reset(self) -> None:
-        """Reset all statistics."""
-        self.total_prompt_tokens = 0
-        self.total_completion_tokens = 0
-        self.total_tokens = 0
-        self.total_calls = 0
-        self.calls_by_model.clear()
-        self.tokens_by_model.clear()
-        self.history.clear()
+        """Reset all statistics (thread-safe)."""
+        with self._lock:
+            self.total_prompt_tokens = 0
+            self.total_completion_tokens = 0
+            self.total_tokens = 0
+            self.total_calls = 0
+            self.calls_by_model.clear()
+            self.tokens_by_model.clear()
+            self.history.clear()
 
 
-# Global token usage tracker
+# Global token usage tracker (process-wide aggregate).
+#
+# Per-run isolation: each research run can attach its OWN
+# TokenUsageStats to its LLM clients (client.token_stats). Clients then
+# record into BOTH the run-local stats and this global aggregate, so:
+# - parallel Web UI jobs never mix their per-job numbers, and
+# - one job calling reset_token_stats() only clears the global
+#   aggregate, never another job's run-local statistics.
 _global_token_stats = TokenUsageStats()
 
 
@@ -134,6 +151,15 @@ def get_token_stats() -> TokenUsageStats:
 def reset_token_stats() -> None:
     """Reset the global token usage statistics."""
     _global_token_stats.reset()
+
+
+def record_usage(client, token_usage: TokenUsage) -> None:
+    """Record usage into the client's run-local stats (if attached) and
+    the process-wide aggregate."""
+    run_stats = getattr(client, "token_stats", None)
+    if run_stats is not None:
+        run_stats.add_usage(token_usage)
+    _global_token_stats.add_usage(token_usage)
 
 
 @dataclass
@@ -178,6 +204,28 @@ class BaseLLMClient(ABC):
         self.max_tokens = max_tokens
         self.max_tokens_limit = max_tokens_limit
         self._client = None
+        # Optional run-scoped concurrency limiter (utils.concurrency
+        # RunLimits), attached by DeepResearchTool.run(). A permit is
+        # taken ONLY around the leaf HTTP/SDK call.
+        self.concurrency_limiter = None
+        # Optional run-local TokenUsageStats (per-job isolation)
+        self.token_stats = None
+
+    def _leaf_permit(self):
+        """Composed run+process permit around one leaf API call."""
+        from ..utils.concurrency import maybe_permit
+        return maybe_permit(self.concurrency_limiter)
+
+    def _record_usage(self, token_usage) -> None:
+        """Record usage into run-local (if attached) + global stats."""
+        record_usage(self, token_usage)
+
+    def _sanitize_error(self, exc) -> str:
+        """Error text with the API key scrubbed — keys never reach logs."""
+        text = str(exc)
+        if self.api_key:
+            text = text.replace(self.api_key, "***")
+        return text
 
     @abstractmethod
     def _initialize_client(self) -> None:

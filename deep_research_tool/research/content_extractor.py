@@ -77,6 +77,7 @@ class ContentExtractor:
         language: str = "ja",
         evaluation_llm_client=None,
         target_chars_per_section: Optional[int] = None,
+        max_parallel_workers: Optional[int] = None,
     ):
         """
         Initialize ContentExtractor.
@@ -93,6 +94,9 @@ class ContentExtractor:
         self.eval_llm = evaluation_llm_client or llm_client
         self.language = language
         self.target_chars_per_section = target_chars_per_section
+        # app-wide parallelism ceiling (parallel_max_workers); the stage
+        # cap CHUNK_WORKERS still applies on top
+        self.max_parallel_workers = max_parallel_workers
 
     def _split_into_chunks(self, text: str) -> List[str]:
         """Split text into overlapping chunks, merging runt tails."""
@@ -291,7 +295,9 @@ Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
                     chunk_label=label,
                 )
 
-            workers = min(self.CHUNK_WORKERS, len(chunks))
+            from ..utils.concurrency import effective_workers
+            workers = effective_workers(self.max_parallel_workers,
+                                        self.CHUNK_WORKERS, len(chunks))
             if workers > 1:
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:

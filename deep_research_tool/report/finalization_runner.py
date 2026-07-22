@@ -114,6 +114,9 @@ class FinalizationRunner:
             llm_client=self.eval_llm, language=self.language)
         self.section_evidence: Dict[str, List[Dict]] = {}
         self._url_to_id: Dict[str, str] = {}
+        # Sections that are VERIFIED but never LLM-edited (rendered
+        # verbatim from their frozen source, e.g. figure semantics)
+        self.render_only_sections: set = set()
 
     # ------------------------------------------------------------------
     # construction helpers
@@ -220,6 +223,8 @@ class FinalizationRunner:
                              for sid in self.section_evidence]
         self.planner.initial_allocation(plan_sections)
         self._recalc_units()
+        # shift budget from low- to high-importance sections
+        self.planner.rebalance()
 
     def _recalc_units(self) -> None:
         units = {sid: self.planner.extract_units(sid, evs)
@@ -300,6 +305,10 @@ class FinalizationRunner:
             budget=self.budget,
             hard_max_body_chars=self._rp("hard_max_body_chars"),
             hard_min_body_chars=self._rp("hard_min_body_chars"),
+            # fixed mode: the explicit quota ± tolerance is evaluated in
+            # production (planner.fixed_quota() is None in adaptive mode)
+            fixed_target_chars=self.planner.fixed_quota(),
+            length_tolerance=self._rp("length_tolerance", 0.20),
             language=self.language,
         )
 
@@ -343,6 +352,26 @@ class FinalizationRunner:
     # ------------------------------------------------------------------
     # research round (live locker updates, dedup, no refetch)
     # ------------------------------------------------------------------
+
+    _DATE_RE = re.compile(
+        r"((?:19|20)\d{2})[年/\-.](\d{1,2})[月/\-.]?(?:(\d{1,2})日?)?")
+
+    def _classify_new_evidence(self, url: str, text: str):
+        """(published_date, source_type, is_primary) for researched pages."""
+        from ..evidence.locker import SourceType
+        published = ""
+        m = self._DATE_RE.search((text or "")[:3000])
+        if m:
+            month = int(m.group(2))
+            day = int(m.group(3) or 1)
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                published = f"{m.group(1)}-{month:02d}-{day:02d}"
+        host = re.sub(r"^https?://", "", url or "").split("/")[0].lower()
+        if re.search(r"\.(go\.jp|gov(\.[a-z]{2})?)$|\.gouv\.", host):
+            return published, SourceType.OFFICIAL, True
+        if re.search(r"\.(ac\.jp|edu(\.[a-z]{2})?)$", host):
+            return published, SourceType.ACADEMIC, True
+        return published, SourceType.UNKNOWN, False
 
     def _is_duplicate_content(self, text: str) -> bool:
         """Reposts (URL-different copies) never count as new sources."""
@@ -393,6 +422,13 @@ class FinalizationRunner:
                     continue
                 target_sections = list(per_issue_sections.keys()) or \
                     list(self.section_evidence.keys())[:1]
+                # freshness metadata for the NEW evidence: published date
+                # (best-effort from the page text) and a deterministic
+                # source-type/primary classification from the domain, so
+                # the primary/freshness gate can re-evaluate correctly
+                # after the additional research
+                published, src_type, is_primary = \
+                    self._classify_new_evidence(url, text)
                 evidence = self.locker.add_evidence(
                     url=url, title=getattr(page, "title", "") or url,
                     content_excerpt=text[:500], extracted_text=text,
@@ -400,7 +436,11 @@ class FinalizationRunner:
                     search_query=q,
                     section_reference=target_sections[0]
                     if target_sections else "",
+                    published_date=published,
+                    source_type=src_type,
                 )
+                if is_primary:
+                    evidence.quality_indicators.is_primary_source = True
                 self._url_to_id[url] = evidence.id
                 new_sources += 1
                 for sid in target_sections:
@@ -434,6 +474,41 @@ class FinalizationRunner:
     # ------------------------------------------------------------------
     # section edits (full evidence, new-first, stable SOURCE numbers)
     # ------------------------------------------------------------------
+
+    def _register_replacements(self, sid: str, issues) -> Dict[int, str]:
+        """Make citation-replacement candidates citable in this section.
+
+        For invalid-citation issues carrying replacement evidence ids,
+        the ids are APPENDED to the section registry (existing numbers
+        never shift) and the evidence body joins the section's evidence
+        so the rewrite prompt can quote it. Returns {id(issue): hint}.
+        """
+        hints: Dict[int, str] = {}
+        for issue in issues:
+            if issue.type != "invalid_citation" or \
+                    not issue.supporting_source_ids:
+                continue
+            numbers = []
+            for eid in issue.supporting_source_ids:
+                n = self.citation_mgr.append_evidence(sid, eid)
+                numbers.append(n)
+                # ensure the evidence text is available to the rewrite
+                entry_urls = {ec.get("url") for ec in
+                              self.section_evidence.get(sid, [])}
+                ev = self.locker.get_evidence(eid)
+                if ev is not None and getattr(ev, "url", "") not in entry_urls:
+                    text = (getattr(ev, "extracted_text", "") or
+                            getattr(ev, "content_excerpt", "") or "")
+                    entry = {"title": getattr(ev, "title", "") or eid,
+                             "url": getattr(ev, "url", ""),
+                             "content": text[:2000], "raw_content": text,
+                             "key_points": [], "relevance_score": 0.6,
+                             "is_new": True}
+                    self.section_evidence.setdefault(sid, []).append(entry)
+            if numbers:
+                hints[id(issue)] = ", ".join(
+                    f"[SOURCE {n}]" for n in numbers)
+        return hints
 
     def _evidence_blocks(self, sid: str) -> str:
         """All section evidence within a char budget, NEW evidence first,
@@ -475,15 +550,32 @@ class FinalizationRunner:
               hedge    (soften unresolved assertions, state limitations)
         The controller machine-validates citations before accepting.
         """
+        if sid in self.render_only_sections:
+            # render-only section (figure semantics): verified, but its
+            # text always mirrors the frozen source — never LLM-edited
+            return None
+
         text = current.get(sid, "")
         if not text:
             text = (self.session_contents.get(sid) or {}).get("content", "")
         if not text:
             return None
 
+        # Misattributed citations: register the replacement candidates in
+        # the section registry (append-only) so the rewrite can cite them
+        # with a valid, stable [SOURCE N] number.
+        replacement_hints = self._register_replacements(sid, issues)
+
         evidence_text = self._evidence_blocks(sid)
-        issue_text = "\n".join(
-            f"- ({i.type}) {i.claim or i.reason}" for i in issues[:8])
+        issue_lines = []
+        for i in issues[:8]:
+            line = f"- ({i.type}) {i.claim or i.reason}"
+            hint = replacement_hints.get(id(i))
+            if hint:
+                line += ("　→ 正しい出典候補: " if self.language == "ja"
+                         else " -> replacement citation: ") + hint
+            issue_lines.append(line)
+        issue_text = "\n".join(issue_lines)
 
         lang_ja = self.language == "ja"
         if mode == "rewrite":

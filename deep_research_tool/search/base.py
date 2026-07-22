@@ -90,6 +90,13 @@ class BaseSearchClient(ABC):
         self.timeout = timeout
         self.extract_images = extract_images
         self.max_images = max_images
+        # Optional run-scoped concurrency limiter (utils.concurrency
+        # RunLimits): leaf HTTP operations take one composed permit
+        self.concurrency_limiter = None
+
+    def _leaf_permit(self):
+        from ..utils.concurrency import maybe_permit
+        return maybe_permit(getattr(self, "concurrency_limiter", None))
 
     @abstractmethod
     def search(self, query: str, **kwargs) -> List[SearchResult]:

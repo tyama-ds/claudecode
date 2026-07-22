@@ -338,6 +338,9 @@ def passes_hard_gates(verdict: StructuredVerdict, budget: LoopBudget) -> bool:
     m = verdict.metrics
     if m.verification_failed:
         return False
+    if m.chunks_failed > 0:
+        # unverified body ranges remain -> never a clean ACCEPT
+        return False
     if m.critical_question_coverage < budget.required_critical_coverage:
         return False
     if m.unsupported_critical_claims > 0:
@@ -354,6 +357,8 @@ def decide(
     budget: LoopBudget,
     hard_max_body_chars: Optional[int] = None,
     hard_min_body_chars: Optional[int] = None,
+    fixed_target_chars: Optional[int] = None,
+    length_tolerance: float = 0.20,
 ) -> ResearchDecision:
     """Choose the next state. Thresholds live here, not in the LLM.
 
@@ -392,6 +397,15 @@ def decide(
             return ResearchDecision.RESEARCH
         return ResearchDecision.FINALIZE_WITH_LIMITATIONS
 
+    # --- misattributed citations with KNOWN replacement candidates are a
+    #     body defect: rewrite swaps the citation; research would be waste ---
+    if not m.citations_valid:
+        fixable = any(i.type == ISSUE_INVALID_CITATION
+                      and i.supporting_source_ids
+                      for i in verdict.issues)
+        if fixable and budget.revision_allowed():
+            return ResearchDecision.REWRITE_FROM_EVIDENCE
+
     # --- support score below threshold but nothing actionable by search ---
     if m.claim_support_score < budget.min_claim_support_score:
         if budget.research_allowed():
@@ -418,6 +432,25 @@ def decide(
             return ResearchDecision.RESEARCH
         return ResearchDecision.FINALIZE_WITH_LIMITATIONS
 
+    # --- fixed mode: the user-set target ± tolerance is evaluated in
+    #     production. Overshoot compresses; shortfall is fixed from
+    #     EVIDENCE (rewrite) or by research — never by padding, and an
+    #     over-target body is compressed, never mechanically truncated ---
+    if fixed_target_chars:
+        upper = int(fixed_target_chars * (1 + length_tolerance))
+        lower = int(fixed_target_chars * (1 - length_tolerance))
+        if m.actual_body_chars > upper and budget.revision_allowed():
+            return ResearchDecision.COMPRESS_FROM_EVIDENCE
+        if m.actual_body_chars < lower:
+            has_untapped = bool(
+                m.unused_high_importance_evidence_ids
+                or m.missing_content_units)
+            if has_untapped and budget.revision_allowed():
+                return ResearchDecision.REWRITE_FROM_EVIDENCE
+            if budget.research_allowed():
+                return ResearchDecision.RESEARCH
+            return ResearchDecision.FINALIZE_WITH_LIMITATIONS
+
     # --- redundancy / imbalance -> compress (must carry reasons) ---
     if m.redundant_passages and budget.revision_allowed():
         return ResearchDecision.COMPRESS_FROM_EVIDENCE
@@ -432,6 +465,12 @@ def decide(
     )
     if shallow and budget.revision_allowed():
         return ResearchDecision.REWRITE_FROM_EVIDENCE
+
+    # --- unverified body ranges (chunk extraction failed after retries):
+    #     no edit can fix this; end EXPLICITLY with limitations instead of
+    #     looping or accepting a partially verified body ---
+    if m.chunks_failed > 0:
+        return ResearchDecision.FINALIZE_WITH_LIMITATIONS
 
     # Short but complete is acceptable; useful overshoot under the hard
     # ceiling is acceptable — no length-only rejections here by design.
@@ -499,6 +538,8 @@ class FinalizationController:
         budget: LoopBudget = None,
         hard_max_body_chars: Optional[int] = None,
         hard_min_body_chars: Optional[int] = None,
+        fixed_target_chars: Optional[int] = None,
+        length_tolerance: float = 0.20,
         language: str = "ja",
     ):
         self.verify_fn = verify_fn
@@ -510,6 +551,8 @@ class FinalizationController:
         self.budget = budget or LoopBudget()
         self.hard_max_body_chars = hard_max_body_chars
         self.hard_min_body_chars = hard_min_body_chars
+        self.fixed_target_chars = fixed_target_chars
+        self.length_tolerance = length_tolerance
         self.language = language
         self.history: List[Dict[str, Any]] = []
         self.limitations: List[str] = []
@@ -596,7 +639,9 @@ class FinalizationController:
 
         for _round in range(max_total_rounds + 1):
             decision = decide(verdict, self.budget, self.hard_max_body_chars,
-                              self.hard_min_body_chars)
+                              self.hard_min_body_chars,
+                              fixed_target_chars=self.fixed_target_chars,
+                              length_tolerance=self.length_tolerance)
             self.history.append({
                 "round": _round,
                 "decision": decision.value,

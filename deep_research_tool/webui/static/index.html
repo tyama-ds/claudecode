@@ -436,8 +436,9 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
       </div>
      </div><!-- /tabFeatures -->
 
+      <label class="check"><input type="checkbox" id="set_persist_keys"> 🔐 APIキーをこの端末に保存する（localStorage・平文）。OFF（既定）ではこのタブを閉じるまでの一時保存（sessionStorage）のみ</label>
       <button class="primary" id="settingsSaveBtn">保存して閉じる</button>
-      <p class="hint">※APIキーはこのブラウザのlocalStorageに保存されます。共有PCでは空欄のままサーバー側の環境変数をご利用ください。</p>
+      <p class="hint">※共有PCでは保存をOFFのまま、サーバー側の環境変数をご利用ください。<b>⚠ このWeb UIを 0.0.0.0 等でネットワークに公開すると、TLSも認証もない平文HTTPでAPIキーが送信されます。</b>公開が必要な場合はリバースプロキシでTLS/認証を挟んでください。</p>
     </div>
   </div>
 </div>
@@ -481,6 +482,8 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
           <label class="mode-card"><input type="radio" name="crawl_mode" value="ai_crawl_selenium">
             <span class="t">AIクロール（ブラウザ）</span><span class="d">　Seleniumで取得。JS描画サイト対応</span></label>
         </div>
+        <label>⚙ 全体の並列ワーカー数（1〜16。LLM・通信の同時実行数の上限。DeepThink・図表などの個別ワーカー数はこの範囲内で機能タブから調整）</label>
+        <input type="number" id="parallel_max_workers" value="8" min="1" max="16" step="1" style="width:100px">
         <div class="grid2">
           <div><label>最大取得ページ数 / 章</label><input type="number" id="ai_crawl_max_pages" value="15" min="3" max="50"></div>
           <div><label>サイト内の探索階層</label><input type="number" id="ai_crawl_site_depth" value="2" min="0" max="5"></div>
@@ -691,18 +694,70 @@ let logLength = 0;
 let selectedJobId = null;
 let lastRenderedJobId = null;
 
-// ==================== 設定モーダル（localStorageに保存） ====================
+// ==================== 設定モーダル ====================
+// 非secret設定は localStorage、APIキー（secret）は既定で sessionStorage
+// のみ（タブを閉じると消える）。「この端末に保存する」を明示的にONに
+// した場合だけ localStorage へ永続化する。
 const SETTINGS_FIELDS = {
-  set_openai_key: 'openai_api_key',
   set_openai_url: 'openai_base_url',
-  set_anthropic_key: 'anthropic_api_key',
   set_anthropic_url: 'anthropic_base_url',
   set_local_url: 'local_base_url',
-  set_local_key: 'local_api_key',
   set_local_backend: 'local_backend',
   set_https_proxy: 'https_proxy',
   set_http_proxy: 'http_proxy',
 };
+
+// secrets: NEVER mixed into the non-secret settings object
+const SECRET_FIELDS = {
+  set_openai_key: 'openai_api_key',
+  set_anthropic_key: 'anthropic_api_key',
+  set_local_key: 'local_api_key',
+};
+
+const SECRETS_SESSION_KEY = 'drt_secrets_session';
+const SECRETS_PERSIST_KEY = 'drt_secrets_persist';
+
+function loadSecrets() {
+  // session first; persisted copy only when the user opted in
+  let s = {};
+  try { s = JSON.parse(sessionStorage.getItem(SECRETS_SESSION_KEY) || '{}'); } catch (e) {}
+  let persisted = {};
+  try { persisted = JSON.parse(localStorage.getItem(SECRETS_PERSIST_KEY) || '{}'); } catch (e) {}
+  return {...persisted, ...s};
+}
+
+function saveSecrets(persist) {
+  const secrets = {};
+  for (const [el, key] of Object.entries(SECRET_FIELDS)) {
+    const v = ($(el).value || '').trim();
+    if (v) secrets[key] = v;
+  }
+  try { sessionStorage.setItem(SECRETS_SESSION_KEY, JSON.stringify(secrets)); } catch (e) {}
+  if (persist) {
+    try { localStorage.setItem(SECRETS_PERSIST_KEY, JSON.stringify(secrets)); } catch (e) {}
+  } else {
+    try { localStorage.removeItem(SECRETS_PERSIST_KEY); } catch (e) {}
+  }
+}
+
+function migrateLegacySecrets(saved) {
+  // older versions stored keys inside drt_settings (localStorage, plain):
+  // move them to sessionStorage and scrub them from localStorage
+  let moved = false;
+  const secrets = {};
+  for (const key of Object.values(SECRET_FIELDS)) {
+    if (saved[key]) { secrets[key] = saved[key]; delete saved[key]; moved = true; }
+  }
+  if (moved) {
+    try {
+      const existing = JSON.parse(sessionStorage.getItem(SECRETS_SESSION_KEY) || '{}');
+      sessionStorage.setItem(SECRETS_SESSION_KEY,
+        JSON.stringify({...secrets, ...existing}));
+      localStorage.setItem('drt_settings', JSON.stringify(saved));
+    } catch (e) {}
+  }
+  return saved;
+}
 
 // Boolean feature toggles (機能 tab): element id -> create_config param
 const FEATURE_FIELDS = {
@@ -717,9 +772,16 @@ const FEATURE_FIELDS = {
 function loadSettings() {
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem('drt_settings') || '{}'); } catch (e) {}
+  saved = migrateLegacySecrets(saved);
   for (const [el, key] of Object.entries(SETTINGS_FIELDS)) {
     if (saved[key] !== undefined) $(el).value = saved[key];
   }
+  const secrets = loadSecrets();
+  for (const [el, key] of Object.entries(SECRET_FIELDS)) {
+    if (secrets[key] !== undefined) $(el).value = secrets[key];
+  }
+  $('set_persist_keys').checked =
+    !!localStorage.getItem(SECRETS_PERSIST_KEY);
   for (const [el, key] of Object.entries(FEATURE_FIELDS)) {
     if (saved[key] !== undefined) $(el).checked = !!saved[key];
   }
@@ -737,6 +799,7 @@ function saveSettings() {
     const v = $(el).value.trim ? $(el).value.trim() : $(el).value;
     if (v) s[key] = v;
   }
+  saveSecrets($('set_persist_keys').checked);
   for (const [el, key] of Object.entries(FEATURE_FIELDS)) {
     s[key] = $(el).checked;
   }
@@ -752,6 +815,10 @@ function settingsParams() {
   // Read current modal values (persisted or not) into request params
   const p = {};
   for (const [el, key] of Object.entries(SETTINGS_FIELDS)) {
+    const v = ($(el).value || '').trim();
+    if (v) p[key] = v;
+  }
+  for (const [el, key] of Object.entries(SECRET_FIELDS)) {
     const v = ($(el).value || '').trim();
     if (v) p[key] = v;
   }
@@ -909,10 +976,22 @@ function collectLengthParams() {
   return p;
 }
 
+function collectWorkerParam() {
+  const raw = $('parallel_max_workers').value.trim();
+  if (raw === '') return {};                  // 空 → サーバー既定(8)
+  if (!/^[0-9]+$/.test(raw))
+    throw new Error('全体の並列ワーカー数は整数で入力してください');
+  const v = parseInt(raw, 10);
+  if (v < 1 || v > 16)
+    throw new Error('全体の並列ワーカー数は1〜16で入力してください');
+  return {parallel_max_workers: v};
+}
+
 function collectParams() {
   const provider = $('provider').value;
   const params = {
     ...collectLengthParams(),
+    ...collectWorkerParam(),
     query: $('query').value.trim(),
     requirements: $('requirements').value.trim(),
     provider: provider,

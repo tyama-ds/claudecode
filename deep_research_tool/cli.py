@@ -88,6 +88,13 @@ def cli():
     help="Number of research iterations per section"
 )
 @click.option(
+    "--parallel-max-workers",
+    type=int,
+    default=8,
+    help="App-wide limit on simultaneous LLM/network operations "
+         "(1-16, default 8; stage caps still apply on top)"
+)
+@click.option(
     "--output-format", "-f",
     type=click.Choice(["markdown", "docx", "pdf", "html"]),
     default="markdown",
@@ -336,6 +343,7 @@ def research(
     model: Optional[str],
     search: str,
     iterations: int,
+    parallel_max_workers: int,
     output_format: str,
     output_dir: str,
     requirements: str,
@@ -396,6 +404,7 @@ def research(
         model=model,
         search_method=search,
         research_iterations=iterations,
+        parallel_max_workers=parallel_max_workers,
         output_format=output_format,
         output_dir=output_dir,
         additional_documents=list(documents) if documents else None,
@@ -540,6 +549,21 @@ def research(
     default=None,
     help="Absolute maximum body characters (enforced only when set)"
 )
+@click.option(
+    "--verify/--no-verify",
+    "verify",
+    default=True,
+    help="Run the report body through the SAME finalization pipeline as "
+         "a live research run (requires an LLM API key via environment). "
+         "With --no-verify (or no key), the body is rendered UNVERIFIED "
+         "with an explicit warning."
+)
+@click.option(
+    "--provider", "-p",
+    type=click.Choice(["openai", "anthropic", "local"]),
+    default="openai",
+    help="LLM provider for --verify"
+)
 def report(
     session_path: str,
     output_format: Optional[str],
@@ -549,6 +573,8 @@ def report(
     preferred_body_chars: Optional[int],
     hard_min_body_chars: Optional[int],
     hard_max_body_chars: Optional[int],
+    verify: bool,
+    provider: str,
 ):
     """
     Generate a report from a saved research session.
@@ -614,6 +640,60 @@ def report(
             fmt = ReportFormat(output_format)
         else:
             fmt = ReportFormat.MARKDOWN
+
+        # Verification: the CLI report path goes through the SAME
+        # FinalizationRunner as a live run (no search client). Without an
+        # API key the body renders UNVERIFIED with an explicit warning.
+        import os as _os
+        env_keys = {"openai": "OPENAI_API_KEY",
+                    "anthropic": "ANTHROPIC_API_KEY",
+                    "local": "LOCAL_LLM_BASE_URL"}
+        has_credentials = bool(_os.getenv(env_keys.get(provider, "")))
+        if verify and has_credentials:
+            from .api import get_client
+            from .config import create_config as _cc
+            from .report.finalization_runner import FinalizationRunner
+
+            _config = _cc(provider=provider,
+                          output_dir=str(session_dir),
+                          length_mode=length_mode,
+                          preferred_body_chars=preferred_body_chars,
+                          hard_min_body_chars=hard_min_body_chars,
+                          hard_max_body_chars=hard_max_body_chars,
+                          target_characters=target_characters)
+            runner = FinalizationRunner(
+                evidence_locker=evidence_locker,
+                session_contents=session.section_contents,
+                research_plan=session.research_plan,
+                query=session.query or session_path,
+                requirements=session.requirements or "",
+                language=_config.research.language,
+                llm_client=get_client(provider=provider),
+                search_client=None,
+                report_config=_config.report,
+                research_config=_config.research,
+                output_dir=session_dir,
+                session_id=session.session_id,
+            )
+            chapters = {
+                sid: sdata.get("content", "")
+                for sid, sdata in session.section_contents.items()
+                if not sid.startswith("_") and sdata.get("content")
+            }
+            if chapters:
+                console.print("[bold]Running finalization "
+                              "(verify -> decide -> freeze)...[/bold]")
+                outcome = runner.run(chapters)
+                for sid, text in outcome["chapters"].items():
+                    if sid in session.section_contents:
+                        session.section_contents[sid]["content"] = text
+                console.print(f"Finalization decision: "
+                              f"{outcome['decision']}")
+        elif verify:
+            console.print(
+                "[yellow]⚠ 検証をスキップしました（LLM APIキーが環境変数に"
+                "ありません）。本文は未検証のままレンダリングされます。"
+                "--no-verify で明示的に無効化できます。[/yellow]")
 
         # Generate report
         generator = ReportGenerator(output_dir=session_dir / "reports")

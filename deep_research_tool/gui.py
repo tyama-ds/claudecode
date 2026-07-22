@@ -77,6 +77,10 @@ class GUIConfig:
     verbose: bool = False
 
 
+
+from .gui_config import build_gui_config
+
+
 class DeepResearchGUI:
     """Main GUI application for Deep Research Tool."""
 
@@ -106,6 +110,7 @@ class DeepResearchGUI:
         self.var_language = tk.StringVar(value="ja")
         self.var_min_iterations = tk.IntVar(value=3)
         self.var_max_iterations = tk.IntVar(value=10)
+        self.var_parallel_workers = tk.IntVar(value=8)
 
         # API
         self.var_provider = tk.StringVar(value="openai")
@@ -113,6 +118,10 @@ class DeepResearchGUI:
         self.var_anthropic_key = tk.StringVar(value=os.getenv("ANTHROPIC_API_KEY", ""))
         self.var_openai_model = tk.StringVar(value="gpt-5-mini")
         self.var_anthropic_model = tk.StringVar(value="claude-3-5-sonnet-20241022")
+        self.var_local_key = tk.StringVar(value="")
+        self.var_local_model = tk.StringVar(value="llama3.1:8b")
+        self.var_local_url = tk.StringVar(value=os.getenv("LOCAL_LLM_BASE_URL", ""))
+        self.var_local_backend = tk.StringVar(value="ollama")
         self.var_temperature = tk.DoubleVar(value=0.7)
         self.var_max_tokens = tk.IntVar(value=4096)
 
@@ -287,6 +296,16 @@ class DeepResearchGUI:
                      values=["low", "medium", "high"], state="readonly",
                      width=15).pack(side=tk.LEFT)
 
+        # App-wide parallelism (LLM / network concurrency limit)
+        row = ttk.Frame(frame)
+        row.pack(fill=tk.X, pady=5)
+        ttk.Label(row, text="Parallel Workers:", width=20, anchor="w").pack(side=tk.LEFT)
+        ttk.Spinbox(row, from_=1, to=16, increment=1,
+                    textvariable=self.var_parallel_workers,
+                    width=10).pack(side=tk.LEFT)
+        ttk.Label(row, text="(1-16; app-wide limit on concurrent LLM/network calls)",
+                  foreground="gray").pack(side=tk.LEFT, padx=10)
+
     def _build_api_tab(self, notebook):
         """Build the API Settings tab."""
         frame = ttk.Frame(notebook, padding="10")
@@ -297,7 +316,7 @@ class DeepResearchGUI:
         row.pack(fill=tk.X, pady=5)
         ttk.Label(row, text="LLM Provider:", width=20, anchor="w").pack(side=tk.LEFT)
         provider_combo = ttk.Combobox(row, textvariable=self.var_provider,
-                                      values=["openai", "anthropic"],
+                                      values=["openai", "anthropic", "local"],
                                       state="readonly", width=15)
         provider_combo.pack(side=tk.LEFT)
         provider_combo.bind("<<ComboboxSelected>>", self._on_provider_change)
@@ -335,6 +354,42 @@ class DeepResearchGUI:
                      values=["claude-3-5-sonnet-20241022", "claude-3-opus-20240229",
                             "claude-3-sonnet-20240229", "claude-3-haiku-20240307"],
                      width=30).pack(side=tk.LEFT)
+
+        # Local LLM Settings
+        ttk.Separator(frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=15)
+        ttk.Label(frame, text="Local LLM Settings (provider=local)",
+                  font=("", 10, "bold")).pack(anchor="w")
+
+        row = ttk.Frame(frame)
+        row.pack(fill=tk.X, pady=5)
+        ttk.Label(row, text="Model:", width=20, anchor="w").pack(side=tk.LEFT)
+        ttk.Combobox(row, textvariable=self.var_local_model,
+                     values=["llama3.1:8b", "llama3.1:70b", "llama3.2:3b",
+                            "gpt-oss-20b", "gpt-oss-120b", "mistral:7b",
+                            "mixtral:8x7b", "qwen2:7b", "gemma2:9b"],
+                     width=25).pack(side=tk.LEFT)
+
+        row = ttk.Frame(frame)
+        row.pack(fill=tk.X, pady=5)
+        ttk.Label(row, text="Base URL:", width=20, anchor="w").pack(side=tk.LEFT)
+        ttk.Entry(row, textvariable=self.var_local_url, width=50).pack(side=tk.LEFT)
+        ttk.Label(row, text="(empty = LOCAL_LLM_BASE_URL / backend default)",
+                  foreground="gray").pack(side=tk.LEFT, padx=6)
+
+        row = ttk.Frame(frame)
+        row.pack(fill=tk.X, pady=5)
+        ttk.Label(row, text="Backend:", width=20, anchor="w").pack(side=tk.LEFT)
+        ttk.Combobox(row, textvariable=self.var_local_backend,
+                     values=["ollama", "vllm", "openai_compatible"],
+                     state="readonly", width=20).pack(side=tk.LEFT)
+
+        row = ttk.Frame(frame)
+        row.pack(fill=tk.X, pady=5)
+        ttk.Label(row, text="API Key (optional):", width=20, anchor="w").pack(side=tk.LEFT)
+        ttk.Entry(row, textvariable=self.var_local_key, width=50,
+                  show="*").pack(side=tk.LEFT)
+        ttk.Label(row, text="(empty = LOCAL_LLM_API_KEY env var)",
+                  foreground="gray").pack(side=tk.LEFT, padx=6)
 
         # Common Settings
         ttk.Separator(frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=15)
@@ -757,82 +812,72 @@ This helps gather more comprehensive information from diverse sources."""
                                "Anthropic API key is required.\nSet it in the API tab or via ANTHROPIC_API_KEY environment variable.")
             return False
 
+        # provider == "local": API key is OPTIONAL (many local servers
+        # need no auth; empty falls back to LOCAL_LLM_API_KEY env var)
+
+        try:
+            from .utils.concurrency import validate_parallel_max_workers
+            validate_parallel_max_workers(self.var_parallel_workers.get(),
+                                          source="Parallel workers")
+        except (ValueError, tk.TclError) as e:
+            messagebox.showerror("Validation Error", str(e))
+            return False
+
         return True
 
     def _get_config_dict(self) -> dict:
-        """Get configuration as a dictionary for run_research."""
-        config = {
-            "topic": self.var_topic.get().strip(),
+        """Get configuration as a dictionary for run_research.
+
+        Collects plain values from the Tk variables and delegates to the
+        pure (headlessly testable) ``build_gui_config``.
+        """
+        values = {
+            "topic": self.var_topic.get(),
             "provider": self.var_provider.get(),
             "search_method": self.var_search_method.get(),
-            "research_iterations": self.var_min_iterations.get(),
+            "min_iterations": self.var_min_iterations.get(),
             "max_iterations": self.var_max_iterations.get(),
+            "parallel_max_workers": self.var_parallel_workers.get(),
             "output_format": self.var_output_format.get(),
             "output_dir": self.var_output_dir.get(),
             "enable_verification": self.var_enable_verification.get(),
             "verbose": self.var_verbose.get(),
             "language": self.var_language.get(),
             "max_results": self.var_max_results.get(),
-
-            # Extended Mode
             "extended_mode": self.var_extended_mode.get(),
             "crawl_max_pages": self.var_crawl_max_pages.get(),
             "crawl_max_depth": self.var_crawl_max_depth.get(),
             "crawl_max_sites": self.var_crawl_max_sites.get(),
-
-            # DeepThink
             "deep_think": self.var_deep_think.get(),
             "deep_think_level": self.var_deep_think_level.get(),
             "reasoning_iterations": self.var_reasoning_iterations.get(),
             "consistency_threshold": self.var_consistency_threshold.get(),
             "consistency_mode": self.var_consistency_mode.get(),
             "fidelity_threshold": self.var_fidelity_threshold.get(),
-        }
-
-        # API keys
-        if self.var_provider.get() == "openai":
-            config["openai_api_key"] = self.var_openai_key.get().strip()
-            config["model"] = self.var_openai_model.get()
-        else:
-            config["anthropic_api_key"] = self.var_anthropic_key.get().strip()
-            config["model"] = self.var_anthropic_model.get()
-
-        # Target length
-        if self.var_target_pages.get().strip():
-            try:
-                config["target_pages"] = int(self.var_target_pages.get().strip())
-            except ValueError:
-                pass
-
-        if self.var_target_characters.get().strip():
-            try:
-                config["target_characters"] = int(self.var_target_characters.get().strip())
-            except ValueError:
-                pass
-
-        # Multilingual
-        config["multilingual"] = self.var_multilingual.get()
-        if self.var_multilingual.get():
-            selected_languages = [
+            "openai_api_key": self.var_openai_key.get(),
+            "openai_model": self.var_openai_model.get(),
+            "anthropic_api_key": self.var_anthropic_key.get(),
+            "anthropic_model": self.var_anthropic_model.get(),
+            "local_api_key": self.var_local_key.get(),
+            "local_model": self.var_local_model.get(),
+            "local_base_url": self.var_local_url.get(),
+            "local_backend": self.var_local_backend.get(),
+            "target_pages": self.var_target_pages.get(),
+            "target_characters": self.var_target_characters.get(),
+            "multilingual": self.var_multilingual.get(),
+            "search_languages": [
                 code for code, var in self.var_search_languages.items()
                 if var.get()
-            ]
-            config["search_languages"] = selected_languages if selected_languages else ["ja", "en"]
-        config["results_per_language"] = self.var_results_per_language.get()
-        config["translate_results"] = self.var_translate_results.get()
-
-        # Proxy
-        if self.var_http_proxy.get().strip():
-            config["http_proxy"] = self.var_http_proxy.get().strip()
-        if self.var_https_proxy.get().strip():
-            config["https_proxy"] = self.var_https_proxy.get().strip()
-        if self.var_proxy_username.get().strip():
-            config["proxy_username"] = self.var_proxy_username.get().strip()
-        if self.var_proxy_password.get().strip():
-            config["proxy_password"] = self.var_proxy_password.get().strip()
-        config["verify_ssl"] = self.var_verify_ssl.get()
-
-        return config
+            ],
+            "results_per_language": self.var_results_per_language.get(),
+            "translate_results": self.var_translate_results.get(),
+            "http_proxy": self.var_http_proxy.get(),
+            "https_proxy": self.var_https_proxy.get(),
+            "proxy_username": self.var_proxy_username.get(),
+            "proxy_password": self.var_proxy_password.get(),
+            "verify_ssl": self.var_verify_ssl.get(),
+        }
+        return build_gui_config(values)
 
     def _start_research(self):
         """Start the research process."""

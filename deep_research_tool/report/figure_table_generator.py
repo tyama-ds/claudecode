@@ -196,6 +196,7 @@ class FigureTableGenerator:
         verify_ssl: bool = True,
         chart_library: str = "matplotlib",
         max_workers: int = 8,
+        concurrency_limiter=None,
     ):
         """
         Initialize FigureTableGenerator.
@@ -212,6 +213,8 @@ class FigureTableGenerator:
             chart_library: Chart rendering library ("matplotlib" or "seaborn";
                 falls back to matplotlib when seaborn is not installed)
         """
+        # app-wide run limiter: image downloads are leaf network I/O
+        self.concurrency_limiter = concurrency_limiter
         self.llm = llm_client
         self.output_dir = output_dir or Path("./output/figures")
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -362,6 +365,10 @@ class FigureTableGenerator:
         if base and attribution:
             return f"{base}　{attribution}"
         return base or attribution
+
+    def _leaf_permit(self):
+        from ..utils.concurrency import maybe_permit
+        return maybe_permit(getattr(self, "concurrency_limiter", None))
 
     def _get_fetch_session(self):
         """Session for re-fetching evidence pages (HTML table extraction).
@@ -969,17 +976,18 @@ class FigureTableGenerator:
         try:
             from bs4 import BeautifulSoup
 
-            response = requests.get(
-                url,
-                timeout=(5, 20),
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
-                },
-                proxies=self.proxies,
-                verify=self.verify_ssl,
-            )
+            with self._leaf_permit():
+                response = requests.get(
+                    url,
+                    timeout=(5, 20),
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
+                    },
+                    proxies=self.proxies,
+                    verify=self.verify_ssl,
+                )
             response.raise_for_status()
 
             soup = BeautifulSoup(response.content, 'html.parser')
@@ -1076,13 +1084,14 @@ class FigureTableGenerator:
         last_exception = None
         for attempt in range(max_retries):
             try:
-                response = requests.get(
-                    url,
-                    timeout=(5, 10),
-                    headers=headers,
-                    proxies=self.proxies,
-                    verify=self.verify_ssl,
-                )
+                with self._leaf_permit():
+                    response = requests.get(
+                        url,
+                        timeout=(5, 10),
+                        headers=headers,
+                        proxies=self.proxies,
+                        verify=self.verify_ssl,
+                    )
                 if response.status_code in (429, 503) and attempt < max_retries - 1:
                     wait = 2 ** attempt
                     print(f"[FigureTableGenerator] HTTP {response.status_code} for {url}, retrying in {wait}s...")
@@ -1474,10 +1483,11 @@ Return ONLY valid JSON, no other text."""
                 continue
 
             try:
-                response = session.get(
-                    evidence.url,
-                    timeout=(5, 10),
-                )
+                with self._leaf_permit():
+                    response = session.get(
+                        evidence.url,
+                        timeout=(5, 10),
+                    )
                 response.raise_for_status()
                 soup = BeautifulSoup(response.content, 'html.parser')
 
