@@ -26,6 +26,7 @@ def build_gui_config(v: dict) -> dict:
         "output_format": v.get("output_format", "markdown"),
         "output_dir": v.get("output_dir", "./output"),
         "enable_verification": v.get("enable_verification", True),
+        "verification_profile": v.get("verification_profile", "balanced"),
         "verbose": v.get("verbose", False),
         "language": v.get("language", "ja"),
         "max_results": v.get("max_results", 10),

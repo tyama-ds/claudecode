@@ -536,6 +536,18 @@ class ResearchConfig:
     min_claim_support_score: float = 0.85
     required_critical_coverage: float = 1.0
 
+    # --- Verification profile (fast / balanced / strict / custom) ---
+    # Resolved by verification.profiles.resolve_verification_settings —
+    # the ONE backend path shared by GUI, Web UI and CLI. The legacy
+    # round/threshold fields above still work: values changed from their
+    # defaults override the profile preset (backward compatible).
+    verification_profile: str = "balanced"
+    verification_max_workers: int = 8
+    verification_batch_size: int = 10
+    verification_cache_enabled: bool = True
+    verification_timeout_seconds: int = 0      # 0 = no timeout
+    verification_minor_claim_sample_rate: float = 1.0
+
     # Extended mode settings (deep site crawling)
     extended_mode: bool = False
     crawl_max_pages: int = 10  # Max pages to crawl per site
@@ -676,6 +688,10 @@ class Config:
 
     # Verification settings
     enable_verification: bool = True
+    # NOTE: verification_strictness applies ONLY to the standalone
+    # `deep-research verify` command (legacy Verifier). The research
+    # pipeline's finalization verification is controlled by
+    # research.verification_profile instead.
     verification_strictness: str = "medium"  # low, medium, high
 
     # Logging
@@ -775,6 +791,13 @@ class Config:
             errors.append(
                 f"min_score_improvement must be >= 0 "
                 f"(got {rc.min_score_improvement})")
+
+        # --- Verification profile validation (single backend resolver) ---
+        try:
+            from .verification.profiles import settings_from_research_config
+            settings_from_research_config(rc)
+        except ValueError as e:
+            errors.append(str(e))
 
         # --- Parallelism validation (strict, no clamping) ---
         try:
@@ -910,6 +933,12 @@ def create_config(
     min_new_independent_sources: int = 1,
     min_claim_support_score: float = 0.85,
     required_critical_coverage: float = 1.0,
+    verification_profile: str = "balanced",
+    verification_max_workers: int = 8,
+    verification_batch_size: int = 10,
+    verification_cache_enabled: bool = True,
+    verification_timeout_seconds: int = 0,
+    verification_minor_claim_sample_rate: float = 1.0,
     auto_figures_include_images: bool = True,
     auto_figures_include_tables: bool = True,
     auto_figures_include_charts: bool = True,
@@ -1107,6 +1136,21 @@ def create_config(
             support score (default 0.85)
         required_critical_coverage: required coverage of critical questions
             for acceptance (default 1.0)
+        verification_profile: 'fast' | 'balanced' (default) | 'strict' |
+            'custom' — how thoroughly the final verification runs. fast:
+            no research/revision rounds, minor claims sampled (critical/
+            important always verified). balanced: 1/1 rounds, all claims.
+            strict: legacy-equivalent 2/2 rounds, thresholds never
+            relaxed. custom: explicit knobs, validated with hard bounds
+        verification_max_workers: parallel workers inside verification
+            (also bounded by parallel_max_workers and the run limiter)
+        verification_batch_size: claims judged per LLM request (1-32)
+        verification_cache_enabled: same-run cache for unchanged
+            sections/claims/coverage windows (default True)
+        verification_timeout_seconds: overall verification timeout
+            (0 = none); on expiry the run exits at a safe boundary
+        verification_minor_claim_sample_rate: fraction of MINOR claims
+            verified (critical/important are always verified)
         figure_max_workers: Parallel workers for the figure stage
             (per-section image/table extraction, numerical extraction,
             LLM chart judging). Default 8
@@ -1195,6 +1239,12 @@ def create_config(
         min_new_independent_sources=min_new_independent_sources,
         min_claim_support_score=min_claim_support_score,
         required_critical_coverage=required_critical_coverage,
+        verification_profile=verification_profile,
+        verification_max_workers=verification_max_workers,
+        verification_batch_size=verification_batch_size,
+        verification_cache_enabled=verification_cache_enabled,
+        verification_timeout_seconds=verification_timeout_seconds,
+        verification_minor_claim_sample_rate=verification_minor_claim_sample_rate,
         extended_mode=extended_mode,
         crawl_max_pages=crawl_max_pages,
         crawl_max_depth=crawl_max_depth,

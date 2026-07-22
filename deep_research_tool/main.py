@@ -429,6 +429,10 @@ class DeepResearchTool:
         # and another job's reset cannot clear them.
         from .utils.concurrency import RunLimits
         from .api.base import TokenUsageStats
+        from .verification.runtime import VerificationProgress
+        # live verification progress (phases / counters / cancel) — the
+        # Web UI polls this and can request a safe cancellation
+        self.verification_progress = VerificationProgress()
         run_limits = RunLimits(self.config.research.parallel_max_workers)
         self.run_limits = run_limits
         run_token_stats = TokenUsageStats()
@@ -1030,6 +1034,12 @@ class DeepResearchTool:
             "max_concurrency_observed": run_limits.run_peak,
             "semantic_manifest_hash_at_freeze": semantic_freeze_hash,
             "semantic_manifest_hash_at_output": semantic_output_hash,
+            "verification_summary": (getattr(self, "finalization_outcome",
+                                             None) or {}).get(
+                "verification_summary"),
+            "verification_cancelled": (getattr(self, "finalization_outcome",
+                                               None) or {}).get(
+                "decision") == "cancelled",
             "warnings": warnings_collector.to_dict_list(),
             "warning_count": warnings_collector.count(),
         }
@@ -1507,10 +1517,24 @@ class DeepResearchTool:
             session_id=session.session_id,
             progress_callback=progress_callback,
             chapter_citation_callback=chapter_citation_callback,
+            verification_progress=getattr(self, "verification_progress",
+                                          None),
         )
 
     def _warn_on_finalization_outcome(self, outcome) -> None:
         verdict = outcome["verdict"]
+        if outcome["decision"] == "cancelled":
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.CRITICAL, "Finalize",
+                "検証はユーザーによってキャンセルされました。本文は最後に"
+                "検証された状態（または未検証）のままレンダリングされます。",
+            )
+        if outcome["decision"] == "timeout":
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.CRITICAL, "Finalize",
+                "検証がタイムアウトしました（verification_timeout_seconds）。"
+                "本文は最後に検証された状態のままレンダリングされます。",
+            )
         if outcome["decision"] == "finalize_with_limitations":
             ResearchWarnings.get_instance().add(
                 ResearchWarnings.HIGH, "Finalize",

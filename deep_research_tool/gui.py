@@ -156,6 +156,7 @@ class DeepResearchGUI:
         # Verification
         self.var_enable_verification = tk.BooleanVar(value=True)
         self.var_verification_strictness = tk.StringVar(value="medium")
+        self.var_verification_profile = tk.StringVar(value="balanced")
 
         # Proxy
         self.var_http_proxy = tk.StringVar(value=os.getenv("HTTP_PROXY", ""))
@@ -295,6 +296,37 @@ class DeepResearchGUI:
         ttk.Combobox(row, textvariable=self.var_verification_strictness,
                      values=["low", "medium", "high"], state="readonly",
                      width=15).pack(side=tk.LEFT)
+
+        # Verification profile (fast / balanced / strict / custom)
+        row = ttk.Frame(frame)
+        row.pack(fill=tk.X, pady=5)
+        ttk.Label(row, text="Verification Mode:", width=20,
+                  anchor="w").pack(side=tk.LEFT)
+        profile_combo = ttk.Combobox(
+            row, textvariable=self.var_verification_profile,
+            values=["fast", "balanced", "strict", "custom"],
+            state="readonly", width=15)
+        profile_combo.pack(side=tk.LEFT)
+        ttk.Label(row, text="(balanced=推奨)",
+                  foreground="gray").pack(side=tk.LEFT, padx=8)
+        self._verify_desc = ttk.Label(
+            frame, foreground="gray", wraplength=520, justify="left",
+            text="速度と検証品質のバランスを取った推奨設定です。")
+        self._verify_desc.pack(anchor="w", padx=4)
+
+        def _update_profile_desc(event=None):
+            try:
+                from .verification.profiles import (
+                    CUSTOM_WARNING, PROFILE_DESCRIPTIONS)
+                profile = self.var_verification_profile.get()
+                text = PROFILE_DESCRIPTIONS.get(profile, "")
+                if profile == "custom":
+                    text += ("\n" + CUSTOM_WARNING
+                             + "\n（詳細な数値はCLIまたはWeb UIで設定できます）")
+                self._verify_desc.config(text=text)
+            except Exception:
+                pass
+        profile_combo.bind("<<ComboboxSelected>>", _update_profile_desc)
 
         # App-wide parallelism (LLM / network concurrency limit)
         row = ttk.Frame(frame)
@@ -841,6 +873,7 @@ This helps gather more comprehensive information from diverse sources."""
             "output_format": self.var_output_format.get(),
             "output_dir": self.var_output_dir.get(),
             "enable_verification": self.var_enable_verification.get(),
+            "verification_profile": self.var_verification_profile.get(),
             "verbose": self.var_verbose.get(),
             "language": self.var_language.get(),
             "max_results": self.var_max_results.get(),

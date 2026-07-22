@@ -154,16 +154,71 @@ class ClaimVerifier:
     def __init__(self, llm_client, language: str = "ja",
                  evidence_per_claim: int = EVIDENCE_PER_CLAIM,
                  chunk_chars: int = CLAIM_CHUNK_CHARS,
-                 evidence_chunk_chars: int = EVIDENCE_CHUNK_CHARS):
+                 evidence_chunk_chars: int = EVIDENCE_CHUNK_CHARS,
+                 settings=None, cache=None, progress=None):
+        """settings/cache/progress (verification.profiles / .runtime):
+        when omitted, the verifier behaves exactly like the legacy
+        sequential implementation (workers=1, batch=1, cache off) so
+        existing scripted-LLM tests and callers are unaffected."""
+        from .runtime import VerificationCache
         self.llm = llm_client
         self.language = language
         self.evidence_per_claim = evidence_per_claim
         self.chunk_chars = chunk_chars
         self.evidence_chunk_chars = evidence_chunk_chars
+        self.settings = settings
+        self.cache = cache or VerificationCache(enabled=False)
+        self.progress = progress
         # per-verify_report accounting (fail-closed bookkeeping)
         self.extraction_errors: List[str] = []
         self.chunks_total = 0
         self.chunks_failed = 0
+        self.skipped_minor = 0
+
+    @property
+    def _workers(self) -> int:
+        return max(1, getattr(self.settings, "max_workers", 1) or 1) \
+            if self.settings else 1
+
+    @property
+    def _batch_size(self) -> int:
+        return max(1, getattr(self.settings, "batch_size", 1) or 1) \
+            if self.settings else 1
+
+    @property
+    def _model_key(self) -> str:
+        return str(getattr(self.llm, "model", "") or "")
+
+    def _checkpoint(self) -> None:
+        """Safe cancellation/timeout boundary (chunk / batch / retry)."""
+        if self.progress is not None:
+            self.progress.checkpoint()
+
+    def _llm_generate(self, prompt: str):
+        """All verifier LLM calls go through here: counts calls, marks
+        the waiting state (>30s stalls become visible in the UI), and
+        never starts after a cancellation."""
+        self._checkpoint()
+        if self.progress is not None:
+            self.progress.add(llm_calls=1)
+            self.progress.set_waiting("llm")
+        try:
+            return self.llm.generate(prompt)
+        finally:
+            if self.progress is not None:
+                self.progress.set_waiting(None)
+
+    def _map_parallel(self, fn, items):
+        """Deterministic parallel map: results in INPUT order regardless
+        of completion order; sequential when workers == 1."""
+        items = list(items)
+        if self._workers <= 1 or len(items) <= 1:
+            return [fn(item) for item in items]
+        import concurrent.futures
+        workers = min(self._workers, len(items))
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=workers) as ex:
+            return list(ex.map(fn, items))
 
     # ------------------------------------------------------------------
     # Claim extraction (whole section, chunked — no head truncation)
@@ -171,24 +226,64 @@ class ClaimVerifier:
 
     def extract_claims(self, section_id: str, text: str,
                        start_index: int = 0) -> List[Claim]:
-        claims: List[Claim] = []
+        """Extract claims from one section (chunked, parallel, cached).
+
+        - claim ids are DETERMINISTIC (section / chunk / position), never
+          dependent on parallel completion order;
+        - unchanged sections hit the extraction cache (key includes the
+          section text hash, the model and the prompt version) and are
+          not re-extracted;
+        - chunks run in parallel within the worker limit; each chunk
+          keeps its bounded retry.
+        """
+        from .runtime import PROMPT_VERSION, stable_hash
+
         chunks = self._chunk(text)
-        counter = start_index
-        for ci, chunk in enumerate(chunks):
-            self.chunks_total += 1
-            prompt = self._claim_prompt(section_id, chunk, ci + 1, len(chunks))
-            data = None
+        if not chunks:
+            return []
+
+        cache_key = stable_hash("extract", section_id, text,
+                                self._model_key, PROMPT_VERSION)
+        cached = self.cache.get(cache_key)
+        if cached is not None:
+            # rebuild FRESH Claim objects (statuses must not leak between
+            # verification passes); chunk accounting counts as verified
+            self.chunks_total += cached["chunks_total"]
+            if self.progress is not None:
+                self.progress.add(chunks_done=cached["chunks_total"])
+                self.progress.sync_cache(self.cache)
+            return [Claim(**dict(raw)) for raw in cached["claims"]]
+
+        def _extract_chunk(indexed):
+            ci, chunk = indexed
+            self._checkpoint()
+            prompt = self._claim_prompt(section_id, chunk, ci + 1,
+                                        len(chunks))
             last_error = None
             # bounded per-chunk retry: a transient LLM failure must not
             # silently leave part of the body unverified
-            for _attempt in range(self.EXTRACT_RETRIES + 1):
+            for attempt in range(self.EXTRACT_RETRIES + 1):
+                if attempt and self.progress is not None:
+                    self.progress.add(retries=1)
+                    self.progress.set_waiting("retry")
                 try:
-                    response = self.llm.generate(prompt)
-                    data = extract_json_from_response(response.content)
-                    break
+                    response = self._llm_generate(prompt)
+                    return ci, extract_json_from_response(response.content), None
                 except Exception as e:
                     last_error = e
+            return ci, None, last_error
+
+        results = self._map_parallel(_extract_chunk, enumerate(chunks))
+
+        claims: List[Claim] = []
+        raw_claims: List[Dict] = []
+        chunk_failures = 0
+        for ci, data, error in sorted(results, key=lambda r: r[0]):
+            self.chunks_total += 1
+            if self.progress is not None:
+                self.progress.add(chunks_done=1)
             if data is None:
+                chunk_failures += 1
                 self.chunks_failed += 1
                 self.extraction_errors.append(
                     f"claim extraction failed after "
@@ -196,17 +291,16 @@ class ClaimVerifier:
                     f"chunk {ci + 1}/{len(chunks)}, chars "
                     f"{ci * self.chunk_chars}-"
                     f"{min(len(text), (ci + 1) * self.chunk_chars)}): "
-                    f"{last_error}")
+                    f"{error}")
                 print(f"[ClaimVerifier] claim extraction failed "
-                      f"({section_id} chunk {ci + 1}): {last_error}")
+                      f"({section_id} chunk {ci + 1}): {error}")
                 continue
-            for item in data.get("claims", []):
+            for k, item in enumerate(data.get("claims", [])):
                 if not isinstance(item, dict):
                     continue
                 claim_text = (item.get("claim") or "").strip()
                 if not claim_text:
                     continue
-                counter += 1
                 importance = item.get("importance", "important")
                 if importance not in IMPORTANCE_WEIGHT:
                     importance = "important"
@@ -216,13 +310,23 @@ class ClaimVerifier:
                     cited = [int(n) for n in raw
                              if isinstance(n, (int, str))
                              and str(n).isdigit()]
-                claims.append(Claim(
-                    claim_id=f"C-{counter}",
+                raw_claim = dict(
+                    claim_id=f"C-{section_id}.{ci + 1}.{k + 1}",
                     section_id=section_id,
                     text=claim_text,
                     importance=importance,
                     cited_source_numbers=cited,
-                ))
+                )
+                raw_claims.append(raw_claim)
+                claims.append(Claim(**dict(raw_claim)))
+
+        # cache only FULLY extracted sections (a failed chunk must be
+        # retried on the next pass, not remembered as permanently failed)
+        if chunk_failures == 0:
+            self.cache.put(cache_key, {"chunks_total": len(chunks),
+                                       "claims": raw_claims})
+        if self.progress is not None:
+            self.progress.sync_cache(self.cache)
         return claims
 
     def _chunk(self, text: str) -> List[str]:
@@ -403,29 +507,67 @@ Do not include opinions or generic statements. JSON only."""
                       ) -> List[Claim]:
         """Judge each claim against ITS OWN evidence — CITED FIRST.
 
-        With ``enforce_citations`` (the production path, i.e. whenever a
-        citation registry exists):
-        - a claim WITH citations is judged first against ONLY the
-          evidence it cites; "supported" requires at least one id that is
-          BOTH cited in the body AND judged to actually support it;
-        - cited-but-unsupporting is a citation mismatch — uncited
-          evidence that happens to support the claim NEVER turns it into
-          a pass; it is recorded only as a replacement candidate for the
-          rewrite;
-        - critical/important factual claims WITHOUT citations are never
-          supported (citation required, regardless of registry size).
-        Without ``enforce_citations`` (no registry available), the legacy
-        whole-locker judgement applies.
+        Semantics (unchanged from the sequential implementation):
+        - with ``enforce_citations``, a claim WITH citations is judged
+          against ONLY the evidence it cites; "supported" requires at
+          least one id that is BOTH cited and actually supporting;
+          cited-but-unsupporting is a citation mismatch, and uncited
+          evidence is recorded only as a rewrite replacement candidate;
+        - critical/important claims WITHOUT citations are never
+          supported;
+        - unknown statuses / supported-without-valid-sources degrade to
+          uncertain (fail-safe).
+
+        Performance (new): claims are judged in BATCHES (one LLM request
+        for several claims; missing/invalid entries are retried
+        individually), batches run in PARALLEL within the worker limit,
+        unchanged claim+evidence pairs hit the judgement cache, and
+        MINOR claims can be deterministically sampled (fast profile —
+        critical/important are never sampled out). Results and claim ids
+        never depend on completion order.
         """
+        from .runtime import PROMPT_VERSION, stable_hash
+
         if chunk_index is None:
             chunk_index = self.build_chunk_index(evidence_list)
         cited_ids_by_claim = cited_ids_by_claim or {}
+        locker_digest = stable_hash(
+            "locker", *[f"{c.evidence_id}@{c.offset}:{len(c.text)}"
+                        for c in chunk_index])
+        rate = getattr(self.settings, "minor_claim_sample_rate", 1.0) \
+            if self.settings else 1.0
+
+        # ---- prepare: sampling, evidence selection, cache keys --------
+        prepared: List[Dict] = []
         for claim in claims:
+            # deterministic minor-claim sampling (fast profile).
+            # critical/important claims are NEVER sampled out.
+            if claim.importance == "minor" and rate < 1.0 and \
+                    int(stable_hash("sample", claim.text), 16) % 1000 \
+                    >= int(rate * 1000):
+                claim.status = "skipped"
+                claim.reason = ("軽微なクレームのためサンプル検証で省略"
+                                "（fastモード）" if self.language == "ja"
+                                else "minor claim sampled out (fast mode)")
+                self.skipped_minor += 1
+                self._progress_claim_done()
+                continue
+
             cited_ids = cited_ids_by_claim.get(claim.claim_id) or []
             if enforce_citations and cited_ids:
-                self._verify_cited_claim(claim, cited_ids, chunk_index)
-            elif enforce_citations and claim.importance in ("critical",
-                                                            "important"):
+                cited_set = set(cited_ids)
+                pool = [c for c in chunk_index
+                        if c.evidence_id in cited_set]
+                selected = self.select_evidence(
+                    claim, [], chunk_index=pool,
+                    cited_evidence_ids=cited_ids)
+                digest = stable_hash(
+                    "ev", *sorted(cited_ids),
+                    *[f"{c.evidence_id}@{c.offset}:{stable_hash(c.text)}"
+                      for c in selected])
+                mode = "cited"
+            elif enforce_citations and claim.importance in (
+                    "critical", "important"):
                 claim.status = "unsupported"
                 claim.citation_missing = True
                 claim.reason = (
@@ -434,79 +576,147 @@ Do not include opinions or generic statements. JSON only."""
                     "no citation (critical/important factual claims "
                     "require one)")
                 claim.supporting_source_ids = []
-                self._find_replacements(claim, chunk_index, exclude=set())
+                mode, selected, cited_set, digest = \
+                    "uncited", [], set(), locker_digest
             else:
-                self._verify_open_claim(claim, evidence_list, chunk_index,
-                                        cited_ids)
+                cited_set = set(cited_ids)
+                selected = self.select_evidence(
+                    claim, evidence_list, chunk_index=chunk_index,
+                    cited_evidence_ids=cited_ids)
+                # open claims judge against the whole locker: growth of
+                # the locker legitimately re-judges them
+                digest = stable_hash(
+                    locker_digest,
+                    *[f"{c.evidence_id}@{c.offset}" for c in selected])
+                mode = "open"
+
+            prepared.append(dict(
+                claim=claim, mode=mode, selected=selected,
+                cited=cited_set,
+                key=stable_hash("judge", mode, claim.text,
+                                claim.importance, digest,
+                                self._model_key, PROMPT_VERSION)))
+
+        # safeguard: sampling must never skip EVERY claim — an entirely
+        # unverified body would fail closed even though evidence exists
+        if not prepared and self.skipped_minor:
+            revived = next(c for c in claims if c.status == "skipped")
+            revived.status = "supported"     # placeholder; judged below
+            revived.reason = ""
+            self.skipped_minor -= 1
+            cited_ids = cited_ids_by_claim.get(revived.claim_id) or []
+            selected = self.select_evidence(
+                revived, evidence_list, chunk_index=chunk_index,
+                cited_evidence_ids=cited_ids)
+            prepared.append(dict(
+                claim=revived, mode="open", selected=selected,
+                cited=set(cited_ids),
+                key=stable_hash("judge", "open", revived.text,
+                                revived.importance, locker_digest,
+                                self._model_key, PROMPT_VERSION)))
+
+        # ---- cache pass: unchanged claim+evidence pairs replay --------
+        to_judge: List[Dict] = []
+        for item in prepared:
+            cached = self.cache.get(item["key"])
+            if cached is not None:
+                self._apply_stored_judgement(item["claim"], cached)
+                self._progress_claim_done()
+                continue
+            to_judge.append(item)
+        if self.progress is not None:
+            self.progress.sync_cache(self.cache)
+
+        # ---- resolve claims that need no judge call --------------------
+        batchable: List[Dict] = []
+        for item in to_judge:
+            claim = item["claim"]
+            if item["mode"] == "uncited":
+                # status already set; search replacement candidates
+                self._find_replacements(claim, chunk_index, exclude=set())
+                self._store_judgement(item)
+                self._progress_claim_done()
+                continue
+            claim.evidence_provenance = [
+                (c.evidence_id, c.offset) for c in item["selected"]]
+            if not item["selected"]:
+                if item["mode"] == "cited":
+                    claim.status = "unsupported"
+                    claim.citation_mismatch = True
+                    claim.supporting_source_ids = []
+                    claim.reason = (
+                        "引用された出典に該当する本文が見つかりません"
+                        if self.language == "ja" else
+                        "cited evidence has no matching content")
+                    self._find_replacements(claim, chunk_index,
+                                            exclude=item["cited"])
+                else:
+                    claim.status = "unsupported"
+                    claim.supporting_source_ids = []
+                    claim.reason = ("関連するエビデンスが見つかりません"
+                                    if self.language == "ja"
+                                    else "no relevant evidence found")
+                self._store_judgement(item)
+                self._progress_claim_done()
+                continue
+            batchable.append(item)
+
+        # ---- batched, parallel judging ---------------------------------
+        size = self._batch_size
+        batches = [batchable[i:i + size]
+                   for i in range(0, len(batchable), size)]
+
+        def _run_batch(batch):
+            self._checkpoint()
+            verdicts = self._judge_batch(batch)
+            for item in batch:
+                claim = item["claim"]
+                verdict = verdicts.get(claim.claim_id)
+                if verdict is None:
+                    claim.status = "uncertain"
+                    claim.reason = "verification error: no verdict"
+                    claim.supporting_source_ids = []
+                else:
+                    self._apply_raw_verdict(item, verdict, chunk_index)
+                self._store_judgement(item)
+                self._progress_claim_done()
+            return True
+
+        self._map_parallel(_run_batch, batches)
         return claims
 
-    def _verify_open_claim(self, claim, evidence_list, chunk_index,
-                           cited_ids) -> None:
-        """Legacy whole-locker judgement (minor claims / no registry)."""
-        selected = self.select_evidence(
-            claim, evidence_list, chunk_index=chunk_index,
-            cited_evidence_ids=cited_ids)
-        claim.evidence_provenance = [
-            (c.evidence_id, c.offset) for c in selected]
-        claim.supporting_source_ids = list(dict.fromkeys(
-            c.evidence_id for c in selected))
-        if not selected:
-            claim.status = "unsupported"
-            claim.reason = ("関連するエビデンスが見つかりません"
-                            if self.language == "ja"
-                            else "no relevant evidence found")
-            return
-        try:
-            verdict = self._judge_claim(claim, selected)
-        except Exception as e:
-            claim.status = "uncertain"
-            claim.reason = f"verification error: {e}"
-            self.extraction_errors.append(
-                f"claim judgement failed ({claim.claim_id}): {e}")
-            return
-        status = verdict.get("status", "uncertain")
-        if status not in _VALID_STATUSES:
-            status = "uncertain"     # unknown status is never "fine"
-        claim.status = status
-        claim.reason = verdict.get("reason", "")
-        ids = verdict.get("supporting_source_ids")
-        valid = {c.evidence_id for c in selected}
-        if isinstance(ids, list):
-            claim.supporting_source_ids = [i for i in ids if i in valid]
-        # "supported" with zero valid supporting sources is a
-        # contradiction in terms -> downgrade to uncertain
-        if claim.status == "supported" and not claim.supporting_source_ids:
-            claim.status = "uncertain"
-            claim.reason = (claim.reason + " / 有効な支持ソースなし"
-                            if self.language == "ja"
-                            else claim.reason + " / no valid sources")
+    def _progress_claim_done(self) -> None:
+        if self.progress is not None:
+            self.progress.add(claims_done=1)
 
-    def _verify_cited_claim(self, claim, cited_ids, chunk_index) -> None:
-        """Cited-first judgement: ONLY the evidence the body cites."""
-        cited_set = set(cited_ids)
-        cited_chunks = [c for c in chunk_index if c.evidence_id in cited_set]
-        selected = self.select_evidence(
-            claim, [], chunk_index=cited_chunks,
-            cited_evidence_ids=cited_ids)
-        claim.evidence_provenance = [
-            (c.evidence_id, c.offset) for c in selected]
-        if not selected:
-            claim.status = "unsupported"
-            claim.citation_mismatch = True
-            claim.supporting_source_ids = []
-            claim.reason = ("引用された出典に該当する本文が見つかりません"
-                            if self.language == "ja" else
-                            "cited evidence has no matching content")
-            self._find_replacements(claim, chunk_index, exclude=cited_set)
-            return
-        try:
-            verdict = self._judge_claim(claim, selected)
-        except Exception as e:
-            claim.status = "uncertain"
-            claim.reason = f"verification error: {e}"
-            self.extraction_errors.append(
-                f"claim judgement failed ({claim.claim_id}): {e}")
-            return
+    # -- judgement application / storage ---------------------------------
+
+    _JUDGEMENT_FIELDS = ("status", "reason", "supporting_source_ids",
+                         "citation_mismatch", "citation_missing",
+                         "replacement_source_ids", "evidence_provenance")
+
+    def _store_judgement(self, item: Dict) -> None:
+        claim = item["claim"]
+        self.cache.put(item["key"], {
+            f: list(v) if isinstance(v := getattr(claim, f), list) else v
+            for f in self._JUDGEMENT_FIELDS})
+
+    def _apply_stored_judgement(self, claim: Claim, stored: Dict) -> None:
+        for f in self._JUDGEMENT_FIELDS:
+            if f in stored:
+                value = stored[f]
+                setattr(claim, f,
+                        list(value) if isinstance(value, list) else value)
+
+    def _apply_raw_verdict(self, item: Dict, verdict: Dict,
+                           chunk_index) -> None:
+        """Normalize one judge verdict onto the claim (identical rules to
+        the sequential implementation: unknown -> uncertain, supported
+        requires cited∩supporting for cited claims, mismatch triggers a
+        replacement-candidate search, fail-safe throughout)."""
+        claim = item["claim"]
+        selected = item["selected"]
+        cited_set = item["cited"]
         status = verdict.get("status", "uncertain")
         if status not in _VALID_STATUSES:
             status = "uncertain"
@@ -514,31 +724,152 @@ Do not include opinions or generic statements. JSON only."""
         valid = {c.evidence_id for c in selected}
         supporting = [i for i in ids if i in valid] \
             if isinstance(ids, list) else []
-        # supported REQUIRES: cited-in-body ∩ actually-supporting ≠ ∅
-        if status == "supported" and any(i in cited_set for i in supporting):
-            claim.status = "supported"
-            claim.supporting_source_ids = supporting
+
+        if item["mode"] == "cited":
+            if status == "supported" and \
+                    any(i in cited_set for i in supporting):
+                claim.status = "supported"
+                claim.supporting_source_ids = supporting
+                claim.reason = verdict.get("reason", "")
+                return
+            claim.supporting_source_ids = []
             claim.reason = verdict.get("reason", "")
+            if status in ("unsupported", "contradicted"):
+                claim.status = status
+                claim.citation_mismatch = True
+                if not claim.reason:
+                    claim.reason = ("引用された出典は主張を支持しません"
+                                    if self.language == "ja" else
+                                    "the cited evidence does not support "
+                                    "the claim")
+                self._find_replacements(claim, chunk_index,
+                                        exclude=cited_set)
+            else:
+                claim.status = "uncertain"
+                claim.reason = (claim.reason + " / 有効な支持ソースなし"
+                                if self.language == "ja"
+                                else claim.reason + " / no valid sources")
             return
-        claim.supporting_source_ids = []
+
+        # open mode
+        claim.status = status
         claim.reason = verdict.get("reason", "")
-        if status in ("unsupported", "contradicted"):
-            # the citation is real but its content does NOT support the
-            # claim -> invalid/unsupported citation
-            claim.status = status
-            claim.citation_mismatch = True
-            if not claim.reason:
-                claim.reason = ("引用された出典は主張を支持しません"
-                                if self.language == "ja" else
-                                "the cited evidence does not support "
-                                "the claim")
-            self._find_replacements(claim, chunk_index, exclude=cited_set)
-        else:
-            # uncertain / unknown / supported-without-valid-ids
+        claim.supporting_source_ids = supporting if isinstance(ids, list) \
+            else list(dict.fromkeys(c.evidence_id for c in selected))
+        if claim.status == "supported" and not claim.supporting_source_ids:
             claim.status = "uncertain"
             claim.reason = (claim.reason + " / 有効な支持ソースなし"
                             if self.language == "ja"
                             else claim.reason + " / no valid sources")
+
+    # -- batched judging --------------------------------------------------
+
+    def _judge_batch(self, batch: List[Dict]) -> Dict[str, Dict]:
+        """Judge several claims in ONE LLM request.
+
+        Structured JSON response; entries that are missing or malformed
+        are retried INDIVIDUALLY (already-judged claims are never
+        re-run). An unusable verdict degrades to uncertain downstream —
+        never to supported.
+        """
+        if len(batch) == 1:
+            item = batch[0]
+            try:
+                verdict = self._judge_claim(item["claim"], item["selected"])
+            except Exception as e:
+                self.extraction_errors.append(
+                    f"claim judgement failed "
+                    f"({item['claim'].claim_id}): {e}")
+                return {item["claim"].claim_id:
+                        {"status": "uncertain",
+                         "reason": f"verification error: {e}"}}
+            return {item["claim"].claim_id: verdict}
+
+        verdicts: Dict[str, Dict] = {}
+        try:
+            response = self._llm_generate(self._batch_prompt(batch))
+            data = extract_json_from_response(response.content)
+            for entry in data.get("verdicts", []):
+                if not isinstance(entry, dict):
+                    continue
+                cid = str(entry.get("id", ""))
+                if cid and entry.get("status") in _VALID_STATUSES:
+                    verdicts[cid] = entry
+        except Exception as e:
+            self.extraction_errors.append(f"batch judgement failed: {e}")
+
+        # individual retry ONLY for the missing/invalid entries
+        missing = [item for item in batch
+                   if item["claim"].claim_id not in verdicts]
+        if missing:
+            if self.progress is not None and len(missing) < len(batch):
+                self.progress.add(retries=len(missing))
+
+            def _one(item):
+                self._checkpoint()
+                try:
+                    return (item["claim"].claim_id,
+                            self._judge_claim(item["claim"],
+                                              item["selected"]))
+                except Exception as e:
+                    self.extraction_errors.append(
+                        f"claim judgement failed "
+                        f"({item['claim'].claim_id}): {e}")
+                    return (item["claim"].claim_id,
+                            {"status": "uncertain",
+                             "reason": f"verification error: {e}"})
+
+            for cid, verdict in self._map_parallel(_one, missing):
+                verdicts[cid] = verdict
+        return verdicts
+
+    def _batch_prompt(self, batch: List[Dict]) -> str:
+        blocks = []
+        for item in batch:
+            claim = item["claim"]
+            ev_lines = []
+            for c in item["selected"]:
+                pos = ("冒頭" if c.offset == 0 else f"{c.offset}字目以降") \
+                    if self.language == "ja" else \
+                    ("start" if c.offset == 0 else f"offset {c.offset}")
+                ev_lines.append(
+                    f"[{c.evidence_id}] {c.title}（{pos}）\n{c.text}")
+            if self.language == "ja":
+                blocks.append(f"◆ 主張 {claim.claim_id}"
+                              f"（{claim.importance}）\n{claim.text}\n"
+                              f"【エビデンス】\n" + "\n---\n".join(ev_lines))
+            else:
+                blocks.append(f"# CLAIM {claim.claim_id}"
+                              f" ({claim.importance})\n{claim.text}\n"
+                              f"[EVIDENCE]\n" + "\n---\n".join(ev_lines))
+        joined = "\n\n====\n\n".join(blocks)
+        if self.language == "ja":
+            return f"""以下の各主張を、それぞれに提示されたエビデンスだけで検証してください。
+
+{joined}
+
+JSONで回答（全主張分を必ず含める）:
+{{"verdicts": [{{"id": "主張のID",
+  "status": "supported/unsupported/contradicted/uncertain",
+  "reason": "判定理由（1文）",
+  "supporting_source_ids": ["支持するエビデンスのID"]}}]}}
+
+- supported: エビデンスが主張を実際に支持している
+- unsupported: どのエビデンスも主張を支持しない
+- contradicted: エビデンスが主張と矛盾する
+- uncertain: 判断材料が不十分
+JSON以外は出力しない。"""
+        return f"""Verify EACH claim below using ONLY its own evidence.
+
+{joined}
+
+Respond as JSON (include EVERY claim):
+{{"verdicts": [{{"id": "claim id",
+  "status": "supported/unsupported/contradicted/uncertain",
+  "reason": "one sentence",
+  "supporting_source_ids": ["ids of supporting evidence"]}}]}}
+JSON only."""
+
 
     def _find_replacements(self, claim, chunk_index, exclude) -> None:
         """Search UNCITED evidence for citation-replacement candidates.
@@ -604,7 +935,7 @@ Respond as JSON:
  "reason": "one sentence",
  "supporting_source_ids": ["ids of supporting evidence"]}}
 JSON only."""
-        response = self.llm.generate(prompt)
+        response = self._llm_generate(prompt)
         return extract_json_from_response(response.content)
 
     # ------------------------------------------------------------------
@@ -729,14 +1060,27 @@ JSON only."""
         if current:
             windows.append("\n\n".join(current))
 
-        merged: Dict[int, Dict] = {}
-        for window in windows:
+        from .runtime import PROMPT_VERSION, stable_hash
+        q_digest = stable_hash("questions", *questions)
+
+        def _one_window(window):
+            self._checkpoint()
+            key = stable_hash("coverage", q_digest, window,
+                              self._model_key, PROMPT_VERSION)
+            cached = self.cache.get(key)
+            if cached is not None:
+                return cached
             try:
                 result = self._judge_coverage_window(questions, window)
             except Exception as e:
                 self.extraction_errors.append(
                     f"coverage window judgement failed: {e}")
-                continue
+                return None
+            self.cache.put(key, result)
+            return result
+
+        merged: Dict[int, Dict] = {}
+        for result in self._map_parallel(_one_window, windows):
             if not result:
                 continue
             for idx, entry in result.items():
@@ -744,6 +1088,8 @@ JSON only."""
                 if prev is None or (entry.get("answered")
                                     and not prev.get("answered")):
                     merged[idx] = entry
+        if self.progress is not None:
+            self.progress.sync_cache(self.cache)
         return merged or None
 
     def _judge_coverage_window(self, questions: List[str],
@@ -783,7 +1129,7 @@ Respond as JSON:
   "missing": "what is missing (when answered=false)",
   "search_queries": ["queries to fill the gap (>=1 when answered=false)"]}}]}}
 JSON only."""
-        response = self.llm.generate(prompt)
+        response = self._llm_generate(prompt)
         data = extract_json_from_response(response.content)
         out: Dict[int, Dict] = {}
         for item in data.get("coverage", []):
@@ -859,13 +1205,32 @@ JSON only."""
         self.extraction_errors = []
         self.chunks_total = 0
         self.chunks_failed = 0
+        self.skipped_minor = 0
         all_claims: List[Claim] = []
 
-        counter = 0
-        for sid, text in chapters.items():
-            claims = self.extract_claims(sid, text, start_index=counter)
-            counter += len(claims)
+        if self.progress is not None:
+            self.progress.set_phase("extracting")
+            self.progress.set_counts(
+                chunks_done=0,
+                chunks_total=sum(len(self._chunk(
+                    self._strip_limitations(t))) for t in chapters.values()))
+
+        # machine-generated limitations blocks are DETERMINISTIC text —
+        # they are excluded from claim extraction (their content is the
+        # already-known unresolved issues), so appending them never
+        # forces an LLM re-extraction of the whole section
+        extract_inputs = {sid: self._strip_limitations(text)
+                          for sid, text in chapters.items()}
+        extracted_lists = self._map_parallel(
+            lambda kv: self.extract_claims(kv[0], kv[1]),
+            extract_inputs.items())
+        for claims in extracted_lists:
             all_claims.extend(claims)
+
+        if self.progress is not None:
+            self.progress.set_phase("judging")
+            self.progress.set_counts(claims_done=0,
+                                     claims_total=len(all_claims))
 
         # resolve each claim's cited [SOURCE N] numbers to evidence ids.
         # The DETERMINISTIC parser (sentence/paragraph association) is the
@@ -895,6 +1260,10 @@ JSON only."""
         weighted_total = 0.0
         weighted_supported = 0.0
         for claim in all_claims:
+            if claim.status == "skipped":
+                # sampled-out minor claim (fast profile): excluded from
+                # the score, counted separately, surfaced in the summary
+                continue
             weight = IMPORTANCE_WEIGHT.get(claim.importance, 2.0)
             weighted_total += weight
             if claim.status == "supported":
@@ -977,6 +1346,7 @@ JSON only."""
                 ))
 
         verdict.metrics.claims_total = len(all_claims)
+        verdict.metrics.skipped_minor_claims = self.skipped_minor
         verdict.metrics.chunks_total = self.chunks_total
         verdict.metrics.chunks_failed = self.chunks_failed
         # ALWAYS transcribed: callers read metrics, not verifier state
@@ -1034,6 +1404,8 @@ JSON only."""
         # --- critical question coverage (all sections, answered vs
         #     mentioned, with actionable queries) ---
         if critical_questions:
+            if self.progress is not None:
+                self.progress.set_phase("coverage")
             coverage = self.judge_coverage(critical_questions, chapters)
             answered = sum(1 for c in coverage if c["answered"])
             verdict.metrics.critical_question_coverage = (

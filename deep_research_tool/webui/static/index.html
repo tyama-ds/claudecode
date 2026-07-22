@@ -572,24 +572,78 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
           <div><label>許容幅（0〜0.99）</label>
             <input type="number" id="length_tolerance" min="0" max="0.99" step="0.05" value="0.20"></div>
         </div>
-        <label style="margin-top:12px">最終検証ループ</label>
-        <div class="grid2">
-          <div><label>追加調査ラウンド上限</label>
-            <input type="number" id="max_final_research_rounds" min="0" max="10" value="2"></div>
-          <div><label>リライト/圧縮ラウンド上限</label>
-            <input type="number" id="max_final_revision_rounds" min="0" max="10" value="2"></div>
-          <div><label>改善なし許容ラウンド数</label>
-            <input type="number" id="max_no_improvement_rounds" min="0" max="5" value="1"></div>
-          <div><label>進捗と見なす最小スコア改善（0〜1）</label>
-            <input type="number" id="min_score_improvement" min="0" max="1" step="0.01" value="0.03"></div>
-          <div><label>進捗と見なす新規独立ソース数</label>
-            <input type="number" id="min_new_independent_sources" min="0" max="10" value="1"></div>
-          <div><label>主張サポート合格スコア（0〜1）</label>
-            <input type="number" id="min_claim_support_score" min="0" max="1" step="0.05" value="0.85"></div>
-          <div><label>必須の重要質問カバレッジ（0〜1）</label>
-            <input type="number" id="required_critical_coverage" min="0" max="1" step="0.05" value="1.0"></div>
-        </div>
         <p class="hint">下限・上限は明示した場合のみ絶対制約になります。下限未達でも水増しは行わず、追加調査または「調査上の限界」記載で対応します。上限超過が圧縮でも解消しない場合、レポートは警告付きの完了になります。</p>
+      </div>
+    </details>
+
+    <details>
+      <summary>🛡 検証モード（Verification）</summary>
+      <div class="body">
+        <div class="mode-cards" id="verifyModes" style="flex-wrap:wrap">
+          <label class="mode-card"><input type="radio" name="verification_profile" value="fast">
+            <span class="t">⚡ Fast</span>
+            <span class="d">短時間で結果を確認したい場合。<br>
+            速度: ◎ 最速／検証品質: △<br>
+            追加調査 0回・自動修正 0回<br>
+            <b>最短時間で検証します。追加調査や自動修正を行わないため、未解決のクレームが残る場合があります。</b>品質スコアと未解決クレームは結果画面に表示されます。</span></label>
+          <label class="mode-card sel"><input type="radio" name="verification_profile" value="balanced" checked>
+            <span class="t">⚖ Balanced <span style="color:#2e7d32;border:1px solid #2e7d32;border-radius:4px;font-size:11px;padding:0 4px">推奨</span></span>
+            <span class="d">通常のレポート作成に。<br>
+            速度: ○／検証品質: ○<br>
+            追加調査 1回・自動修正 1回<br>
+            <b>速度と検証品質のバランスを取った推奨設定です。</b>全クレームを検証し、キャッシュ・並列・バッチ検証を使用します。</span></label>
+          <label class="mode-card"><input type="radio" name="verification_profile" value="strict">
+            <span class="t">🔒 Strict</span>
+            <span class="d">提出用・最終版の厳格検証に。<br>
+            速度: △ 長時間化の可能性あり／検証品質: ◎<br>
+            追加調査 2回・自動修正 2回<br>
+            <b>すべてのクレームを厳格に検証します。レポートの内容によっては完了まで長時間かかる場合があります。</b>判定基準は一切緩和されません。</span></label>
+          <label class="mode-card"><input type="radio" name="verification_profile" value="custom">
+            <span class="t">⚙ Custom</span>
+            <span class="d">検証条件を個別に設定。<br>
+            速度: 設定次第／検証品質: 設定次第<br>
+            追加調査・自動修正: 任意<br>
+            設定によっては<b>非常に長い時間</b>がかかる可能性があります。</span></label>
+        </div>
+
+        <div id="verifyCustomPane" style="display:none;margin-top:12px">
+          <div class="banner error" style="display:block">
+            ⚠ 注意: 設定内容やレポートの長さによっては、Verificationに非常に長い時間がかかる可能性があります。特に追加調査回数、修正回数、検証対象クレーム数、並列数を変更する場合はご注意ください。
+          </div>
+          <label style="margin-top:12px">検証ループ</label>
+          <div class="grid2">
+            <div><label>追加調査ラウンド上限</label>
+              <input type="number" id="max_final_research_rounds" min="0" max="5" value="1">
+              <span class="field-warn" data-warn-for="max_final_research_rounds" style="display:none;color:#b71c1c;font-size:11px">⚠ 3回以上は処理時間が大幅に増加します</span></div>
+            <div><label>リライト/圧縮ラウンド上限</label>
+              <input type="number" id="max_final_revision_rounds" min="0" max="5" value="1">
+              <span class="field-warn" data-warn-for="max_final_revision_rounds" style="display:none;color:#b71c1c;font-size:11px">⚠ 3回以上は処理時間が大幅に増加します</span></div>
+            <div><label>改善なし許容ラウンド数</label>
+              <input type="number" id="max_no_improvement_rounds" min="0" max="5" value="1"></div>
+            <div><label>進捗と見なす最小スコア改善（0〜1）</label>
+              <input type="number" id="min_score_improvement" min="0" max="1" step="0.01" value="0.03"></div>
+            <div><label>進捗と見なす新規独立ソース数</label>
+              <input type="number" id="min_new_independent_sources" min="0" max="10" value="1"></div>
+            <div><label>主張サポート合格スコア（0〜1）</label>
+              <input type="number" id="min_claim_support_score" min="0" max="1" step="0.05" value="0.85"></div>
+            <div><label>必須の重要質問カバレッジ（0〜1）</label>
+              <input type="number" id="required_critical_coverage" min="0" max="1" step="0.05" value="1.0"></div>
+          </div>
+          <label style="margin-top:12px">実行方法</label>
+          <div class="grid2">
+            <div><label>検証の並列ワーカー数（1〜16）</label>
+              <input type="number" id="verification_max_workers" min="1" max="16" value="8">
+              <span class="field-warn" data-warn-for="verification_max_workers" style="display:none;color:#b71c1c;font-size:11px">⚠ 9以上はLLMのレート制限に注意</span></div>
+            <div><label>1リクエストで検証するクレーム数（1〜32）</label>
+              <input type="number" id="verification_batch_size" min="1" max="32" value="10">
+              <span class="field-warn" data-warn-for="verification_batch_size" style="display:none;color:#b71c1c;font-size:11px">⚠ 17以上は応答の欠落・再試行が増える可能性</span></div>
+            <div><label>軽微なクレームの検証率（0〜1）</label>
+              <input type="number" id="verification_minor_sample_rate" min="0" max="1" step="0.05" value="1.0"></div>
+            <div><label>Verification全体のタイムアウト（秒、0=なし）</label>
+              <input type="number" id="verification_timeout_seconds" min="0" max="86400" value="0"></div>
+          </div>
+          <label class="check"><input type="checkbox" id="verification_cache_enabled" checked> 同一内容の再検証をキャッシュで省略する（推奨）</label>
+        </div>
       </div>
     </details>
 
@@ -665,6 +719,24 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
           <button class="primary" id="planApproveBtn">▶ この計画で開始</button>
           <button id="planReviseBtn">✏ 修正を依頼</button>
         </div>
+      </div>
+
+      <div id="verifyPanel" style="display:none;margin-top:14px;
+           border:1px solid var(--border,#ddd);border-radius:10px;
+           padding:12px 14px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <b>🛡 Verification: <span id="vPhase">待機中</span></b>
+          <button id="vCancelBtn" style="background:#b71c1c;color:#fff;
+                  border:none;border-radius:6px;padding:4px 12px;cursor:pointer">
+            ⏹ キャンセル</button>
+        </div>
+        <div class="hint" id="vWaiting" style="display:none;color:#b8860b"></div>
+        <div style="margin-top:6px;font-size:12px">全体</div>
+        <div class="bar-wrap"><div class="bar" id="vBarAll" style="width:0%"></div></div>
+        <div style="margin-top:4px;font-size:12px">現在フェーズ: <span id="vPhaseLabel"></span></div>
+        <div class="bar-wrap"><div class="bar" id="vBarPhase" style="width:0%;background:#7b1fa2"></div></div>
+        <div id="vStats" style="display:grid;grid-template-columns:repeat(4,1fr);
+             gap:4px 12px;font-size:12px;margin-top:8px;color:var(--muted,#666)"></div>
       </div>
 
       <details id="livePanel" style="margin-top:14px">
@@ -940,14 +1012,73 @@ const LENGTH_LOOP_FIELDS = {
   hard_min_body_chars: {type: 'int', min: 0},
   hard_max_body_chars: {type: 'int', min: 0},
   length_tolerance: {type: 'float', min: 0, max: 1, maxExclusive: true},
-  max_final_research_rounds: {type: 'int', min: 0},
-  max_final_revision_rounds: {type: 'int', min: 0},
-  max_no_improvement_rounds: {type: 'int', min: 0},
+};
+
+// Verification loop/runtime fields (Customモードでのみ送信)
+const VERIFY_FIELDS = {
+  max_final_research_rounds: {type: 'int', min: 0, max: 5},
+  max_final_revision_rounds: {type: 'int', min: 0, max: 5},
+  max_no_improvement_rounds: {type: 'int', min: 0, max: 5},
   min_score_improvement: {type: 'float', min: 0, max: 1},
-  min_new_independent_sources: {type: 'int', min: 0},
+  min_new_independent_sources: {type: 'int', min: 0, max: 10},
   min_claim_support_score: {type: 'float', min: 0, max: 1},
   required_critical_coverage: {type: 'float', min: 0, max: 1},
+  verification_max_workers: {type: 'int', min: 1, max: 16},
+  verification_batch_size: {type: 'int', min: 1, max: 32},
+  verification_minor_sample_rate: {type: 'float', min: 0, max: 1},
+  verification_timeout_seconds: {type: 'int', min: 0, max: 86400},
 };
+
+function readField(id, spec) {
+  const raw = $(id).value.trim();
+  if (raw === '') return undefined;
+  const v = spec.type === 'int' ? parseInt(raw, 10) : parseFloat(raw);
+  if (Number.isNaN(v)) throw new Error(`${id} は数値で入力してください`);
+  if (spec.type === 'int' && !Number.isInteger(parseFloat(raw)))
+    throw new Error(`${id} は整数で入力してください`);
+  if (spec.min !== undefined && v < spec.min)
+    throw new Error(`${id} は ${spec.min} 以上で入力してください`);
+  if (spec.max !== undefined &&
+      (spec.maxExclusive ? v >= spec.max : v > spec.max))
+    throw new Error(`${id} は ${spec.maxExclusive ? spec.max + '未満' : spec.max + '以下'}で入力してください`);
+  return v;
+}
+
+function collectVerificationParams() {
+  const profile = document.querySelector(
+    'input[name=verification_profile]:checked').value;
+  const p = {verification_profile: profile};
+  if (profile !== 'custom') return p;   // presets resolved server-side
+  for (const [id, spec] of Object.entries(VERIFY_FIELDS)) {
+    const v = readField(id, spec);
+    if (v === undefined) continue;
+    // UI id -> server param name
+    const key = id === 'verification_minor_sample_rate'
+      ? 'verification_minor_claim_sample_rate' : id;
+    p[key] = v;
+  }
+  p.verification_cache_enabled = $('verification_cache_enabled').checked;
+  return p;
+}
+
+// custom pane visibility + per-field danger warnings
+document.querySelectorAll('input[name=verification_profile]').forEach(r => {
+  r.addEventListener('change', () => {
+    $('verifyCustomPane').style.display = r.value === 'custom' && r.checked
+      ? 'block' : 'none';
+  });
+});
+const FIELD_WARN_THRESHOLDS = {
+  max_final_research_rounds: 3, max_final_revision_rounds: 3,
+  verification_max_workers: 9, verification_batch_size: 17,
+};
+for (const [id, threshold] of Object.entries(FIELD_WARN_THRESHOLDS)) {
+  $(id).addEventListener('input', () => {
+    const warn = document.querySelector(`[data-warn-for=${id}]`);
+    if (warn) warn.style.display =
+      (parseInt($(id).value, 10) || 0) >= threshold ? 'inline' : 'none';
+  });
+}
 
 // Collect + validate the 12 length/loop settings.
 // Empty inputs are OMITTED (server treats them as "use default / None");
@@ -992,6 +1123,7 @@ function collectParams() {
   const params = {
     ...collectLengthParams(),
     ...collectWorkerParam(),
+    ...collectVerificationParams(),
     query: $('query').value.trim(),
     requirements: $('requirements').value.trim(),
     provider: provider,
@@ -1203,6 +1335,8 @@ function render(status) {
     lastPlanJson = null;
   }
 
+  renderVerification(status);
+
   // append new log lines
   const log = status.log || [];
   if (log.length !== logLength) {
@@ -1227,6 +1361,104 @@ function render(status) {
   }
 }
 
+// ==================== Verification進捗・キャンセル ====================
+let vCancelRequested = false;
+
+function fmtSec(s) {
+  if (s == null) return '—';
+  const m = Math.floor(s / 60);
+  return m > 0 ? `${m}分${Math.round(s % 60)}秒` : `${Math.round(s)}秒`;
+}
+
+function renderVerification(status) {
+  const v = status.verification;
+  const active = v && v.phase && !['idle'].includes(v.phase)
+    && status.state === 'running';
+  $('verifyPanel').style.display = active ? 'block' : 'none';
+  if (!v || !active) return;
+
+  $('vPhase').textContent = v.phase_label || v.phase;
+  $('vPhaseLabel').textContent = v.current_label
+    ? `${v.phase_label}（${v.current_label}）` : (v.phase_label || '');
+
+  // overall bar: rounds + claims within the round
+  const roundFrac = v.max_rounds ? Math.min(v.round / v.max_rounds, 1) : 0;
+  const claimFrac = v.claims_total ? v.claims_done / v.claims_total : 0;
+  const overall = Math.min(100, Math.round(
+    (roundFrac * 0.5 + claimFrac * 0.5) * 100));
+  $('vBarAll').style.width = overall + '%';
+  // phase bar: claims for judging, chunks for extracting
+  const phaseFrac = v.phase === 'extracting'
+    ? (v.chunks_total ? v.chunks_done / v.chunks_total : 0)
+    : (v.claims_total ? v.claims_done / v.claims_total : 0);
+  $('vBarPhase').style.width = Math.round(phaseFrac * 100) + '%';
+
+  const rows = [
+    ['ラウンド', `${v.round}/${v.max_rounds}`],
+    ['クレーム', `${v.claims_done}/${v.claims_total}`],
+    ['チャンク', `${v.chunks_done}/${v.chunks_total}`],
+    ['経過', fmtSec(v.elapsed_seconds)],
+    ['推定残り', fmtSec(v.eta_seconds)],
+    ['LLM呼び出し', v.llm_calls],
+    ['キャッシュ', `${v.cache_hits}件 (${Math.round((v.cache_hit_rate||0)*100)}%)`],
+    ['リトライ', v.retries],
+  ];
+  $('vStats').innerHTML = rows.map(([k, val]) =>
+    `<span>${k}: <b>${escapeHtml(String(val))}</b></span>`).join('');
+
+  if (v.waiting) {
+    $('vWaiting').style.display = 'block';
+    $('vWaiting').textContent =
+      `⏳ ${v.waiting_label}（${fmtSec(v.waiting_seconds)}）`;
+  } else {
+    $('vWaiting').style.display = 'none';
+  }
+  if (v.cancelled) {
+    $('vCancelBtn').disabled = true;
+    $('vCancelBtn').textContent = 'キャンセル中…';
+  }
+}
+
+$('vCancelBtn').addEventListener('click', async () => {
+  if (vCancelRequested) return;              // 連打・二重実行防止
+  if (!confirm('Verificationを安全に中断しますか？\n途中までのレポート・検証結果・メトリクスは可能な範囲で保存されます。')) return;
+  vCancelRequested = true;
+  $('vCancelBtn').disabled = true;
+  $('vCancelBtn').textContent = 'キャンセル中…';
+  try {
+    await fetch('/api/cancel-verification', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({job_id: selectedJobId}),
+    });
+  } catch (e) { /* poll will reflect the state */ }
+});
+
+function renderVerificationSummary(s) {
+  if (!s) return '';
+  const unresolved = (s.unresolved_claims || []).slice(0, 10).map(u =>
+    `<div class="warn-row">[${escapeHtml(u.severity||'')}] §${escapeHtml(u.section_id||'')} ${escapeHtml(u.claim||'')}</div>`).join('');
+  const skipped = (s.skipped_work || []).map(x =>
+    `<div class="warn-row">${escapeHtml(x)}</div>`).join('');
+  return `
+    <label style="margin-top:10px">🛡 Verificationサマリー（${escapeHtml(s.profile||'')}モード）</label>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px 12px;font-size:12.5px">
+      <span>総実行時間: <b>${fmtSec(s.duration_seconds)}</b></span>
+      <span>ラウンド数: <b>${s.rounds}</b></span>
+      <span>総クレーム: <b>${s.claims_total}</b></span>
+      <span>supported: <b>${s.supported}</b></span>
+      <span>partially/uncertain: <b>${s.partially_supported}</b></span>
+      <span>unsupported: <b>${s.unsupported}</b></span>
+      <span>支持スコア: <b>${s.claim_support_score}</b></span>
+      <span>重大カバレッジ: <b>${s.critical_coverage}</b></span>
+      <span>LLM呼び出し: <b>${s.llm_calls}</b></span>
+      <span>キャッシュ率: <b>${Math.round((s.cache_hit_rate||0)*100)}%</b></span>
+      <span>リトライ: <b>${s.retries}</b></span>
+      <span>ボトルネック: <b>${escapeHtml(s.bottleneck||'—')}</b></span>
+    </div>
+    ${unresolved ? `<label style="margin-top:8px">未解決クレーム（上位10件）</label>${unresolved}` : ''}
+    ${skipped ? `<label style="margin-top:8px">省略された処理</label>${skipped}` : ''}`;
+}
+
 function showResults(result) {
   const files = [];
   if (result.report_path) files.push({label: '📄 レポート', path: result.report_path});
@@ -1241,6 +1473,16 @@ function showResults(result) {
         <a href="/api/report-file?path=${encodeURIComponent(f.path)}&download=1">保存</a>
       </span>
     </div>`).join('');
+
+  // verification completion summary
+  const vs = renderVerificationSummary(result.verification_summary);
+  let vSummaryEl = document.getElementById('vSummary');
+  if (!vSummaryEl) {
+    vSummaryEl = document.createElement('div');
+    vSummaryEl.id = 'vSummary';
+    $('resultPanel').insertBefore(vSummaryEl, $('resultWarnings'));
+  }
+  vSummaryEl.innerHTML = vs;
 
   // processing warnings (fallbacks, skipped figures, etc.)
   const warns = result.warnings || [];
