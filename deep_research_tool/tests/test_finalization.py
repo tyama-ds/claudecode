@@ -473,6 +473,10 @@ class TestMainWiring(unittest.TestCase):
         ev = fake_evidence(1, "市場規模は1000億円と報告", title="ソース1")
         ev.url = "https://src1.example.com/page"
         locker.get_all_evidence.return_value = [ev]
+        # resolve canonical ids like the real locker (a bare MagicMock
+        # returns junk ids, silently breaking cited-first verification)
+        locker.get_by_url = lambda url: ev if url == ev.url else None
+        locker.get_evidence = lambda eid: ev if eid == "EV-1" else None
 
         verdict, html_path = tool._run_finalization_loop(
             result=result, session=session, evidence_locker=locker,

@@ -87,6 +87,14 @@ _CONFIG_PARAM_MAP = {
     "min_new_independent_sources": "min_new_independent_sources",
     "min_claim_support_score": "min_claim_support_score",
     "required_critical_coverage": "required_critical_coverage",
+    # Verification profile (fast / balanced / strict / custom)
+    "verification_profile": "verification_profile",
+    "verification_max_workers": "verification_max_workers",
+    "verification_batch_size": "verification_batch_size",
+    "verification_cache_enabled": "verification_cache_enabled",
+    "verification_timeout_seconds": "verification_timeout_seconds",
+    "verification_minor_claim_sample_rate":
+        "verification_minor_claim_sample_rate",
 }
 
 
@@ -132,8 +140,36 @@ def _strict_workers(value, name):
 # Server-side type conversion & validation for length/loop settings.
 # Empty strings are dropped BEFORE conversion (=> config defaults / None);
 # invalid values raise ValueError -> HTTP 400 before the job starts.
+def _profile(value, name):
+    v = str(value).strip().lower()
+    if v not in ("fast", "balanced", "strict", "custom"):
+        raise ValueError(f"{name} must be fast/balanced/strict/custom "
+                         f"(got {value!r})")
+    return v
+
+
+def _int_range(lo, hi):
+    def convert(value, name):
+        try:
+            if isinstance(value, bool) or isinstance(value, float):
+                raise ValueError
+            n = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} must be an integer (got {value!r})")
+        if not (lo <= n <= hi):
+            raise ValueError(f"{name} must be between {lo} and {hi} "
+                             f"(got {n})")
+        return n
+    return convert
+
+
 _PARAM_CONVERTERS = {
     "parallel_max_workers": _strict_workers,
+    "verification_profile": _profile,
+    "verification_max_workers": _int_range(1, 16),
+    "verification_batch_size": _int_range(1, 32),
+    "verification_timeout_seconds": _int_range(0, 86400),
+    "verification_minor_claim_sample_rate": _float_range(0.0, 1.0),
     "length_mode": _length_mode,
     "preferred_body_chars": _int_ge0,
     "hard_min_body_chars": _int_ge0,
@@ -238,11 +274,37 @@ class ResearchJob:
         self._lock = threading.Lock()
         # Live report preview (WebUILiveSink), set by the worker thread
         self.live_sink = None
+        # callable returning the run's VerificationProgress (or None)
+        self.verification_source = None
         # Plan review state (state == "plan_review")
         self.plan: Optional[Dict[str, Any]] = None
         self.plan_review_deadline: Optional[float] = None
         self._plan_event: Optional[threading.Event] = None
         self._plan_response: Optional[Dict[str, str]] = None
+
+    def verification_snapshot(self):
+        source = self.verification_source
+        if source is None:
+            return None
+        try:
+            progress = source()
+            return progress.snapshot() if progress is not None else None
+        except Exception:
+            return None
+
+    def cancel_verification(self) -> bool:
+        """Request a SAFE verification cancel (idempotent)."""
+        source = self.verification_source
+        if source is None:
+            return False
+        try:
+            progress = source()
+        except Exception:
+            return False
+        if progress is None:
+            return False
+        progress.cancel()
+        return True
 
     def update(self, message: str, percentage: float) -> None:
         with self._lock:
@@ -287,10 +349,12 @@ class ResearchJob:
 
     def to_dict(self) -> Dict[str, Any]:
         with self._lock:
+            verification = self.verification_snapshot()
             data = {
                 "job_id": self.job_id,
                 "query": self.query,
                 "state": self.state,
+                "verification": verification,
                 "progress": round(self.progress, 1),
                 "message": self.message,
                 "log": list(self.log)[-50:],
@@ -389,6 +453,9 @@ class JobManager:
             job.update("設定を構築しました。ツールを初期化中...", 1)
 
             tool = DeepResearchTool(config)
+            # verification progress + safe cancel become pollable
+            job.verification_source = (
+                lambda: getattr(tool, "verification_progress", None))
             job.update("調査を開始します", 2)
 
             documents = expand_document_paths(params.get("local_documents"))
@@ -459,10 +526,16 @@ class JobManager:
                 # into the already-saved report footer, so surface them here
                 "warnings": result.get("warnings") or [],
                 "warning_count": result.get("warning_count", 0),
+                "verification_summary": result.get("verification_summary"),
             }
             job.progress = 100.0
-            job.state = "completed"
-            job.update("完了しました", 100)
+            if result.get("verification_cancelled"):
+                job.state = "cancelled"
+                job.update("検証をキャンセルしました（部分的な結果を保存済み）",
+                           100)
+            else:
+                job.state = "completed"
+                job.update("完了しました", 100)
         except Exception as e:
             job.error = f"{e}\n{traceback.format_exc(limit=3)}"
             job.state = "error"
@@ -596,7 +669,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        if parsed.path not in ("/api/research", "/api/plan-review"):
+        if parsed.path not in ("/api/research", "/api/plan-review",
+                               "/api/cancel-verification"):
             self._send_json({"error": "not found"}, 404)
             return
 
@@ -608,6 +682,17 @@ class WebUIHandler(BaseHTTPRequestHandler):
             return
 
         manager: JobManager = self.server.job_manager
+
+        if parsed.path == "/api/cancel-verification":
+            job_id = params.get("job_id") or ""
+            job = manager.get(job_id) if job_id else manager.current
+            if job is None:
+                self._send_json({"error": "no such job"}, 404)
+                return
+            ok = job.cancel_verification()
+            # idempotent: repeated cancels simply return ok/false
+            self._send_json({"ok": ok}, 200 if ok else 409)
+            return
 
         if parsed.path == "/api/plan-review":
             action = params.get("action")

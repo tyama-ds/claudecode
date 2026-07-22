@@ -213,6 +213,44 @@ def cli():
     help="Required coverage of critical questions for acceptance (0-1)"
 )
 @click.option(
+    "--verification-profile",
+    type=click.Choice(["fast", "balanced", "strict", "custom"]),
+    default="balanced",
+    help="Verification mode: fast (no research/revision rounds, minor "
+         "claims sampled), balanced (recommended default), strict "
+         "(legacy-equivalent thoroughness), custom (explicit knobs)"
+)
+@click.option(
+    "--verification-max-workers",
+    type=int,
+    default=8,
+    help="Parallel workers inside verification (1-16)"
+)
+@click.option(
+    "--verification-batch-size",
+    type=int,
+    default=10,
+    help="Claims judged per LLM request (1-32)"
+)
+@click.option(
+    "--verification-cache/--no-verification-cache",
+    "verification_cache",
+    default=True,
+    help="Same-run cache: unchanged sections/claims are not re-verified"
+)
+@click.option(
+    "--verification-timeout-seconds",
+    type=int,
+    default=0,
+    help="Overall verification timeout in seconds (0 = none)"
+)
+@click.option(
+    "--verification-minor-sample-rate",
+    type=float,
+    default=1.0,
+    help="Fraction of MINOR claims verified (critical/important always are)"
+)
+@click.option(
     "--extended-mode",
     is_flag=True,
     default=False,
@@ -364,6 +402,12 @@ def research(
     min_new_independent_sources: int,
     min_claim_support_score: float,
     required_critical_coverage: float,
+    verification_profile: str,
+    verification_max_workers: int,
+    verification_batch_size: int,
+    verification_cache: bool,
+    verification_timeout_seconds: int,
+    verification_minor_sample_rate: float,
     extended_mode: bool,
     crawl_max_pages: int,
     crawl_max_depth: int,
@@ -425,6 +469,12 @@ def research(
         min_new_independent_sources=min_new_independent_sources,
         min_claim_support_score=min_claim_support_score,
         required_critical_coverage=required_critical_coverage,
+        verification_profile=verification_profile,
+        verification_max_workers=verification_max_workers,
+        verification_batch_size=verification_batch_size,
+        verification_cache_enabled=verification_cache,
+        verification_timeout_seconds=verification_timeout_seconds,
+        verification_minor_claim_sample_rate=verification_minor_sample_rate,
         extended_mode=extended_mode,
         crawl_max_pages=crawl_max_pages,
         crawl_max_depth=crawl_max_depth,

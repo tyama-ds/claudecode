@@ -150,6 +150,7 @@ class VerificationMetrics:
     redundant_passages: List[str] = field(default_factory=list)
     # fail-closed accounting: the verifier records HOW MUCH it verified
     claims_total: int = 0
+    skipped_minor_claims: int = 0     # fast profile: sampled-out minors
     chunks_total: int = 0
     chunks_failed: int = 0
     extraction_errors: List[str] = field(default_factory=list)
@@ -179,6 +180,7 @@ class VerificationMetrics:
                 self.unused_high_importance_evidence_ids,
             "redundant_passages": self.redundant_passages,
             "claims_total": self.claims_total,
+            "skipped_minor_claims": self.skipped_minor_claims,
             "chunks_total": self.chunks_total,
             "chunks_failed": self.chunks_failed,
             "extraction_errors": self.extraction_errors,
@@ -541,6 +543,7 @@ class FinalizationController:
         fixed_target_chars: Optional[int] = None,
         length_tolerance: float = 0.20,
         language: str = "ja",
+        progress=None,
     ):
         self.verify_fn = verify_fn
         self.research_fn = research_fn
@@ -554,9 +557,20 @@ class FinalizationController:
         self.fixed_target_chars = fixed_target_chars
         self.length_tolerance = length_tolerance
         self.language = language
+        # optional verification.runtime.VerificationProgress: phase and
+        # round reporting plus SAFE cancellation/timeout boundaries
+        self.progress = progress
         self.history: List[Dict[str, Any]] = []
         self.limitations: List[str] = []
         self._last_new_sources = 0
+
+    def _checkpoint(self) -> None:
+        if self.progress is not None:
+            self.progress.checkpoint()
+
+    def _phase(self, phase: str, label: str = "") -> None:
+        if self.progress is not None:
+            self.progress.set_phase(phase, label)
 
     # -- helpers ----------------------------------------------------------
 
@@ -638,6 +652,9 @@ class FinalizationController:
                             + self.budget.max_final_revision_rounds + 2)
 
         for _round in range(max_total_rounds + 1):
+            self._checkpoint()      # safe cancel/timeout boundary
+            if self.progress is not None:
+                self.progress.set_round(_round + 1)
             decision = decide(verdict, self.budget, self.hard_max_body_chars,
                               self.hard_min_body_chars,
                               fixed_target_chars=self.fixed_target_chars,
@@ -659,13 +676,16 @@ class FinalizationController:
             prev_issue_count = len(verdict.issues)
 
             if decision == ResearchDecision.RESEARCH:
+                self._phase("researching")
                 changed_any = self._do_research(chapters, verdict)
             elif decision == ResearchDecision.REWRITE_FROM_EVIDENCE:
+                self._phase("revising")
                 changed_any = self._do_revision(
                     chapters, verdict, self.rewrite_fn,
                     (ISSUE_INSUFFICIENT_EXPLANATION, ISSUE_UNUSED_EVIDENCE,
                      ISSUE_UNCITED_CLAIM))
             elif decision == ResearchDecision.COMPRESS_FROM_EVIDENCE:
+                self._phase("revising")
                 changed_any = self._do_revision(
                     chapters, verdict, self.compress_fn,
                     (ISSUE_REDUNDANCY, ISSUE_OVER_HARD_MAX))
@@ -738,6 +758,7 @@ class FinalizationController:
         queries = self.budget.novel_queries(queries)
         if not queries or self.research_fn is None:
             return False    # no round consumed
+        self._checkpoint()          # safe boundary before research I/O
         self.budget.research_rounds += 1
         try:
             outcome = self.research_fn(issues, queries) or {}
@@ -772,6 +793,7 @@ class FinalizationController:
         for sid in sections:
             if sid not in chapters:
                 continue
+            self._checkpoint()      # safe boundary between section edits
             try:
                 new_text = fn(sid, [i for i in issues
                                     if i.section_id in ("", sid)])

@@ -77,6 +77,7 @@ class FinalizationRunner:
         session_id: str = "",
         progress_callback: Optional[Callable] = None,
         chapter_citation_callback: Optional[Callable] = None,
+        verification_progress=None,
     ):
         """
         Args:
@@ -106,12 +107,29 @@ class FinalizationRunner:
         self.progress_callback = progress_callback
         self.chapter_citation_callback = chapter_citation_callback
 
+        # --- verification profile: the ONE backend resolution path ---
+        from ..verification.profiles import (
+            VerificationSettings, settings_from_research_config)
+        from ..verification.runtime import (
+            VerificationCache, VerificationProgress)
+        if self.rc is not None:
+            self.verification_settings = settings_from_research_config(self.rc)
+        else:
+            self.verification_settings = VerificationSettings()
+        self.verification_cache = VerificationCache(
+            enabled=self.verification_settings.cache_enabled)
+        self.verification_progress = (verification_progress
+                                      or VerificationProgress())
+
         self.citation_mgr = CitationManager(
             evidence_ids_exist=self._evidence_id_exists)
         self.planner = self._build_planner()
         self.budget = self._build_budget()
         self.claim_verifier = ClaimVerifier(
-            llm_client=self.eval_llm, language=self.language)
+            llm_client=self.eval_llm, language=self.language,
+            settings=self.verification_settings,
+            cache=self.verification_cache,
+            progress=self.verification_progress)
         self.section_evidence: Dict[str, List[Dict]] = {}
         self._url_to_id: Dict[str, str] = {}
         # Sections that are VERIFIED but never LLM-edited (rendered
@@ -146,16 +164,16 @@ class FinalizationRunner:
         )
 
     def _build_budget(self) -> LoopBudget:
+        vs = self.verification_settings
         budget = LoopBudget(
-            max_final_research_rounds=self._rc("max_final_research_rounds", 2),
-            max_final_revision_rounds=self._rc("max_final_revision_rounds", 2),
-            max_no_improvement_rounds=self._rc("max_no_improvement_rounds", 1),
+            max_final_research_rounds=vs.max_final_research_rounds,
+            max_final_revision_rounds=vs.max_final_revision_rounds,
+            max_no_improvement_rounds=vs.max_no_improvement_rounds,
             min_score_improvement=self._rc("min_score_improvement", 0.03),
             min_new_independent_sources=self._rc(
                 "min_new_independent_sources", 1),
-            min_claim_support_score=self._rc("min_claim_support_score", 0.85),
-            required_critical_coverage=self._rc(
-                "required_critical_coverage", 1.0),
+            min_claim_support_score=vs.min_claim_support_score,
+            required_critical_coverage=vs.required_critical_coverage,
         )
         # every URL already in the locker is "seen": the final loop never
         # re-fetches a URL the research already collected
@@ -275,9 +293,45 @@ class FinalizationRunner:
 
         current = dict(chapters)   # the shared, mutating body
 
+        from ..verification.runtime import stable_hash
+        last_verify = {"fingerprint": None, "verdict": None}
+
+        def _fingerprint(body):
+            # report body + sections + claims-bearing text + evidence +
+            # citation relations: when NOTHING substantive changed, the
+            # previous verdict stands without any LLM call
+            evidence_sig = stable_hash(
+                "ev", *sorted(
+                    f"{getattr(e, 'id', '')}:"
+                    f"{stable_hash(getattr(e, 'extracted_text', '') or getattr(e, 'content_excerpt', '') or '')}"
+                    for e in self.locker.get_all_evidence()))
+            registry_sig = stable_hash(
+                "reg",
+                *[f"{sid}:" + ",".join(
+                    str(eid) for eid in self.citation_mgr.evidence_ids(sid))
+                  for sid in sorted(self.citation_mgr.sections(), key=str)])
+            body_sig = stable_hash(
+                "body", *[f"{sid}\x1e{text}"
+                          for sid, text in sorted(body.items())])
+            return stable_hash(body_sig, evidence_sig, registry_sig,
+                               *critical_questions)
+
         def verify_fn(body):
+            # differential verification: an IDENTICAL body/evidence/
+            # citation state is never re-verified with the LLM
+            fp = _fingerprint(body)
+            if (self.verification_settings.cache_enabled
+                    and last_verify["fingerprint"] == fp
+                    and last_verify["verdict"] is not None):
+                self.verification_cache.hits += 1
+                self.verification_progress.sync_cache(
+                    self.verification_cache)
+                print("[Finalize] body/evidence/citations unchanged — "
+                      "skipping full re-verification")
+                return last_verify["verdict"]
+
             # LIVE evidence on every pass — never a loop-start snapshot
-            return self.claim_verifier.verify_report(
+            verdict = self.claim_verifier.verify_report(
                 chapters=body,
                 evidence_list=self.locker.get_all_evidence(),
                 citation_manager=self.citation_mgr,
@@ -288,6 +342,9 @@ class FinalizationRunner:
                     "exclude_references_from_count", True),
                 primary_freshness_required=freshness_required,
             )
+            last_verify["fingerprint"] = fp
+            last_verify["verdict"] = verdict
+            return verdict
 
         def research_fn(issues, queries):
             return self._research_round(issues, queries)
@@ -310,9 +367,36 @@ class FinalizationRunner:
             fixed_target_chars=self.planner.fixed_quota(),
             length_tolerance=self._rp("length_tolerance", 0.20),
             language=self.language,
+            progress=self.verification_progress,
         )
 
-        outcome = controller.run(current)
+        import time as _time
+        from ..verification.runtime import (
+            VerificationCancelled, VerificationTimeout)
+        vs = self.verification_settings
+        self.verification_progress.start(
+            vs.profile,
+            max_rounds=(vs.max_final_research_rounds
+                        + vs.max_final_revision_rounds + 2),
+            timeout_seconds=vs.timeout_seconds)
+        started = _time.time()
+
+        try:
+            outcome = controller.run(current)
+            self.verification_progress.set_phase("done")
+        except VerificationCancelled:
+            # SAFE cancel: no new LLM request after the boundary; the
+            # partial body, last verdict and metrics are preserved
+            outcome = self._interrupted_outcome(
+                controller, current, last_verify["verdict"], "cancelled")
+            self.verification_progress.set_phase("cancelled")
+        except VerificationTimeout:
+            outcome = self._interrupted_outcome(
+                controller, current, last_verify["verdict"], "timeout")
+            self.verification_progress.set_phase("error", "timeout")
+
+        outcome["verification_summary"] = self._build_summary(
+            outcome, started)
 
         # FREEZE, then deterministic display numbering ([SOURCE N] -> [n])
         frozen = outcome["chapters"]
@@ -348,6 +432,89 @@ class FinalizationRunner:
             html_path = None
         outcome["html_path"] = html_path
         return outcome
+
+    # ------------------------------------------------------------------
+    # interruption / summary
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _interrupted_outcome(controller, chapters, verdict, decision):
+        """Partial outcome after cancel/timeout — an unverified body is
+        NEVER silently promoted: without a verdict the outcome carries a
+        verification_failed one."""
+        from .finalization import StructuredVerdict
+        if verdict is None:
+            verdict = StructuredVerdict()
+            verdict.metrics.verification_failed = True
+            verdict.metrics.claim_support_score = 0.0
+        return {
+            "chapters": chapters,
+            "verdict": verdict,
+            "decision": decision,
+            "history": controller.history,
+            "limitations": controller.limitations,
+            "over_hard_max": False,
+        }
+
+    def _build_summary(self, outcome, started) -> Dict[str, Any]:
+        """Completion summary for the GUI (mode, timing, counters,
+        unresolved claims, skipped work). Metrics only — never api keys
+        or prompt text."""
+        import time as _time
+        verdict = outcome["verdict"]
+        m = verdict.metrics
+        snap = self.verification_progress.snapshot()
+        vs = self.verification_settings
+
+        unresolved = [
+            {"section_id": i.section_id, "type": i.type,
+             "severity": i.severity,
+             "claim": (i.claim or i.reason or "")[:160]}
+            for i in verdict.issues
+            if i.type in ("unsupported_claim", "contradicted_claim",
+                          "uncertain_claim", "invalid_citation",
+                          "unanswered_critical_question")][:20]
+
+        skipped_work = []
+        if vs.max_final_research_rounds == 0:
+            skipped_work.append("追加調査（0回設定）")
+        if vs.max_final_revision_rounds == 0:
+            skipped_work.append("自動修正（0回設定）")
+        if m.skipped_minor_claims:
+            skipped_work.append(
+                f"軽微クレームのサンプル検証で{m.skipped_minor_claims}件を省略"
+                f"（検証率{int(vs.minor_claim_sample_rate * 100)}%）")
+
+        supported = max(m.claims_total - m.skipped_minor_claims
+                        - m.unsupported_count - m.contradicted_count
+                        - m.uncertain_count, 0)
+        counters = {"claims": snap["claims_total"],
+                    "chunks": snap["chunks_total"],
+                    "llm": snap["llm_calls"]}
+        bottleneck = ("クレーム検証"
+                      if snap["claims_total"] >= snap["chunks_total"]
+                      else "クレーム抽出")
+
+        return {
+            "profile": vs.profile,
+            "decision": outcome["decision"],
+            "duration_seconds": round(_time.time() - started, 1),
+            "rounds": len(outcome.get("history", [])),
+            "claims_total": m.claims_total,
+            "supported": supported,
+            "partially_supported": m.uncertain_count,
+            "unsupported": m.unsupported_count + m.contradicted_count,
+            "skipped_minor": m.skipped_minor_claims,
+            "claim_support_score": round(m.claim_support_score, 3),
+            "critical_coverage": round(m.critical_question_coverage, 3),
+            "llm_calls": snap["llm_calls"],
+            "cache_hits": snap["cache_hits"],
+            "cache_hit_rate": snap["cache_hit_rate"],
+            "retries": snap["retries"],
+            "bottleneck": bottleneck,
+            "unresolved_claims": unresolved,
+            "skipped_work": skipped_work,
+        }
 
     # ------------------------------------------------------------------
     # research round (live locker updates, dedup, no refetch)
