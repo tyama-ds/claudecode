@@ -66,7 +66,7 @@ def cli():
 @click.argument("query")
 @click.option(
     "--provider", "-p",
-    type=click.Choice(["openai", "anthropic"]),
+    type=click.Choice(["openai", "anthropic", "local"]),
     default="openai",
     help="LLM provider to use"
 )
@@ -408,6 +408,37 @@ def cli():
     envvar="ANTHROPIC_API_KEY",
     help="Anthropic API key"
 )
+@click.option(
+    "--local-base-url",
+    envvar="LOCAL_LLM_BASE_URL",
+    default=None,
+    help="Local LLM server URL (user-provided local/LAN endpoint only; "
+         "never auto-set to an external service)"
+)
+@click.option(
+    "--local-api-key",
+    envvar="LOCAL_LLM_API_KEY",
+    default=None,
+    help="Optional auth token for the local LLM server"
+)
+@click.option(
+    "--local-backend",
+    type=click.Choice(["ollama", "vllm", "openai_compatible"]),
+    default="ollama",
+    help="Local LLM backend type"
+)
+@click.option(
+    "--local-timeout",
+    type=int,
+    default=None,
+    help="Local LLM request timeout in seconds (unset: client default)"
+)
+@click.option(
+    "--local-concurrency",
+    type=int,
+    default=None,
+    help="Max simultaneous requests to the local LLM server"
+)
 def research(
     query: str,
     provider: str,
@@ -465,6 +496,11 @@ def research(
     chart_library: str,
     verbose: bool,
     openai_key: Optional[str],
+    local_base_url: Optional[str],
+    local_api_key: Optional[str],
+    local_backend: str,
+    local_timeout: Optional[int],
+    local_concurrency: Optional[int],
     anthropic_key: Optional[str],
 ):
     """
@@ -483,6 +519,11 @@ def research(
         provider=provider,
         openai_api_key=openai_key,
         anthropic_api_key=anthropic_key,
+        local_base_url=local_base_url,
+        local_api_key=local_api_key,
+        local_backend=local_backend,
+        local_timeout=local_timeout,
+        local_concurrency=local_concurrency,
         model=model,
         search_method=search,
         research_iterations=iterations,
@@ -682,6 +723,7 @@ def report(
     """
     print_banner()
 
+    finalized = False
     try:
         from .research.researcher import ResearchSession
         from .evidence.locker import EvidenceLocker
@@ -780,6 +822,7 @@ def report(
                 for sid, text in outcome["chapters"].items():
                     if sid in session.section_contents:
                         session.section_contents[sid]["content"] = text
+                finalized = True
                 console.print(f"Finalization decision: "
                               f"{outcome['decision']}")
         elif verify:
@@ -812,7 +855,14 @@ def report(
                 f"hard minimum ({hard_min_body_chars:,}). Padding is never "
                 f"applied — run more research to add evidence.[/yellow]")
 
-        if target_pages or target_characters:
+        if finalized and (target_pages or target_characters):
+            # the body is FROZEN: the legacy length adjustment must never
+            # rewrite a verified body — targets are dropped at render time
+            console.print(
+                "[yellow]検証済み本文は凍結されているため、"
+                "target_pages/target_charactersによるレンダリング時の"
+                "本文調整は行いません。[/yellow]")
+        elif target_pages or target_characters:
             target_desc = f"{target_pages} pages" if target_pages else f"{target_characters:,} characters"
             console.print(f"Target: {target_desc}")
 
@@ -820,9 +870,35 @@ def report(
             session=session,
             evidence_locker=evidence_locker,
             format=fmt,
-            target_pages=target_pages,
-            target_characters=target_characters,
+            target_pages=None if finalized else target_pages,
+            target_characters=None if finalized else target_characters,
         )
+
+        # Semantic freeze + artifact check (same invariant as run())
+        if finalized:
+            from .report.semantic_manifest import (
+                build_semantic_manifest, check_artifact)
+            manifest = build_semantic_manifest({
+                sid: sdata.get("content", "")
+                for sid, sdata in session.section_contents.items()
+                if not sid.startswith("_") and sdata.get("content")})
+            check = check_artifact(manifest, report_path,
+                                   evidence_locker=evidence_locker)
+            if check["status"] == "fail":
+                console.print(
+                    f"[red]ARTIFACT CHECK FAILED: 欠落"
+                    f"{len(check['missing'])}件 / 凍結後の追加"
+                    f"{len(check.get('additions', []))}件。"
+                    f"このレポートは正常完了ではありません。[/red]")
+                sys.exit(2)
+            elif check["status"].startswith("skipped"):
+                console.print(
+                    "[yellow]成果物の読み戻しができず、凍結内容との照合は"
+                    "未実施です（成功ではありません）。[/yellow]")
+            else:
+                console.print(
+                    f"[green]Artifact check passed "
+                    f"({check['checked']} fragments).[/green]")
 
         console.print(f"\n[green]Report generated: {report_path}[/green]")
 

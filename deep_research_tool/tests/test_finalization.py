@@ -446,6 +446,11 @@ class TestMainWiring(unittest.TestCase):
                               "importance": "important"}]})
         llm.push({"status": "supported", "reason": "一致",
                   "supporting_source_ids": ["EV-1"]})
+        # coverage is FAIL-CLOSED: without an explicit LLM verdict the
+        # question counts as unanswered, so the wiring test answers it
+        llm.push({"coverage": [{"question": 0, "answered": True,
+                                "section_id": "1", "missing": "",
+                                "search_queries": []}]})
 
         # fake session / result / locker
         chapter = MagicMock()

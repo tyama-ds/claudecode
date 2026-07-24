@@ -1,11 +1,14 @@
 """
 TaskDAG — dependency-aware scheduler for ResearchTasks.
 
-Reuses the app-wide concurrency model:
-- pool size = effective_workers(parallel_max_workers, stage_cap, tasks)
-- an optional limiter (RunLimits / ConcurrencyLimiter) is taken as a
-  LEAF permit around each task execution, never while waiting on
-  dependencies — consistent with utils.concurrency's rules.
+Concurrency model (ONE-SIDED permit ownership):
+- the scheduler controls ONLY the pool size
+  (effective_workers(parallel_max_workers, stage_cap, tasks)) and the
+  dependency order;
+- concurrency PERMITS belong to the LEAF CLIENTS (search/LLM clients
+  take their own permit inside their calls). The scheduler never
+  acquires the limiter — double acquisition of a shared RunLimits
+  would deadlock at limit=1.
 
 Deterministic: ready tasks are dispatched in sorted task_id order and
 results are returned keyed by task_id. Cycles are detected up front.
@@ -15,7 +18,7 @@ import concurrent.futures
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
-from ..utils.concurrency import effective_workers, maybe_permit
+from ..utils.concurrency import effective_workers
 from .models import ResearchTask
 
 
@@ -85,13 +88,17 @@ class TaskDAG:
           the result dict. An exception marks the task ``failed`` and
           SKIPS its dependents (marked failed with a dependency error) —
           the scheduler itself never raises for task errors.
-        - ``limiter`` (RunLimits/ConcurrencyLimiter/None) is acquired as
-          a leaf permit around execute() only.
+        - PERMIT OWNERSHIP IS ONE-SIDED: the scheduler controls ONLY the
+          pool size and the dependency order. It NEVER acquires the
+          concurrency limiter itself — the leaf client (search/LLM
+          client) takes its own permit inside execute(). Acquiring here
+          too would hold two permits per task and deadlock a shared
+          RunLimits at limit=1. The ``limiter`` parameter is retained
+          for API compatibility but is intentionally not acquired.
         """
         self.validate()
         results: Dict[str, Any] = {}
         lock = threading.Lock()
-        done = threading.Condition(lock)
         finished: Dict[str, bool] = {}      # task_id -> success
         remaining = set(self._tasks)
 
@@ -115,8 +122,10 @@ class TaskDAG:
                 return task.task_id, None, False
             task.status = "running"
             try:
-                with maybe_permit(limiter):
-                    value = execute(task)
+                # no permit here: the leaf client self-limits (see
+                # docstring) — a parent must never hold a permit while
+                # its child work runs
+                value = execute(task)
                 task.status = "done"
                 return task.task_id, value, True
             except Exception as e:      # task errors never kill the DAG

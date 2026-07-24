@@ -59,6 +59,10 @@ class Figure:
     alt_text: str = ""
     width: Optional[int] = None
     height: Optional[int] = None
+    # Structured chart semantics (labels/values/axes/unit/annotation):
+    # part of the SEMANTIC MANIFEST, so a change to the plotted numbers
+    # after the freeze changes the manifest hash and is detected.
+    chart_data: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -803,6 +807,15 @@ class FigureTableGenerator:
                 image_path=chart_path,
                 image_data=image_data,
                 alt_text=f"Chart showing {recommendation.title}",
+                chart_data={
+                    "chart_type": chart_type.value,
+                    "labels": [str(x) for x in x_labels],
+                    "values": [f"{v:g}" for v in values],
+                    "x_axis": recommendation.x_axis_label or "",
+                    "y_axis": recommendation.y_axis_label or "",
+                    "unit": str(getattr(recommendation, "unit", "") or ""),
+                    "annotation": recommendation.main_message or "",
+                },
             )
 
         except Exception as e:
@@ -1930,6 +1943,16 @@ Example: line"""
                 image_path=chart_path,
                 image_data=image_data,
                 alt_text=f"Chart showing {table.title}",
+                chart_data={
+                    "chart_type": chart_type.value,
+                    "labels": [str(x) for x in x_labels],
+                    "series": {str(name): [f"{v:g}" for v in values]
+                               for name, values in data_columns},
+                    "x_axis": str(table.headers[0]) if table.headers else "",
+                    "y_axis": str(table.unit or ""),
+                    "unit": str(table.unit or ""),
+                    "annotation": table.caption or "",
+                },
             )
 
             return chart_figure

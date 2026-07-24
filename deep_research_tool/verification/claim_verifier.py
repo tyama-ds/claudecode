@@ -38,6 +38,11 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from ..utils.helpers import extract_json_from_response
+from .schema import (
+    validate_coverage_entry,
+    validate_extracted_claim,
+    validate_verdict,
+)
 from ..report.finalization import (
     FRESHNESS_FAIL,
     FRESHNESS_NOT_REQUIRED,
@@ -100,19 +105,46 @@ def _containment(needle: set, haystack: set) -> float:
     return len(needle & haystack) / len(needle)
 
 
+# bump when the chunking/extraction logic changes (part of chunk
+# provenance so cached judgements can never mix extractor generations)
+EVIDENCE_EXTRACTOR_VERSION = "chunk-v2"
+
+
 @dataclass
 class EvidenceChunk:
-    """One retrievable slice of an evidence body, with provenance."""
+    """One retrievable slice of an evidence body, with FULL provenance.
+
+    canonical_url / source_version_hash / fetched_at / extractor_version
+    are filled by ``build_chunk_index``; the query/requirement/section/
+    claim linkage is copied from the evidence's adaptive metadata (set
+    when a gap-research task ingested the source).
+    """
     evidence_id: str
     offset: int                 # character offset in the source text
     text: str
     title: str = ""
     url: str = ""
+    canonical_url: str = ""
+    source_version_hash: str = ""        # hash of the chunk's exact text
+    fetched_at: str = ""
+    extractor_version: str = EVIDENCE_EXTRACTOR_VERSION
+    query_id: str = ""
+    requirement_id: str = ""
+    section_id: str = ""
+    claim_id: str = ""
     _bigram_cache: Optional[set] = field(default=None, repr=False)
 
     @property
     def id(self) -> str:        # evidence id (for callers scoring by source)
         return self.evidence_id
+
+    @property
+    def exact_quote(self) -> str:        # spec alias: the chunk text IS
+        return self.text                 # the verbatim source excerpt
+
+    @property
+    def locator(self) -> str:
+        return f"{self.evidence_id}@{self.offset}"
 
     @property
     def provenance(self) -> str:
@@ -341,25 +373,34 @@ class ClaimVerifier:
                       f"({sid} chunk {ci + 1}): {error}")
                 continue
             items: List[Dict] = []
-            for k, item in enumerate(data.get("claims", [])):
-                if not isinstance(item, dict):
+            raw_claims_list = data.get("claims", []) \
+                if isinstance(data, dict) else []
+            if not isinstance(raw_claims_list, list):
+                raw_claims_list = []
+            for k, item in enumerate(raw_claims_list):
+                checked = validate_extracted_claim(item)
+                if checked is None:
+                    self.extraction_errors.append(
+                        f"schema anomaly in extracted claim "
+                        f"({sid} chunk {ci + 1} item {k + 1}) — dropped")
                     continue
-                claim_text = (item.get("claim") or "").strip()
-                if not claim_text:
-                    continue
-                importance = item.get("importance", "important")
+                importance = checked["importance"]
                 if importance not in IMPORTANCE_WEIGHT:
                     importance = "important"
                 cited = None
-                if "source_numbers" in item:
-                    raw = item.get("source_numbers") or []
-                    cited = [int(n) for n in raw
-                             if isinstance(n, (int, str))
-                             and str(n).isdigit()]
+                if "source_numbers" in checked:
+                    cited = checked["source_numbers"]
+                    if cited is None:
+                        # invalid list[int] (e.g. ["1"]): the field is
+                        # unusable — treated as unreported, never parsed
+                        self.extraction_errors.append(
+                            f"schema anomaly: source_numbers not "
+                            f"list[int] ({sid} chunk {ci + 1} "
+                            f"item {k + 1}) — field ignored")
                 items.append(dict(
                     claim_id=f"C-{sid}.{ci + 1}.{k + 1}",
                     section_id=sid,
-                    text=claim_text,
+                    text=checked["claim"],
                     importance=importance,
                     cited_source_numbers=cited,
                 ))
@@ -430,31 +471,34 @@ Do not include opinions or generic statements. JSON only."""
     def locate_cited_numbers(cls, claim_text: str,
                              section_text: str) -> Tuple[bool, List[int]]:
         """Deterministically associate a claim with the [SOURCE N]
-        citations of its best-matching sentence (fallback: paragraph).
+        citations of its OWN sentence — and only that sentence.
 
         Returns ``(located, numbers)``. ``located`` distinguishes "the
         claim was found in the body and carries these citations (possibly
-        none)" from "the claim could not be located at all". This parser
-        — not the LLM — is the SOLE authority on which citations a claim
-        carries; LLM-reported numbers are diagnostics, never merged in.
+        none)" from "the claim could not be located at all".
+
+        STRICT sentence scope: when the claim's sentence carries no
+        citation, citations of OTHER sentences in the same paragraph are
+        NEVER picked up ("A社は10億円。B社は20億円 [SOURCE 2]。" must not
+        attach SOURCE 2 to the A社 claim). This parser — not the LLM —
+        is the SOLE authority on which citations a claim carries;
+        LLM-reported numbers are diagnostics, never merged in.
         """
         text = section_text or ""
         if not text or not claim_text:
             return False, []
         claim_bi = _bigrams(claim_text)
-        best_sent, best_para, best_score = "", "", 0.0
+        best_sent, best_score = "", 0.0
         for para in text.split("\n\n"):
             for sent in re.split(r"(?<=[。．！？!?.])\s*", para):
                 if len(sent.strip()) < 8:
                     continue
                 score = _containment(claim_bi, _bigrams(sent))
                 if score > best_score:
-                    best_score, best_sent, best_para = score, sent, para
+                    best_score, best_sent = score, sent
         if best_score < 0.3:
             return False, []
         nums = [int(n) for n in cls.CITATION_TAG_RE.findall(best_sent)]
-        if not nums:
-            nums = [int(n) for n in cls.CITATION_TAG_RE.findall(best_para)]
         return True, sorted(set(nums))
 
     @classmethod
@@ -469,6 +513,7 @@ Do not include opinions or generic statements. JSON only."""
 
     def build_chunk_index(self, evidence_list: List) -> List[EvidenceChunk]:
         """Split every evidence body into retrievable chunks."""
+        from .runtime import stable_hash
         index: List[EvidenceChunk] = []
         step = self.evidence_chunk_chars
         for ev in evidence_list:
@@ -479,12 +524,24 @@ Do not include opinions or generic statements. JSON only."""
             url = getattr(ev, "url", "") or ""
             if not text.strip():
                 continue
+            fetched_at = str(getattr(ev, "collected_at", "") or
+                             getattr(ev, "fetched_at", "") or "")
+            meta = getattr(ev, "adaptive_meta", None) or {}
             count = 0
             for pos in range(0, len(text), step):
+                chunk_text = text[pos:pos + step + 100]  # slight overlap
                 index.append(EvidenceChunk(
                     evidence_id=eid, offset=pos,
-                    text=text[pos:pos + step + 100],   # slight overlap
-                    title=title, url=url))
+                    text=chunk_text,
+                    title=title, url=url,
+                    canonical_url=url,
+                    source_version_hash=stable_hash(chunk_text),
+                    fetched_at=fetched_at,
+                    query_id=str(meta.get("query_id", "") or ""),
+                    requirement_id=str(meta.get("requirement_id", "")
+                                       or ""),
+                    section_id=str(meta.get("section_id", "") or ""),
+                    claim_id=str(meta.get("claim_id", "") or "")))
                 count += 1
                 if count >= MAX_CHUNKS_PER_EVIDENCE:
                     break
@@ -562,6 +619,7 @@ Do not include opinions or generic statements. JSON only."""
                       chunk_index: Optional[List[EvidenceChunk]] = None,
                       cited_ids_by_claim: Optional[Dict[str, List[str]]] = None,
                       enforce_citations: bool = False,
+                      citation_exempt_sections: Optional[set] = None,
                       ) -> List[Claim]:
         """Judge each claim against ITS OWN evidence — CITED FIRST.
 
@@ -629,6 +687,8 @@ Do not include opinions or generic statements. JSON only."""
                 self._progress_claim_done()
                 continue
 
+            claim_exempt = claim.section_id in \
+                (citation_exempt_sections or set())
             cited_ids = cited_ids_by_claim.get(claim.claim_id) or []
             if enforce_citations and cited_ids:
                 cited_set = set(cited_ids)
@@ -642,8 +702,8 @@ Do not include opinions or generic statements. JSON only."""
                     *[f"{c.evidence_id}@{c.offset}:{stable_hash(c.text)}"
                       for c in selected])
                 mode = "cited"
-            elif enforce_citations and claim.importance in (
-                    "critical", "important"):
+            elif enforce_citations and not claim_exempt \
+                    and claim.importance in ("critical", "important"):
                 claim.status = "unsupported"
                 claim.citation_missing = True
                 claim.reason = (
@@ -855,36 +915,35 @@ Do not include opinions or generic statements. JSON only."""
         """
         if len(batch) == 1:
             item = batch[0]
-            try:
-                verdict = self._judge_claim(item["claim"], item["selected"])
-            except Exception as e:
-                self.extraction_errors.append(
-                    f"claim judgement failed "
-                    f"({item['claim'].claim_id}): {e}")
-                return {item["claim"].claim_id:
-                        {"status": "uncertain",
-                         "reason": f"verification error: {e}"}}
-            return {item["claim"].claim_id: verdict}
+            return {item["claim"].claim_id:
+                    self._judge_claim_validated(item["claim"],
+                                                item["selected"])}
 
         verdicts: Dict[str, Dict] = {}
         try:
             response = self._llm_generate(self._batch_prompt(batch))
             data = extract_json_from_response(response.content)
-            for entry in data.get("verdicts", []):
+            entries = data.get("verdicts", []) \
+                if isinstance(data, dict) else []
+            if not isinstance(entries, list):
+                entries = []
+            for entry in entries:
                 if not isinstance(entry, dict):
                     continue
-                cid = str(entry.get("id", ""))
-                status = entry.get("status")
-                if not cid or status not in _VALID_STATUSES:
+                cid = entry.get("id")
+                if not isinstance(cid, str) or not cid:
                     continue
-                # schema fail-closed: "supported" REQUIRES a non-empty
-                # supporting_source_ids list — anything else is a schema
-                # anomaly, retried individually below
-                if status == "supported":
-                    sids = entry.get("supporting_source_ids")
-                    if not isinstance(sids, list) or not sids:
-                        continue
-                verdicts[cid] = entry
+                # STRICT schema: status enum string, reason str,
+                # supporting_source_ids list[str] (non-empty for
+                # supported). ANY anomaly (nested lists, dicts, numbers)
+                # invalidates the entry -> individual retry below.
+                checked = validate_verdict(entry)
+                if checked is None:
+                    self.extraction_errors.append(
+                        f"schema anomaly in batch verdict ({cid}) — "
+                        f"retrying individually")
+                    continue
+                verdicts[cid] = checked
         except Exception as e:
             self.extraction_errors.append(f"batch judgement failed: {e}")
 
@@ -899,16 +958,45 @@ Do not include opinions or generic statements. JSON only."""
                 self.progress.add(retries=len(missing))
             for item in missing:
                 self._checkpoint()
-                cid = item["claim"].claim_id
-                try:
-                    verdicts[cid] = self._judge_claim(item["claim"],
-                                                      item["selected"])
-                except Exception as e:
-                    self.extraction_errors.append(
-                        f"claim judgement failed ({cid}): {e}")
-                    verdicts[cid] = {"status": "uncertain",
-                                     "reason": f"verification error: {e}"}
+                verdicts[item["claim"].claim_id] = \
+                    self._judge_claim_validated(item["claim"],
+                                                item["selected"])
         return verdicts
+
+    JUDGE_SCHEMA_RETRIES = 1     # bounded retry on schema anomalies
+
+    def _judge_claim_validated(self, claim: Claim,
+                               chunks: List[EvidenceChunk]) -> Dict:
+        """Judge ONE claim with strict schema validation.
+
+        Bounded retry on schema anomalies AND transport errors; after
+        the retries the claim fails CLOSED to uncertain. Never raises,
+        never auto-fills ids, never lets a malformed response crash the
+        verification pass.
+        """
+        last_reason = "schema anomaly in judge verdict"
+        for attempt in range(self.JUDGE_SCHEMA_RETRIES + 1):
+            if attempt and self.progress is not None:
+                self.progress.add(retries=1)
+            try:
+                raw = self._judge_claim(claim, chunks)
+            except Exception as e:
+                last_reason = f"verification error: {e}"
+                self.extraction_errors.append(
+                    f"claim judgement failed ({claim.claim_id}, attempt "
+                    f"{attempt + 1}): {e}")
+                continue
+            checked = validate_verdict(raw)
+            if checked is not None:
+                return checked
+            last_reason = "schema anomaly in judge verdict"
+            self.extraction_errors.append(
+                f"schema anomaly in judge verdict ({claim.claim_id}, "
+                f"attempt {attempt + 1}) — "
+                + ("retrying" if attempt < self.JUDGE_SCHEMA_RETRIES
+                   else "fail-closed to uncertain"))
+        return {"status": "uncertain", "reason": last_reason,
+                "supporting_source_ids": []}
 
     def _batch_prompt(self, batch: List[Dict]) -> str:
         blocks = []
@@ -969,16 +1057,11 @@ JSON only."""
         selected = self.select_evidence(claim, [], chunk_index=other)
         if not selected:
             return
-        try:
-            verdict = self._judge_claim(claim, selected)
-        except Exception:
-            return
-        if verdict.get("status") == "supported":
+        verdict = self._judge_claim_validated(claim, selected)
+        if verdict["status"] == "supported":
             valid = {c.evidence_id for c in selected}
-            ids = verdict.get("supporting_source_ids")
-            if isinstance(ids, list):
-                claim.replacement_source_ids = [
-                    i for i in ids if i in valid]
+            claim.replacement_source_ids = [
+                i for i in verdict["supporting_source_ids"] if i in valid]
 
     def _judge_claim(self, claim: Claim, chunks: List[EvidenceChunk]) -> Dict:
         blocks = []
@@ -1040,7 +1123,16 @@ JSON only."""
 
     def judge_coverage(self, questions: List[str],
                        chapters: Dict[str, str]) -> List[Dict]:
-        """LLM-judged coverage with a lexical fallback.
+        """LLM-judged coverage. FAIL-CLOSED throughout:
+
+        - only the LLM's JSON literal ``true`` marks a question answered;
+        - an LLM ``false`` is FINAL — it is never overturned by lexical
+          containment (the words of a question appearing in the body is
+          a mention, possibly even "この問いには回答できなかった", never
+          an answer);
+        - when the LLM could not judge a question at all, the question
+          stays UNANSWERED; lexical matching is used only to point at
+          the best CANDIDATE section for diagnostics/re-research.
 
         Returns one dict per question:
         {"question", "answered", "section_id", "missing", "search_queries"}
@@ -1055,49 +1147,56 @@ JSON only."""
         except Exception as e:
             self.extraction_errors.append(f"coverage judgement failed: {e}")
 
-        # lexical fallback data: FULL body of EVERY section (no 20k cap)
+        # lexical data: FULL body of EVERY section — used ONLY to locate
+        # the candidate section, never to decide "answered"
         section_bigrams = {sid: _bigrams(text)
                            for sid, text in chapters.items()}
+
+        def _candidate_section(q: str):
+            q_bi = _bigrams(q)
+            best_sid, best = "", 0.0
+            for sid, bi in section_bigrams.items():
+                c = _containment(q_bi, bi)
+                if c > best:
+                    best_sid, best = sid, c
+            return best_sid, best
 
         for qi, q in enumerate(questions):
             entry = None
             if llm_results:
                 entry = llm_results.get(qi)
             if entry is None:
-                # fallback: containment of the question's bigrams in each
-                # section — a high overlap approximates "answered", a low
-                # one is at best a mention
-                q_bi = _bigrams(q)
-                best_sid, best = "", 0.0
-                for sid, bi in section_bigrams.items():
-                    c = _containment(q_bi, bi)
-                    if c > best:
-                        best_sid, best = sid, c
+                # the LLM produced NO verdict for this question: FAIL
+                # CLOSED — unanswered. The lexical best-match section is
+                # attached as a diagnostic candidate only.
+                best_sid, best = _candidate_section(q)
+                self.extraction_errors.append(
+                    f"coverage: no LLM verdict for question {qi} — "
+                    f"fail-closed to unanswered (lexical candidate: "
+                    f"section {best_sid or '-'} containment {best:.2f})")
                 entry = {
-                    "answered": best >= 0.6,
+                    "answered": False,
                     "section_id": best_sid,
-                    "missing": "" if best >= 0.6 else q,
+                    "missing": q,
                     "search_queries": [q[:60]],
                 }
             elif entry.get("answered") is not True:
-                # lexical CROSS-CHECK of an LLM "unanswered" verdict: a
-                # very strong lexical presence in some section suggests
-                # the LLM missed it (e.g. window boundaries) — overturn
-                # and note the disagreement
-                q_bi = _bigrams(q)
-                best_sid, best = "", 0.0
-                for sid, bi in section_bigrams.items():
-                    c = _containment(q_bi, bi)
-                    if c > best:
-                        best_sid, best = sid, c
+                # LLM says unanswered: FINAL. A strong lexical presence
+                # is recorded as a diagnostic disagreement, never as an
+                # overturn — questions quoted next to "回答を確認できな
+                # かった" would otherwise pass.
+                best_sid, best = _candidate_section(q)
                 if best >= 0.7:
                     self.extraction_errors.append(
-                        f"coverage cross-check: LLM marked unanswered but "
-                        f"lexical containment {best:.2f} in section "
-                        f"{best_sid} — treated as answered")
-                    entry = {"answered": True, "section_id": best_sid,
-                             "missing": "", "search_queries": []}
-            queries = [s for s in (entry.get("search_queries") or []) if s]
+                        f"coverage diagnostic: LLM marked question {qi} "
+                        f"unanswered while lexical containment is "
+                        f"{best:.2f} in section {best_sid} — LLM verdict "
+                        f"kept (fail-closed)")
+                if not entry.get("section_id"):
+                    entry = dict(entry)
+                    entry["section_id"] = best_sid
+            queries = [s for s in (entry.get("search_queries") or [])
+                       if isinstance(s, str) and s]
             if not queries:
                 queries = [q[:60]]
             # STRICT boolean: only the JSON literal true counts. The
@@ -1106,8 +1205,8 @@ JSON only."""
             results.append({
                 "question": q,
                 "answered": entry.get("answered") is True,
-                "section_id": entry.get("section_id", "") or "",
-                "missing": entry.get("missing", "") or "",
+                "section_id": str(entry.get("section_id", "") or ""),
+                "missing": str(entry.get("missing", "") or ""),
                 "search_queries": queries,
             })
         return results
@@ -1116,6 +1215,9 @@ JSON only."""
     # covered via map-reduce over windows of this size (no 3,000-char
     # per-section or 24,000-char whole-report truncation)
     COVERAGE_WINDOW_CHARS = 20000
+    # Questions are BATCHED per LLM call — a long requirement list is
+    # split across calls, never truncated
+    COVERAGE_QUESTIONS_PER_CALL = 15
 
     def _judge_coverage_llm(self, questions: List[str],
                             chapters: Dict[str, str]) -> Dict[int, Dict]:
@@ -1151,26 +1253,37 @@ JSON only."""
             windows.append("\n\n".join(current))
 
         from .runtime import stable_hash
-        q_digest = stable_hash("questions", *questions)
 
-        def _one_window(window):
+        # question BATCHES: every question is judged (no [:N] truncation);
+        # long lists just take more calls
+        step = self.COVERAGE_QUESTIONS_PER_CALL
+        batches = [(base, questions[base:base + step])
+                   for base in range(0, len(questions), step)]
+        tasks = [(window, base, qs) for window in windows
+                 for base, qs in batches]
+
+        def _one(task):
+            window, base, qs = task
             self._checkpoint()
-            key = stable_hash("coverage", q_digest, window,
+            key = stable_hash("coverage", base,
+                              stable_hash("questions", *qs), window,
                               self._cache_namespace)
             cached = self.cache.get(key)
             if cached is not None:
-                return cached
+                return {int(k): v for k, v in cached.items()}
             try:
-                result = self._judge_coverage_window(questions, window)
+                result = self._judge_coverage_window(qs, window,
+                                                     base_index=base)
             except Exception as e:
                 self.extraction_errors.append(
                     f"coverage window judgement failed: {e}")
                 return None
-            self.cache.put(key, result)
+            if result:
+                self.cache.put(key, result)
             return result
 
         merged: Dict[int, Dict] = {}
-        for result in self._map_parallel(_one_window, windows):
+        for result in self._map_parallel(_one, tasks):
             if not result:
                 continue
             for idx, entry in result.items():
@@ -1183,8 +1296,10 @@ JSON only."""
         return merged or None
 
     def _judge_coverage_window(self, questions: List[str],
-                               body: str) -> Optional[Dict[int, Dict]]:
-        q_lines = "\n".join(f"{i}. {q}" for i, q in enumerate(questions))
+                               body: str, base_index: int = 0,
+                               ) -> Optional[Dict[int, Dict]]:
+        q_lines = "\n".join(f"{base_index + i}. {q}"
+                            for i, q in enumerate(questions))
 
         if self.language == "ja":
             prompt = f"""以下のレポート本文が、各「重要な問い」に実質的に回答しているか判定してください。
@@ -1221,15 +1336,21 @@ Respond as JSON:
 JSON only."""
         response = self._llm_generate(prompt)
         data = extract_json_from_response(response.content)
+        entries = data.get("coverage", []) if isinstance(data, dict) else []
+        if not isinstance(entries, list):
+            entries = []
         out: Dict[int, Dict] = {}
-        for item in data.get("coverage", []):
-            if not isinstance(item, dict):
+        for item in entries:
+            # STRICT schema: answered must be a JSON boolean, queries a
+            # list[str]. Anomalous entries are dropped -> the question
+            # fails closed to unanswered downstream.
+            checked = validate_coverage_entry(item)
+            if checked is None:
+                self.extraction_errors.append(
+                    "schema anomaly in coverage entry — dropped "
+                    "(question fails closed to unanswered)")
                 continue
-            try:
-                idx = int(item.get("question"))
-            except (TypeError, ValueError):
-                continue
-            out[idx] = item
+            out[checked["question"]] = checked
         return out or None
 
     # ------------------------------------------------------------------
@@ -1237,42 +1358,58 @@ JSON only."""
     # ------------------------------------------------------------------
 
     @staticmethod
-    def assess_primary_freshness(evidence_list: List,
+    def _evidence_is_fresh(ev, now_year: int, max_age_years: int) -> bool:
+        date = str(getattr(ev, "published_date", "") or "")
+        m = re.search(r"(19|20)\d{2}", date)
+        return bool(m and now_year - int(m.group(0)) <= max_age_years)
+
+    @staticmethod
+    def _evidence_is_primary(ev) -> bool:
+        try:
+            qi = getattr(ev, "quality_indicators", None)
+            if qi is not None and bool(getattr(qi, "is_primary_source",
+                                               False)):
+                return True
+        except Exception:
+            pass
+        st = getattr(ev, "source_type", None)
+        if st is not None and str(getattr(st, "value", st)) in (
+                "official", "academic"):
+            return True
+        qc = getattr(ev, "quality_category", None)
+        return qc is not None and str(getattr(qc, "value", qc)) == \
+            "authoritative"
+
+    @classmethod
+    def assess_primary_freshness(cls, evidence_list: List,
                                  required: bool,
                                  max_age_years: int = 3) -> Tuple[str, str]:
-        """Return (state, reason): pass / fail / not_required."""
+        """Return (state, reason): pass / fail / not_required.
+
+        "Fresh AND primary" must hold on the SAME evidence item: a fresh
+        secondary source combined with a stale primary source is NOT a
+        fresh primary source. The caller passes the evidence of ONE
+        requirement / claim group — never the whole document's union.
+        """
         if not required:
             return FRESHNESS_NOT_REQUIRED, ""
         now_year = datetime.now().year
-        fresh = False
-        primary = False
+        any_fresh = False
+        any_primary = False
         for ev in evidence_list:
-            date = str(getattr(ev, "published_date", "") or "")
-            m = re.search(r"(19|20)\d{2}", date)
-            if m and now_year - int(m.group(0)) <= max_age_years:
-                fresh = True
-            try:
-                qi = getattr(ev, "quality_indicators", None)
-                if qi is not None and bool(getattr(qi, "is_primary_source",
-                                                   False)):
-                    primary = True
-            except Exception:
-                pass
-            st = getattr(ev, "source_type", None)
-            if st is not None and str(getattr(st, "value", st)) in (
-                    "official", "academic"):
-                primary = True
-            qc = getattr(ev, "quality_category", None)
-            if qc is not None and str(getattr(qc, "value", qc)) == \
-                    "authoritative":
-                primary = True
-        if fresh and primary:
-            return FRESHNESS_PASS, ""
+            fresh = cls._evidence_is_fresh(ev, now_year, max_age_years)
+            primary = cls._evidence_is_primary(ev)
+            any_fresh = any_fresh or fresh
+            any_primary = any_primary or primary
+            if fresh and primary:       # the SAME source satisfies both
+                return FRESHNESS_PASS, ""
         missing = []
-        if not fresh:
+        if not any_fresh:
             missing.append(f"published within {max_age_years}y")
-        if not primary:
+        if not any_primary:
             missing.append("primary/official source")
+        if not missing:
+            missing.append("no single source is BOTH fresh and primary")
         return FRESHNESS_FAIL, "missing: " + ", ".join(missing)
 
     # ------------------------------------------------------------------
@@ -1289,8 +1426,16 @@ JSON only."""
         preferred_body_chars: Optional[int] = None,
         exclude_references: bool = True,
         primary_freshness_required: bool = False,
+        citation_exempt_sections: Optional[set] = None,
     ) -> StructuredVerdict:
-        """Verify the FINAL candidate body, section by section."""
+        """Verify the FINAL candidate body, section by section.
+
+        ``citation_exempt_sections``: sections that legitimately carry
+        no [SOURCE N] tags (executive summary — a digest of already-
+        cited body claims). Their claims are still judged against the
+        evidence (open mode), but the per-claim citation requirement is
+        waived for them.
+        """
         verdict = StructuredVerdict()
         self.extraction_errors = []
         self.chunks_total = 0
@@ -1330,19 +1475,35 @@ JSON only."""
         # the two disagree outright, the claim's citation state is
         # unknown -> citation_association_failure, fail-closed.
         enforce_citations = citation_manager is not None
+        exempt = citation_exempt_sections or set()
         cited_ids_by_claim: Dict[str, List[str]] = {}
         if enforce_citations:
             for claim in all_claims:
+                if claim.section_id in exempt:
+                    # summary-style section: judged open-mode, no
+                    # citation requirement, no association handling
+                    claim.cited_source_numbers = []
+                    continue
                 located, parsed = self.locate_cited_numbers(
                     claim.text, chapters.get(claim.section_id, ""))
-                llm_nums = sorted(set(claim.cited_source_numbers or []))
+                # None = the extraction did not report the field at all;
+                # a reported list (even []) is compared STRICTLY
+                reported = claim.cited_source_numbers
+                llm_nums = sorted(set(reported)) \
+                    if reported is not None else None
                 claim.llm_reported_source_numbers = llm_nums   # diagnostic
                 if located:
                     claim.cited_source_numbers = parsed
-                    if llm_nums and parsed and \
-                            not (set(llm_nums) & set(parsed)):
-                        # parser and LLM name DISJOINT citations: the
-                        # association is unreliable -> fail closed
+                    if llm_nums and set(llm_nums) != set(parsed):
+                        # STRICT disagreement: any NON-EMPTY LLM report
+                        # that differs from the parser — including
+                        # partial overlap (parser=[1], LLM=[1,2]) — is
+                        # an association failure, fail closed. An EMPTY
+                        # report is "no citation observed by the LLM":
+                        # our extraction schema does not mandate an
+                        # exhaustive number return, so silence is a
+                        # diagnostic, and the parser (the sole
+                        # authority) decides alone.
                         claim.association_failed = True
                 else:
                     claim.cited_source_numbers = []
@@ -1362,7 +1523,8 @@ JSON only."""
         self.verify_claims(all_claims, evidence_list,
                            chunk_index=chunk_index,
                            cited_ids_by_claim=cited_ids_by_claim,
-                           enforce_citations=enforce_citations)
+                           enforce_citations=enforce_citations,
+                           citation_exempt_sections=exempt)
 
         # --- aggregate: unsupported / contradicted / uncertain SEPARATELY ---
         weighted_total = 0.0
@@ -1441,6 +1603,7 @@ JSON only."""
             # critical/important claims REGARDLESS of whether the section
             # registry happens to be empty.
             if (enforce_citations
+                    and claim.section_id not in exempt
                     and not claim.cited_source_numbers
                     and claim.importance in ("critical", "important")):
                 verdict.issues.append(VerificationIssue(
@@ -1563,32 +1726,58 @@ JSON only."""
                     reason="登録済みエビデンスがあるのに引用が全て削除されています",
                 ))
 
-        # --- primary / freshness (3-state), tied to the evidence that the
-        #     IMPORTANT claims actually rely on (cited + supporting), not
-        #     to the whole locker — one fresh but irrelevant source can
-        #     never satisfy the gate. Falls back to all evidence when no
-        #     claim-level linkage exists. ---
-        relevant_ids: set = set()
+        # --- primary / freshness (3-state), evaluated PER SECTION over
+        #     the evidence that the section's critical/important claims
+        #     actually rely on (cited + supporting) — never over the
+        #     whole document's evidence union, so one fresh-but-
+        #     unrelated source can never satisfy another section's gate.
+        #     Issues carry the section_id so the Coverage Ledger reopens
+        #     EXACTLY the affected requirement. Falls back to a single
+        #     whole-locker judgement when no claim linkage exists. ---
+        by_id_ev = {getattr(ev, "id", ""): ev for ev in evidence_list}
+        section_relevant: Dict[str, set] = {}
         for claim in all_claims:
             if claim.importance in ("critical", "important"):
-                relevant_ids.update(claim.supporting_source_ids or [])
-                relevant_ids.update(
-                    cited_ids_by_claim.get(claim.claim_id, []))
-        freshness_evidence = [ev for ev in evidence_list
-                              if getattr(ev, "id", "") in relevant_ids] \
-            if relevant_ids else evidence_list
-        state, why = self.assess_primary_freshness(
-            freshness_evidence, required=primary_freshness_required)
-        verdict.metrics.primary_freshness = state
-        if state == FRESHNESS_FAIL:
-            verdict.issues.append(VerificationIssue(
-                type=ISSUE_STALE_OR_NON_PRIMARY, severity="critical",
-                reason=why,
-                needed_evidence=why,
-                search_queries=["一次情報 最新 統計"
-                                if self.language == "ja"
-                                else "primary source latest statistics"],
-            ))
+                ids = set(claim.supporting_source_ids or []) | \
+                    set(cited_ids_by_claim.get(claim.claim_id, []))
+                if ids:
+                    section_relevant.setdefault(
+                        claim.section_id, set()).update(ids)
+        if primary_freshness_required and section_relevant:
+            failed_sections: List[Tuple[str, str]] = []
+            for sid in sorted(section_relevant):
+                sec_evidence = [by_id_ev[i] for i in
+                                sorted(section_relevant[sid])
+                                if i in by_id_ev]
+                state, why = self.assess_primary_freshness(
+                    sec_evidence, required=True)
+                if state == FRESHNESS_FAIL:
+                    failed_sections.append((sid, why))
+            verdict.metrics.primary_freshness = (
+                FRESHNESS_FAIL if failed_sections else FRESHNESS_PASS)
+            for sid, why in failed_sections:
+                verdict.issues.append(VerificationIssue(
+                    section_id=sid,
+                    type=ISSUE_STALE_OR_NON_PRIMARY, severity="critical",
+                    reason=why,
+                    needed_evidence=why,
+                    search_queries=["一次情報 最新 統計"
+                                    if self.language == "ja"
+                                    else "primary source latest statistics"],
+                ))
+        else:
+            state, why = self.assess_primary_freshness(
+                evidence_list, required=primary_freshness_required)
+            verdict.metrics.primary_freshness = state
+            if state == FRESHNESS_FAIL:
+                verdict.issues.append(VerificationIssue(
+                    type=ISSUE_STALE_OR_NON_PRIMARY, severity="critical",
+                    reason=why,
+                    needed_evidence=why,
+                    search_queries=["一次情報 最新 統計"
+                                    if self.language == "ja"
+                                    else "primary source latest statistics"],
+                ))
 
         # --- length metrics (adaptive ranges, references excluded) ---
         verdict.metrics.actual_body_chars = factual_chars

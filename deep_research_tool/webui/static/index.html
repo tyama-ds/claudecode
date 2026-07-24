@@ -306,6 +306,18 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
           <option value="vllm">vLLM</option>
         </select>
         <p class="hint">URLに /v1 を含めた場合は自動的にOpenAI互換として扱われます。</p>
+        <label>ロールルーティング（メインが他プロバイダの場合にローカルLLMへ委譲する処理）</label>
+        <select id="set_local_role">
+          <option value="off">オフ（従来どおりメインのプロバイダのみ）</option>
+          <option value="verify">verify: 検証（クレーム判定）をローカルLLMで実行</option>
+          <option value="draft">draft: 本文の書き直しをローカルLLMで実行</option>
+          <option value="all">all: 検証と書き直しの両方をローカルLLMで実行</option>
+        </select>
+        <label>タイムアウト（秒、空欄=既定120秒）</label>
+        <input type="number" id="set_local_timeout" min="1" max="3600" placeholder="120">
+        <label>同時リクエスト上限（空欄=制限なし。小規模サーバーは1〜2推奨）</label>
+        <input type="number" id="set_local_concurrency" min="1" max="16" placeholder="例: 2">
+        <p class="hint">ロールルーティングはサーバーURLが設定されている場合のみ有効です。URLが外部サービスへ自動設定されることはありません。</p>
       </div>
 
       <div class="prov-block">
@@ -703,6 +715,9 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
       <div class="pct-row">
         <span class="pct" id="pctLabel">0%</span>
         <span class="elapsed" id="elapsed"></span>
+        <button id="runCancelBtn" style="display:none;margin-left:auto;
+                background:#b71c1c;color:#fff;border:none;border-radius:6px;
+                padding:4px 12px;cursor:pointer">⏹ 調査を中止</button>
       </div>
       <div class="bar-wrap"><div class="bar" id="bar"></div></div>
       <div class="msg" id="currentMsg">待機中...</div>
@@ -775,6 +790,9 @@ const SETTINGS_FIELDS = {
   set_anthropic_url: 'anthropic_base_url',
   set_local_url: 'local_base_url',
   set_local_backend: 'local_backend',
+  set_local_role: 'local_llm_role',
+  set_local_timeout: 'local_timeout',
+  set_local_concurrency: 'local_concurrency',
   set_https_proxy: 'https_proxy',
   set_http_proxy: 'http_proxy',
 };
@@ -1303,13 +1321,18 @@ async function sendPlanReview(action) {
 }
 
 function render(status) {
-  // when switching between job tabs, reset per-job view state
+  // when switching between job tabs, reset per-job view state —
+  // INCLUDING cancel-button states (a cancel requested on another job
+  // must not leave this job's buttons stuck)
   if (status.job_id !== lastRenderedJobId) {
     lastRenderedJobId = status.job_id;
     logLength = -1;
     lastPlanJson = null;
     $('jobBanner').className = 'banner';
     $('resultPanel').style.display = 'none';
+    vCancelRequested = false;
+    $('vCancelBtn').disabled = false;
+    $('vCancelBtn').textContent = '⏹ キャンセル';
   }
 
   const pct = status.progress || 0;
@@ -1320,6 +1343,24 @@ function render(status) {
   const min = Math.floor((status.elapsed_seconds || 0) / 60);
   const sec = Math.round((status.elapsed_seconds || 0) % 60);
   $('elapsed').textContent = `経過 ${min}分${sec}秒`;
+
+  // run-level cancel button: visible only for jobs still running
+  const runCancel = $('runCancelBtn');
+  if (runCancel) {
+    const running = status.state === 'running' ||
+                    status.state === 'plan_review';
+    runCancel.style.display = running ? 'inline-block' : 'none';
+    if (!runCancelRequested[status.job_id]) {
+      runCancel.disabled = false;
+      runCancel.textContent = '⏹ 調査を中止';
+    } else {
+      runCancel.disabled = true;
+      runCancel.textContent = '中止処理中…';
+    }
+    if (status.state === 'cancelled') {
+      delete runCancelRequested[status.job_id];
+    }
+  }
 
   const active = stepIndex(pct);
   document.querySelectorAll('.step').forEach((el, i) => {
@@ -1431,6 +1472,34 @@ $('vCancelBtn').addEventListener('click', async () => {
       body: JSON.stringify({job_id: selectedJobId}),
     });
   } catch (e) { /* poll will reflect the state */ }
+});
+
+// run-level cancellation: stops the WHOLE research at the next safe
+// checkpoint (no new LLM/search calls); partial artifacts stay visible
+const runCancelRequested = {};   // per-job (job switching resets the view)
+const runCancelEl = $('runCancelBtn');
+if (runCancelEl) runCancelEl.addEventListener('click', async () => {
+  const jobId = selectedJobId;
+  if (!jobId || runCancelRequested[jobId]) return;
+  if (!confirm('調査全体を安全に中止しますか？\n次の安全なチェックポイントで停止し、途中までの成果物（収集済みエビデンス・下書きプレビュー）は残ります。')) return;
+  runCancelRequested[jobId] = true;
+  runCancelEl.disabled = true;
+  runCancelEl.textContent = '中止処理中…';
+  try {
+    const res = await fetch('/api/cancel-run', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({job_id: jobId}),
+    });
+    if (!res.ok) {                     // API失敗時はボタンを復帰する
+      delete runCancelRequested[jobId];
+      runCancelEl.disabled = false;
+      runCancelEl.textContent = '⏹ 調査を中止';
+    }
+  } catch (e) {
+    delete runCancelRequested[jobId];
+    runCancelEl.disabled = false;
+    runCancelEl.textContent = '⏹ 調査を中止';
+  }
 });
 
 function renderVerificationSummary(s) {

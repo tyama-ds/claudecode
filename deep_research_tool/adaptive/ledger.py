@@ -56,6 +56,9 @@ class CoverageLedger:
         self._reqs: Dict[str, RequirementLeaf] = {}
         self.max_search_attempts = max(1, int(max_search_attempts))
         self.rounds: List[ProgressRound] = []
+        # WHY the research phase ended (single stopping authority's
+        # verdict; surfaced in the outcome, audit log and GUI)
+        self.termination_reason: str = ""
 
     # -- requirement management -------------------------------------------
 
@@ -102,6 +105,8 @@ class CoverageLedger:
                     f"({req_id})")
             req.status = new_state
             req.status_reason = reason
+            req.terminal_reason = reason if new_state in TERMINAL_STATES \
+                else ""
             req.history.append(new_state)
             return req
 
@@ -200,6 +205,7 @@ class CoverageLedger:
                 "coverage": round(self.coverage(), 4),
                 "rounds": [p.to_dict() for p in self.rounds],
                 "max_search_attempts": self.max_search_attempts,
+                "termination_reason": self.termination_reason,
             }
 
 

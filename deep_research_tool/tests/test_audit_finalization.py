@@ -50,7 +50,7 @@ RIGHT = ("https://right.example.com/uncited",
 
 class TestMisattributedCitation(Base):
 
-    def _routed_llm(self, edits):
+    def _routed_llm(self, edits, edit_handler=None):
         def judge(prompt):
             evidence_part = prompt.split("【エビデンス】")[-1]
             if "国内シェアは52%" in evidence_part:
@@ -70,19 +70,23 @@ class TestMisattributedCitation(Base):
                 .on("extract", extract)
                 .on("judge", judge)
                 .on("coverage", all_answered_coverage)
-                .on("edit", lambda p: next(edits, "")))
+                .on("edit", edit_handler or (lambda p: next(edits, ""))))
 
     def test_wrong_citation_never_accepts_and_rewrite_fixes_it(self):
         """Body cites SOURCE 1 (irrelevant); SOURCE 2 (uncited) supports
         the claim. This must NOT accept with claim_support_score=1.0 /
         citations_valid=True; only after the citation is replaced with
         SOURCE 2 and re-verified may it accept."""
-        # the rewrite cites the replacement (SOURCE 2 = appended number)
-        edits = iter([
-            f"## 1. 市場シェア\n\n{CLAIM_SENTENCE} [SOURCE 2]。"
-            + "裏付けを確認した本文。" * 30,
-        ])
-        llm = self._routed_llm(edits)
+        # the repair is a LOCALIZED sentence patch that cites the
+        # replacement (SOURCE 2 = appended number); a full-section
+        # rewrite stays available for the audited fallback path
+        def edit_handler(prompt):
+            if "対象は一文のみです" in prompt:      # sentence patch
+                return f"{CLAIM_SENTENCE} [SOURCE 2]。"
+            return (f"## 1. 市場シェア\n\n{CLAIM_SENTENCE} [SOURCE 2]。"
+                    + "裏付けを確認した本文。" * 30)
+        edits = None
+        llm = self._routed_llm(edits, edit_handler=edit_handler)
         locker = make_locker(self.tmp, [WRONG, RIGHT])
         plan = make_plan([("1", "市場シェア", "A社のシェア")])
         session = make_session(plan, {
@@ -249,10 +253,16 @@ class TestFreshnessUpdate(Base):
                  "2015年3月時点の古いブログ記事。A社の話題。" * 10)
 
         def extract(prompt):
+            # correct extractor: report exactly the numbers next to the
+            # claim sentence (strict association compares them)
             if CLAIM_SENTENCE in prompt:
+                m = re.search(re.escape(CLAIM_SENTENCE)
+                              + r"((?:\s*\[SOURCE \d+\])*)", prompt)
+                nums = sorted({int(n) for n in re.findall(
+                    r"\[SOURCE (\d+)\]", m.group(1))}) if m else []
                 return j({"claims": [{"claim": CLAIM_SENTENCE,
                                       "importance": "critical",
-                                      "source_numbers": [1]}]})
+                                      "source_numbers": nums or [1]}]})
             return j({"claims": []})
 
         def judge(prompt):

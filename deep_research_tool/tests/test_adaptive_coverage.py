@@ -496,7 +496,9 @@ class TestSchemaFailClosed(unittest.TestCase):
         ]
         verifier.verify_claims(claims, [ev])
         self.assertEqual(llm.batch_calls, 1)
-        self.assertEqual(llm.single_calls, 1)       # only the anomaly
+        # only the anomalous claim is retried individually — with ONE
+        # bounded schema retry (2 calls), never the valid claim
+        self.assertEqual(llm.single_calls, 2)
         self.assertEqual(claims[0].status, "supported")
         self.assertEqual(claims[1].status, "uncertain")   # fail-closed
 
@@ -614,7 +616,9 @@ class TestRunnerAdaptiveIntegration(unittest.TestCase):
             session_contents=session_contents,
             research_plan=None,
             query="A社の市場シェア調査",
-            requirements="A社の最新の市場シェアを統計で裏付けること",
+            # no freshness markers: these tests exercise the coverage/
+            # gap mechanics, not the freshness gate
+            requirements="A社の市場シェアを統計資料で裏付けること",
             language="ja",
             llm_client=llm,
             search_client=search,
@@ -686,7 +690,8 @@ class TestRunnerAdaptiveIntegration(unittest.TestCase):
             # the question AND the section
             ledger = outcome["coverage_ledger"]
             ids = {r["req_id"] for r in ledger["requirements"]}
-            self.assertIn("REQ-Q1", ids)
+            # explicit user requirements get their own REQ-U ids
+            self.assertIn("REQ-U1", ids)
             self.assertIn("REQ-S1", ids)
 
             # the section requirement went open -> supported after the
