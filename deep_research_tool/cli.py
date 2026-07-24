@@ -173,20 +173,20 @@ def cli():
 @click.option(
     "--max-final-research-rounds",
     type=int,
-    default=2,
-    help="Additional research rounds in the final verification loop (default: 2)"
+    default=None,
+    help="Additional research rounds in the final loop (unset: profile preset)"
 )
 @click.option(
     "--max-final-revision-rounds",
     type=int,
-    default=2,
-    help="Rewrite/compress rounds in the final verification loop (default: 2)"
+    default=None,
+    help="Rewrite/compress rounds in the final loop (unset: profile preset)"
 )
 @click.option(
     "--max-no-improvement-rounds",
     type=int,
-    default=1,
-    help="Stop the final loop after this many stagnant rounds (default: 1)"
+    default=None,
+    help="Stop the final loop after this many stagnant rounds (unset: profile preset)"
 )
 @click.option(
     "--min-score-improvement",
@@ -203,14 +203,14 @@ def cli():
 @click.option(
     "--min-claim-support-score",
     type=float,
-    default=0.85,
-    help="Acceptance threshold for the weighted claim support score (0-1)"
+    default=None,
+    help="Acceptance threshold for the claim support score (unset: profile preset)"
 )
 @click.option(
     "--required-critical-coverage",
     type=float,
-    default=1.0,
-    help="Required coverage of critical questions for acceptance (0-1)"
+    default=None,
+    help="Required critical-question coverage (unset: profile preset)"
 )
 @click.option(
     "--verification-profile",
@@ -223,32 +223,65 @@ def cli():
 @click.option(
     "--verification-max-workers",
     type=int,
-    default=8,
-    help="Parallel workers inside verification (1-16)"
+    default=None,
+    help="Parallel workers inside verification (1-16; unset: profile preset)"
 )
 @click.option(
     "--verification-batch-size",
     type=int,
-    default=10,
-    help="Claims judged per LLM request (1-32)"
+    default=None,
+    help="Claims judged per LLM request (1-32; unset: profile preset)"
 )
 @click.option(
     "--verification-cache/--no-verification-cache",
     "verification_cache",
-    default=True,
-    help="Same-run cache: unchanged sections/claims are not re-verified"
+    default=None,
+    help="Same-run cache: unchanged sections/claims are not re-verified (unset: profile preset)"
 )
 @click.option(
     "--verification-timeout-seconds",
     type=int,
-    default=0,
-    help="Overall verification timeout in seconds (0 = none)"
+    default=None,
+    help="Overall verification timeout in seconds (0 = none; unset: profile preset)"
 )
 @click.option(
     "--verification-minor-sample-rate",
     type=float,
-    default=1.0,
-    help="Fraction of MINOR claims verified (critical/important always are)"
+    default=None,
+    help="Fraction of MINOR claims verified (unset: profile preset)"
+)
+@click.option(
+    "--adaptive-coverage/--no-adaptive-coverage",
+    "adaptive_coverage",
+    default=True,
+    help="Requirement-granular coverage ledger + gap-only re-research "
+         "in the final loop (default: on)"
+)
+@click.option(
+    "--requirement-max-search-attempts",
+    type=int,
+    default=2,
+    help="Gap searches per requirement before it is closed as "
+         "unavailable_after_search (default: 2)"
+)
+@click.option(
+    "--max-stall-rounds",
+    type=int,
+    default=2,
+    help="Consecutive no-progress rounds before research stops (default: 2)"
+)
+@click.option(
+    "--audit-log/--no-audit-log",
+    "audit_log",
+    default=True,
+    help="Write a local JSONL audit trail of the run (secrets masked)"
+)
+@click.option(
+    "--local-llm-role",
+    type=click.Choice(["off", "verify", "draft", "all"]),
+    default="off",
+    help="Route verification/draft LLM calls to the configured local "
+         "LLM server (requires --local-base-url or LOCAL_LLM_BASE_URL)"
 )
 @click.option(
     "--extended-mode",
@@ -395,19 +428,24 @@ def research(
     hard_max_body_chars: Optional[int],
     report_version: str,
     length_tolerance: float,
-    max_final_research_rounds: int,
-    max_final_revision_rounds: int,
-    max_no_improvement_rounds: int,
+    max_final_research_rounds: Optional[int],
+    max_final_revision_rounds: Optional[int],
+    max_no_improvement_rounds: Optional[int],
     min_score_improvement: float,
     min_new_independent_sources: int,
-    min_claim_support_score: float,
-    required_critical_coverage: float,
+    min_claim_support_score: Optional[float],
+    required_critical_coverage: Optional[float],
     verification_profile: str,
-    verification_max_workers: int,
-    verification_batch_size: int,
-    verification_cache: bool,
-    verification_timeout_seconds: int,
-    verification_minor_sample_rate: float,
+    verification_max_workers: Optional[int],
+    verification_batch_size: Optional[int],
+    verification_cache: Optional[bool],
+    verification_timeout_seconds: Optional[int],
+    verification_minor_sample_rate: Optional[float],
+    adaptive_coverage: bool,
+    requirement_max_search_attempts: int,
+    max_stall_rounds: int,
+    audit_log: bool,
+    local_llm_role: str,
     extended_mode: bool,
     crawl_max_pages: int,
     crawl_max_depth: int,
@@ -475,6 +513,11 @@ def research(
         verification_cache_enabled=verification_cache,
         verification_timeout_seconds=verification_timeout_seconds,
         verification_minor_claim_sample_rate=verification_minor_sample_rate,
+        adaptive_coverage=adaptive_coverage,
+        requirement_max_search_attempts=requirement_max_search_attempts,
+        max_stall_rounds=max_stall_rounds,
+        audit_log_enabled=audit_log,
+        local_llm_role=local_llm_role,
         extended_mode=extended_mode,
         crawl_max_pages=crawl_max_pages,
         crawl_max_depth=crawl_max_depth,

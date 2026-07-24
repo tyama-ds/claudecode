@@ -315,6 +315,47 @@ class DeepResearchTool:
 
             clients[stage] = get_client(**kwargs)
             print(f"[StageLLM] {stage}: {provider} / {spec.get('model') or 'default model'}")
+
+        # --- Local LLM role routing (feature flag, default off) -------
+        # local_llm_role routes the verification and/or draft stages to
+        # the user's OWN local server. The base_url must have been set
+        # explicitly (config or LOCAL_LLM_BASE_URL) — this code never
+        # invents an endpoint, and the client only ever talks to it as
+        # the result of the user starting a run.
+        role = getattr(self.config.research, "local_llm_role", "off")
+        if role and role != "off" and \
+                self.config.api.provider != LLMProvider.LOCAL:
+            base_url = self.config.api.local_base_url
+            if base_url:
+                local_kwargs = {
+                    "provider": "local",
+                    "api_key": self.config.api.local_api_key,   # optional
+                    "model": None,
+                    "http_proxy": self.config.proxy.http_proxy,
+                    "https_proxy": self.config.proxy.https_proxy,
+                    "verify_ssl": self.config.proxy.verify_ssl,
+                    "base_url": base_url,
+                    "backend": self.config.api.local_backend.value,
+                }
+                try:
+                    local_client = get_client(**local_kwargs)
+                except Exception as e:
+                    print(f"[RoleLLM] local client unavailable: {e}")
+                    local_client = None
+                if local_client is not None:
+                    routed = {"verify": ("evaluation",),
+                              "draft": ("writing",),
+                              "all": ("evaluation", "writing")}[role]
+                    for stage in routed:
+                        # explicit stage_overrides always win over the flag
+                        clients.setdefault(stage, local_client)
+                    masked = "(api key set)" if \
+                        self.config.api.local_api_key else "(no api key)"
+                    print(f"[RoleLLM] local_llm_role={role}: "
+                          f"{', '.join(routed)} -> {base_url} {masked}")
+            else:
+                print("[RoleLLM] local_llm_role is set but no "
+                      "local_base_url is configured — routing skipped")
         return clients
 
     def _create_search_client(self):
@@ -854,11 +895,19 @@ class DeepResearchTool:
                         figure_collection=figure_collection,
                     )
                 finalized = True
+                # V1 stores the executive summary / key findings OUTSIDE
+                # the chapter map — they are semantic content the reader
+                # sees, so they join the freeze as manifest extras
+                _exec = session.section_contents.get(
+                    "_executive_summary") or {}
                 semantic_freeze_hash = self._freeze_semantics(
                     {sid: sd.get("content", "")
                      for sid, sd in session.section_contents.items()
                      if not sid.startswith("_") and sd.get("content")},
-                    figure_collection)
+                    figure_collection,
+                    extras={k: _exec.get(k) for k in
+                            ("executive_summary", "key_findings",
+                             "recommendations") if _exec.get(k)} or None)
 
             # After finalization the body is FROZEN: the legacy length
             # adjustment must never rewrite a verified body, so the
@@ -979,17 +1028,29 @@ class DeepResearchTool:
         # only have done non-semantic work since (layout, format
         # conversion, deterministic insertion of the frozen figures).
         semantic_output_hash = None
+        semantic_artifact_check = None
         if semantic_freeze_hash:
             if version_tag == "v1":
                 output_chapters = {
                     sid: sd.get("content", "")
                     for sid, sd in session.section_contents.items()
                     if not sid.startswith("_") and sd.get("content")}
+                _exec = session.section_contents.get(
+                    "_executive_summary") or {}
+                _extras = {k: _exec.get(k) for k in
+                           ("executive_summary", "key_findings",
+                            "recommendations") if _exec.get(k)} or None
             else:
                 output_chapters = {sid: ch.content
                                    for sid, ch in result.chapters.items()}
+                _extras = None
             semantic_output_hash = self._check_semantics_at_output(
-                output_chapters, figure_collection, semantic_freeze_hash)
+                output_chapters, figure_collection, semantic_freeze_hash,
+                extras=_extras)
+            # audit item D: the check must also REBUILD from the actual
+            # saved artifact — not only re-hash the in-memory object
+            semantic_artifact_check = self._check_semantics_in_artifact(
+                active_report_path)
 
         # Live report: deliver the VERIFIED final body (replaces drafts,
         # removes watermarks, appends references) and release the sinks.
@@ -1034,6 +1095,7 @@ class DeepResearchTool:
             "max_concurrency_observed": run_limits.run_peak,
             "semantic_manifest_hash_at_freeze": semantic_freeze_hash,
             "semantic_manifest_hash_at_output": semantic_output_hash,
+            "semantic_artifact_check": semantic_artifact_check,
             "verification_summary": (getattr(self, "finalization_outcome",
                                              None) or {}).get(
                 "verification_summary"),
@@ -1440,11 +1502,17 @@ class DeepResearchTool:
             return None
         return CompositeSink(sinks)
 
-    def _freeze_semantics(self, chapters, figure_collection) -> str:
-        """Canonical semantic snapshot + hash at FREEZE time."""
+    def _freeze_semantics(self, chapters, figure_collection,
+                          extras=None) -> str:
+        """Canonical semantic snapshot + hash at FREEZE time.
+
+        ``extras`` carries semantic content stored outside the chapter
+        map (V1 executive summary / key findings / recommendations) so
+        the freeze covers EVERYTHING the reader will read."""
         from .report.semantic_manifest import (
             build_semantic_manifest, manifest_hash)
-        manifest = build_semantic_manifest(chapters, figure_collection)
+        manifest = build_semantic_manifest(chapters, figure_collection,
+                                           extras=extras)
         digest = manifest_hash(manifest)
         self.semantic_manifest = manifest
         self.semantic_manifest_hash = digest
@@ -1452,7 +1520,7 @@ class DeepResearchTool:
         return digest
 
     def _check_semantics_at_output(self, chapters, figure_collection,
-                                   freeze_hash) -> str:
+                                   freeze_hash, extras=None) -> str:
         """Recompute the manifest right before the final output.
 
         Any difference from the freeze-time hash means semantic content
@@ -1461,7 +1529,8 @@ class DeepResearchTool:
         from .report.semantic_manifest import (
             build_semantic_manifest, manifest_hash)
         digest = manifest_hash(
-            build_semantic_manifest(chapters, figure_collection))
+            build_semantic_manifest(chapters, figure_collection,
+                                    extras=extras))
         if freeze_hash and digest != freeze_hash:
             print(f"[Freeze] SEMANTIC DRIFT DETECTED: "
                   f"{freeze_hash[:16]}… -> {digest[:16]}…")
@@ -1471,6 +1540,44 @@ class DeepResearchTool:
                 "hash不一致）。パイプライン不具合の可能性があります。",
             )
         return digest
+
+    def _check_semantics_in_artifact(self, report_path) -> str:
+        """Audit item D: verify the frozen semantics inside the ACTUAL
+        saved artifact — re-hashing the in-memory object only proves the
+        object didn't change, not that the renderer wrote it faithfully.
+
+        Returns "pass", "fail" or "skipped:<reason>" and raises a
+        CRITICAL warning on failure.
+        """
+        from .report.semantic_manifest import (
+            extract_artifact_text, verify_frozen_in_artifact)
+        manifest = getattr(self, "semantic_manifest", None)
+        if not manifest:
+            return "skipped:no_manifest"
+        artifact_text = extract_artifact_text(report_path)
+        if artifact_text is None:
+            # unreadable format (e.g. PDF): SKIPPED is reported loudly,
+            # never disguised as a pass
+            print(f"[Freeze] artifact check skipped "
+                  f"(unsupported format): {report_path}")
+            return "skipped:unsupported_format"
+        result = verify_frozen_in_artifact(manifest, artifact_text)
+        if result["ok"]:
+            print(f"[Freeze] artifact check passed "
+                  f"({result['checked']} fragments verified in "
+                  f"{Path(report_path).name})")
+            return "pass"
+        print(f"[Freeze] ARTIFACT CONTENT MISMATCH: "
+              f"{len(result['missing'])}/{result['checked']} frozen "
+              f"fragments missing from {report_path}")
+        ResearchWarnings.get_instance().add(
+            ResearchWarnings.CRITICAL, "Freeze",
+            f"保存された成果物に凍結済み本文の一部が見つかりません"
+            f"（{len(result['missing'])}断片欠落、例: "
+            f"{result['missing'][0] if result['missing'] else ''}…）。"
+            f"レンダリング段階の不具合の可能性があります。",
+        )
+        return "fail"
 
     @staticmethod
     def _emit_live_figures(live_sink, collection) -> None:

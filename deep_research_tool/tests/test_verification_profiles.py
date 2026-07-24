@@ -439,7 +439,13 @@ class TestCancelAndSampling(unittest.TestCase):
         evidence = make_locker_evidence()
         mgr = make_registry(evidence)
         verifier = make_verifier(llm, rate=0.3)     # fast-style sampling
-        verdict = verifier.verify_report({"1": SECTION_TEXT}, evidence,
+        # every extracted claim exists VERBATIM in the body so the
+        # deterministic citation parser can associate it ([SOURCE 1])
+        body = (SECTION_TEXT
+                + "重大な主張である [SOURCE 1]。重要な主張である [SOURCE 1]。"
+                + "".join(f"軽微な話{i}である [SOURCE 1]。"
+                          for i in range(12)))
+        verdict = verifier.verify_report({"1": body}, evidence,
                                          citation_manager=mgr)
         self.assertGreater(verdict.metrics.skipped_minor_claims, 0)
         # every skipped claim is MINOR; critical/important all verified

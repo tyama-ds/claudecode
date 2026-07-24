@@ -56,13 +56,32 @@ def figure_semantics(collection) -> List[Dict[str, Any]]:
 
 
 def build_semantic_manifest(chapters: Dict[str, str],
-                            figure_collection=None) -> Dict[str, Any]:
-    """Canonical semantic snapshot: chapter texts + figure semantics."""
-    return {
+                            figure_collection=None,
+                            extras: Optional[Dict[str, Any]] = None,
+                            ) -> Dict[str, Any]:
+    """Canonical semantic snapshot: chapter texts + figure semantics.
+
+    ``extras`` carries semantic content that lives OUTSIDE the chapter
+    map — the executive summary, key findings, recommendations, glossary
+    entries, footnotes. Everything the reader will read is in the
+    manifest; nothing semantic escapes the freeze because it happens to
+    be stored under another key.
+    """
+    manifest = {
         "chapters": {str(k): str(v or "") for k, v in
                      sorted((chapters or {}).items())},
         "figures": figure_semantics(figure_collection),
     }
+    if extras:
+        def _canon(v):
+            if isinstance(v, dict):
+                return {str(k): _canon(x) for k, x in sorted(v.items())}
+            if isinstance(v, (list, tuple)):
+                return [_canon(x) for x in v]
+            return str(v)
+        manifest["extras"] = {str(k): _canon(v)
+                              for k, v in sorted(extras.items())}
+    return manifest
 
 
 def manifest_hash(manifest: Dict[str, Any]) -> str:
@@ -70,6 +89,122 @@ def manifest_hash(manifest: Dict[str, Any]) -> str:
     canonical = json.dumps(manifest, ensure_ascii=False, sort_keys=True,
                            separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Artifact-level freeze verification (audit item D)
+#
+# Hashing the in-memory chapters twice only proves the OBJECT did not
+# change; a renderer bug could still alter or drop content on the way to
+# disk. The functions below REBUILD the semantic text from the ACTUAL
+# saved artifact and check that every frozen chapter paragraph survived
+# into it (normalized: markup, citation numbers and whitespace removed —
+# rendering may restyle, it must never change meaning-bearing text).
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+_CITATION_RE = _re.compile(r"\[(?:SOURCE:?\s*)?\d+\]")
+_MD_IMAGE_RE = _re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_MD_LINK_RE = _re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_TAG_RE = _re.compile(r"<[^>]+>")
+
+
+def normalize_semantic_text(text: str) -> str:
+    """Reduce text to its meaning-bearing characters.
+
+    Removes markdown/HTML markup, citation tags/numbers and ALL
+    whitespace, so a markdown source and its rendered artifact compare
+    equal exactly when the words are the same.
+    """
+    text = text or ""
+    text = _MD_IMAGE_RE.sub("", text)
+    text = _MD_LINK_RE.sub(r"\1", text)
+    text = _TAG_RE.sub("", text)
+    text = _CITATION_RE.sub("", text)
+    text = _re.sub(r"[*_`>#|\\-]+", "", text)
+    text = _re.sub(r"[：:]\s*$", "", text)
+    return _re.sub(r"\s+", "", text)
+
+
+def extract_artifact_text(path) -> Optional[str]:
+    """Best-effort text of a SAVED report artifact (md/txt/html/docx).
+
+    Returns None when the format cannot be read back (the caller reports
+    the check as SKIPPED — never silently passed).
+    """
+    from pathlib import Path
+    p = Path(path)
+    if not p.exists():
+        return None
+    suffix = p.suffix.lower()
+    if suffix in (".md", ".txt", ".markdown"):
+        return p.read_text(encoding="utf-8", errors="replace")
+    if suffix in (".html", ".htm"):
+        import html as _htmlmod
+        return _htmlmod.unescape(
+            p.read_text(encoding="utf-8", errors="replace"))
+    if suffix == ".docx":
+        try:
+            import docx
+            doc = docx.Document(str(p))
+            parts = [para.text for para in doc.paragraphs]
+            for table in doc.tables:
+                for row in table.rows:
+                    parts.extend(cell.text for cell in row.cells)
+            return "\n".join(parts)
+        except Exception:
+            return None
+    return None
+
+
+def verify_frozen_in_artifact(manifest: Dict[str, Any],
+                              artifact_text: str,
+                              min_fragment_chars: int = 24,
+                              ) -> Dict[str, Any]:
+    """Check that the frozen semantic content is IN the saved artifact.
+
+    Every sufficiently long paragraph of every frozen chapter (and every
+    figure/table title, caption and cell) must appear — normalized — in
+    the artifact text. Returns {"ok", "checked", "missing"} where
+    ``missing`` lists the fragments that did not survive rendering.
+    """
+    haystack = normalize_semantic_text(artifact_text)
+    checked = 0
+    missing: List[str] = []
+
+    def _check(fragment: str) -> None:
+        nonlocal checked
+        needle = normalize_semantic_text(fragment)
+        if len(needle) < min_fragment_chars:
+            return
+        checked += 1
+        if needle not in haystack:
+            missing.append(fragment.strip()[:120])
+
+    for text in (manifest.get("chapters") or {}).values():
+        for para in (text or "").split("\n\n"):
+            for line in para.split("\n"):
+                _check(line)
+    for item in manifest.get("figures") or []:
+        _check(item.get("title", ""))
+        _check(item.get("caption", ""))
+        for row in item.get("rows", []) or []:
+            _check(" ".join(row))
+    extras = manifest.get("extras") or {}
+
+    def _walk(value):
+        if isinstance(value, dict):
+            for v in value.values():
+                _walk(v)
+        elif isinstance(value, list):
+            for v in value:
+                _walk(v)
+        else:
+            _check(str(value))
+    _walk(extras)
+
+    return {"ok": not missing, "checked": checked, "missing": missing}
 
 
 def figure_semantics_markdown(collection, language: str = "ja",

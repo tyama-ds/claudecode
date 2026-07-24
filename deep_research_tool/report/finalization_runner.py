@@ -136,6 +136,32 @@ class FinalizationRunner:
         # verbatim from their frozen source, e.g. figure semantics)
         self.render_only_sections: set = set()
 
+        # --- adaptive coverage: requirement-granular gap control ------
+        from ..adaptive import CoverageLedger, StopController
+        from ..utils.audit_log import AuditLog
+        self.adaptive_enabled = bool(self._rc("adaptive_coverage", True))
+        self.ledger = CoverageLedger(
+            max_search_attempts=self._rc(
+                "requirement_max_search_attempts", 2) or 2) \
+            if self.adaptive_enabled else None
+        self.stop_controller = StopController(
+            max_rounds=self.verification_settings.max_final_research_rounds,
+            max_stall_rounds=self._rc("max_stall_rounds", 2) or 2) \
+            if self.adaptive_enabled else None
+        # default ON in production (a research_config exists); OFF for
+        # bare test/manual constructions so no files appear unrequested
+        audit_enabled = bool(self._rc("audit_log_enabled",
+                                      self.rc is not None))
+        self.audit = AuditLog(
+            path=(self.output_dir /
+                  f"audit_{self.session_id or 'report'}.jsonl"),
+            enabled=audit_enabled,
+            session_id=self.session_id)
+        # round-in-progress bookkeeping (finalized on the next verify)
+        self._pending_round = None
+        self._last_claim_counts = None
+        self._req_seq = 0
+
     # ------------------------------------------------------------------
     # construction helpers
     # ------------------------------------------------------------------
@@ -291,6 +317,14 @@ class FinalizationRunner:
         critical_questions = self._critical_questions()
         freshness_required = self._freshness_required()
 
+        if self.ledger is not None:
+            self._build_requirements(critical_questions, chapters)
+        self.audit.event(
+            "finalization_started",
+            profile=self.verification_settings.profile,
+            adaptive=self.ledger is not None,
+            sections=sorted(chapters), questions=len(critical_questions))
+
         current = dict(chapters)   # the shared, mutating body
 
         from ..verification.runtime import stable_hash
@@ -328,6 +362,7 @@ class FinalizationRunner:
                     self.verification_cache)
                 print("[Finalize] body/evidence/citations unchanged — "
                       "skipping full re-verification")
+                self._after_verify(last_verify["verdict"])
                 return last_verify["verdict"]
 
             # LIVE evidence on every pass — never a loop-start snapshot
@@ -344,6 +379,7 @@ class FinalizationRunner:
             )
             last_verify["fingerprint"] = fp
             last_verify["verdict"] = verdict
+            self._after_verify(verdict)
             return verdict
 
         def research_fn(issues, queries):
@@ -398,8 +434,25 @@ class FinalizationRunner:
         outcome["verification_summary"] = self._build_summary(
             outcome, started)
 
+        # settle the coverage ledger: nothing stays silently "open" —
+        # remaining gaps are explicitly closed as budget_exhausted
+        if self.ledger is not None:
+            closed = self.ledger.close_budget_exhausted(
+                "最終ループ終了時に未解決" if self.language == "ja"
+                else "unresolved at end of finalization loop")
+            outcome["coverage_ledger"] = self.ledger.to_dict()
+            self.audit.event("finalization_done",
+                             decision=outcome["decision"],
+                             coverage=self.ledger.coverage(),
+                             counts=self.ledger.counts(),
+                             budget_exhausted=closed)
+        else:
+            self.audit.event("finalization_done",
+                             decision=outcome["decision"])
+
         # FREEZE, then deterministic display numbering ([SOURCE N] -> [n])
         frozen = outcome["chapters"]
+        self.audit.event("body_frozen", sections=sorted(frozen))
         rendered, ordered_ids = self.citation_mgr.render_numbering(frozen)
         # references follow first-use order in every renderer
         try:
@@ -552,8 +605,75 @@ class FinalizationRunner:
                 return True
         return False
 
-    def _research_round(self, issues, queries) -> Dict[str, Any]:
+    def _fetch_and_register(self, url: str, query: str,
+                            target_sections: List[str],
+                            changed_sections: List[str]):
+        """Fetch one novel URL and register it as evidence (shared by the
+        legacy and adaptive research rounds). Returns the Evidence or
+        None (already seen / too short / duplicate content / fetch
+        error). seen_urls is wired to the actual fetch: a URL is fetched
+        at most once across the whole run (locker-seeded)."""
         from ..evidence.locker import EvidenceType
+
+        if not self.budget.is_novel_url(url):
+            return None
+        try:
+            page = self.search_client.get_page_content(url)
+        except Exception:
+            return None
+        text = getattr(page, "text_content", "") or ""
+        if len(text) < 200:
+            return None
+        # content-level dedup: same substance under another URL is NOT a
+        # new independent source
+        if self._is_duplicate_content(text):
+            print(f"[Finalize] duplicate content skipped: {url[:60]}")
+            return None
+        # freshness metadata for the NEW evidence: published date
+        # (best-effort from the page text) and a deterministic
+        # source-type/primary classification from the domain, so the
+        # primary/freshness gate can re-evaluate correctly after the
+        # additional research
+        published, src_type, is_primary = \
+            self._classify_new_evidence(url, text)
+        evidence = self.locker.add_evidence(
+            url=url, title=getattr(page, "title", "") or url,
+            content_excerpt=text[:500], extracted_text=text,
+            evidence_type=EvidenceType.WEB_PAGE,
+            search_query=query,
+            section_reference=target_sections[0] if target_sections else "",
+            published_date=published,
+            source_type=src_type,
+        )
+        if is_primary:
+            evidence.quality_indicators.is_primary_source = True
+        self._url_to_id[url] = evidence.id
+        for sid in target_sections:
+            entry = {"title": getattr(page, "title", "") or url,
+                     "url": url, "content": text[:2000],
+                     "raw_content": text, "key_points": [],
+                     "relevance_score": 0.5, "is_new": True}
+            # section-evidence relations
+            self.section_evidence.setdefault(sid, []).append(entry)
+            sdata = self.session_contents.get(sid)
+            if sdata is not None:
+                sdata.setdefault("extracted_content", []).append(entry)
+                sdata.setdefault("sources", []).append(url)
+            # citation registry: APPEND-ONLY, numbers never shift
+            self.citation_mgr.append_evidence(sid, evidence.id)
+            # generator-side chapter citations stay in sync
+            if self.chapter_citation_callback:
+                try:
+                    self.chapter_citation_callback(sid, evidence)
+                except Exception:
+                    pass
+            if sid not in changed_sections:
+                changed_sections.append(sid)
+        return evidence
+
+    def _research_round(self, issues, queries) -> Dict[str, Any]:
+        if self.ledger is not None:
+            return self._adaptive_research_round(issues, queries)
 
         new_sources = 0
         changed_sections: List[str] = []
@@ -571,72 +691,299 @@ class FinalizationRunner:
                 continue
             for r in results[:2]:
                 url = getattr(r, "url", "")
-                # seen_urls is wired to the actual fetch: a URL is fetched
-                # at most once across the whole run (locker-seeded)
-                if not self.budget.is_novel_url(url):
-                    continue
-                try:
-                    page = self.search_client.get_page_content(url)
-                except Exception:
-                    continue
-                text = getattr(page, "text_content", "") or ""
-                if len(text) < 200:
-                    continue
-                # content-level dedup: same substance under another URL
-                # is NOT a new independent source
-                if self._is_duplicate_content(text):
-                    print(f"[Finalize] duplicate content skipped: {url[:60]}")
-                    continue
                 target_sections = list(per_issue_sections.keys()) or \
                     list(self.section_evidence.keys())[:1]
-                # freshness metadata for the NEW evidence: published date
-                # (best-effort from the page text) and a deterministic
-                # source-type/primary classification from the domain, so
-                # the primary/freshness gate can re-evaluate correctly
-                # after the additional research
-                published, src_type, is_primary = \
-                    self._classify_new_evidence(url, text)
-                evidence = self.locker.add_evidence(
-                    url=url, title=getattr(page, "title", "") or url,
-                    content_excerpt=text[:500], extracted_text=text,
-                    evidence_type=EvidenceType.WEB_PAGE,
-                    search_query=q,
-                    section_reference=target_sections[0]
-                    if target_sections else "",
-                    published_date=published,
-                    source_type=src_type,
-                )
-                if is_primary:
-                    evidence.quality_indicators.is_primary_source = True
-                self._url_to_id[url] = evidence.id
-                new_sources += 1
-                for sid in target_sections:
-                    entry = {"title": getattr(page, "title", "") or url,
-                             "url": url, "content": text[:2000],
-                             "raw_content": text, "key_points": [],
-                             "relevance_score": 0.5, "is_new": True}
-                    # section-evidence relations
-                    self.section_evidence.setdefault(sid, []).append(entry)
-                    sdata = self.session_contents.get(sid)
-                    if sdata is not None:
-                        sdata.setdefault("extracted_content", []).append(entry)
-                        sdata.setdefault("sources", []).append(url)
-                    # citation registry: APPEND-ONLY, numbers never shift
-                    self.citation_mgr.append_evidence(sid, evidence.id)
-                    # generator-side chapter citations stay in sync
-                    if self.chapter_citation_callback:
-                        try:
-                            self.chapter_citation_callback(sid, evidence)
-                        except Exception:
-                            pass
-                    if sid not in changed_sections:
-                        changed_sections.append(sid)
+                if self._fetch_and_register(url, q, target_sections,
+                                            changed_sections) is not None:
+                    new_sources += 1
 
         # length-planner units follow the evidence (audit item 2)
         if changed_sections:
             self._recalc_units()
         return {"new_sources": new_sources,
                 "changed_sections": changed_sections}
+
+    # ------------------------------------------------------------------
+    # adaptive research round (requirement-granular, gap-only)
+    # ------------------------------------------------------------------
+
+    def _adaptive_research_round(self, issues, queries) -> Dict[str, Any]:
+        """Gap-only research at REQUIREMENT granularity.
+
+        - the deterministic StopController is consulted first: a stalled
+          or exhausted run performs no search at all;
+        - only gap requirements (open / conflicted) get queries —
+          supported requirements are NEVER re-searched;
+        - per requirement, issue-supplied queries are augmented with
+          intent-templated variants and executed in PARALLEL through the
+          TaskDAG scheduler (bounded by parallel_max_workers);
+        - per-requirement result lists are fused with INTERNAL RRF
+          before fetching (existing search clients only);
+        - every fetch/dedup rule of the legacy round applies unchanged.
+        """
+        from ..adaptive import (TaskDAG, build_intent_queries, rrf_merge)
+        from ..adaptive.models import ResearchTask
+
+        stop, stop_reason = self.stop_controller.should_stop(self.ledger)
+        if stop:
+            print(f"[Adaptive] research stopped: {stop_reason}")
+            self.audit.event("research_stopped", reason=stop_reason,
+                             coverage=self.ledger.coverage())
+            return {"new_sources": 0, "changed_sections": []}
+
+        gaps = self.ledger.gap_requirements()
+        if not gaps:
+            self.audit.event("research_skipped", reason="no_gap_requirements")
+            return {"new_sources": 0, "changed_sections": []}
+
+        # queries handed in by the controller are ALREADY novel-filtered;
+        # map them back to their requirement via the issues they came from
+        query_req: Dict[str, str] = {}
+        for issue in issues:
+            req = self._requirement_for_issue(issue)
+            if req is None:
+                continue
+            for q in issue.search_queries or []:
+                query_req.setdefault(q, req.req_id)
+
+        gap_ids = {r.req_id for r in gaps}
+        tasks: List[ResearchTask] = []
+        attempted: set = set()
+        seq = 0
+        for q in queries:
+            req_id = query_req.get(q) or gaps[0].req_id
+            if req_id not in gap_ids:
+                continue        # supported requirements are never searched
+            seq += 1
+            req = self.ledger.get(req_id)
+            tasks.append(ResearchTask(task_id=f"T{seq:03d}",
+                                      req_id=req_id, query=q,
+                                      intent=req.intent))
+            attempted.add(req_id)
+        # intent-templated diversification for the gap requirements
+        for req in gaps[:4]:
+            extra = build_intent_queries(req.text, req.intent,
+                                         self.language, max_queries=3)
+            for q in self.budget.novel_queries(extra)[:2]:
+                seq += 1
+                tasks.append(ResearchTask(task_id=f"T{seq:03d}",
+                                          req_id=req.req_id, query=q,
+                                          intent=req.intent))
+                attempted.add(req.req_id)
+        if not tasks:
+            return {"new_sources": 0, "changed_sections": []}
+        for req_id in sorted(attempted):
+            self.ledger.record_search_attempt(req_id)
+
+        # snapshot BEFORE the round (deltas are measured, not self-reported)
+        coverage_before = self.ledger.coverage()
+        counts_before = self._claim_counts()
+
+        # parallel search through the DAG scheduler (search clients take
+        # their own leaf permits; the pool size honors the app-wide limit)
+        dag = TaskDAG(tasks[:12])
+        results_by_task = dag.run(
+            lambda task: self.search_client.search(task.query),
+            parallel_max_workers=self._rc("parallel_max_workers", 8),
+            stage_cap=self.verification_settings.max_workers,
+        )
+
+        # per-requirement RRF fusion of the task result lists
+        by_req: Dict[str, List] = {}
+        for task in dag.tasks():
+            value = results_by_task.get(task.task_id)
+            task.result_count = len(value or [])
+            if value:
+                by_req.setdefault(task.req_id, []).append(value)
+
+        new_sources = 0
+        changed_sections: List[str] = []
+        new_evidence_ids: List[str] = []
+        for req_id in sorted(by_req):
+            req = self.ledger.get(req_id)
+            fused = rrf_merge(by_req[req_id], limit=4)
+            targets = [req.section_id] if req.section_id else \
+                sorted({i.section_id for i in issues if i.section_id}) or \
+                list(self.section_evidence.keys())[:1]
+            for r in fused:
+                url = getattr(r, "url", "")
+                evidence = self._fetch_and_register(
+                    url, req.text[:60], targets, changed_sections)
+                if evidence is not None:
+                    new_sources += 1
+                    new_evidence_ids.append(evidence.id)
+                    req.evidence_ids.append(evidence.id)
+
+        if changed_sections:
+            self._recalc_units()
+
+        # attempt budget spent and still a gap -> unavailable_after_search
+        exhausted = self.ledger.close_exhausted()
+
+        self._pending_round = {
+            "round_index": len(self.ledger.rounds) + 1,
+            "new_unique_evidence": new_sources,
+            "queries_run": len(tasks),
+            "coverage_before": coverage_before,
+            "counts_before": counts_before,
+        }
+        self.audit.event(
+            "research_round",
+            round=self._pending_round["round_index"],
+            gap_requirements=sorted(attempted),
+            queries=[t.query for t in tasks],
+            new_sources=new_sources,
+            new_evidence_ids=new_evidence_ids,
+            unavailable_after_search=exhausted,
+        )
+        return {"new_sources": new_sources,
+                "changed_sections": changed_sections}
+
+    # ------------------------------------------------------------------
+    # coverage ledger plumbing
+    # ------------------------------------------------------------------
+
+    def _build_requirements(self, critical_questions: List[str],
+                            chapters: Dict[str, str]) -> None:
+        """Decompose the run into RequirementLeafs (deterministic).
+
+        - one requirement per critical question (plan items + explicit
+          user requirements), classified by intent;
+        - one claims-support requirement per section (the requirement
+          that every factual claim in the section is evidence-backed).
+        """
+        from ..adaptive import classify_intent
+        from ..adaptive.models import RequirementLeaf
+
+        for i, q in enumerate(critical_questions, 1):
+            self.ledger.add(RequirementLeaf(
+                req_id=f"REQ-Q{i}", text=q,
+                intent=classify_intent(q), priority="critical"))
+        for sid in chapters:
+            text = (f"セクション{sid}の事実主張がエビデンスに支持されている"
+                    if self.language == "ja" else
+                    f"every factual claim in section {sid} is "
+                    f"evidence-backed")
+            self.ledger.add(RequirementLeaf(
+                req_id=f"REQ-S{sid}", text=text, section_id=sid,
+                intent="background", priority="important"))
+        self.audit.event("requirements_decomposed",
+                         count=len(self.ledger),
+                         requirements=[
+                             {"req_id": r.req_id, "intent": r.intent,
+                              "priority": r.priority,
+                              "text": r.text[:80]}
+                             for r in self.ledger.requirements()])
+
+    def _requirement_for_issue(self, issue):
+        """Deterministic issue -> requirement mapping."""
+        if self.ledger is None:
+            return None
+        from ..report.finalization import ISSUE_UNANSWERED_QUESTION
+        if issue.type == ISSUE_UNANSWERED_QUESTION and issue.claim:
+            for req in self.ledger.requirements():
+                if req.req_id.startswith("REQ-Q") and req.text == issue.claim:
+                    return req
+        if issue.section_id:
+            return self.ledger.get(f"REQ-S{issue.section_id}")
+        return None
+
+    def _claim_counts(self) -> Dict[str, int]:
+        """Measured claim counters from the LAST verdict (for deltas)."""
+        return dict(self._last_claim_counts or
+                    {"supported": 0, "contradicted": 0})
+
+    def _update_ledger_from_verdict(self, verdict) -> None:
+        """Deterministic requirement-state update from one verify pass."""
+        from ..adaptive.models import (
+            REQ_BUDGET_EXHAUSTED, REQ_CONFLICTED, REQ_NOT_APPLICABLE,
+            REQ_OPEN, REQ_SUPPORTED, REQ_UNAVAILABLE)
+        from ..report.finalization import (
+            ISSUE_CONTRADICTED, ISSUE_UNANSWERED_QUESTION, ISSUE_UNSUPPORTED)
+
+        m = verdict.metrics
+        supported_claims = max(
+            0, m.claims_total - m.skipped_minor_claims - m.unsupported_count
+            - m.contradicted_count - m.uncertain_count)
+        self._last_claim_counts = {"supported": supported_claims,
+                                   "contradicted": m.contradicted_count}
+
+        unanswered = {i.claim for i in verdict.issues
+                      if i.type == ISSUE_UNANSWERED_QUESTION and i.claim}
+        sec_open: Dict[str, List[str]] = {}
+        sec_conflicted: Dict[str, List[str]] = {}
+        for i in verdict.issues:
+            if not i.section_id:
+                continue
+            if i.type == ISSUE_UNSUPPORTED:
+                sec_open.setdefault(i.section_id, []).append(i.claim_id)
+            elif i.type == ISSUE_CONTRADICTED:
+                sec_conflicted.setdefault(i.section_id, []).append(i.claim_id)
+
+        for req in self.ledger.requirements():
+            if req.status in (REQ_NOT_APPLICABLE, REQ_BUDGET_EXHAUSTED):
+                continue
+            if req.req_id.startswith("REQ-Q"):
+                target = REQ_OPEN if req.text in unanswered else REQ_SUPPORTED
+            else:
+                sid = req.section_id
+                if sid in sec_conflicted:
+                    target = REQ_CONFLICTED
+                    req.claim_ids = sorted(
+                        set(sec_conflicted[sid] + sec_open.get(sid, [])))
+                elif sid in sec_open:
+                    target = REQ_OPEN
+                    req.claim_ids = sorted(set(sec_open[sid]))
+                else:
+                    target = REQ_SUPPORTED
+            if target == req.status:
+                continue
+            # a searched-out requirement stays unavailable unless the
+            # new pass actually SUPPORTS it
+            if req.status == REQ_UNAVAILABLE and target != REQ_SUPPORTED:
+                continue
+            reason = ("検証パスの結果" if self.language == "ja"
+                      else "verification pass")
+            self.ledger.transition(req.req_id, target, reason=reason)
+            self.audit.event("requirement_transition",
+                             req_id=req.req_id, to=target, reason=reason)
+
+    def _after_verify(self, verdict) -> None:
+        """Ledger update + pending-round settlement after ANY verify."""
+        if self.ledger is None:
+            return
+        self._update_ledger_from_verdict(verdict)
+        pending = self._pending_round
+        if pending is not None:
+            from ..adaptive.models import ProgressRound
+            counts_now = self._claim_counts()
+            counts_before = pending["counts_before"]
+            progress = ProgressRound(
+                round_index=pending["round_index"],
+                new_unique_evidence=pending["new_unique_evidence"],
+                new_supported_claims=max(
+                    0, counts_now["supported"]
+                    - counts_before.get("supported", 0)),
+                resolved_conflicts=max(
+                    0, counts_before.get("contradicted", 0)
+                    - counts_now["contradicted"]),
+                coverage_delta=(self.ledger.coverage()
+                                - pending["coverage_before"]),
+                queries_run=pending["queries_run"],
+            )
+            self.ledger.record_round(progress)
+            self._pending_round = None
+            self.audit.event("round_measured", **progress.to_dict())
+        self.audit.event(
+            "verify_pass",
+            claims_total=verdict.metrics.claims_total,
+            unsupported=verdict.metrics.unsupported_count,
+            contradicted=verdict.metrics.contradicted_count,
+            uncertain=verdict.metrics.uncertain_count,
+            support_score=round(verdict.metrics.claim_support_score, 3),
+            coverage=self.ledger.coverage(),
+            counts=self.ledger.counts(),
+        )
 
     # ------------------------------------------------------------------
     # section edits (full evidence, new-first, stable SOURCE numbers)

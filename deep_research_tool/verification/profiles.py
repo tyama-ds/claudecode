@@ -198,38 +198,33 @@ def resolve_verification_settings(
 def settings_from_research_config(rc) -> VerificationSettings:
     """Resolve settings from a ResearchConfig (the ONE backend path).
 
-    Config fields that the user explicitly changed from their declared
-    defaults act as overrides on the profile preset — existing configs
-    that set e.g. max_final_research_rounds keep working unchanged.
+    UNSET semantics: every override field on the config defaults to
+    ``None`` (= the user did not set it, the profile preset applies).
+    A non-None value is an EXPLICIT override. Overrides are never
+    inferred by diffing a value against a declared default — a user who
+    explicitly picks the default value has still made an explicit
+    choice, and a preset that happens to share the default is never
+    mistaken for a user override.
     """
-    from ..config import ResearchConfig
-    defaults = ResearchConfig()
     overrides: Dict[str, Any] = {}
 
-    legacy_map = {
+    field_map = {
         "max_final_research_rounds": "max_final_research_rounds",
         "max_final_revision_rounds": "max_final_revision_rounds",
         "max_no_improvement_rounds": "max_no_improvement_rounds",
         "min_claim_support_score": "min_claim_support_score",
         "required_critical_coverage": "required_critical_coverage",
-    }
-    for cfg_name, key in legacy_map.items():
-        value = getattr(rc, cfg_name, None)
-        if value is not None and value != getattr(defaults, cfg_name):
-            overrides[key] = value
-
-    new_map = {
         "verification_max_workers": "max_workers",
         "verification_batch_size": "batch_size",
         "verification_minor_claim_sample_rate": "minor_claim_sample_rate",
         "verification_timeout_seconds": "timeout_seconds",
     }
-    for cfg_name, key in new_map.items():
+    for cfg_name, key in field_map.items():
         value = getattr(rc, cfg_name, None)
-        if value is not None and value != getattr(defaults, cfg_name):
+        if value is not None:
             overrides[key] = value
     cache = getattr(rc, "verification_cache_enabled", None)
-    if cache is not None and cache != defaults.verification_cache_enabled:
+    if cache is not None:
         overrides["cache_enabled"] = cache
 
     profile = getattr(rc, "verification_profile", "balanced")

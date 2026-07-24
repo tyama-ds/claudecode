@@ -54,6 +54,9 @@ ISSUE_INSUFFICIENT_EXPLANATION = "insufficient_explanation"
 ISSUE_UNUSED_EVIDENCE = "unused_high_importance_evidence"
 ISSUE_REDUNDANCY = "redundant_content"
 ISSUE_INVALID_CITATION = "invalid_citation"
+# the deterministic body parser and the LLM disagree about which
+# citations a claim carries -> the claim fails closed (audit item A)
+ISSUE_CITATION_ASSOCIATION_FAILURE = "citation_association_failure"
 ISSUE_ORPHAN_CITATION = "orphan_citation"
 ISSUE_ALL_CITATIONS_DELETED = "all_citations_deleted"
 ISSUE_OVER_HARD_MAX = "over_hard_max"
@@ -420,9 +423,11 @@ def decide(
             return ResearchDecision.REWRITE_FROM_EVIDENCE
         return ResearchDecision.FINALIZE_WITH_LIMITATIONS
 
-    # --- absolute floor (user-set only): expand from evidence, then
-    #     research, NEVER padding. An evidence-poor short body ends in
-    #     RESEARCH or limitations, not in inflated prose. ---
+    # --- absolute floor (user-set only): expand from EVIDENCE, never
+    #     padding — and NEVER research. A character count is a rendering
+    #     concern, not an evidence gap: research is triggered ONLY by
+    #     unsupported/conflicted/unanswered requirements (above), so a
+    #     short body without untapped evidence ends with limitations. ---
     if hard_min_body_chars and m.actual_body_chars < hard_min_body_chars:
         has_untapped_evidence = bool(
             m.unused_high_importance_evidence_ids or m.missing_content_units
@@ -430,14 +435,13 @@ def decide(
                                  ISSUE_INSUFFICIENT_EXPLANATION))
         if has_untapped_evidence and budget.revision_allowed():
             return ResearchDecision.REWRITE_FROM_EVIDENCE
-        if budget.research_allowed():
-            return ResearchDecision.RESEARCH
         return ResearchDecision.FINALIZE_WITH_LIMITATIONS
 
     # --- fixed mode: the user-set target ± tolerance is evaluated in
     #     production. Overshoot compresses; shortfall is fixed from
-    #     EVIDENCE (rewrite) or by research — never by padding, and an
-    #     over-target body is compressed, never mechanically truncated ---
+    #     EVIDENCE (rewrite) only — length alone never triggers research,
+    #     padding is forbidden, and an over-target body is compressed,
+    #     never mechanically truncated ---
     if fixed_target_chars:
         upper = int(fixed_target_chars * (1 + length_tolerance))
         lower = int(fixed_target_chars * (1 - length_tolerance))
@@ -449,8 +453,6 @@ def decide(
                 or m.missing_content_units)
             if has_untapped and budget.revision_allowed():
                 return ResearchDecision.REWRITE_FROM_EVIDENCE
-            if budget.research_allowed():
-                return ResearchDecision.RESEARCH
             return ResearchDecision.FINALIZE_WITH_LIMITATIONS
 
     # --- redundancy / imbalance -> compress (must carry reasons) ---

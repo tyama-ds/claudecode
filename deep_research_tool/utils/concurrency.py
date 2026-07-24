@@ -150,7 +150,14 @@ class RunLimits:
 
     Attach to LLM/search clients (``client.concurrency_limiter``); they
     take one composed permit around each leaf call. Acquisition order is
-    always process -> run, so no lock-order inversion is possible.
+    always run -> process (consistent everywhere, so no lock-order
+    inversion). The RUN permit is taken FIRST on purpose: a thread must
+    never hold a scarce PROCESS permit while blocked on its own run's
+    limiter — with the reverse order, one run's threads could park on
+    all 16 process permits while waiting for their 8 run permits,
+    starving every other run in the process (partial-acquisition
+    starvation). Holding a run permit while waiting for a process permit
+    only ever blocks threads of the SAME run.
     """
 
     def __init__(self, parallel_max_workers: int,
@@ -163,8 +170,8 @@ class RunLimits:
 
     @contextmanager
     def permit(self, timeout: Optional[float] = None):
-        with self.process_limiter.permit(timeout=timeout):
-            with self.run_limiter.permit(timeout=timeout):
+        with self.run_limiter.permit(timeout=timeout):
+            with self.process_limiter.permit(timeout=timeout):
                 yield
 
     @property
