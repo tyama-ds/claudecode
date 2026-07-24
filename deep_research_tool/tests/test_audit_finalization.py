@@ -477,11 +477,13 @@ class TestFixedModeDecisions(unittest.TestCase):
                    fixed_target_chars=10000, length_tolerance=0.2)
         self.assertEqual(d, ResearchDecision.REWRITE_FROM_EVIDENCE)
 
-    def test_fixed_shortfall_without_evidence_researches(self):
+    def test_fixed_shortfall_without_evidence_never_researches(self):
+        # character count is a rendering concern, NEVER a research
+        # trigger: a shortfall without untapped evidence ends with
+        # limitations (and never padding) even with research budget left
         d = decide(make_verdict(5000), LoopBudget(),
                    fixed_target_chars=10000, length_tolerance=0.2)
-        self.assertEqual(d, ResearchDecision.RESEARCH)
-        # research exhausted -> limitations, never padding
+        self.assertEqual(d, ResearchDecision.FINALIZE_WITH_LIMITATIONS)
         budget = LoopBudget(max_final_research_rounds=0)
         d = decide(make_verdict(5000), budget,
                    fixed_target_chars=10000, length_tolerance=0.2)

@@ -95,6 +95,12 @@ _CONFIG_PARAM_MAP = {
     "verification_timeout_seconds": "verification_timeout_seconds",
     "verification_minor_claim_sample_rate":
         "verification_minor_claim_sample_rate",
+    # Adaptive coverage / audit log / Local LLM role routing
+    "adaptive_coverage": "adaptive_coverage",
+    "requirement_max_search_attempts": "requirement_max_search_attempts",
+    "max_stall_rounds": "max_stall_rounds",
+    "audit_log_enabled": "audit_log_enabled",
+    "local_llm_role": "local_llm_role",
 }
 
 
@@ -148,6 +154,14 @@ def _profile(value, name):
     return v
 
 
+def _local_llm_role(value, name):
+    v = str(value).strip().lower()
+    if v not in ("off", "verify", "draft", "all"):
+        raise ValueError(f"{name} must be off/verify/draft/all "
+                         f"(got {value!r})")
+    return v
+
+
 def _int_range(lo, hi):
     def convert(value, name):
         try:
@@ -170,6 +184,9 @@ _PARAM_CONVERTERS = {
     "verification_batch_size": _int_range(1, 32),
     "verification_timeout_seconds": _int_range(0, 86400),
     "verification_minor_claim_sample_rate": _float_range(0.0, 1.0),
+    "requirement_max_search_attempts": _int_range(1, 10),
+    "max_stall_rounds": _int_range(1, 10),
+    "local_llm_role": _local_llm_role,
     "length_mode": _length_mode,
     "preferred_body_chars": _int_ge0,
     "hard_min_body_chars": _int_ge0,

@@ -144,6 +144,7 @@ class ChartAnalyzer:
         fill_missing_data: bool = True,
         max_charts_per_section: int = 3,
         max_workers: int = 8,
+        concurrency_limiter=None,
     ):
         """
         Initialize analyzer.
@@ -155,6 +156,8 @@ class ChartAnalyzer:
             use_llm_analysis: Use LLM for insight generation
             fill_missing_data: Fill missing data points (CAGR, interpolation)
             max_charts_per_section: Maximum charts per section
+            concurrency_limiter: optional ConcurrencyLimiter / RunLimits;
+                one leaf permit is taken around each LLM call
         """
         self.llm = llm_client
         self.language = language
@@ -163,11 +166,26 @@ class ChartAnalyzer:
         self.fill_missing_data = fill_missing_data
         self.max_charts_per_section = max_charts_per_section
         self.max_workers = max(1, int(max_workers))
+        self.concurrency_limiter = concurrency_limiter
 
         # Quality gate state (populated by analyze())
         from .chart_quality import ChartQualityGate
         self.quality_gate = ChartQualityGate()
         self.demoted_table_candidates: List[ChartRecommendation] = []
+
+    def _leaf_permit(self):
+        """Composed leaf permit around one LLM call.
+
+        When the LLM client already carries its own concurrency_limiter
+        (attached by DeepResearchTool.run), the client takes the permit
+        inside generate(); acquiring here too would hold TWO permits per
+        call and could deadlock the semaphore. Only limit here when the
+        client does not self-limit.
+        """
+        from ..utils.concurrency import maybe_permit
+        if getattr(self.llm, "concurrency_limiter", None) is not None:
+            return maybe_permit(None)
+        return maybe_permit(self.concurrency_limiter)
 
     def analyze(
         self,
@@ -790,7 +808,8 @@ these apply:
 
 Answer (finding, or REJECT):"""
 
-                response = self.llm.generate(prompt)
+                with self._leaf_permit():
+                    response = self.llm.generate(prompt)
                 return (response.content or "").strip()
             except Exception as e:
                 logger.warning(f"LLM insight refinement failed: {e}")

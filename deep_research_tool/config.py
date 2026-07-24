@@ -528,25 +528,30 @@ class ResearchConfig:
     plan_review_timeout: int = 60  # seconds
 
     # --- Finalization loop control (backward compatible additions) ---
-    max_final_research_rounds: int = 2
-    max_final_revision_rounds: int = 2
-    max_no_improvement_rounds: int = 1
+    # UNSET semantics: None means "the user did not set this" and the
+    # verification profile preset applies. A non-None value is an
+    # EXPLICIT override of the profile — overrides are never inferred by
+    # diffing a value against some default (a user explicitly choosing
+    # the default value is still an explicit choice).
+    max_final_research_rounds: Optional[int] = None
+    max_final_revision_rounds: Optional[int] = None
+    max_no_improvement_rounds: Optional[int] = None
     min_score_improvement: float = 0.03
     min_new_independent_sources: int = 1
-    min_claim_support_score: float = 0.85
-    required_critical_coverage: float = 1.0
+    min_claim_support_score: Optional[float] = None
+    required_critical_coverage: Optional[float] = None
 
     # --- Verification profile (fast / balanced / strict / custom) ---
     # Resolved by verification.profiles.resolve_verification_settings —
-    # the ONE backend path shared by GUI, Web UI and CLI. The legacy
-    # round/threshold fields above still work: values changed from their
-    # defaults override the profile preset (backward compatible).
+    # the ONE backend path shared by GUI, Web UI and CLI. All the
+    # override fields below default to None (UNSET): only explicitly
+    # provided values override the profile preset.
     verification_profile: str = "balanced"
-    verification_max_workers: int = 8
-    verification_batch_size: int = 10
-    verification_cache_enabled: bool = True
-    verification_timeout_seconds: int = 0      # 0 = no timeout
-    verification_minor_claim_sample_rate: float = 1.0
+    verification_max_workers: Optional[int] = None
+    verification_batch_size: Optional[int] = None
+    verification_cache_enabled: Optional[bool] = None
+    verification_timeout_seconds: Optional[int] = None   # 0 = no timeout
+    verification_minor_claim_sample_rate: Optional[float] = None
 
     # Extended mode settings (deep site crawling)
     extended_mode: bool = False
@@ -583,6 +588,34 @@ class ResearchConfig:
     importance_threshold: float = 0.6      # Min score to count as high-importance
     min_high_importance_sources: int = 2   # Below this, gap-fill re-search triggers
     max_gap_fill_rounds: int = 1           # Max re-search rounds per section
+
+    # --- Adaptive coverage (requirement/claim-granular gap control) ---
+    # When True (default), the final research loop keeps a Coverage
+    # Ledger: requirements decomposed from the plan/user requirements
+    # carry per-requirement states (open / supported / conflicted /
+    # unavailable_after_search / not_applicable / budget_exhausted),
+    # research targets ONLY gap requirements, stopping uses measured
+    # stall detection, and searches run intent-diversified through the
+    # EXISTING search clients with internal RRF merging. Off = the
+    # pre-1.2 behavior, unchanged.
+    adaptive_coverage: bool = True
+    # gap searches allowed per requirement before it is closed as
+    # unavailable_after_search
+    requirement_max_search_attempts: int = 2
+    # consecutive no-progress rounds (measured deltas) before stopping
+    max_stall_rounds: int = 2
+
+    # --- Audit log (local JSONL; secrets masked, nothing transmitted) ---
+    audit_log_enabled: bool = True
+
+    # --- Local LLM role routing (feature flag, default OFF) ---
+    # off:    the selected provider handles everything (current behavior)
+    # verify: the Local LLM handles VERIFICATION calls (claim judging)
+    # draft:  the Local LLM handles DRAFT/EDIT calls (section rewrites)
+    # all:    the Local LLM handles both roles
+    # Requires local_base_url to be configured explicitly by the user;
+    # the tool never auto-points this at an external service.
+    local_llm_role: str = "off"
 
 
 @dataclass
@@ -775,17 +808,17 @@ class Config:
                 "length_mode='fixed' requires preferred_body_chars or "
                 "target_characters to be set")
 
-        # --- Finalization loop validation ---
+        # --- Finalization loop validation (None = UNSET, profile applies) ---
         rc = self.research
         for name in ("max_final_research_rounds", "max_final_revision_rounds",
                      "max_no_improvement_rounds",
                      "min_new_independent_sources"):
             value = getattr(rc, name)
-            if value < 0:
+            if value is not None and value < 0:
                 errors.append(f"{name} must be >= 0 (got {value})")
         for name in ("min_claim_support_score", "required_critical_coverage"):
             value = getattr(rc, name)
-            if not (0 <= value <= 1):
+            if value is not None and not (0 <= value <= 1):
                 errors.append(f"{name} must be between 0 and 1 (got {value})")
         if rc.min_score_improvement < 0:
             errors.append(
@@ -798,6 +831,27 @@ class Config:
             settings_from_research_config(rc)
         except ValueError as e:
             errors.append(str(e))
+
+        # --- Adaptive coverage / audit / Local LLM role validation ---
+        if rc.requirement_max_search_attempts < 1:
+            errors.append(
+                f"requirement_max_search_attempts must be >= 1 "
+                f"(got {rc.requirement_max_search_attempts})")
+        if rc.max_stall_rounds < 1:
+            errors.append(
+                f"max_stall_rounds must be >= 1 "
+                f"(got {rc.max_stall_rounds})")
+        if rc.local_llm_role not in ("off", "verify", "draft", "all"):
+            errors.append(
+                f"local_llm_role must be one of off/verify/draft/all "
+                f"(got {rc.local_llm_role!r})")
+        if rc.local_llm_role != "off" and not (
+                self.api.local_base_url
+                or os.getenv("LOCAL_LLM_BASE_URL")):
+            errors.append(
+                "local_llm_role requires local_base_url (or the "
+                "LOCAL_LLM_BASE_URL environment variable) to be set "
+                "explicitly — the tool never picks a URL by itself")
 
         # --- Parallelism validation (strict, no clamping) ---
         try:
@@ -926,19 +980,27 @@ def create_config(
     hard_max_body_chars: Optional[int] = None,
     length_tolerance: float = 0.20,
     exclude_references_from_count: bool = True,
-    max_final_research_rounds: int = 2,
-    max_final_revision_rounds: int = 2,
-    max_no_improvement_rounds: int = 1,
+    # None = UNSET: the verification profile preset applies. Only values
+    # the caller explicitly passes act as profile overrides.
+    max_final_research_rounds: Optional[int] = None,
+    max_final_revision_rounds: Optional[int] = None,
+    max_no_improvement_rounds: Optional[int] = None,
     min_score_improvement: float = 0.03,
     min_new_independent_sources: int = 1,
-    min_claim_support_score: float = 0.85,
-    required_critical_coverage: float = 1.0,
+    min_claim_support_score: Optional[float] = None,
+    required_critical_coverage: Optional[float] = None,
     verification_profile: str = "balanced",
-    verification_max_workers: int = 8,
-    verification_batch_size: int = 10,
-    verification_cache_enabled: bool = True,
-    verification_timeout_seconds: int = 0,
-    verification_minor_claim_sample_rate: float = 1.0,
+    verification_max_workers: Optional[int] = None,
+    verification_batch_size: Optional[int] = None,
+    verification_cache_enabled: Optional[bool] = None,
+    verification_timeout_seconds: Optional[int] = None,
+    verification_minor_claim_sample_rate: Optional[float] = None,
+    # Adaptive coverage / audit log / Local LLM role routing
+    adaptive_coverage: bool = True,
+    requirement_max_search_attempts: int = 2,
+    max_stall_rounds: int = 2,
+    audit_log_enabled: bool = True,
+    local_llm_role: str = "off",
     auto_figures_include_images: bool = True,
     auto_figures_include_tables: bool = True,
     auto_figures_include_charts: bool = True,
@@ -1266,6 +1328,11 @@ def create_config(
         importance_threshold=importance_threshold,
         min_high_importance_sources=min_high_importance_sources,
         max_gap_fill_rounds=max_gap_fill_rounds,
+        adaptive_coverage=adaptive_coverage,
+        requirement_max_search_attempts=requirement_max_search_attempts,
+        max_stall_rounds=max_stall_rounds,
+        audit_log_enabled=audit_log_enabled,
+        local_llm_role=local_llm_role,
     )
 
     report_config = ReportConfig(

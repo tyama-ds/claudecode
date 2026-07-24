@@ -3,6 +3,7 @@ Selenium browser-based web search and content extraction.
 """
 
 import os
+import threading
 import time
 from typing import List, Optional
 from pathlib import Path
@@ -92,6 +93,13 @@ class SeleniumBrowser(BaseSearchClient):
         self.verify_ssl = verify_ssl
         self.driver_path = driver_path or os.getenv("SELENIUM_DRIVER_PATH")
         self._driver = None
+        # A Selenium WebDriver is NOT thread-safe: one browser session
+        # holds one navigation state, so concurrent search() /
+        # get_page_content() calls from parallel workers would corrupt
+        # each other. All driver access is serialized on this lock —
+        # parallel callers (multilingual search, research rounds) simply
+        # queue on it instead of sharing the driver mid-navigation.
+        self._driver_lock = threading.RLock()
 
     def _proxy_url(self) -> str:
         """Proxy URL for the browser (credentials stripped if present)."""
@@ -316,21 +324,21 @@ class SeleniumBrowser(BaseSearchClient):
         Returns:
             List of search results
         """
-        driver = self._get_driver()
-        max_results = max_results or self.max_results
-        region = kwargs.get("region") or None
-        if region in ("wt-wt", ""):
-            region = None
-        label = f" [{region}]" if region else ""
-        print(f"[Selenium/{search_engine}] Searching{label}: {query}")
+        with self._driver_lock:
+            driver = self._get_driver()
+            max_results = max_results or self.max_results
+            region = kwargs.get("region") or None
+            if region in ("wt-wt", ""):
+                region = None
+            label = f" [{region}]" if region else ""
+            print(f"[Selenium/{search_engine}] Searching{label}: {query}")
 
-        if search_engine.lower() == "duckduckgo":
-            return self._search_duckduckgo(driver, query, max_results,
+            if search_engine.lower() == "duckduckgo":
+                return self._search_duckduckgo(driver, query, max_results,
+                                               region=region)
+            elif search_engine.lower() == "google":
+                return self._search_google(driver, query, max_results,
                                            region=region)
-        elif search_engine.lower() == "google":
-            return self._search_google(driver, query, max_results,
-                                       region=region)
-        else:
             raise ValueError(f"Unsupported search engine: {search_engine}")
 
     def _search_duckduckgo(
@@ -487,6 +495,21 @@ class SeleniumBrowser(BaseSearchClient):
             return []
 
     def get_page_content(
+        self,
+        url: str,
+        wait_for_dynamic: bool = True,
+        scroll_to_load: bool = True,
+        extract_images: Optional[bool] = None,
+        **kwargs
+    ) -> PageContent:
+        """Thread-safe wrapper: one navigation at a time per driver."""
+        with self._driver_lock:
+            return self._get_page_content_impl(
+                url, wait_for_dynamic=wait_for_dynamic,
+                scroll_to_load=scroll_to_load,
+                extract_images=extract_images, **kwargs)
+
+    def _get_page_content_impl(
         self,
         url: str,
         wait_for_dynamic: bool = True,
@@ -683,9 +706,10 @@ class SeleniumBrowser(BaseSearchClient):
             True if successful
         """
         try:
-            driver = self._get_driver()
-            save_path.parent.mkdir(parents=True, exist_ok=True)
-            driver.save_screenshot(str(save_path))
+            with self._driver_lock:
+                driver = self._get_driver()
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                driver.save_screenshot(str(save_path))
             return True
         except Exception:
             return False
@@ -700,17 +724,19 @@ class SeleniumBrowser(BaseSearchClient):
         Returns:
             Result of the script execution
         """
-        driver = self._get_driver()
-        return driver.execute_script(script)
+        with self._driver_lock:
+            driver = self._get_driver()
+            return driver.execute_script(script)
 
     def close(self):
         """Close the browser and clean up resources."""
-        if self._driver:
-            try:
-                self._driver.quit()
-            except Exception:
-                pass
-            self._driver = None
+        with self._driver_lock:
+            if self._driver:
+                try:
+                    self._driver.quit()
+                except Exception:
+                    pass
+                self._driver = None
 
     def __enter__(self):
         """Context manager entry."""

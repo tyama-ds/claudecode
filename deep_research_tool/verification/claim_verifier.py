@@ -42,6 +42,7 @@ from ..report.finalization import (
     FRESHNESS_FAIL,
     FRESHNESS_NOT_REQUIRED,
     FRESHNESS_PASS,
+    ISSUE_CITATION_ASSOCIATION_FAILURE,
     ISSUE_CONTRADICTED,
     ISSUE_INVALID_CITATION,
     ISSUE_ORPHAN_CITATION,
@@ -136,6 +137,14 @@ class Claim:
     # the extraction did not report the field (cannot distinguish
     # "uncited" from "unreported")
     cited_source_numbers: Optional[List[int]] = None
+    # what the LLM reported, kept for DIAGNOSTICS ONLY — verification
+    # always uses the deterministic body parser's numbers
+    llm_reported_source_numbers: Optional[List[int]] = None
+    # the deterministic parser could not associate the claim with its
+    # body sentence while the LLM reported citations (or the two
+    # disagree outright): the claim's citation state is UNKNOWN and the
+    # claim is fail-closed (never verified as supported)
+    association_failed: bool = False
     # (evidence_id, char_offset) pairs of the chunks the judgement used
     evidence_provenance: List[Tuple[str, int]] = field(default_factory=list)
     # citation integrity (cited-first verification)
@@ -189,6 +198,22 @@ class ClaimVerifier:
     def _model_key(self) -> str:
         return str(getattr(self.llm, "model", "") or "")
 
+    @property
+    def _cache_namespace(self) -> str:
+        """Everything that parameterizes an LLM judgement BESIDES the
+        content: model, generation params, prompt version and verifier
+        version. Content (claim text, evidence chunk text) is hashed
+        into each key separately — cache keys are CONTENT-ADDRESSED,
+        never based on lengths or counts."""
+        from .runtime import PROMPT_VERSION, VERIFIER_VERSION
+        gen_params = ",".join(
+            f"{name}={getattr(self.llm, name)!r}"
+            for name in ("temperature", "top_p", "max_tokens")
+            if getattr(self.llm, name, None) is not None
+            and not callable(getattr(self.llm, name)))
+        return (f"{self._model_key}|{gen_params}|{PROMPT_VERSION}"
+                f"|{VERIFIER_VERSION}")
+
     def _checkpoint(self) -> None:
         """Safe cancellation/timeout boundary (chunk / batch / retry)."""
         if self.progress is not None:
@@ -226,39 +251,55 @@ class ClaimVerifier:
 
     def extract_claims(self, section_id: str, text: str,
                        start_index: int = 0) -> List[Claim]:
-        """Extract claims from one section (chunked, parallel, cached).
+        """Extract claims from one section (chunked, parallel, cached)."""
+        return self._extract_all({section_id: text}).get(section_id, [])
+
+    def _extract_all(self, sections: Dict[str, str]) \
+            -> Dict[str, List[Claim]]:
+        """Extract claims for ALL sections with ONE flat parallel map.
 
         - claim ids are DETERMINISTIC (section / chunk / position), never
           dependent on parallel completion order;
         - unchanged sections hit the extraction cache (key includes the
-          section text hash, the model and the prompt version) and are
-          not re-extracted;
-        - chunks run in parallel within the worker limit; each chunk
-          keeps its bounded retry.
+          section text, the model+params and the prompt/verifier
+          versions) and are not re-extracted;
+        - all chunks of all sections form a SINGLE task list mapped once
+          within the worker limit — there is no nested thread pool, so
+          total in-flight extraction work never exceeds ``max_workers``;
+        - each chunk keeps its bounded retry.
         """
-        from .runtime import PROMPT_VERSION, stable_hash
+        from .runtime import stable_hash
 
-        chunks = self._chunk(text)
-        if not chunks:
-            return []
+        results: Dict[str, List[Claim]] = {sid: [] for sid in sections}
+        cache_keys: Dict[str, str] = {}
+        pending: Dict[str, List[str]] = {}     # sid -> chunks
+        tasks: List[tuple] = []                # (sid, ci, chunk, total)
 
-        cache_key = stable_hash("extract", section_id, text,
-                                self._model_key, PROMPT_VERSION)
-        cached = self.cache.get(cache_key)
-        if cached is not None:
-            # rebuild FRESH Claim objects (statuses must not leak between
-            # verification passes); chunk accounting counts as verified
-            self.chunks_total += cached["chunks_total"]
-            if self.progress is not None:
-                self.progress.add(chunks_done=cached["chunks_total"])
-                self.progress.sync_cache(self.cache)
-            return [Claim(**dict(raw)) for raw in cached["claims"]]
+        for sid, text in sections.items():
+            chunks = self._chunk(text)
+            if not chunks:
+                continue
+            key = stable_hash("extract", sid, text, self._cache_namespace)
+            cache_keys[sid] = key
+            cached = self.cache.get(key)
+            if cached is not None:
+                # rebuild FRESH Claim objects (statuses must not leak
+                # between verification passes); chunk accounting counts
+                # the cached chunks as verified
+                self.chunks_total += cached["chunks_total"]
+                if self.progress is not None:
+                    self.progress.add(chunks_done=cached["chunks_total"])
+                results[sid] = [Claim(**dict(raw))
+                                for raw in cached["claims"]]
+                continue
+            pending[sid] = chunks
+            for ci, chunk in enumerate(chunks):
+                tasks.append((sid, ci, chunk, len(chunks)))
 
-        def _extract_chunk(indexed):
-            ci, chunk = indexed
+        def _extract_chunk(task):
+            sid, ci, chunk, total = task
             self._checkpoint()
-            prompt = self._claim_prompt(section_id, chunk, ci + 1,
-                                        len(chunks))
+            prompt = self._claim_prompt(sid, chunk, ci + 1, total)
             last_error = None
             # bounded per-chunk retry: a transient LLM failure must not
             # silently leave part of the body unverified
@@ -268,33 +309,38 @@ class ClaimVerifier:
                     self.progress.set_waiting("retry")
                 try:
                     response = self._llm_generate(prompt)
-                    return ci, extract_json_from_response(response.content), None
+                    return (sid, ci,
+                            extract_json_from_response(response.content),
+                            None)
                 except Exception as e:
                     last_error = e
-            return ci, None, last_error
+            return sid, ci, None, last_error
 
-        results = self._map_parallel(_extract_chunk, enumerate(chunks))
+        outputs = self._map_parallel(_extract_chunk, tasks)
 
-        claims: List[Claim] = []
-        raw_claims: List[Dict] = []
-        chunk_failures = 0
-        for ci, data, error in sorted(results, key=lambda r: r[0]):
+        raw_by_section: Dict[str, Dict[int, List[Dict]]] = \
+            {sid: {} for sid in pending}
+        failures: Dict[str, int] = {sid: 0 for sid in pending}
+        for sid, ci, data, error in outputs:
+            text = sections[sid]
+            total = len(pending[sid])
             self.chunks_total += 1
             if self.progress is not None:
                 self.progress.add(chunks_done=1)
             if data is None:
-                chunk_failures += 1
+                failures[sid] += 1
                 self.chunks_failed += 1
                 self.extraction_errors.append(
                     f"claim extraction failed after "
-                    f"{self.EXTRACT_RETRIES + 1} attempts ({section_id} "
-                    f"chunk {ci + 1}/{len(chunks)}, chars "
+                    f"{self.EXTRACT_RETRIES + 1} attempts ({sid} "
+                    f"chunk {ci + 1}/{total}, chars "
                     f"{ci * self.chunk_chars}-"
                     f"{min(len(text), (ci + 1) * self.chunk_chars)}): "
                     f"{error}")
                 print(f"[ClaimVerifier] claim extraction failed "
-                      f"({section_id} chunk {ci + 1}): {error}")
+                      f"({sid} chunk {ci + 1}): {error}")
                 continue
+            items: List[Dict] = []
             for k, item in enumerate(data.get("claims", [])):
                 if not isinstance(item, dict):
                     continue
@@ -310,24 +356,28 @@ class ClaimVerifier:
                     cited = [int(n) for n in raw
                              if isinstance(n, (int, str))
                              and str(n).isdigit()]
-                raw_claim = dict(
-                    claim_id=f"C-{section_id}.{ci + 1}.{k + 1}",
-                    section_id=section_id,
+                items.append(dict(
+                    claim_id=f"C-{sid}.{ci + 1}.{k + 1}",
+                    section_id=sid,
                     text=claim_text,
                     importance=importance,
                     cited_source_numbers=cited,
-                )
-                raw_claims.append(raw_claim)
-                claims.append(Claim(**dict(raw_claim)))
+                ))
+            raw_by_section[sid][ci] = items
 
-        # cache only FULLY extracted sections (a failed chunk must be
-        # retried on the next pass, not remembered as permanently failed)
-        if chunk_failures == 0:
-            self.cache.put(cache_key, {"chunks_total": len(chunks),
-                                       "claims": raw_claims})
+        for sid, by_chunk in raw_by_section.items():
+            raw_claims = [raw for ci in sorted(by_chunk)
+                          for raw in by_chunk[ci]]
+            results[sid] = [Claim(**dict(raw)) for raw in raw_claims]
+            # cache only FULLY extracted sections (a failed chunk must be
+            # retried on the next pass, not remembered as failed forever)
+            if failures[sid] == 0:
+                self.cache.put(cache_keys[sid],
+                               {"chunks_total": len(pending[sid]),
+                                "claims": raw_claims})
         if self.progress is not None:
             self.progress.sync_cache(self.cache)
-        return claims
+        return results
 
     def _chunk(self, text: str) -> List[str]:
         text = text or ""
@@ -377,18 +427,20 @@ Do not include opinions or generic statements. JSON only."""
     CITATION_TAG_RE = re.compile(r"\[SOURCE:?\s*(\d+)\]")
 
     @classmethod
-    def parse_cited_numbers(cls, claim_text: str,
-                            section_text: str) -> List[int]:
+    def locate_cited_numbers(cls, claim_text: str,
+                             section_text: str) -> Tuple[bool, List[int]]:
         """Deterministically associate a claim with the [SOURCE N]
         citations of its best-matching sentence (fallback: paragraph).
 
-        This parser — not the LLM — is the primary authority on which
-        citations a claim carries; the LLM-reported numbers are merged in
-        as a secondary signal.
+        Returns ``(located, numbers)``. ``located`` distinguishes "the
+        claim was found in the body and carries these citations (possibly
+        none)" from "the claim could not be located at all". This parser
+        — not the LLM — is the SOLE authority on which citations a claim
+        carries; LLM-reported numbers are diagnostics, never merged in.
         """
         text = section_text or ""
         if not text or not claim_text:
-            return []
+            return False, []
         claim_bi = _bigrams(claim_text)
         best_sent, best_para, best_score = "", "", 0.0
         for para in text.split("\n\n"):
@@ -399,11 +451,17 @@ Do not include opinions or generic statements. JSON only."""
                 if score > best_score:
                     best_score, best_sent, best_para = score, sent, para
         if best_score < 0.3:
-            return []
+            return False, []
         nums = [int(n) for n in cls.CITATION_TAG_RE.findall(best_sent)]
         if not nums:
             nums = [int(n) for n in cls.CITATION_TAG_RE.findall(best_para)]
-        return sorted(set(nums))
+        return True, sorted(set(nums))
+
+    @classmethod
+    def parse_cited_numbers(cls, claim_text: str,
+                            section_text: str) -> List[int]:
+        """Back-compat wrapper around :meth:`locate_cited_numbers`."""
+        return cls.locate_cited_numbers(claim_text, section_text)[1]
 
     # ------------------------------------------------------------------
     # Evidence chunk index (whole locker, whole texts)
@@ -526,13 +584,17 @@ Do not include opinions or generic statements. JSON only."""
         critical/important are never sampled out). Results and claim ids
         never depend on completion order.
         """
-        from .runtime import PROMPT_VERSION, stable_hash
+        from .runtime import stable_hash
 
         if chunk_index is None:
             chunk_index = self.build_chunk_index(evidence_list)
         cited_ids_by_claim = cited_ids_by_claim or {}
+        # CONTENT-ADDRESSED locker digest: the chunk TEXT is hashed, so
+        # same-length evidence whose content changed (e.g. support ->
+        # contradiction) can never replay a stale judgement. Lengths and
+        # counts are never used as cache-key material.
         locker_digest = stable_hash(
-            "locker", *[f"{c.evidence_id}@{c.offset}:{len(c.text)}"
+            "locker", *[f"{c.evidence_id}@{c.offset}:{stable_hash(c.text)}"
                         for c in chunk_index])
         rate = getattr(self.settings, "minor_claim_sample_rate", 1.0) \
             if self.settings else 1.0
@@ -540,6 +602,20 @@ Do not include opinions or generic statements. JSON only."""
         # ---- prepare: sampling, evidence selection, cache keys --------
         prepared: List[Dict] = []
         for claim in claims:
+            # citation association failure (deterministic parser vs LLM
+            # disagreement) is FAIL-CLOSED: the claim's citation state is
+            # unknown, so it is never judged — and never supported
+            if enforce_citations and claim.association_failed:
+                claim.status = "uncertain"
+                claim.supporting_source_ids = []
+                claim.reason = (
+                    "本文中の引用と主張の対応を特定できません"
+                    "（citation association failure）"
+                    if self.language == "ja" else
+                    "cannot associate the claim with its body citations "
+                    "(citation association failure)")
+                self._progress_claim_done()
+                continue
             # deterministic minor-claim sampling (fast profile).
             # critical/important claims are NEVER sampled out.
             if claim.importance == "minor" and rate < 1.0 and \
@@ -584,10 +660,12 @@ Do not include opinions or generic statements. JSON only."""
                     claim, evidence_list, chunk_index=chunk_index,
                     cited_evidence_ids=cited_ids)
                 # open claims judge against the whole locker: growth of
-                # the locker legitimately re-judges them
+                # the locker legitimately re-judges them. Selected chunks
+                # contribute their CONTENT hash, never just their offset.
                 digest = stable_hash(
                     locker_digest,
-                    *[f"{c.evidence_id}@{c.offset}" for c in selected])
+                    *[f"{c.evidence_id}@{c.offset}:{stable_hash(c.text)}"
+                      for c in selected])
                 mode = "open"
 
             prepared.append(dict(
@@ -595,7 +673,7 @@ Do not include opinions or generic statements. JSON only."""
                 cited=cited_set,
                 key=stable_hash("judge", mode, claim.text,
                                 claim.importance, digest,
-                                self._model_key, PROMPT_VERSION)))
+                                self._cache_namespace)))
 
         # safeguard: sampling must never skip EVERY claim — an entirely
         # unverified body would fail closed even though evidence exists
@@ -613,7 +691,7 @@ Do not include opinions or generic statements. JSON only."""
                 cited=set(cited_ids),
                 key=stable_hash("judge", "open", revived.text,
                                 revived.importance, locker_digest,
-                                self._model_key, PROMPT_VERSION)))
+                                self._cache_namespace)))
 
         # ---- cache pass: unchanged claim+evidence pairs replay --------
         to_judge: List[Dict] = []
@@ -751,11 +829,14 @@ Do not include opinions or generic statements. JSON only."""
                                 else claim.reason + " / no valid sources")
             return
 
-        # open mode
+        # open mode. SCHEMA FAIL-CLOSED: a "supported" verdict without a
+        # valid supporting_source_ids list is INVALID — it degrades to
+        # uncertain. The ids are never auto-filled from the offered
+        # evidence ("the LLM saw these chunks" is not "these chunks
+        # support the claim").
         claim.status = status
         claim.reason = verdict.get("reason", "")
-        claim.supporting_source_ids = supporting if isinstance(ids, list) \
-            else list(dict.fromkeys(c.evidence_id for c in selected))
+        claim.supporting_source_ids = supporting
         if claim.status == "supported" and not claim.supporting_source_ids:
             claim.status = "uncertain"
             claim.reason = (claim.reason + " / 有効な支持ソースなし"
@@ -793,34 +874,40 @@ Do not include opinions or generic statements. JSON only."""
                 if not isinstance(entry, dict):
                     continue
                 cid = str(entry.get("id", ""))
-                if cid and entry.get("status") in _VALID_STATUSES:
-                    verdicts[cid] = entry
+                status = entry.get("status")
+                if not cid or status not in _VALID_STATUSES:
+                    continue
+                # schema fail-closed: "supported" REQUIRES a non-empty
+                # supporting_source_ids list — anything else is a schema
+                # anomaly, retried individually below
+                if status == "supported":
+                    sids = entry.get("supporting_source_ids")
+                    if not isinstance(sids, list) or not sids:
+                        continue
+                verdicts[cid] = entry
         except Exception as e:
             self.extraction_errors.append(f"batch judgement failed: {e}")
 
-        # individual retry ONLY for the missing/invalid entries
+        # individual retry ONLY for the missing/invalid entries. The
+        # retries run SEQUENTIALLY: this method already executes inside a
+        # parallel batch worker, and a nested parallel map would push
+        # in-flight work beyond the configured worker limit.
         missing = [item for item in batch
                    if item["claim"].claim_id not in verdicts]
         if missing:
             if self.progress is not None and len(missing) < len(batch):
                 self.progress.add(retries=len(missing))
-
-            def _one(item):
+            for item in missing:
                 self._checkpoint()
+                cid = item["claim"].claim_id
                 try:
-                    return (item["claim"].claim_id,
-                            self._judge_claim(item["claim"],
-                                              item["selected"]))
+                    verdicts[cid] = self._judge_claim(item["claim"],
+                                                      item["selected"])
                 except Exception as e:
                     self.extraction_errors.append(
-                        f"claim judgement failed "
-                        f"({item['claim'].claim_id}): {e}")
-                    return (item["claim"].claim_id,
-                            {"status": "uncertain",
-                             "reason": f"verification error: {e}"})
-
-            for cid, verdict in self._map_parallel(_one, missing):
-                verdicts[cid] = verdict
+                        f"claim judgement failed ({cid}): {e}")
+                    verdicts[cid] = {"status": "uncertain",
+                                     "reason": f"verification error: {e}"}
         return verdicts
 
     def _batch_prompt(self, batch: List[Dict]) -> str:
@@ -992,7 +1079,7 @@ JSON only."""
                     "missing": "" if best >= 0.6 else q,
                     "search_queries": [q[:60]],
                 }
-            elif not entry.get("answered"):
+            elif entry.get("answered") is not True:
                 # lexical CROSS-CHECK of an LLM "unanswered" verdict: a
                 # very strong lexical presence in some section suggests
                 # the LLM missed it (e.g. window boundaries) — overturn
@@ -1013,9 +1100,12 @@ JSON only."""
             queries = [s for s in (entry.get("search_queries") or []) if s]
             if not queries:
                 queries = [q[:60]]
+            # STRICT boolean: only the JSON literal true counts. The
+            # strings "false"/"true", 1, etc. are schema anomalies and
+            # a question is never marked answered by a truthy non-bool.
             results.append({
                 "question": q,
-                "answered": bool(entry.get("answered")),
+                "answered": entry.get("answered") is True,
                 "section_id": entry.get("section_id", "") or "",
                 "missing": entry.get("missing", "") or "",
                 "search_queries": queries,
@@ -1060,13 +1150,13 @@ JSON only."""
         if current:
             windows.append("\n\n".join(current))
 
-        from .runtime import PROMPT_VERSION, stable_hash
+        from .runtime import stable_hash
         q_digest = stable_hash("questions", *questions)
 
         def _one_window(window):
             self._checkpoint()
             key = stable_hash("coverage", q_digest, window,
-                              self._model_key, PROMPT_VERSION)
+                              self._cache_namespace)
             cached = self.cache.get(key)
             if cached is not None:
                 return cached
@@ -1085,8 +1175,8 @@ JSON only."""
                 continue
             for idx, entry in result.items():
                 prev = merged.get(idx)
-                if prev is None or (entry.get("answered")
-                                    and not prev.get("answered")):
+                if prev is None or (entry.get("answered") is True
+                                    and prev.get("answered") is not True):
                     merged[idx] = entry
         if self.progress is not None:
             self.progress.sync_cache(self.cache)
@@ -1221,11 +1311,11 @@ JSON only."""
         # forces an LLM re-extraction of the whole section
         extract_inputs = {sid: self._strip_limitations(text)
                           for sid, text in chapters.items()}
-        extracted_lists = self._map_parallel(
-            lambda kv: self.extract_claims(kv[0], kv[1]),
-            extract_inputs.items())
-        for claims in extracted_lists:
-            all_claims.extend(claims)
+        # ONE flat parallel map over every chunk of every section — no
+        # nested thread pools, in-flight work never exceeds max_workers
+        extracted_by_section = self._extract_all(extract_inputs)
+        for sid in extract_inputs:
+            all_claims.extend(extracted_by_section.get(sid, []))
 
         if self.progress is not None:
             self.progress.set_phase("judging")
@@ -1233,20 +1323,38 @@ JSON only."""
                                      claims_total=len(all_claims))
 
         # resolve each claim's cited [SOURCE N] numbers to evidence ids.
-        # The DETERMINISTIC parser (sentence/paragraph association) is the
-        # primary source; LLM-reported numbers are merged in on top.
+        # The DETERMINISTIC parser (sentence/paragraph association) is
+        # the SOLE authority: LLM-reported source_numbers are NEVER
+        # unioned in — they are kept for diagnostics only. When the
+        # parser cannot locate a claim that the LLM says is cited, or
+        # the two disagree outright, the claim's citation state is
+        # unknown -> citation_association_failure, fail-closed.
         enforce_citations = citation_manager is not None
         cited_ids_by_claim: Dict[str, List[str]] = {}
         if enforce_citations:
             for claim in all_claims:
-                parsed = self.parse_cited_numbers(
+                located, parsed = self.locate_cited_numbers(
                     claim.text, chapters.get(claim.section_id, ""))
-                nums = sorted(set(parsed)
-                              | set(claim.cited_source_numbers or []))
-                claim.cited_source_numbers = nums
-                if nums:
+                llm_nums = sorted(set(claim.cited_source_numbers or []))
+                claim.llm_reported_source_numbers = llm_nums   # diagnostic
+                if located:
+                    claim.cited_source_numbers = parsed
+                    if llm_nums and parsed and \
+                            not (set(llm_nums) & set(parsed)):
+                        # parser and LLM name DISJOINT citations: the
+                        # association is unreliable -> fail closed
+                        claim.association_failed = True
+                else:
+                    claim.cited_source_numbers = []
+                    if llm_nums:
+                        # the LLM reports citations for a claim the body
+                        # parser cannot even locate -> fail closed
+                        claim.association_failed = True
+                if claim.cited_source_numbers and \
+                        not claim.association_failed:
                     mapping = citation_manager.mapping(claim.section_id)
-                    ids = [mapping[n] for n in nums if n in mapping]
+                    ids = [mapping[n] for n in claim.cited_source_numbers
+                           if n in mapping]
                     if ids:
                         cited_ids_by_claim[claim.claim_id] = ids
 
@@ -1322,7 +1430,8 @@ JSON only."""
                 verdict.issues.append(VerificationIssue(
                     section_id=claim.section_id,
                     claim_id=claim.claim_id,
-                    type=ISSUE_UNCERTAIN,
+                    type=(ISSUE_CITATION_ASSOCIATION_FAILURE
+                          if claim.association_failed else ISSUE_UNCERTAIN),
                     severity=claim.importance,
                     claim=claim.text,
                     reason=claim.reason,
@@ -1367,9 +1476,10 @@ JSON only."""
                         f"{self.EXTRACT_RETRIES} retries"),
             ))
 
-        # citation mismatches invalidate the citation gate even when every
-        # [SOURCE N] number technically resolves
+        # citation mismatches AND association failures invalidate the
+        # citation gate even when every [SOURCE N] number resolves
         has_mismatch = any(c.citation_mismatch or c.citation_missing
+                           or c.association_failed
                            for c in all_claims)
         verdict.metrics.claim_support_score = (
             weighted_supported / weighted_total if weighted_total else 0.0)
