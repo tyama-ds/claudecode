@@ -208,6 +208,11 @@ class APIConfig:
     local_backend: LocalLLMBackend = LocalLLMBackend.OLLAMA
     local_base_url: Optional[str] = None  # e.g., "http://localhost:11434"
     local_api_key: Optional[str] = None  # Optional auth for local servers
+    # Local LLM request timeout (seconds) and per-client concurrency cap
+    # (small local servers often handle only 1-2 parallel requests);
+    # None = client defaults
+    local_timeout: Optional[int] = None
+    local_concurrency: Optional[int] = None
 
     # API parameters
     temperature: float = 0.7
@@ -880,6 +885,8 @@ def create_config(
     local_base_url: Optional[str] = None,
     local_api_key: Optional[str] = None,
     local_backend: str = "ollama",
+    local_timeout: Optional[int] = None,
+    local_concurrency: Optional[int] = None,
     model: Optional[str] = None,
     search_method: str = "duckduckgo",
     search_region: str = "wt-wt",
@@ -1253,6 +1260,8 @@ def create_config(
         local_base_url=local_base_url,
         local_api_key=local_api_key,
         local_backend=LocalLLMBackend(local_backend),
+        local_timeout=local_timeout,
+        local_concurrency=local_concurrency,
         stage_overrides=dict(stage_llm) if stage_llm else {},
     )
 

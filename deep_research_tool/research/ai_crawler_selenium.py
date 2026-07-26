@@ -97,7 +97,13 @@ class AICrawlerSelenium(AICrawler):
         self._driver_path = driver_path
 
     def _get_selenium_client(self):
-        """Get or lazily create the Selenium browser client."""
+        """Get or lazily create the Selenium browser client.
+
+        The PARENT RUN's concurrency limiter is propagated onto the
+        internally-created browser: its fetches take the same leaf
+        permits as every other network operation, so an AI crawl can
+        never push the process past parallel_max_workers.
+        """
         if self._selenium_client is None:
             from ..search.selenium_browser import SeleniumBrowser
             self._selenium_client = SeleniumBrowser(
@@ -108,6 +114,12 @@ class AICrawlerSelenium(AICrawler):
                 verify_ssl=self._verify_ssl,
                 driver_path=self._driver_path,
             )
+            limiter = (getattr(getattr(self, "search", None),
+                               "concurrency_limiter", None)
+                       or getattr(getattr(self, "llm", None),
+                                  "concurrency_limiter", None))
+            if limiter is not None:
+                self._selenium_client.concurrency_limiter = limiter
         return self._selenium_client
 
     def _start_browser(self) -> Optional[str]:

@@ -6,6 +6,7 @@ This module provides the main interface for conducting automated research.
 
 import logging
 import re
+import threading
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable
 
@@ -125,6 +126,15 @@ def _create_report_generator(
             language=config.research.language,
         )
         return generator, "v1"
+
+
+class RunCancelled(Exception):
+    """Raised at a safe checkpoint after the user cancelled the run.
+
+    Carries the stage name; the partial artifacts produced so far stay
+    on disk / in the live sink and are surfaced as a CANCELLED result —
+    never as a normal completion.
+    """
 
 
 class DeepResearchTool:
@@ -276,6 +286,8 @@ class DeepResearchTool:
         # Add local LLM specific settings
         if self.config.api.provider == LLMProvider.LOCAL:
             kwargs["backend"] = self.config.api.local_backend.value
+            kwargs["local_timeout"] = self.config.api.local_timeout
+            kwargs["local_concurrency"] = self.config.api.local_concurrency
 
         return get_client(**kwargs)
 
@@ -336,6 +348,8 @@ class DeepResearchTool:
                     "verify_ssl": self.config.proxy.verify_ssl,
                     "base_url": base_url,
                     "backend": self.config.api.local_backend.value,
+                    "local_timeout": self.config.api.local_timeout,
+                    "local_concurrency": self.config.api.local_concurrency,
                 }
                 try:
                     local_client = get_client(**local_kwargs)
@@ -422,6 +436,24 @@ class DeepResearchTool:
 
         return content_filter
 
+    def request_cancel(self) -> None:
+        """Cancel the running research (thread-safe, idempotent).
+
+        Sets the run-level cancel event (checked at every progress event
+        and stage boundary — no NEW LLM/search/fetch work starts after
+        it) and requests the SAFE verification cancel so an in-flight
+        finalization stops at its next checkpoint too.
+        """
+        event = getattr(self, "cancel_event", None)
+        if event is not None:
+            event.set()
+        progress = getattr(self, "verification_progress", None)
+        if progress is not None:
+            try:
+                progress.cancel()
+            except Exception:
+                pass
+
     def run(
         self,
         query: str,
@@ -431,6 +463,7 @@ class DeepResearchTool:
         progress_callback: Callable[[str, float], None] = None,
         plan_review_callback: Callable = None,
         live_sink=None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> Dict[str, Any]:
         """
         Run the complete research workflow.
@@ -461,6 +494,28 @@ class DeepResearchTool:
         # Reset warning collector for this run (kept when another run is
         # already active, so parallel Web UI jobs don't wipe each other)
         ResearchWarnings.reset_if_idle()
+
+        # --- run-level cancellation ------------------------------------
+        # request_cancel() (GUI Stop / Web UI cancel) sets the event and
+        # cancels verification; every progress event and every explicit
+        # stage boundary is a checkpoint — after it fires, no NEW LLM /
+        # search / fetch work starts and the run exits as CANCELLED with
+        # its partial artifacts (never as a normal completion). Permits
+        # are released by the leaf `finally` blocks as usual.
+        self.cancel_event = cancel_event or threading.Event()
+
+        def _cancel_checkpoint():
+            if self.cancel_event.is_set():
+                raise RunCancelled("cancelled by user")
+        self._cancel_checkpoint = _cancel_checkpoint
+
+        _user_progress_cb = progress_callback
+
+        def progress_callback(message, percentage,
+                              _cb=_user_progress_cb):
+            _cancel_checkpoint()
+            if _cb:
+                _cb(message, percentage)
 
         # --- run-scoped concurrency + token accounting ---
         # One RunLimits per run: every leaf LLM/HTTP call takes a composed
@@ -592,11 +647,13 @@ class DeepResearchTool:
                               .get_flat_sections())]
             live_sink.on_plan(session.research_plan.title, toc)
 
-        # Check if content expansion is needed (target specified and content too short)
-        session = self._expand_if_needed(
-            session=session,
-            progress_callback=progress_callback,
-        )
+        # Character/page targets are RENDERING preferences, never a search
+        # trigger: a shortfall is only noted here. Missing information is
+        # researched exclusively through the Coverage Ledger (critical
+        # requirement gaps) inside the finalization loop; a still-short
+        # but complete body ends with limitations, not padding.
+        self._note_length_shortfall(session, progress_callback)
+        _cancel_checkpoint()      # stage boundary: research finished
 
         # Save pre-DeepThink content snapshot for Fermi estimation context.
         # DeepThink modifies session.section_contents in place, which could
@@ -774,18 +831,15 @@ class DeepResearchTool:
                     {sid: ch.content for sid, ch in result.chapters.items()},
                     figure_collection)
 
-            # Build warnings text. When the warnings snapshot was already
-            # verified inside the body, only warnings raised AFTER the
-            # finalization are appended (deterministic rendering).
+            # Warnings text for the DOCX: with a FROZEN body nothing is
+            # appended after the freeze (the verified snapshot is already
+            # in the body; later warnings are run metadata only).
             warnings_text = ""
             warnings_collector = ResearchWarnings.get_instance()
-            if warnings_collector.has_warnings():
+            if warnings_collector.has_warnings() and \
+                    not semantic_freeze_hash:
                 language = getattr(self.config.research, "language", "en")
-                if extras_flags.get("warnings"):
-                    warnings_text = self._late_warnings_section(
-                        warnings_collector, language)
-                else:
-                    warnings_text = warnings_collector.to_report_section(language)
+                warnings_text = warnings_collector.to_report_section(language)
 
             # Build DOCX directly via python-docx API
             output_dir = self.config.report.output_dir / "reports"
@@ -849,17 +903,15 @@ class DeepResearchTool:
             if fermi_markdown:
                 final_doc += fermi_markdown
 
-            # Append warnings to markdown BEFORE format conversion. When
-            # a warnings snapshot was verified inside the body, only
-            # warnings raised after finalization are appended.
+            # Warnings: with a FROZEN body nothing is appended after the
+            # freeze — the verified snapshot (if any) is already in the
+            # body, and warnings raised later are OPERATIONAL metadata
+            # (result["warnings"] / GUI), never unverified report text.
             warnings_collector = ResearchWarnings.get_instance()
-            if warnings_collector.has_warnings():
+            if warnings_collector.has_warnings() and \
+                    not semantic_freeze_hash:
                 language = getattr(self.config.research, "language", "en")
-                if extras_flags.get("warnings"):
-                    final_doc += self._late_warnings_section(
-                        warnings_collector, language)
-                else:
-                    final_doc += warnings_collector.to_report_section(language)
+                final_doc += warnings_collector.to_report_section(language)
 
             # Save to file in the configured format (DOCX/PDF/HTML/MD)
             output_dir = self.config.report.output_dir / "reports"
@@ -980,11 +1032,15 @@ class DeepResearchTool:
         if hasattr(self.search_client, 'close'):
             self.search_client.close()
 
-        # Append warnings section to the report if any fallbacks occurred
-        # (V2/V3 already handle warnings before/during format conversion;
-        #  V1 needs post-save appending for markdown files)
+        # Warnings handling. With a FROZEN body, post-freeze text appends
+        # are forbidden (the artifact check would rightly flag them as
+        # unverified additions): operational warnings raised after the
+        # freeze stay in the RUN METADATA (result["warnings"], GUI) and
+        # never enter the report body. Without a freeze (verification
+        # off) the legacy in-report append remains.
         warnings_collector = ResearchWarnings.get_instance()
-        if version_tag == "v1" and warnings_collector.has_warnings():
+        if version_tag == "v1" and warnings_collector.has_warnings() \
+                and not semantic_freeze_hash:
             self._append_warnings_to_report(
                 active_report_path, warnings_collector)
 
@@ -1050,7 +1106,7 @@ class DeepResearchTool:
             # audit item D: the check must also REBUILD from the actual
             # saved artifact — not only re-hash the in-memory object
             semantic_artifact_check = self._check_semantics_in_artifact(
-                active_report_path)
+                active_report_path, evidence_locker=evidence_locker)
 
         # Live report: deliver the VERIFIED final body (replaces drafts,
         # removes watermarks, appends references) and release the sinks.
@@ -1096,6 +1152,14 @@ class DeepResearchTool:
             "semantic_manifest_hash_at_freeze": semantic_freeze_hash,
             "semantic_manifest_hash_at_output": semantic_output_hash,
             "semantic_artifact_check": semantic_artifact_check,
+            # a mismatching artifact is NEVER a normal completion: the
+            # run is reported failed/incomplete, not silently successful
+            "run_status": (
+                "failed_semantic_check"
+                if (semantic_artifact_check == "fail"
+                    or (semantic_freeze_hash and semantic_output_hash
+                        and semantic_output_hash != semantic_freeze_hash))
+                else "completed"),
             "verification_summary": (getattr(self, "finalization_outcome",
                                              None) or {}).get(
                 "verification_summary"),
@@ -1541,13 +1605,38 @@ class DeepResearchTool:
             )
         return digest
 
-    def _check_semantics_in_artifact(self, report_path) -> str:
-        """Audit item D: verify the frozen semantics inside the ACTUAL
-        saved artifact — re-hashing the in-memory object only proves the
-        object didn't change, not that the renderer wrote it faithfully.
+    def _artifact_allowed_extras(self, evidence_locker=None) -> list:
+        """Deterministic artifact content that is NOT semantic body:
+        references (from the locker), the report title, standard section
+        headings. Anything else that appears only in the artifact is an
+        unverified post-freeze ADDITION and fails the check."""
+        extras = []
+        if evidence_locker is not None:
+            try:
+                for ev in evidence_locker.get_all_evidence():
+                    extras.append(getattr(ev, "citation_text", "") or "")
+                    extras.append(getattr(ev, "title", "") or "")
+                    extras.append(getattr(ev, "url", "") or "")
+            except Exception:
+                pass
+        extras.extend([
+            "参考文献", "引用文献", "目次", "References", "Sources",
+            "Table of Contents", "図表一覧", "Figures and Tables",
+            "用語集", "Glossary",
+        ])
+        return [e for e in extras if e]
 
-        Returns "pass", "fail" or "skipped:<reason>" and raises a
-        CRITICAL warning on failure.
+    def _check_semantics_in_artifact(self, report_path,
+                                     evidence_locker=None) -> str:
+        """Audit item D: verify the frozen semantics inside the ACTUAL
+        saved artifact — TWO-WAY (missing frozen content AND unverified
+        post-freeze additions both fail). Re-hashing the in-memory
+        object only proves the object didn't change, not that the
+        renderer wrote it faithfully.
+
+        Returns "pass", "fail" or "skipped:<reason>". A failure raises a
+        CRITICAL warning AND the caller marks the run incomplete — a
+        mismatching artifact is never a normal completion.
         """
         from .report.semantic_manifest import (
             extract_artifact_text, verify_frozen_in_artifact)
@@ -1556,26 +1645,39 @@ class DeepResearchTool:
             return "skipped:no_manifest"
         artifact_text = extract_artifact_text(report_path)
         if artifact_text is None:
-            # unreadable format (e.g. PDF): SKIPPED is reported loudly,
-            # never disguised as a pass
+            # unreadable artifact: SKIPPED is reported loudly with a
+            # HIGH warning — never disguised as a pass
             print(f"[Freeze] artifact check skipped "
-                  f"(unsupported format): {report_path}")
-            return "skipped:unsupported_format"
-        result = verify_frozen_in_artifact(manifest, artifact_text)
+                  f"(unreadable format): {report_path}")
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.HIGH, "Freeze",
+                f"最終成果物（{Path(report_path).name}）を読み戻せない"
+                f"ため、凍結内容との照合を実施できませんでした。"
+                f"この照合は未実施であり、成功ではありません。")
+            return "skipped:unreadable_format"
+        result = verify_frozen_in_artifact(
+            manifest, artifact_text,
+            allowed_extras=self._artifact_allowed_extras(evidence_locker))
         if result["ok"]:
             print(f"[Freeze] artifact check passed "
                   f"({result['checked']} fragments verified in "
                   f"{Path(report_path).name})")
             return "pass"
-        print(f"[Freeze] ARTIFACT CONTENT MISMATCH: "
-              f"{len(result['missing'])}/{result['checked']} frozen "
-              f"fragments missing from {report_path}")
+        parts = []
+        if result["missing"]:
+            parts.append(f"{len(result['missing'])}断片が欠落"
+                         f"（例: {result['missing'][0]}…）")
+        if result.get("additions"):
+            parts.append(f"凍結後の未検証追加 {len(result['additions'])}件"
+                         f"（例: {result['additions'][0]}…）")
+        if result["checked"] == 0:
+            parts.append("照合対象0件（空のmanifest）")
+        print(f"[Freeze] ARTIFACT CONTENT MISMATCH: {'; '.join(parts)} "
+              f"({report_path})")
         ResearchWarnings.get_instance().add(
             ResearchWarnings.CRITICAL, "Freeze",
-            f"保存された成果物に凍結済み本文の一部が見つかりません"
-            f"（{len(result['missing'])}断片欠落、例: "
-            f"{result['missing'][0] if result['missing'] else ''}…）。"
-            f"レンダリング段階の不具合の可能性があります。",
+            f"保存された成果物と凍結済み内容が一致しません: "
+            f"{'; '.join(parts)}。この実行は正常完了ではありません。",
         )
         return "fail"
 
@@ -1676,6 +1778,8 @@ class DeepResearchTool:
         no LLM may modify them; only deterministic rendering (markdown
         assembly, DOCX/PDF/HTML conversion) is allowed downstream.
         """
+        getattr(self, "_cancel_checkpoint", lambda: None)()
+
         def chapter_citation_cb(sid, evidence):
             ch = result.chapters.get(sid)
             if ch is not None and evidence.url not in ch.citations:
@@ -1698,12 +1802,13 @@ class DeepResearchTool:
         self.finalization_outcome = outcome
 
         # Freeze: write the verified, display-numbered text back into the
-        # generation result (extras become chapters of their own)
-        # Render-only sections (figure semantics) are NOT written back:
-        # rendering uses the frozen collection itself.
+        # generation result (extras become chapters of their own).
+        # Render-only sections (figure semantics) are written back TOO:
+        # "render-only" means never LLM-edited — the verified figure
+        # titles/captions/cells must ship in the artifact even when
+        # image insertion later fails, or the artifact check would
+        # rightly report the frozen content as missing.
         for sid, text in outcome["chapters"].items():
-            if render_only and sid == render_only:
-                continue
             if sid in result.chapters:
                 result.chapters[sid].content = text
                 result.chapters[sid].word_count = len(text)
@@ -1720,6 +1825,7 @@ class DeepResearchTool:
         the chapters; the frozen, display-numbered text is written back
         before the deterministic V1 render. Figure semantics join the
         verified body as a render-only section."""
+        getattr(self, "_cancel_checkpoint", lambda: None)()
         runner = self._build_finalization_runner(
             session, evidence_locker, query, requirements,
             progress_callback)
@@ -1731,6 +1837,17 @@ class DeepResearchTool:
             for sid, sdata in session.section_contents.items()
             if not sid.startswith("_") and sdata.get("content")
         }
+        # The executive summary / key findings / recommendations are
+        # READER-VISIBLE semantic content: they join the verified body
+        # BEFORE the freeze as a render-only, citation-exempt chapter
+        # (a digest of already-cited claims carries no [SOURCE] tags).
+        exec_md = self._executive_summary_markdown(session)
+        if exec_md:
+            key = "要旨" if self.config.research.language == "ja" \
+                else "Executive Summary"
+            chapters[key] = exec_md
+            runner.render_only_sections.add(key)
+            runner.citation_exempt_sections.add(key)
         if figure_collection is not None:
             from .report.semantic_manifest import figure_semantics_markdown
             key = "付録D" if self.config.research.language == "ja" \
@@ -1747,12 +1864,47 @@ class DeepResearchTool:
         outcome = runner.run(chapters)
         self.finalization_outcome = outcome
 
+        exec_key = "要旨" if self.config.research.language == "ja" \
+            else "Executive Summary"
         for sid, text in outcome["chapters"].items():
             if sid in session.section_contents:
                 session.section_contents[sid]["content"] = text
+            elif sid != exec_key:
+                # verified extra chapters (figure semantics) must ship
+                # in the rendered report — a frozen chapter that never
+                # reaches the artifact fails the artifact check. The
+                # executive summary is the exception: the V1 renderer
+                # already renders it from _executive_summary verbatim.
+                session.section_contents[sid] = {
+                    "title": sid, "content": text,
+                    "sources": [], "extracted_content": [],
+                }
 
         self._warn_on_finalization_outcome(outcome)
         return outcome["verdict"], outcome["html_path"]
+
+    def _executive_summary_markdown(self, session) -> str:
+        """The V1 executive summary / key findings / recommendations as
+        verifiable markdown (empty string when absent)."""
+        data = (session.section_contents or {}).get(
+            "_executive_summary") or {}
+        summary = str(data.get("executive_summary", "") or "").strip()
+        findings = [str(f) for f in (data.get("key_findings") or []) if f]
+        recs = [str(r) for r in (data.get("recommendations") or []) if r]
+        if not (summary or findings or recs):
+            return ""
+        ja = self.config.research.language == "ja"
+        lines = [f"## {'要旨' if ja else 'Executive Summary'}", ""]
+        if summary:
+            lines.extend([summary, ""])
+        if findings:
+            lines.append(f"### {'主要な発見' if ja else 'Key Findings'}")
+            lines.extend(f"- {f}" for f in findings)
+            lines.append("")
+        if recs:
+            lines.append(f"### {'提言' if ja else 'Recommendations'}")
+            lines.extend(f"- {r}" for r in recs)
+        return "\n".join(lines).strip()
 
     def _make_extra_chapter(self, sid, text):
         """Wrap a verified extra section (Fermi / glossary / warnings)
@@ -2724,84 +2876,51 @@ Output only the text (no JSON, no heading):"""
 
         return session, deep_think_results
 
-    def _expand_if_needed(
+    def _note_length_shortfall(
         self,
         session: ResearchSession,
         progress_callback: Callable[[str, float], None] = None,
-    ) -> ResearchSession:
+    ) -> None:
+        """Measure a target_pages/target_characters shortfall WITHOUT
+        searching.
+
+        A character count is never a reason to hit the web: additional
+        research happens ONLY for open critical requirements through the
+        Coverage Ledger in the finalization loop. Here the shortfall is
+        just measured and surfaced — the finalization loop may still
+        deepen sections FROM EXISTING EVIDENCE (rewrite), and an
+        unresolvable shortfall ends as an explicit limitation, never as
+        padding or an automatic search.
         """
-        Check if content needs expansion and expand if necessary.
-
-        This is called when target pages/characters are specified and
-        the generated content is shorter than the target.
-
-        Args:
-            session: Research session with content
-            progress_callback: Progress callback function
-
-        Returns:
-            Session with potentially expanded content
-        """
-        # Check if target is specified
         target_pages = self.config.report.target_pages
         target_characters = self.config.report.target_characters
-
         if target_pages is None and target_characters is None:
-            return session
+            return
 
-        # Create length controller
         length_target = LengthTarget(
             target_pages=target_pages,
             target_characters=target_characters,
         )
-
         controller = ContentLengthController(
             target=length_target,
             format_type=self.config.report.format.value,
             language=self.config.research.language,
         )
-
-        # Check if expansion is needed
-        expansion_req = controller.get_expansion_requirement(session.section_contents)
-
+        expansion_req = controller.get_expansion_requirement(
+            session.section_contents)
         if not expansion_req.needs_expansion:
-            return session
+            return
 
-        # Report progress
+        message = (
+            f"本文は{expansion_req.current_characters:,}字で目標"
+            f"{expansion_req.target_characters:,}字に達していません。"
+            f"文字数のみを理由とした追加Web検索は行いません（既存エビデンス"
+            f"からの詳述、または調査上の限界として明示されます）。")
+        print(f"[Length] {message}")
         if progress_callback:
-            progress_callback(
-                f"Content is {expansion_req.current_characters:,} chars, "
-                f"target is {expansion_req.target_characters:,} chars. "
-                f"Running additional research...",
-                80
-            )
-
-        # Calculate how many additional iterations to run
-        additional_iterations = controller.estimate_additional_iterations(expansion_req)
-
-        if progress_callback:
-            progress_callback(
-                f"Expanding {len(expansion_req.sections_to_expand)} sections "
-                f"with {additional_iterations} additional iterations each...",
-                82
-            )
-
-        # Run expansion
-        expansion_result = self.researcher.expand_section_content(
-            section_ids=expansion_req.sections_to_expand,
-            additional_iterations=additional_iterations,
-            focus_on_gaps=True,
-        )
-
-        if progress_callback:
-            progress_callback(
-                f"Added {expansion_result['characters_added']:,} characters "
-                f"from {expansion_result['new_sources']} new sources",
-                85
-            )
-
-        # Return the updated session
-        return self.researcher.get_session()
+            progress_callback(message, 80)
+        ResearchWarnings.get_instance().add(
+            ResearchWarnings.LOW, "Length", message)
 
     def quick_research(
         self,
@@ -2943,6 +3062,10 @@ def run_research(
     fermi_sub_decomposition_confidence_threshold: float = 0.65,
     fermi_sub_decomposition_min_sensitivity_pct: float = 10.0,
     # V2 report generation parameters
+    # Progress / cancellation (forwarded to DeepResearchTool.run —
+    # previously progress_callback fell into **kwargs and was dropped)
+    progress_callback: Callable[[str, float], None] = None,
+    cancel_event: Optional[threading.Event] = None,
     report_generator_version: str = "v1",
     v2_writing_style: str = "business",
     v2_target_audience: str = "business",
@@ -3176,14 +3299,16 @@ def run_research(
 
     tool = DeepResearchTool(config)
 
-    def progress_callback(message: str, percentage: float):
+    def _verbose_progress(message: str, percentage: float):
         if verbose and percentage >= 0:
             print(f"[{percentage:5.1f}%] {message}")
 
     result = tool.run(
         query=query,
         requirements=requirements,
-        progress_callback=progress_callback if verbose else None,
+        progress_callback=(progress_callback
+                           or (_verbose_progress if verbose else None)),
+        cancel_event=cancel_event,
     )
 
     # Display token usage summary if verbose
@@ -3559,6 +3684,18 @@ def run_manual_research(
     verification_html = None
     verification_result = None
 
+    def _manual_extra_chapter(sid, text):
+        from .report.v2.generator import ChapterContent
+        m = re.match(r"^##\s*(?:[^.\n]*\.\s*)?([^\n]+)",
+                     (text or "").strip())
+        return ChapterContent(
+            section_number=sid,
+            section_title=(m.group(1).strip() if m else sid),
+            content=text,
+            word_count=len(text or ""),
+            is_draft=False,
+        )
+
     def _finalize_manual(chapters, chapter_citation_callback=None,
                          figure_collection=None):
         from .report.finalization_runner import FinalizationRunner
@@ -3640,13 +3777,19 @@ def run_manual_research(
                 if sid in result.chapters:
                     result.chapters[sid].content = text
                     result.chapters[sid].word_count = len(text)
+                else:
+                    # verified extras (figure semantics) must ship in
+                    # the artifact — they become chapters of their own
+                    result.chapters[sid] = _manual_extra_chapter(sid, text)
             verification_result = outcome["verdict"]
             verification_html = outcome["html_path"]
 
-        # Build warnings text
+        # Warnings text: with a FROZEN body nothing is appended after
+        # the freeze — post-freeze warnings stay in the run metadata
         warnings_text = ""
         warnings_collector = ResearchWarnings.get_instance()
-        if warnings_collector.has_warnings():
+        if warnings_collector.has_warnings() and not (
+                enable_verification and verification_result is not None):
             warnings_text = warnings_collector.to_report_section(
                 config.research.language
             )
@@ -3682,6 +3825,8 @@ def run_manual_research(
                 if sid in result.chapters:
                     result.chapters[sid].content = text
                     result.chapters[sid].word_count = len(text)
+                else:
+                    result.chapters[sid] = _manual_extra_chapter(sid, text)
             verification_result = outcome["verdict"]
             verification_html = outcome["html_path"]
 
@@ -3716,6 +3861,13 @@ def run_manual_research(
                 for sid, text in outcome["chapters"].items():
                     if sid in session.section_contents:
                         session.section_contents[sid]["content"] = text
+                    else:
+                        # verified extras (figure semantics) must reach
+                        # the rendered report
+                        session.section_contents[sid] = {
+                            "title": sid, "content": text,
+                            "sources": [], "extracted_content": [],
+                        }
                 verification_result = outcome["verdict"]
                 verification_html = outcome["html_path"]
 
@@ -3728,6 +3880,42 @@ def run_manual_research(
             target_characters=(None if enable_verification
                                else target_characters),
         )
+
+    # Semantic freeze + artifact check: the manual path honors the SAME
+    # finalization invariant as run() — the saved artifact must contain
+    # exactly the frozen semantic content (two-way check).
+    semantic_freeze_hash = None
+    semantic_artifact_check = None
+    run_status = "completed"
+    if enable_verification and verification_result is not None:
+        from .report.semantic_manifest import (
+            build_semantic_manifest, check_artifact, manifest_hash)
+        if version_tag == "v1":
+            chapters_now = {
+                sid: sd.get("content", "")
+                for sid, sd in session.section_contents.items()
+                if not sid.startswith("_") and sd.get("content")}
+        else:
+            chapters_now = {sid: ch.content
+                            for sid, ch in result.chapters.items()}
+        manifest = build_semantic_manifest(chapters_now, figure_collection)
+        semantic_freeze_hash = manifest_hash(manifest)
+        check = check_artifact(manifest, report_path,
+                               evidence_locker=evidence_locker)
+        semantic_artifact_check = check["status"]
+        if check["status"] == "fail":
+            run_status = "failed_semantic_check"
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.CRITICAL, "Freeze",
+                f"保存された成果物と凍結済み内容が一致しません"
+                f"（欠落{len(check['missing'])}件 / 追加"
+                f"{len(check.get('additions', []))}件）。"
+                f"この実行は正常完了ではありません。")
+        elif check["status"].startswith("skipped"):
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.HIGH, "Freeze",
+                "最終成果物を読み戻せないため凍結内容との照合を実施でき"
+                "ませんでした（未実施であり、成功ではありません）。")
 
     # Export evidence AFTER finalization: exports and the references
     # registry include everything the finalized report cites
@@ -3753,6 +3941,9 @@ def run_manual_research(
         "deep_think_results": deep_think_results,
         "token_usage": token_stats.to_dict(),
         "evidence_count": evidence_count,
+        "semantic_manifest_hash_at_freeze": semantic_freeze_hash,
+        "semantic_artifact_check": semantic_artifact_check,
+        "run_status": run_status,
     }
 
 

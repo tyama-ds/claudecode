@@ -101,6 +101,8 @@ _CONFIG_PARAM_MAP = {
     "max_stall_rounds": "max_stall_rounds",
     "audit_log_enabled": "audit_log_enabled",
     "local_llm_role": "local_llm_role",
+    "local_timeout": "local_timeout",
+    "local_concurrency": "local_concurrency",
 }
 
 
@@ -187,6 +189,8 @@ _PARAM_CONVERTERS = {
     "requirement_max_search_attempts": _int_range(1, 10),
     "max_stall_rounds": _int_range(1, 10),
     "local_llm_role": _local_llm_role,
+    "local_timeout": _int_range(1, 3600),
+    "local_concurrency": _int_range(1, 16),
     "length_mode": _length_mode,
     "preferred_body_chars": _int_ge0,
     "hard_min_body_chars": _int_ge0,
@@ -293,6 +297,8 @@ class ResearchJob:
         self.live_sink = None
         # callable returning the run's VerificationProgress (or None)
         self.verification_source = None
+        # callable cancelling the WHOLE run (tool.request_cancel)
+        self.run_cancel = None
         # Plan review state (state == "plan_review")
         self.plan: Optional[Dict[str, Any]] = None
         self.plan_review_deadline: Optional[float] = None
@@ -322,6 +328,23 @@ class ResearchJob:
             return False
         progress.cancel()
         return True
+
+    def cancel_run(self) -> bool:
+        """Cancel the WHOLE research run (safe checkpoints, idempotent).
+
+        Propagates a real cancel token into the worker: no new
+        LLM/search/fetch work starts after the next checkpoint, permits
+        are released normally, and the job ends in the terminal
+        ``cancelled`` state with its partial artifacts.
+        """
+        fn = self.run_cancel
+        if fn is None:
+            return False
+        try:
+            fn()
+            return True
+        except Exception:
+            return False
 
     def update(self, message: str, percentage: float) -> None:
         with self._lock:
@@ -451,9 +474,10 @@ class JobManager:
         return job
 
     def _trim_finished(self) -> None:
-        """Drop the oldest finished jobs beyond MAX_KEPT (callers hold _lock)."""
+        """Drop the oldest finished jobs beyond MAX_KEPT (callers hold _lock).
+        Cancelled jobs are TERMINAL and are cleaned up like any other."""
         finished = [j for j in self.jobs.values()
-                    if j.state in ("completed", "error")]
+                    if j.state in ("completed", "error", "cancelled")]
         excess = len(finished) - self.MAX_KEPT
         if excess > 0:
             for job in sorted(finished, key=lambda j: j.started_at)[:excess]:
@@ -470,9 +494,11 @@ class JobManager:
             job.update("設定を構築しました。ツールを初期化中...", 1)
 
             tool = DeepResearchTool(config)
-            # verification progress + safe cancel become pollable
+            # verification progress + safe cancel become pollable; the
+            # run-level cancel propagates into the worker
             job.verification_source = (
                 lambda: getattr(tool, "verification_progress", None))
+            job.run_cancel = tool.request_cancel
             job.update("調査を開始します", 2)
 
             documents = expand_document_paths(params.get("local_documents"))
@@ -550,13 +576,25 @@ class JobManager:
                 job.state = "cancelled"
                 job.update("検証をキャンセルしました（部分的な結果を保存済み）",
                            100)
+            elif result.get("run_status", "completed") != "completed":
+                # semantic mismatch etc.: never a normal completion
+                job.state = "error"
+                job.error = (f"run_status={result['run_status']}: "
+                             f"成果物検査に失敗したため正常完了ではありません")
+                job.update(f"検査失敗（{result['run_status']}）", -1)
             else:
                 job.state = "completed"
                 job.update("完了しました", 100)
         except Exception as e:
-            job.error = f"{e}\n{traceback.format_exc(limit=3)}"
-            job.state = "error"
-            job.update(f"エラー: {e}", -1)
+            from ..main import RunCancelled
+            if isinstance(e, RunCancelled):
+                job.state = "cancelled"
+                job.update("キャンセルしました（部分成果物はライブプレビュー"
+                           "と出力フォルダに残っています）", -1)
+            else:
+                job.error = f"{e}\n{traceback.format_exc(limit=3)}"
+                job.state = "error"
+                job.update(f"エラー: {e}", -1)
         finally:
             ResearchWarnings.end_run()
 
@@ -687,7 +725,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         if parsed.path not in ("/api/research", "/api/plan-review",
-                               "/api/cancel-verification"):
+                               "/api/cancel-verification",
+                               "/api/cancel-run"):
             self._send_json({"error": "not found"}, 404)
             return
 
@@ -708,6 +747,21 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 return
             ok = job.cancel_verification()
             # idempotent: repeated cancels simply return ok/false
+            self._send_json({"ok": ok}, 200 if ok else 409)
+            return
+
+        if parsed.path == "/api/cancel-run":
+            # SAFE whole-run cancellation: the worker stops at its next
+            # checkpoint; the job ends as terminal "cancelled" with its
+            # partial artifacts. Idempotent; 409 when nothing to cancel
+            # (the UI restores the cancel button on non-200).
+            job_id = params.get("job_id") or ""
+            job = manager.get(job_id) if job_id else manager.current
+            if job is None:
+                self._send_json({"error": "no such job"}, 404)
+                return
+            ok = job.cancel_run()
+            job.cancel_verification()      # also stop verification work
             self._send_json({"ok": ok}, 200 if ok else 409)
             return
 

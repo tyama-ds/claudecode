@@ -324,22 +324,29 @@ class SeleniumBrowser(BaseSearchClient):
         Returns:
             List of search results
         """
-        with self._driver_lock:
-            driver = self._get_driver()
-            max_results = max_results or self.max_results
-            region = kwargs.get("region") or None
-            if region in ("wt-wt", ""):
-                region = None
-            label = f" [{region}]" if region else ""
-            print(f"[Selenium/{search_engine}] Searching{label}: {query}")
+        # ORDER MATTERS: the run/process LEAF PERMIT is taken FIRST,
+        # then the driver lock — a thread queuing for a permit must
+        # never sit on the driver lock, and browser work counts against
+        # the app-wide concurrency limit like any other network I/O.
+        with self._leaf_permit():
+            with self._driver_lock:
+                driver = self._get_driver()
+                max_results = max_results or self.max_results
+                region = kwargs.get("region") or None
+                if region in ("wt-wt", ""):
+                    region = None
+                label = f" [{region}]" if region else ""
+                print(f"[Selenium/{search_engine}] Searching{label}: "
+                      f"{query}")
 
-            if search_engine.lower() == "duckduckgo":
-                return self._search_duckduckgo(driver, query, max_results,
-                                               region=region)
-            elif search_engine.lower() == "google":
-                return self._search_google(driver, query, max_results,
-                                           region=region)
-            raise ValueError(f"Unsupported search engine: {search_engine}")
+                if search_engine.lower() == "duckduckgo":
+                    return self._search_duckduckgo(
+                        driver, query, max_results, region=region)
+                elif search_engine.lower() == "google":
+                    return self._search_google(
+                        driver, query, max_results, region=region)
+                raise ValueError(
+                    f"Unsupported search engine: {search_engine}")
 
     def _search_duckduckgo(
         self,
@@ -502,12 +509,16 @@ class SeleniumBrowser(BaseSearchClient):
         extract_images: Optional[bool] = None,
         **kwargs
     ) -> PageContent:
-        """Thread-safe wrapper: one navigation at a time per driver."""
-        with self._driver_lock:
-            return self._get_page_content_impl(
-                url, wait_for_dynamic=wait_for_dynamic,
-                scroll_to_load=scroll_to_load,
-                extract_images=extract_images, **kwargs)
+        """Thread-safe wrapper: one navigation at a time per driver.
+
+        Leaf permit FIRST (browser fetches honor the app-wide limit),
+        driver lock second (permit-waiting threads never hold it)."""
+        with self._leaf_permit():
+            with self._driver_lock:
+                return self._get_page_content_impl(
+                    url, wait_for_dynamic=wait_for_dynamic,
+                    scroll_to_load=scroll_to_load,
+                    extract_images=extract_images, **kwargs)
 
     def _get_page_content_impl(
         self,
@@ -706,10 +717,11 @@ class SeleniumBrowser(BaseSearchClient):
             True if successful
         """
         try:
-            with self._driver_lock:
-                driver = self._get_driver()
-                save_path.parent.mkdir(parents=True, exist_ok=True)
-                driver.save_screenshot(str(save_path))
+            with self._leaf_permit():
+                with self._driver_lock:
+                    driver = self._get_driver()
+                    save_path.parent.mkdir(parents=True, exist_ok=True)
+                    driver.save_screenshot(str(save_path))
             return True
         except Exception:
             return False
@@ -724,9 +736,10 @@ class SeleniumBrowser(BaseSearchClient):
         Returns:
             Result of the script execution
         """
-        with self._driver_lock:
-            driver = self._get_driver()
-            return driver.execute_script(script)
+        with self._leaf_permit():
+            with self._driver_lock:
+                driver = self._get_driver()
+                return driver.execute_script(script)
 
     def close(self):
         """Close the browser and clean up resources."""

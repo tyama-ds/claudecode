@@ -247,10 +247,18 @@ def all_answered_coverage(prompt):
 
 
 def default_extract(prompt):
+    """A CORRECT extractor: reports exactly the [SOURCE N] numbers that
+    sit next to the claim sentence in the chunk (the strict association
+    check compares any non-empty LLM report against the body parser)."""
     if CLAIM_SENTENCE in prompt:
+        m = re.search(re.escape(CLAIM_SENTENCE)
+                      + r"((?:\s*\[SOURCE \d+\])*)", prompt)
+        nums = sorted({int(n) for n in
+                       re.findall(r"\[SOURCE (\d+)\]", m.group(1))}) \
+            if m else []
         return j({"claims": [{"claim": CLAIM_SENTENCE,
                               "importance": "critical",
-                              "source_numbers": [1]}]})
+                              "source_numbers": nums or [1]}]})
     return j({"claims": []})
 
 

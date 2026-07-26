@@ -32,14 +32,28 @@ def figure_semantics(collection) -> List[Dict[str, Any]]:
     for kind, figs in (("figure", getattr(collection, "figures", []) or []),
                        ("chart", getattr(collection, "charts", []) or [])):
         for f in figs:
-            items.append({
+            entry = {
                 "kind": kind,
                 "id": str(getattr(f, "figure_id", "") or ""),
                 "section": str(getattr(f, "section_id", "") or ""),
                 "title": str(getattr(f, "title", "") or ""),
                 "caption": str(getattr(f, "caption", "") or ""),
                 "alt": str(getattr(f, "alt_text", "") or ""),
-            })
+            }
+            # chart STRUCTURED data (series values, axes, unit,
+            # annotation) is semantic content: a changed plotted number
+            # changes the manifest hash even though the pixels are
+            # rendered later
+            chart_data = getattr(f, "chart_data", None)
+            if chart_data:
+                def _c(v):
+                    if isinstance(v, dict):
+                        return {str(k): _c(x) for k, x in sorted(v.items())}
+                    if isinstance(v, (list, tuple)):
+                        return [_c(x) for x in v]
+                    return str(v)
+                entry["chart_data"] = _c(chart_data)
+            items.append(entry)
     for t in getattr(collection, "tables", []) or []:
         items.append({
             "kind": "table",
@@ -47,6 +61,7 @@ def figure_semantics(collection) -> List[Dict[str, Any]]:
             "section": str(getattr(t, "section_id", "") or ""),
             "title": str(getattr(t, "title", "") or ""),
             "caption": str(getattr(t, "caption", "") or ""),
+            "unit": str(getattr(t, "unit", "") or ""),
             "headers": [str(h) for h in (getattr(t, "headers", []) or [])],
             "rows": [[str(c) for c in row]
                      for row in (getattr(t, "rows", []) or [])],
@@ -104,7 +119,9 @@ def manifest_hash(manifest: Dict[str, Any]) -> str:
 
 import re as _re
 
-_CITATION_RE = _re.compile(r"\[(?:SOURCE:?\s*)?\d+\]")
+# [SOURCE 1] / [SOURCE: 1] editing tags, [1] display numbers and [^1]
+# footnote markers are all citation plumbing, not semantic text
+_CITATION_RE = _re.compile(r"\[(?:SOURCE:?\s*)?\^?\d+\]")
 _MD_IMAGE_RE = _re.compile(r"!\[[^\]]*\]\([^)]*\)")
 _MD_LINK_RE = _re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _TAG_RE = _re.compile(r"<[^>]+>")
@@ -128,7 +145,9 @@ def normalize_semantic_text(text: str) -> str:
 
 
 def extract_artifact_text(path) -> Optional[str]:
-    """Best-effort text of a SAVED report artifact (md/txt/html/docx).
+    """Text of a SAVED report artifact, read back LOCALLY
+    (md/txt/html/docx/pdf — PDF via the already-bundled PyMuPDF/pypdf
+    extractors, never a network service).
 
     Returns None when the format cannot be read back (the caller reports
     the check as SKIPPED — never silently passed).
@@ -155,42 +174,76 @@ def extract_artifact_text(path) -> Optional[str]:
             return "\n".join(parts)
         except Exception:
             return None
+    if suffix == ".pdf":
+        try:
+            import fitz                     # PyMuPDF (existing dep)
+            with fitz.open(str(p)) as doc:
+                return "\n".join(page.get_text() for page in doc)
+        except Exception:
+            pass
+        try:
+            import pypdf
+            reader = pypdf.PdfReader(str(p))
+            return "\n".join((page.extract_text() or "")
+                             for page in reader.pages)
+        except Exception:
+            return None
     return None
 
 
 def verify_frozen_in_artifact(manifest: Dict[str, Any],
                               artifact_text: str,
                               min_fragment_chars: int = 24,
+                              allowed_extras: Optional[List[str]] = None,
+                              check_additions: bool = True,
                               ) -> Dict[str, Any]:
-    """Check that the frozen semantic content is IN the saved artifact.
+    """Two-way, FAIL-CLOSED check between the frozen manifest and the
+    ACTUAL saved artifact.
 
-    Every sufficiently long paragraph of every frozen chapter (and every
-    figure/table title, caption and cell) must appear — normalized — in
-    the artifact text. Returns {"ok", "checked", "missing"} where
-    ``missing`` lists the fragments that did not survive rendering.
+    Direction 1 (missing): every paragraph line of every frozen chapter,
+    every figure/table title, caption and CELL (cells are checked
+    regardless of length — a short "52%" cell counts), and every extras
+    value must appear — normalized — in the artifact.
+
+    Direction 2 (additions): substantial artifact paragraphs that are
+    neither frozen content nor a declared deterministic extra
+    (references, headings, TOC lines, dates...) are UNVERIFIED
+    post-freeze additions and fail the check.
+
+    checked == 0 is itself a FAILURE — an empty comparison can never
+    pass. Returns {"ok", "checked", "missing", "additions"}.
     """
     haystack = normalize_semantic_text(artifact_text)
     checked = 0
     missing: List[str] = []
+    needles: List[str] = []      # normalized frozen fragments
 
-    def _check(fragment: str) -> None:
+    def _check(fragment: str, min_chars: int = None) -> None:
         nonlocal checked
         needle = normalize_semantic_text(fragment)
-        if len(needle) < min_fragment_chars:
+        limit = min_fragment_chars if min_chars is None else min_chars
+        if len(needle) < max(1, limit):
             return
         checked += 1
+        needles.append(needle)
         if needle not in haystack:
             missing.append(fragment.strip()[:120])
 
+    chapter_titles: List[str] = []
     for text in (manifest.get("chapters") or {}).values():
         for para in (text or "").split("\n\n"):
             for line in para.split("\n"):
+                if line.strip().startswith("#"):
+                    chapter_titles.append(line)
                 _check(line)
     for item in manifest.get("figures") or []:
-        _check(item.get("title", ""))
-        _check(item.get("caption", ""))
+        _check(item.get("title", ""), min_chars=2)
+        _check(item.get("caption", ""), min_chars=2)
+        for header in item.get("headers", []) or []:
+            _check(header, min_chars=1)          # short cells count
         for row in item.get("rows", []) or []:
-            _check(" ".join(row))
+            for cell in row:
+                _check(cell, min_chars=1)        # short cells count
     extras = manifest.get("extras") or {}
 
     def _walk(value):
@@ -201,10 +254,82 @@ def verify_frozen_in_artifact(manifest: Dict[str, Any],
             for v in value:
                 _walk(v)
         else:
-            _check(str(value))
+            _check(str(value), min_chars=2)
     _walk(extras)
 
-    return {"ok": not missing, "checked": checked, "missing": missing}
+    if checked == 0:
+        return {"ok": False, "checked": 0,
+                "missing": ["nothing to check (empty manifest)"],
+                "additions": []}
+
+    # ---- direction 2: unverified POST-FREEZE additions ----------------
+    additions: List[str] = []
+    if check_additions:
+        frozen_blob = "\x1f".join(needles)
+        allowed_norm = [normalize_semantic_text(e)
+                        for e in [*(allowed_extras or []), *chapter_titles]]
+        allowed_norm = [a for a in allowed_norm if len(a) >= 6]
+        for para in _re.split(r"\n\s*\n", artifact_text or ""):
+            for line in para.split("\n"):
+                # footnote definitions / numbered reference lines are
+                # citation plumbing, not semantic additions
+                if _re.match(r"\s*\[\^?\d+\]\s*[:：]", line) or \
+                        _re.match(r"\s*\d+\.\s+\S*https?://", line):
+                    continue
+                norm = normalize_semantic_text(line)
+                if len(norm) < 40:      # short boilerplate is structural
+                    continue
+                if norm in frozen_blob or \
+                        any(norm in n or n in norm for n in needles):
+                    continue
+                if any(a in norm or norm in a for a in allowed_norm):
+                    continue
+                additions.append(line.strip()[:120])
+
+    return {"ok": not missing and not additions, "checked": checked,
+            "missing": missing, "additions": additions}
+
+
+def default_allowed_extras(evidence_locker=None) -> List[str]:
+    """Deterministic artifact content that is NOT semantic body:
+    references (locker citation texts/titles/urls) and standard
+    structural headings."""
+    extras: List[str] = []
+    if evidence_locker is not None:
+        try:
+            for ev in evidence_locker.get_all_evidence():
+                extras.append(str(getattr(ev, "citation_text", "") or ""))
+                extras.append(str(getattr(ev, "title", "") or ""))
+                extras.append(str(getattr(ev, "url", "") or ""))
+        except Exception:
+            pass
+    extras.extend([
+        "参考文献", "引用文献", "目次", "References", "Sources",
+        "Table of Contents", "図表一覧", "Figures and Tables",
+        "用語集", "Glossary",
+    ])
+    return [e for e in extras if e]
+
+
+def check_artifact(manifest: Dict[str, Any], report_path,
+                   evidence_locker=None) -> Dict[str, Any]:
+    """One-call artifact verification shared by run()/manual/CLI paths.
+
+    Returns {"status": "pass"|"fail"|"skipped:<reason>",
+             "checked", "missing", "additions"}.
+    """
+    if not manifest:
+        return {"status": "skipped:no_manifest", "checked": 0,
+                "missing": [], "additions": []}
+    artifact_text = extract_artifact_text(report_path)
+    if artifact_text is None:
+        return {"status": "skipped:unreadable_format", "checked": 0,
+                "missing": [], "additions": []}
+    result = verify_frozen_in_artifact(
+        manifest, artifact_text,
+        allowed_extras=default_allowed_extras(evidence_locker))
+    result["status"] = "pass" if result["ok"] else "fail"
+    return result
 
 
 def figure_semantics_markdown(collection, language: str = "ja",
@@ -234,7 +359,26 @@ def figure_semantics_markdown(collection, language: str = "ja",
             lines.append("")
             lines.append("| " + " | ".join(item["headers"]) + " |")
             lines.append("|" + "---|" * len(item["headers"]))
-            for row in item.get("rows", [])[:50]:
+            # EVERY row is part of the verified text — no row cap
+            for row in item.get("rows", []):
                 lines.append("| " + " | ".join(row) + " |")
+        chart_data = item.get("chart_data")
+        if chart_data:
+            # chart series values/axes/unit join the verified text too
+            labels = chart_data.get("labels") or []
+            values = chart_data.get("values") or []
+            pairs = [f"{l}={v}" for l, v in zip(labels, values)]
+            for name, series in (chart_data.get("series") or {}).items():
+                pairs.extend(f"{name}:{l}={v}"
+                             for l, v in zip(labels, series))
+            if pairs:
+                head = "データ" if language == "ja" else "Data"
+                lines.append(f"{head}: " + "; ".join(pairs))
+            axes = " / ".join(x for x in (chart_data.get("x_axis"),
+                                          chart_data.get("y_axis"),
+                                          chart_data.get("unit")) if x)
+            if axes:
+                lines.append(("軸・単位: " if language == "ja"
+                              else "Axes/unit: ") + axes)
         lines.append("")
     return "\n".join(lines).strip()

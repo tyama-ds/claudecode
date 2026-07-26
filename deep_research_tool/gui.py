@@ -933,6 +933,11 @@ This helps gather more comprehensive information from diverse sources."""
         if config['multilingual'] and 'search_languages' in config:
             self._log(f"  Languages: {', '.join(config['search_languages'])}")
 
+        # Cancel token: Stop propagates a REAL cancellation into the
+        # worker (checked at every progress event / stage boundary),
+        # not just a display change
+        self.cancel_event = threading.Event()
+
         # Run research in background thread
         self.research_thread = threading.Thread(
             target=self._run_research_thread,
@@ -956,13 +961,18 @@ This helps gather more comprehensive information from diverse sources."""
             result = run_research(
                 query=topic,
                 progress_callback=progress_callback,
+                cancel_event=self.cancel_event,
                 **config
             )
 
             self.root.after(0, lambda: self._on_research_complete(result))
 
         except Exception as e:
-            self.root.after(0, lambda: self._on_research_error(str(e)))
+            from .main import RunCancelled
+            if isinstance(e, RunCancelled):
+                self.root.after(0, self._on_research_cancelled)
+            else:
+                self.root.after(0, lambda: self._on_research_error(str(e)))
 
     def _on_research_complete(self, result):
         """Handle research completion."""
@@ -1006,13 +1016,30 @@ This helps gather more comprehensive information from diverse sources."""
         self._log(f"ERROR: {error}")
         messagebox.showerror("Error", f"Research failed:\n{error}")
 
-    def _stop_research(self):
-        """Stop the research process."""
+    def _on_research_cancelled(self):
+        """Worker acknowledged the cancellation (partial artifacts kept)."""
         self.is_running = False
         self.btn_start.config(state=tk.NORMAL)
         self.btn_stop.config(state=tk.DISABLED)
-        self.progress_label.config(text="Stopped")
-        self._log("Research stopped by user")
+        self.progress_label.config(text="Cancelled")
+        self._log("Research cancelled — partial artifacts (evidence, "
+                  "drafts) remain in the output directory")
+
+    def _stop_research(self):
+        """Send a REAL cancel token to the worker thread.
+
+        The worker stops at its next safe checkpoint (no new LLM/search
+        calls start after this) and reports back via
+        _on_research_cancelled; until then the Stop button is disabled
+        and the label shows the cancellation is in progress.
+        """
+        event = getattr(self, "cancel_event", None)
+        if event is not None:
+            event.set()
+        self.btn_stop.config(state=tk.DISABLED)
+        self.progress_label.config(text="Cancelling...")
+        self._log("Cancel requested — stopping at the next safe "
+                  "checkpoint (no new LLM/search calls will start)")
 
 
 def main():

@@ -388,14 +388,22 @@ def decide(
             return ResearchDecision.COMPRESS_FROM_EVIDENCE
         return ResearchDecision.FINALIZE_WITH_LIMITATIONS
 
-    # --- evidence-level problems -> research (bounded) ---
+    # --- evidence-level problems -> research (bounded). SEVERITY-GATED:
+    #     only critical/important gaps justify hitting the web; a body
+    #     whose only defects are MINOR/optional claims never researches —
+    #     minor gaps end as limitations / optional improvements. ---
+    _research_severities = ("critical", "important")
+    significant_gaps = [
+        i for i in verdict.issues_of(ISSUE_UNSUPPORTED, ISSUE_CONTRADICTED,
+                                     ISSUE_UNANSWERED_QUESTION)
+        if i.severity in _research_severities]
     needs_research = (
         m.critical_question_coverage < budget.required_critical_coverage
         or m.unsupported_critical_claims > 0
         or m.primary_freshness == FRESHNESS_FAIL
-        or any(i.needed_evidence for i in verdict.issues)
-        or bool(verdict.issues_of(ISSUE_UNSUPPORTED, ISSUE_CONTRADICTED,
-                                  ISSUE_UNANSWERED_QUESTION))
+        or any(i.needed_evidence for i in verdict.issues
+               if i.severity in _research_severities)
+        or bool(significant_gaps)
     )
     if needs_research:
         if budget.research_allowed():
@@ -411,9 +419,12 @@ def decide(
         if fixable and budget.revision_allowed():
             return ResearchDecision.REWRITE_FROM_EVIDENCE
 
-    # --- support score below threshold but nothing actionable by search ---
+    # --- support score below threshold: research ONLY when a critical/
+    #     important gap exists to search for. A score dragged down by
+    #     MINOR claims alone never triggers a search — it ends with
+    #     limitations (severity gate, spec item 15). ---
     if m.claim_support_score < budget.min_claim_support_score:
-        if budget.research_allowed():
+        if significant_gaps and budget.research_allowed():
             return ResearchDecision.RESEARCH
         return ResearchDecision.FINALIZE_WITH_LIMITATIONS
 

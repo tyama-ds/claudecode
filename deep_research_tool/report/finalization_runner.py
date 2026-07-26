@@ -135,6 +135,9 @@ class FinalizationRunner:
         # Sections that are VERIFIED but never LLM-edited (rendered
         # verbatim from their frozen source, e.g. figure semantics)
         self.render_only_sections: set = set()
+        # Sections verified WITHOUT the per-claim citation requirement
+        # (executive summary — a digest of already-cited body claims)
+        self.citation_exempt_sections: set = set()
 
         # --- adaptive coverage: requirement-granular gap control ------
         from ..adaptive import CoverageLedger, StopController
@@ -148,6 +151,16 @@ class FinalizationRunner:
             max_rounds=self.verification_settings.max_final_research_rounds,
             max_stall_rounds=self._rc("max_stall_rounds", 2) or 2) \
             if self.adaptive_enabled else None
+        if self.adaptive_enabled:
+            # ONE stopping authority: with the ledger active, the
+            # StopController decides stalls. The legacy LoopBudget
+            # no-improvement counter is aligned to the SAME threshold so
+            # it can never stop a round earlier than the configured
+            # max_stall_rounds (previously max_no_improvement_rounds=1
+            # ended the loop after a single stall regardless).
+            self.budget.max_no_improvement_rounds = max(
+                self.budget.max_no_improvement_rounds,
+                self.stop_controller.max_stall_rounds)
         # default ON in production (a research_config exists); OFF for
         # bare test/manual constructions so no files appear unrequested
         audit_enabled = bool(self._rc("audit_log_enabled",
@@ -276,23 +289,55 @@ class FinalizationRunner:
         if units:
             self.planner.recalc_after_research(units)
 
-    def _critical_questions(self) -> List[str]:
-        """Plan questions + explicit user requirements (audit item 8)."""
-        questions: List[str] = []
+    def _requirement_sources(self) -> List[Dict[str, str]]:
+        """ALL requirement sources, none silently dropped.
+
+        - explicit USER requirements come FIRST (highest priority);
+        - EVERY level of the research plan is included
+          (get_flat_sections walks subsections too);
+        - duplicates are merged after normalization;
+        - there is NO count cap — requirements that cannot fit one LLM
+          call are batched downstream, never discarded.
+        """
+        sources: List[Dict[str, str]] = []
+        seen: set = set()
+
+        def _add(text: str, origin: str, section: str = "") -> None:
+            text = re.sub(r"\s+", " ", (text or "").strip())
+            key = re.sub(r"\s+", "", text.lower())
+            if len(text) < 8 or key in seen:
+                return
+            seen.add(key)
+            sources.append({"text": text, "origin": origin,
+                            "section": section})
+
+        # explicit user requirements FIRST — they are never dropped
+        for line in re.split(r"[\n。]", self.requirements):
+            _add(line, "user")
+
         if self.research_plan is not None:
             try:
-                for item in self.research_plan.table_of_contents.items:
-                    q = f"{item.title} {getattr(item, 'description', '')}" \
-                        .strip()
-                    if q:
-                        questions.append(q)
+                flat = list(self.research_plan.table_of_contents
+                            .get_flat_sections())
             except Exception:
-                pass
-        for line in re.split(r"[\n。]", self.requirements):
-            line = line.strip()
-            if len(line) >= 8:
-                questions.append(line)
-        return questions[:15]
+                flat = []
+            if not flat:
+                try:
+                    flat = list(self.research_plan.table_of_contents.items)
+                except Exception:
+                    flat = []
+            for item in flat:
+                q = (f"{getattr(item, 'title', '')} "
+                     f"{getattr(item, 'description', '')}").strip()
+                _add(q, "plan", str(getattr(item, "section", "") or ""))
+        return sources
+
+    def _critical_questions(self) -> List[str]:
+        """Plan questions (all hierarchy levels) + explicit user
+        requirements — ALL of them, user requirements first. The old
+        silent ``[:15]`` cap is gone; coverage judging batches the
+        questions per LLM call instead of discarding them."""
+        return [s["text"] for s in self._requirement_sources()]
 
     def _freshness_required(self) -> bool:
         return bool(_FRESHNESS_MARKERS.search(
@@ -376,6 +421,7 @@ class FinalizationRunner:
                 exclude_references=self._rp(
                     "exclude_references_from_count", True),
                 primary_freshness_required=freshness_required,
+                citation_exempt_sections=self.citation_exempt_sections,
             )
             last_verify["fingerprint"] = fp
             last_verify["verdict"] = verdict
@@ -440,9 +486,18 @@ class FinalizationRunner:
             closed = self.ledger.close_budget_exhausted(
                 "最終ループ終了時に未解決" if self.language == "ja"
                 else "unresolved at end of finalization loop")
+            if not self.ledger.termination_reason:
+                self.ledger.termination_reason = (
+                    "all_requirements_terminal" if not closed
+                    else "loop_budget_exhausted")
             outcome["coverage_ledger"] = self.ledger.to_dict()
+            outcome["termination_reason"] = self.ledger.termination_reason
+            outcome["verification_summary"]["termination_reason"] = \
+                self.ledger.termination_reason
             self.audit.event("finalization_done",
                              decision=outcome["decision"],
+                             termination_reason=(
+                                 self.ledger.termination_reason),
                              coverage=self.ledger.coverage(),
                              counts=self.ledger.counts(),
                              budget_exhausted=closed)
@@ -607,12 +662,21 @@ class FinalizationRunner:
 
     def _fetch_and_register(self, url: str, query: str,
                             target_sections: List[str],
-                            changed_sections: List[str]):
+                            changed_sections: List[str],
+                            meta: Optional[Dict[str, str]] = None):
         """Fetch one novel URL and register it as evidence (shared by the
         legacy and adaptive research rounds). Returns the Evidence or
         None (already seen / too short / duplicate content / fetch
         error). seen_urls is wired to the actual fetch: a URL is fetched
-        at most once across the whole run (locker-seeded)."""
+        at most once across the whole run (locker-seeded).
+
+        ``target_sections`` is the ONLY place the evidence is registered
+        (citations + session contents). An EMPTY list keeps the evidence
+        in the locker as UNASSIGNED — it is never sprayed across
+        sections it was not searched for. ``meta`` (query/requirement/
+        section/claim ids) is stored on the evidence so every
+        EvidenceChunk built from it carries the full provenance chain.
+        """
         from ..evidence.locker import EvidenceType
 
         if not self.budget.is_novel_url(url):
@@ -647,6 +711,11 @@ class FinalizationRunner:
         )
         if is_primary:
             evidence.quality_indicators.is_primary_source = True
+        if meta:
+            try:
+                evidence.adaptive_meta = dict(meta)
+            except Exception:
+                pass
         self._url_to_id[url] = evidence.id
         for sid in target_sections:
             entry = {"title": getattr(page, "title", "") or url,
@@ -707,112 +776,204 @@ class FinalizationRunner:
     # adaptive research round (requirement-granular, gap-only)
     # ------------------------------------------------------------------
 
+    # tasks actually RUN per research round; the rest is DEFERRED (their
+    # requirements keep their attempts and run in the next round)
+    ROUND_TASK_CAP = 12
+
     def _adaptive_research_round(self, issues, queries) -> Dict[str, Any]:
         """Gap-only research at REQUIREMENT granularity.
 
-        - the deterministic StopController is consulted first: a stalled
-          or exhausted run performs no search at all;
+        - the ONE stopping authority (StopController over the Coverage
+          Ledger) is consulted first: a stalled or exhausted run performs
+          no search at all;
         - only gap requirements (open / conflicted) get queries —
           supported requirements are NEVER re-searched;
-        - per requirement, issue-supplied queries are augmented with
-          intent-templated variants and executed in PARALLEL through the
-          TaskDAG scheduler (bounded by parallel_max_workers);
-        - per-requirement result lists are fused with INTERNAL RRF
-          before fetching (existing search clients only);
-        - every fetch/dedup rule of the legacy round applies unchanged.
+        - the round's task list is CAPPED FIRST: only the scheduled
+          tasks consume their requirement's search attempt; deferred
+          tasks consume nothing and stay runnable next round;
+        - multi_hop requirements get a dependent second task whose query
+          is refined from the first task's top result;
+        - evidence found by a task is registered ONLY to that task's
+          target section — section-less results are kept as UNASSIGNED
+          evidence in the locker, never sprayed across sections.
         """
-        from ..adaptive import (TaskDAG, build_intent_queries, rrf_merge)
-        from ..adaptive.models import ResearchTask
+        from ..adaptive import TaskDAG, build_intent_queries, rrf_merge
+        from ..adaptive.models import (
+            TASK_DEFERRED, TASK_EXECUTED, TASK_FAILED, TASK_SCHEDULED,
+            ResearchTask)
 
         stop, stop_reason = self.stop_controller.should_stop(self.ledger)
         if stop:
             print(f"[Adaptive] research stopped: {stop_reason}")
+            self.ledger.termination_reason = stop_reason
             self.audit.event("research_stopped", reason=stop_reason,
                              coverage=self.ledger.coverage())
             return {"new_sources": 0, "changed_sections": []}
 
         gaps = self.ledger.gap_requirements()
         if not gaps:
-            self.audit.event("research_skipped", reason="no_gap_requirements")
+            self.audit.event("research_skipped",
+                             reason="no_gap_requirements")
             return {"new_sources": 0, "changed_sections": []}
 
         # queries handed in by the controller are ALREADY novel-filtered;
-        # map them back to their requirement via the issues they came from
-        query_req: Dict[str, str] = {}
+        # map them back to requirement AND section via their issue
+        query_meta: Dict[str, Dict[str, str]] = {}
         for issue in issues:
             req = self._requirement_for_issue(issue)
             if req is None:
                 continue
             for q in issue.search_queries or []:
-                query_req.setdefault(q, req.req_id)
+                query_meta.setdefault(q, {
+                    "req_id": req.req_id,
+                    "section_id": issue.section_id or req.section_id,
+                    "issue_id": issue.claim_id or issue.type,
+                    "claim_id": issue.claim_id,
+                })
 
         gap_ids = {r.req_id for r in gaps}
         tasks: List[ResearchTask] = []
-        attempted: set = set()
         seq = 0
+
+        def _new_task(req, query, meta=None, depends_on=None):
+            nonlocal seq
+            seq += 1
+            meta = meta or {}
+            return ResearchTask(
+                task_id=f"T{seq:03d}", req_id=req.req_id, query=query,
+                intent=req.intent,
+                issue_id=str(meta.get("issue_id", "") or ""),
+                section_id=str(meta.get("section_id", "")
+                               or req.section_id or ""),
+                claim_id=str(meta.get("claim_id", "") or ""),
+                depends_on=list(depends_on or []))
+
         for q in queries:
-            req_id = query_req.get(q) or gaps[0].req_id
+            meta = query_meta.get(q)
+            req_id = (meta or {}).get("req_id") or gaps[0].req_id
             if req_id not in gap_ids:
                 continue        # supported requirements are never searched
-            seq += 1
-            req = self.ledger.get(req_id)
-            tasks.append(ResearchTask(task_id=f"T{seq:03d}",
-                                      req_id=req_id, query=q,
-                                      intent=req.intent))
-            attempted.add(req_id)
-        # intent-templated diversification for the gap requirements
+            tasks.append(_new_task(self.ledger.get(req_id), q, meta))
+        # intent-templated diversification for the gap requirements;
+        # multi_hop requirements chain a DEPENDENT refinement task whose
+        # query is completed from the first task's top result
         for req in gaps[:4]:
-            extra = build_intent_queries(req.text, req.intent,
+            # a requirement demanding PRIMARY evidence searches with the
+            # primary_source intent regardless of its textual intent
+            intent = ("primary_source"
+                      if req.expected_evidence_type == "primary"
+                      else req.intent)
+            extra = build_intent_queries(req.text, intent,
                                          self.language, max_queries=3)
-            for q in self.budget.novel_queries(extra)[:2]:
-                seq += 1
-                tasks.append(ResearchTask(task_id=f"T{seq:03d}",
-                                          req_id=req.req_id, query=q,
-                                          intent=req.intent))
-                attempted.add(req.req_id)
+            fresh = self.budget.novel_queries(extra)[:2]
+            prev_task = None
+            for q in fresh:
+                task = _new_task(
+                    req, q,
+                    depends_on=[prev_task.task_id]
+                    if (req.intent == "multi_hop"
+                        and prev_task is not None) else None)
+                tasks.append(task)
+                prev_task = task
         if not tasks:
             return {"new_sources": 0, "changed_sections": []}
-        for req_id in sorted(attempted):
+
+        # ---- cap FIRST, then account: only SCHEDULED tasks consume the
+        #      requirement's attempt; deferred tasks consume nothing ----
+        scheduled = tasks[:self.ROUND_TASK_CAP]
+        deferred = tasks[self.ROUND_TASK_CAP:]
+        # a dependency cut by the cap defers its dependents too
+        scheduled_ids = {t.task_id for t in scheduled}
+        keep: List[ResearchTask] = []
+        for t in scheduled:
+            if all(dep in scheduled_ids for dep in t.depends_on):
+                keep.append(t)
+            else:
+                deferred.append(t)
+                scheduled_ids.discard(t.task_id)
+        scheduled = keep
+        for t in scheduled:
+            t.execution_state = TASK_SCHEDULED
+        for t in deferred:
+            t.execution_state = TASK_DEFERRED
+            # deferred queries stay novel for the NEXT round
+            key = re.sub(r"\s+", "", (t.query or "").lower())
+            self.budget.seen_queries.discard(key)
+        attempted = sorted({t.req_id for t in scheduled})
+        for req_id in attempted:
             self.ledger.record_search_attempt(req_id)
 
         # snapshot BEFORE the round (deltas are measured, not self-reported)
         coverage_before = self.ledger.coverage()
         counts_before = self._claim_counts()
 
-        # parallel search through the DAG scheduler (search clients take
-        # their own leaf permits; the pool size honors the app-wide limit)
-        dag = TaskDAG(tasks[:12])
+        # parallel search through the DAG scheduler. Permit ownership is
+        # ONE-SIDED: the search client takes its own leaf permit inside
+        # search(), so the DAG passes NO limiter (double acquisition of
+        # the same RunLimits would deadlock at limit=1).
+        dag = TaskDAG(scheduled)
+        results_map: Dict[str, List] = {}
+
+        def _execute(task: ResearchTask):
+            if task.depends_on:
+                # multi-hop refinement: the dependent query is completed
+                # with the top result of its prerequisite task
+                prev = results_map.get(task.depends_on[0]) or []
+                top_title = str(getattr(prev[0], "title", "") or "") \
+                    if prev else ""
+                if top_title:
+                    task.query = f"{task.query} {top_title[:48]}"
+            value = self.search_client.search(task.query)
+            results_map[task.task_id] = value or []
+            return value
+
         results_by_task = dag.run(
-            lambda task: self.search_client.search(task.query),
+            _execute,
             parallel_max_workers=self._rc("parallel_max_workers", 8),
             stage_cap=self.verification_settings.max_workers,
         )
-
-        # per-requirement RRF fusion of the task result lists
-        by_req: Dict[str, List] = {}
         for task in dag.tasks():
             value = results_by_task.get(task.task_id)
             task.result_count = len(value or [])
-            if value:
-                by_req.setdefault(task.req_id, []).append(value)
+            task.execution_state = TASK_FAILED if task.status == "failed" \
+                else TASK_EXECUTED
+
+        # ---- per (requirement, section) RRF fusion: evidence follows
+        #      its OWN task's target, never other sections ----
+        by_target: Dict[tuple, List] = {}
+        task_of_target: Dict[tuple, ResearchTask] = {}
+        for task in dag.tasks():
+            value = results_by_task.get(task.task_id)
+            if not value:
+                continue
+            key = (task.req_id, task.section_id)
+            by_target.setdefault(key, []).append(value)
+            task_of_target.setdefault(key, task)
 
         new_sources = 0
         changed_sections: List[str] = []
         new_evidence_ids: List[str] = []
-        for req_id in sorted(by_req):
+        unassigned: List[str] = []
+        for key in sorted(by_target):
+            req_id, section_id = key
             req = self.ledger.get(req_id)
-            fused = rrf_merge(by_req[req_id], limit=4)
-            targets = [req.section_id] if req.section_id else \
-                sorted({i.section_id for i in issues if i.section_id}) or \
-                list(self.section_evidence.keys())[:1]
+            task = task_of_target[key]
+            fused = rrf_merge(by_target[key], limit=4)
+            targets = [section_id] if section_id else []
             for r in fused:
                 url = getattr(r, "url", "")
                 evidence = self._fetch_and_register(
-                    url, req.text[:60], targets, changed_sections)
+                    url, task.query, targets, changed_sections,
+                    meta={"query_id": task.task_id,
+                          "requirement_id": req_id,
+                          "section_id": section_id,
+                          "claim_id": task.claim_id})
                 if evidence is not None:
                     new_sources += 1
                     new_evidence_ids.append(evidence.id)
                     req.evidence_ids.append(evidence.id)
+                    if not targets:
+                        unassigned.append(evidence.id)
 
         if changed_sections:
             self._recalc_units()
@@ -823,17 +984,25 @@ class FinalizationRunner:
         self._pending_round = {
             "round_index": len(self.ledger.rounds) + 1,
             "new_unique_evidence": new_sources,
-            "queries_run": len(tasks),
+            "queries_run": len(scheduled),
             "coverage_before": coverage_before,
             "counts_before": counts_before,
+            "scheduled_tasks": [t.task_id for t in scheduled],
+            "executed_tasks": [t.task_id for t in scheduled
+                               if t.execution_state == TASK_EXECUTED],
+            "failed_tasks": [t.task_id for t in scheduled
+                             if t.execution_state == TASK_FAILED],
+            "deferred_tasks": [t.task_id for t in deferred],
         }
         self.audit.event(
             "research_round",
             round=self._pending_round["round_index"],
-            gap_requirements=sorted(attempted),
-            queries=[t.query for t in tasks],
+            gap_requirements=attempted,
+            scheduled=[t.to_dict() for t in scheduled],
+            deferred=[t.to_dict() for t in deferred],
             new_sources=new_sources,
             new_evidence_ids=new_evidence_ids,
+            unassigned_evidence_ids=unassigned,
             unavailable_after_search=exhausted,
         )
         return {"new_sources": new_sources,
@@ -847,18 +1016,39 @@ class FinalizationRunner:
                             chapters: Dict[str, str]) -> None:
         """Decompose the run into RequirementLeafs (deterministic).
 
-        - one requirement per critical question (plan items + explicit
-          user requirements), classified by intent;
-        - one claims-support requirement per section (the requirement
-          that every factual claim in the section is evidence-backed).
+        - one requirement per source question — explicit USER
+          requirements first (REQ-U*, highest priority), then EVERY
+          research-plan item at EVERY hierarchy level (REQ-Q*). Nothing
+          is capped or silently dropped;
+        - one claims-support requirement per section (REQ-S*);
+        - freshness/primary constraints are attached PER REQUIREMENT
+          (text markers or a run-level freshness demand), so a stale
+          gate reopens exactly the affected requirement.
         """
         from ..adaptive import classify_intent
         from ..adaptive.models import RequirementLeaf
 
-        for i, q in enumerate(critical_questions, 1):
+        run_freshness = self._freshness_required()
+        sources = self._requirement_sources()
+        u_seq = q_seq = 0
+        for src in sources:
+            text = src["text"]
+            fresh = run_freshness or bool(_FRESHNESS_MARKERS.search(text))
+            if src["origin"] == "user":
+                u_seq += 1
+                rid = f"REQ-U{u_seq}"
+            else:
+                q_seq += 1
+                rid = f"REQ-Q{q_seq}"
             self.ledger.add(RequirementLeaf(
-                req_id=f"REQ-Q{i}", text=q,
-                intent=classify_intent(q), priority="critical"))
+                req_id=rid, text=text,
+                section_id=src.get("section", "") or "",
+                intent=classify_intent(text),
+                priority="critical",
+                origin=src["origin"],
+                freshness_requirement=fresh,
+                primary_source_required=fresh,
+                expected_evidence_type="primary" if fresh else ""))
         for sid in chapters:
             text = (f"セクション{sid}の事実主張がエビデンスに支持されている"
                     if self.language == "ja" else
@@ -866,12 +1056,16 @@ class FinalizationRunner:
                     f"evidence-backed")
             self.ledger.add(RequirementLeaf(
                 req_id=f"REQ-S{sid}", text=text, section_id=sid,
-                intent="background", priority="important"))
+                intent="background", priority="important",
+                origin="section",
+                freshness_requirement=run_freshness,
+                primary_source_required=run_freshness))
         self.audit.event("requirements_decomposed",
                          count=len(self.ledger),
                          requirements=[
                              {"req_id": r.req_id, "intent": r.intent,
-                              "priority": r.priority,
+                              "priority": r.priority, "origin": r.origin,
+                              "freshness": r.freshness_requirement,
                               "text": r.text[:80]}
                              for r in self.ledger.requirements()])
 
@@ -882,7 +1076,8 @@ class FinalizationRunner:
         from ..report.finalization import ISSUE_UNANSWERED_QUESTION
         if issue.type == ISSUE_UNANSWERED_QUESTION and issue.claim:
             for req in self.ledger.requirements():
-                if req.req_id.startswith("REQ-Q") and req.text == issue.claim:
+                if req.req_id.startswith(("REQ-U", "REQ-Q")) \
+                        and req.text == issue.claim:
                     return req
         if issue.section_id:
             return self.ledger.get(f"REQ-S{issue.section_id}")
@@ -894,12 +1089,19 @@ class FinalizationRunner:
                     {"supported": 0, "contradicted": 0})
 
     def _update_ledger_from_verdict(self, verdict) -> None:
-        """Deterministic requirement-state update from one verify pass."""
+        """Deterministic requirement-state update from one verify pass.
+
+        Freshness is REQUIREMENT-scoped: a stale_or_non_primary_sources
+        issue keeps/reopens EXACTLY the requirements it names (by
+        section) — a freshness-failing requirement is never marked
+        supported just because its claims verified textually.
+        """
         from ..adaptive.models import (
             REQ_BUDGET_EXHAUSTED, REQ_CONFLICTED, REQ_NOT_APPLICABLE,
             REQ_OPEN, REQ_SUPPORTED, REQ_UNAVAILABLE)
         from ..report.finalization import (
-            ISSUE_CONTRADICTED, ISSUE_UNANSWERED_QUESTION, ISSUE_UNSUPPORTED)
+            FRESHNESS_FAIL, ISSUE_CONTRADICTED, ISSUE_STALE_OR_NON_PRIMARY,
+            ISSUE_UNANSWERED_QUESTION, ISSUE_UNSUPPORTED)
 
         m = verdict.metrics
         supported_claims = max(
@@ -912,7 +1114,15 @@ class FinalizationRunner:
                       if i.type == ISSUE_UNANSWERED_QUESTION and i.claim}
         sec_open: Dict[str, List[str]] = {}
         sec_conflicted: Dict[str, List[str]] = {}
+        stale_sections: set = set()
+        stale_global = False
         for i in verdict.issues:
+            if i.type == ISSUE_STALE_OR_NON_PRIMARY:
+                if i.section_id:
+                    stale_sections.add(i.section_id)
+                else:
+                    stale_global = True
+                continue
             if not i.section_id:
                 continue
             if i.type == ISSUE_UNSUPPORTED:
@@ -920,11 +1130,25 @@ class FinalizationRunner:
             elif i.type == ISSUE_CONTRADICTED:
                 sec_conflicted.setdefault(i.section_id, []).append(i.claim_id)
 
+        freshness_failed = m.primary_freshness == FRESHNESS_FAIL
+
+        def _freshness_blocks(req) -> bool:
+            """True when THIS requirement's freshness demand is unmet."""
+            if not req.freshness_requirement or not freshness_failed:
+                return False
+            if req.section_id:
+                return req.section_id in stale_sections or (
+                    stale_global and not stale_sections)
+            # section-less (question) requirements: blocked while the
+            # freshness gate fails anywhere the run demands freshness
+            return stale_global or bool(stale_sections)
+
         for req in self.ledger.requirements():
             if req.status in (REQ_NOT_APPLICABLE, REQ_BUDGET_EXHAUSTED):
                 continue
-            if req.req_id.startswith("REQ-Q"):
-                target = REQ_OPEN if req.text in unanswered else REQ_SUPPORTED
+            if req.req_id.startswith(("REQ-U", "REQ-Q")):
+                target = REQ_OPEN if req.text in unanswered \
+                    else REQ_SUPPORTED
             else:
                 sid = req.section_id
                 if sid in sec_conflicted:
@@ -936,14 +1160,35 @@ class FinalizationRunner:
                     req.claim_ids = sorted(set(sec_open[sid]))
                 else:
                     target = REQ_SUPPORTED
+            # freshness gate: an unmet freshness/primary demand keeps
+            # the requirement OPEN even when its claims verified
+            if target == REQ_SUPPORTED and _freshness_blocks(req):
+                target = REQ_OPEN
+                reason = ("一次情報・鮮度要件が未充足"
+                          if self.language == "ja"
+                          else "freshness/primary-source demand unmet")
+            elif target == REQ_SUPPORTED and req.section_id and \
+                    req.min_independent_sources > 1 and \
+                    len(set(self.citation_mgr.evidence_ids(
+                        req.section_id))
+                        | set(req.evidence_ids)) < \
+                    req.min_independent_sources:
+                # independent-source floor: fewer registered sources
+                # than the requirement demands -> stays open
+                target = REQ_OPEN
+                reason = (f"独立ソースが{req.min_independent_sources}件"
+                          f"未満" if self.language == "ja" else
+                          f"fewer than {req.min_independent_sources} "
+                          f"independent sources")
+            else:
+                reason = ("検証パスの結果" if self.language == "ja"
+                          else "verification pass")
             if target == req.status:
                 continue
             # a searched-out requirement stays unavailable unless the
             # new pass actually SUPPORTS it
             if req.status == REQ_UNAVAILABLE and target != REQ_SUPPORTED:
                 continue
-            reason = ("検証パスの結果" if self.language == "ja"
-                      else "verification pass")
             self.ledger.transition(req.req_id, target, reason=reason)
             self.audit.event("requirement_transition",
                              req_id=req.req_id, to=target, reason=reason)
@@ -970,8 +1215,17 @@ class FinalizationRunner:
                 coverage_delta=(self.ledger.coverage()
                                 - pending["coverage_before"]),
                 queries_run=pending["queries_run"],
+                scheduled_tasks=pending.get("scheduled_tasks", []),
+                executed_tasks=pending.get("executed_tasks", []),
+                failed_tasks=pending.get("failed_tasks", []),
+                deferred_tasks=pending.get("deferred_tasks", []),
             )
             self.ledger.record_round(progress)
+            # the single stopping authority marks termination candidates
+            stop_next, why = self.stop_controller.should_stop(self.ledger)
+            progress.termination_candidate = stop_next
+            if stop_next and not self.ledger.termination_reason:
+                self.ledger.termination_reason = why
             self._pending_round = None
             self.audit.event("round_measured", **progress.to_dict())
         self.audit.event(
@@ -1055,14 +1309,190 @@ class FinalizationRunner:
             blocks.append(block)
         return "\n---\n".join(blocks)
 
+    # issue types whose claim text pins an exact body sentence — these
+    # are patched LOCALLY (sentence-level), never by section regeneration
+    _CLAIM_LEVEL_TYPES = (
+        "unsupported_claim", "contradicted_claim", "uncertain_claim",
+        "invalid_citation", "claim_without_citation",
+        "citation_association_failure",
+    )
+
+    @staticmethod
+    def _sentence_spans(text: str) -> List:
+        """(start, end, sentence) for every sentence, exact offsets."""
+        spans = []
+        pos = 0
+        for m in re.finditer(r"[^。．！？!?.\n]*[。．！？!?.]|[^。．！？!?.\n]+",
+                             text):
+            sent = m.group(0)
+            if sent.strip():
+                spans.append((m.start(), m.end(), sent))
+            pos = m.end()
+        return spans
+
+    @staticmethod
+    def _sent_hash(sentence: str) -> str:
+        import hashlib
+        return hashlib.sha256(sentence.encode("utf-8")).hexdigest()[:24]
+
+    def _locate_claim_span(self, text: str, claim_text: str):
+        """Best-matching sentence span for a claim, or None."""
+        from ..verification.claim_verifier import _bigrams, _containment
+        claim_bi = _bigrams(claim_text or "")
+        best, best_score = None, 0.0
+        for start, end, sent in self._sentence_spans(text):
+            if len(sent.strip()) < 8:
+                continue
+            score = _containment(claim_bi, _bigrams(sent))
+            if score > best_score:
+                best, best_score = (start, end, sent), score
+        return best if best_score >= 0.3 else None
+
+    def _patch_claims(self, sid: str, text: str, issues,
+                      mode: str) -> Optional[str]:
+        """LOCALIZED repair: rewrite ONLY the sentences of the failing
+        claims; every other sentence is byte-preserved (proved by hash
+        comparison, not assumed). Returns the patched section or None
+        when any claim cannot be located / any patch is unusable — the
+        caller then falls back to the audited safe regeneration.
+        """
+        from ..adaptive.models import AtomicClaim
+
+        # locate every claim FIRST: one unlocatable claim -> no patching
+        located: Dict[tuple, List] = {}
+        for issue in issues:
+            span = self._locate_claim_span(text, issue.claim)
+            if span is None:
+                self.audit.event("patch_fallback", section_id=sid,
+                                 reason="claim_not_locatable",
+                                 claim=(issue.claim or "")[:80])
+                return None
+            located.setdefault((span[0], span[1]),
+                               []).append((issue, span[2]))
+
+        spans_all = self._sentence_spans(text)
+        patch_starts = {start for start, _end in located}
+        protected = [(start, end, sent) for start, end, sent in spans_all
+                     if start not in patch_starts]
+        protected_hashes = [self._sent_hash(s) for _s, _e, s in protected]
+
+        replacement_hints = self._register_replacements(sid, issues)
+        evidence_text = self._evidence_blocks(sid)
+        atomic_claims: List[AtomicClaim] = []
+        patches: List[tuple] = []
+        for (start, end), group in sorted(located.items()):
+            issue, sentence = group[0]
+            hint = replacement_hints.get(id(issue)) or ""
+            new_sentence = self._patch_sentence(
+                sid, sentence, [i for i, _s in group], hint,
+                evidence_text, mode)
+            if not new_sentence:
+                self.audit.event("patch_fallback", section_id=sid,
+                                 reason="llm_patch_unusable",
+                                 claim=(issue.claim or "")[:80])
+                return None
+            patches.append((start, end, new_sentence))
+            neighbor_hashes = []
+            idx = next(i for i, sp in enumerate(spans_all)
+                       if sp[0] == start)
+            for j in (idx - 1, idx + 1):
+                if 0 <= j < len(spans_all) and \
+                        spans_all[j][0] not in patch_starts:
+                    neighbor_hashes.append(
+                        self._sent_hash(spans_all[j][2]))
+            atomic_claims.append(AtomicClaim(
+                claim_id=issue.claim_id or f"P-{sid}.{start}",
+                req_id=f"REQ-S{sid}", section_id=sid,
+                text=issue.claim or sentence,
+                status=issue.type,
+                span_start=start, span_end=end,
+                cited_source_ids=list(issue.supporting_source_ids or []),
+                protected_neighbor_hashes=neighbor_hashes))
+
+        # splice back-to-front so earlier offsets stay valid
+        patched = text
+        for start, end, new_sentence in sorted(patches, reverse=True):
+            patched = patched[:start] + new_sentence + patched[end:]
+
+        # PROOF, not assumption: every protected sentence must survive
+        # byte-identically (its hash is still present in the result)
+        result_hashes = {self._sent_hash(s) for _s, _e, s
+                         in self._sentence_spans(patched)}
+        missing = [h for h in protected_hashes if h not in result_hashes]
+        if missing:
+            self.audit.event("patch_fallback", section_id=sid,
+                             reason="protected_sentence_changed",
+                             missing_hashes=missing[:5])
+            return None
+
+        self.audit.event(
+            "claims_patched", section_id=sid, mode=mode,
+            patched=[c.to_dict() for c in atomic_claims],
+            protected_sentences=len(protected_hashes))
+        return patched
+
+    def _patch_sentence(self, sid: str, sentence: str, issues,
+                        hint: str, evidence_text: str,
+                        mode: str) -> Optional[str]:
+        """Ask the LLM for a replacement of ONE sentence only.
+
+        Output that does not look like a single sentence (headings,
+        multi-paragraph text, extreme length) is rejected — the model
+        must never smuggle a whole-section rewrite through a patch.
+        """
+        lang_ja = self.language == "ja"
+        issue_text = "\n".join(
+            f"- ({i.type}) {i.reason or i.claim}" for i in issues[:4])
+        if mode == "hedge":
+            instruction = (
+                "この一文だけを、断定を避けた限定表現（「〜の可能性がある」"
+                "「公開情報では確認できなかった」等）に修正してください。"
+                if lang_ja else
+                "Rewrite ONLY this sentence into a hedged statement.")
+        else:
+            instruction = (
+                "この一文だけを、上記エビデンスに基づいて正確な内容に修正して"
+                "ください。引用 [SOURCE N] は提示された番号のみ使用する。"
+                if lang_ja else
+                "Rewrite ONLY this sentence so it is supported by the "
+                "evidence above. Use only the listed [SOURCE N] numbers.")
+        if hint:
+            instruction += (f"　正しい出典候補: {hint}" if lang_ja
+                            else f" Replacement citation: {hint}")
+        prompt = (
+            f"{'あなたはレポート編集者です。対象は一文のみです。' if lang_ja else 'You are a report editor. ONE sentence only.'}\n\n"
+            f"{'【エビデンス】' if lang_ja else '[EVIDENCE]'}\n{evidence_text}\n\n"
+            f"{'【指摘事項】' if lang_ja else '[ISSUES]'}\n{issue_text or '-'}\n\n"
+            f"{'【修正対象の一文】' if lang_ja else '[SENTENCE TO FIX]'}\n{sentence}\n\n"
+            f"{'【指示】' if lang_ja else '[INSTRUCTIONS]'}\n{instruction}\n\n"
+            f"{'修正後の一文のみを出力（見出し・前置き・複数文は不可）:' if lang_ja else 'Output ONLY the corrected sentence:'}")
+        try:
+            response = self.writing_llm.generate(prompt)
+        except Exception as e:
+            print(f"[Finalize] sentence patch failed ({sid}): {e}")
+            return None
+        out = (response.content or "").strip()
+        if not out:
+            return None
+        # reject whole-section output masquerading as a patch
+        if out.lstrip().startswith("#") or "\n\n" in out or \
+                len(out) > max(400, len(sentence) * 4):
+            return None
+        return out
+
     def _edit_section(self, sid: str, issues, current: Dict[str, str],
                       mode: str = "rewrite") -> Optional[str]:
         """LLM edit of ONE section from its EXISTING evidence.
 
-        mode: rewrite  (deepen using unused evidence, no new facts)
+        mode: rewrite  (repair failing claims; deepen from evidence)
               compress (remove redundancy, keep claims & citations)
               hedge    (soften unresolved assertions, state limitations)
-        The controller machine-validates citations before accepting.
+
+        Claim-level defects are patched LOCALLY (sentence spans) so
+        supported text never changes; whole-section regeneration is the
+        EXPLICIT, audited fallback when a claim cannot be located or a
+        patch is unusable. The controller machine-validates citations
+        before accepting any result.
         """
         if sid in self.render_only_sections:
             # render-only section (figure semantics): verified, but its
@@ -1074,6 +1504,16 @@ class FinalizationRunner:
             text = (self.session_contents.get(sid) or {}).get("content", "")
         if not text:
             return None
+
+        # ---- localized patching first (rewrite / hedge) --------------
+        if mode in ("rewrite", "hedge"):
+            claim_issues = [i for i in issues
+                            if i.claim and i.type in self._CLAIM_LEVEL_TYPES]
+            if claim_issues:
+                patched = self._patch_claims(sid, text, claim_issues, mode)
+                if patched is not None:
+                    return patched
+                # fall through: audited safe regeneration below
 
         # Misattributed citations: register the replacement candidates in
         # the section registry (append-only) so the rewrite can cite them

@@ -28,6 +28,8 @@ def get_client(
     verify_ssl: bool = True,
     base_url: str = None,
     backend: str = None,
+    local_timeout: int = None,
+    local_concurrency: int = None,
 ):
     """
     Factory function to get the appropriate LLM client.
@@ -69,6 +71,11 @@ def get_client(
             base_url=base_url,
         )
     elif provider.lower() == "local":
+        kwargs = {}
+        if local_timeout:
+            kwargs["timeout"] = int(local_timeout)
+        if local_concurrency:
+            kwargs["max_concurrency"] = int(local_concurrency)
         return LocalLLMClient(
             model=model,
             backend=backend,
@@ -78,6 +85,7 @@ def get_client(
             http_proxy=http_proxy,
             https_proxy=https_proxy,
             verify_ssl=verify_ssl,
+            **kwargs,
         )
     else:
         raise ValueError(f"Unsupported provider: {provider}. Use 'openai', 'anthropic', or 'local'.")

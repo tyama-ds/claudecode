@@ -104,6 +104,7 @@ class LocalLLMClient(BaseLLMClient):
         http_proxy: str = None,
         https_proxy: str = None,
         verify_ssl: bool = True,
+        max_concurrency: int = None,
     ):
         """
         Initialize LocalLLMClient.
@@ -155,6 +156,12 @@ class LocalLLMClient(BaseLLMClient):
         # base-class attributes (this __init__ does not chain to super)
         self.concurrency_limiter = None
         self.token_stats = None
+        # OPTIONAL per-client concurrency cap for small local servers:
+        # acquired IN ADDITION to the app-wide leaf permit around each
+        # request (a llama.cpp box may only handle 1-2 parallel calls)
+        self._local_sem = (threading.BoundedSemaphore(int(max_concurrency))
+                           if max_concurrency and int(max_concurrency) > 0
+                           else None)
         # requests.Session is NOT documented as thread-safe for concurrent
         # use; parallel workers each get a thread-local Session built with
         # the same proxies/verify/header configuration
@@ -239,12 +246,15 @@ class LocalLLMClient(BaseLLMClient):
         import random
         import requests
 
+        from contextlib import nullcontext
         last_error = None
         for attempt in range(self._MAX_RETRIES + 1):
             try:
-                with self._leaf_permit():
-                    response = self._session.post(
-                        url, json=payload, timeout=self.timeout)
+                # per-client cap (small local servers) + app-wide permit
+                with (self._local_sem or nullcontext()):
+                    with self._leaf_permit():
+                        response = self._session.post(
+                            url, json=payload, timeout=self.timeout)
                 if response.status_code in self._RETRY_STATUSES:
                     last_error = RuntimeError(
                         f"HTTP {response.status_code} from local LLM server")
