@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Callable, Any, Tuple
 from difflib import SequenceMatcher
 
+from ..utils.concurrency import ContextThreadPoolExecutor
 from ..config import (
     LANGUAGE_REGION_MAP,
     MultilingualSearchConfig,
@@ -366,7 +367,7 @@ Output ONLY the localized query, nothing else."""
                  else f"{len(self.config.search_languages)} languages")
         self._report_progress(f"Searching in {scope}...", 20)
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with ContextThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(self.search_single_language, tq): tq
                 for tq in translated_queries

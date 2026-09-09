@@ -21,7 +21,10 @@ def build_gui_config(v: dict) -> dict:
         "topic": (v.get("topic") or "").strip(),
         "provider": v.get("provider", "openai"),
         "search_method": v.get("search_method", "duckduckgo"),
-        "research_iterations": v.get("min_iterations", 3),
+        # run_research()'s contract is ``iterations`` (it forwards it to
+        # create_config as research_iterations). Emitting research_iterations
+        # here made run_research receive BOTH via **kwargs -> TypeError.
+        "iterations": v.get("min_iterations", 3),
         "max_iterations": v.get("max_iterations", 10),
         "output_format": v.get("output_format", "markdown"),
         "output_dir": v.get("output_dir", "./output"),
@@ -49,6 +52,29 @@ def build_gui_config(v: dict) -> dict:
     # App-wide parallelism (strictly validated; 1..16, no clamping)
     config["parallel_max_workers"] = validate_parallel_max_workers(
         v.get("parallel_max_workers", 8), source="Parallel workers")
+
+    # LLM sampling knobs (were collected by the GUI but never forwarded)
+    if v.get("temperature") is not None:
+        temperature = float(v["temperature"])
+        if not (0.0 <= temperature <= 2.0):
+            raise ValueError("Temperature must be between 0.0 and 2.0")
+        config["temperature"] = temperature
+    if v.get("max_tokens") not in (None, ""):
+        max_tokens = int(v["max_tokens"])
+        if max_tokens < 1:
+            raise ValueError("Max Tokens must be a positive integer")
+        config["max_tokens"] = max_tokens
+    # search region (DuckDuckGo kl code); "wt-wt" = worldwide default
+    region = (v.get("region") or "").strip()
+    if region and region != "wt-wt":
+        config["search_region"] = region
+    # report rendering toggles
+    for key in ("include_images", "include_citations", "include_toc"):
+        if key in v:
+            config[key] = bool(v[key])
+    # NOTE: verification_strictness is NOT forwarded on purpose: it only
+    # applies to the standalone `verify` CLI command, never to a research
+    # run (the research verification is controlled by verification_profile)
 
     # Provider-specific settings. IMPORTANT: "local" is its own provider —
     # it must never fall into the Anthropic branch.
@@ -99,3 +125,35 @@ def build_gui_config(v: dict) -> dict:
     config["verify_ssl"] = v.get("verify_ssl", True)
 
     return config
+
+
+def describe_outcome(result) -> dict:
+    """Classify a run result on THREE axes for display (pure, Tk-free).
+
+    Returns {"headline", "ok", "process", "verification", "quality"}.
+    A run whose artifact check failed, whose verification was cancelled,
+    or that ended with limitations is NEVER shown as a plain success.
+    """
+    result = result if isinstance(result, dict) else {}
+    axes = result.get("status") or {}
+    process = axes.get("process") or (
+        "cancelled" if result.get("verification_cancelled") else "completed")
+    verification = axes.get("verification") or (
+        "cancelled" if result.get("verification_cancelled") else "unknown")
+    quality = axes.get("quality") or "unknown"
+    run_status = result.get("run_status", "completed")
+    if run_status not in ("completed",) or quality == "failed":
+        headline, ok = "成果物検査に失敗しました（要確認）", False
+    elif process == "cancelled" or verification == "cancelled":
+        headline, ok = "中止されました（部分成果物）", False
+    elif verification in ("skipped", "unknown"):
+        headline, ok = "処理は完了しました（未検証）", True
+    elif verification in ("timeout", "failed"):
+        headline, ok = ("処理は完了しましたが検証が完了していません（要確認）",
+                        False)
+    elif quality == "limitations":
+        headline, ok = "検証済み・制約付きで完了（要確認事項あり）", True
+    else:
+        headline, ok = "検証済み・品質基準を達成して完了", True
+    return {"headline": headline, "ok": ok, "process": process,
+            "verification": verification, "quality": quality}

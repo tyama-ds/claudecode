@@ -32,6 +32,8 @@ I/O-bound (LLM/API/HTTP), so ThreadPools are used throughout; nothing is
 moved to a ProcessPool without measured CPU-bound need.
 """
 
+import concurrent.futures
+import contextvars
 import threading
 from contextlib import contextmanager
 from typing import Optional
@@ -191,3 +193,25 @@ def maybe_permit(limiter, timeout: Optional[float] = None):
         return
     with limiter.permit(timeout=timeout):
         yield
+
+
+# --------------------------------------------------------------------------
+# Context-propagating thread pool
+# --------------------------------------------------------------------------
+
+class ContextThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
+    """ThreadPoolExecutor whose workers run each task inside a COPY of the
+    submitter's ``contextvars`` context.
+
+    The stdlib pool (Python <= 3.13) starts tasks with an empty context,
+    so per-run state carried in ContextVars — the job's warning
+    collector, the current run id — would silently fall back to the
+    process-wide default inside every parallel stage. Every pool in this
+    package uses this subclass so a Web UI job's parallel workers
+    (crawl, extraction, figures, verification) still report into THAT
+    job's collector, never into another job's.
+    """
+
+    def submit(self, fn, /, *args, **kwargs):
+        ctx = contextvars.copy_context()
+        return super().submit(ctx.run, fn, *args, **kwargs)

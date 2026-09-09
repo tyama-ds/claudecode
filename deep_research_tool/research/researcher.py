@@ -3,6 +3,7 @@ Researcher - Main research orchestration module.
 """
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -18,6 +19,7 @@ from ..evidence.content_filter import (
     create_moderate_filter,
 )
 from ..utils.helpers import ResearchWarnings
+from ..utils.cancellation import RunCancelled
 from ..search.base import SearchResult
 from ..search.multilingual import MultilingualSearcher, MultilingualSearchResult
 from ..config import CrawlMode, MultilingualSearchConfig, ResearchSourceMode
@@ -39,6 +41,7 @@ class ResearchState(str, Enum):
     VERIFYING = "verifying"
     COMPLETED = "completed"
     ERROR = "error"
+    CANCELLED = "cancelled"
 
 
 @dataclass
@@ -80,6 +83,18 @@ class ResearchSession:
     started_at: str = field(default_factory=lambda: datetime.now().isoformat())
     completed_at: Optional[str] = None
     error_message: Optional[str] = None
+    # --- resumable checkpoint state -------------------------------------
+    # sections whose content generation FINISHED (resume skips them)
+    completed_sections: List[str] = field(default_factory=list)
+    # coarse processing stage at the last save (planning / researching /
+    # section_completed / synthesizing / completed / cancelled / error)
+    stage: str = ""
+    # non-secret snapshot of the run configuration (for resume / reuse)
+    run_config: Dict[str, Any] = field(default_factory=dict)
+    # every checkpoint taken: {"stage","reason","at","completed_sections"}
+    checkpoints: List[Dict[str, Any]] = field(default_factory=list)
+    # artifacts that were ACTUALLY written at the last checkpoint
+    saved_artifacts: Dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -94,12 +109,31 @@ class ResearchSession:
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "error_message": self.error_message,
+            "completed_sections": list(self.completed_sections),
+            "stage": self.stage,
+            "run_config": self.run_config,
+            "checkpoints": list(self.checkpoints),
+            "saved_artifacts": dict(self.saved_artifacts),
         }
 
     def save(self, filepath: Path) -> None:
-        """Save session to file."""
-        with open(filepath, "w", encoding="utf-8") as f:
+        """Save session to file ATOMICALLY (temp file + rename).
+
+        A crash or cancel in the middle of a write can never leave a
+        half-written session JSON behind: readers see either the previous
+        complete file or the new complete file.
+        """
+        filepath = Path(filepath)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        tmp = filepath.with_name(filepath.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        os.replace(tmp, filepath)
 
     @classmethod
     def load(cls, filepath: Path) -> "ResearchSession":
@@ -124,8 +158,25 @@ class ResearchSession:
             ResearchIteration(**i) for i in data.get("iterations", [])
         ]
         session.section_contents = data.get("section_contents", {})
+        session.completed_sections = list(data.get("completed_sections", []))
+        session.stage = data.get("stage", "") or ""
+        session.run_config = dict(data.get("run_config", {}) or {})
+        session.checkpoints = list(data.get("checkpoints", []) or [])
+        session.saved_artifacts = dict(data.get("saved_artifacts", {}) or {})
 
         return session
+
+    def is_section_done(self, section_id: str) -> bool:
+        """True when the section's content generation finished.
+
+        Explicit ``completed_sections`` markers win; sessions saved by
+        older versions fall back to "has non-empty content".
+        """
+        if section_id in self.completed_sections:
+            return True
+        data = self.section_contents.get(section_id) or {}
+        return bool((data.get("content") or "").strip()) and \
+            not self.completed_sections
 
 
 class Researcher:
@@ -186,6 +237,10 @@ class Researcher:
         target_pages: int = None,
         target_characters: int = None,
         plan_review_callback=None,
+        cancel_check: Callable[[], None] = None,
+        run_config: Dict[str, Any] = None,
+        fetch_cache=None,
+        refresh_fetched: bool = False,
     ):
         """
         Initialize Researcher.
@@ -286,6 +341,23 @@ class Researcher:
         self.evidence_locker: Optional[EvidenceLocker] = None
         self.progress_callback = progress_callback
         self.plan_review_callback = plan_review_callback
+        # Run-level cancel token: raises RunCancelled when the user
+        # cancelled. Consulted before EVERY new search / page fetch / LLM
+        # extraction so nothing new starts after a cancel is accepted.
+        self.cancel_check: Callable[[], None] = cancel_check or (lambda: None)
+        # non-secret configuration snapshot stored in every checkpoint
+        self.run_config: Dict[str, Any] = dict(run_config or {})
+        # per-session page cache: a URL is fetched ONCE per run and its
+        # text reused when another query/section returns it again
+        self._page_cache: Dict[str, Any] = {}
+        self.page_reuse_hits = 0
+        # optional DISK cache shared across runs (pages + extractions);
+        # refresh_fetched bypasses cached pages when the topic demands
+        # up-to-date information
+        self.fetch_cache = fetch_cache
+        self.refresh_fetched = bool(refresh_fetched)
+        # sections to skip when resuming (already completed earlier)
+        self._resume_skip: set = set()
 
         # Multilingual search settings
         self.multilingual_config = multilingual_config
@@ -385,6 +457,15 @@ class Researcher:
                 verify_ssl=selenium_verify_ssl,
                 driver_path=selenium_driver_path,
             )
+
+        # crawlers honor the same cancel token (checked before every
+        # search / fetch / LLM evaluation they start)
+        for _crawler in (self.fast_crawler, self.ai_crawler):
+            if _crawler is not None:
+                try:
+                    _crawler.cancel_check = self.cancel_check
+                except Exception:
+                    pass
 
         # Importance scoring / gap-fill settings
         self.importance_threshold = importance_threshold
@@ -526,17 +607,25 @@ class Researcher:
             self.session.completed_at = datetime.now().isoformat()
             self._report_progress("Research completed!", 100)
 
-            # Save session
-            session_path = self.output_dir / f"session_{self.session.session_id}.json"
-            self.session.save(session_path)
+            # Save session + evidence (atomic checkpoint) and the CSV export
+            self._checkpoint("completed", "research finished")
+            try:
+                self.evidence_locker.export_to_csv()
+            except Exception as csv_err:
+                print(f"[Checkpoint] evidence CSV export failed: {csv_err}")
 
-            # Export evidence
-            self.evidence_locker.export_to_json()
-            self.evidence_locker.export_to_csv()
-
+        except RunCancelled:
+            # cancel ACCEPTED: nothing new starts; everything collected so
+            # far (section bodies, evidence, stage) is persisted so the
+            # run can be resumed instead of redone
+            self.session.state = ResearchState.CANCELLED
+            self.session.error_message = "cancelled by user"
+            self._checkpoint("cancelled", "cancelled by user")
+            raise
         except Exception as e:
             self.session.state = ResearchState.ERROR
             self.session.error_message = str(e)
+            self._checkpoint("error", str(e)[:200])
             self._report_progress(f"Error: {e}", -1)
             raise
         finally:
@@ -585,6 +674,21 @@ class Researcher:
 
         for section_idx, section in enumerate(sections):
             section_progress_base = 10 + (section_idx / total_sections) * 70
+
+            # resume: sections that already finished are reused verbatim
+            if section.section in self._resume_skip:
+                section.status = "completed"
+                if section.section not in self.session.completed_sections:
+                    self.session.completed_sections.append(section.section)
+                self._report_progress(
+                    f"Reusing completed section {section.section}. "
+                    f"{section.title}", section_progress_base)
+                if available_queries:
+                    available_queries = available_queries[self.max_queries_per_iteration:]
+                continue
+
+            # no NEW section starts after a cancel was accepted
+            self.cancel_check()
 
             self._report_progress(
                 f"Researching: {section.section}. {section.title}",
@@ -641,6 +745,13 @@ class Researcher:
                 available_queries = available_queries[self.max_queries_per_iteration:]
 
             section.status = "completed"
+            if section.section not in self.session.completed_sections:
+                self.session.completed_sections.append(section.section)
+            # ATOMIC checkpoint after every completed section: body,
+            # evidence, stage and config are on disk before the next
+            # section starts (a cancel/crash loses at most one section)
+            self._checkpoint("section_completed",
+                             f"section {section.section} completed")
 
         # Debug: Log final section contents
         print(f"[DEBUG] Research loop completed. Section contents keys: {list(self.session.section_contents.keys())}")
@@ -847,10 +958,15 @@ class Researcher:
         3. Immediately generates section content (not waiting until the end)
         """
         section_content_parts: List[ExtractedContent] = list(extra_parts or [])
+        # URLs already used for THIS section (normalized): a URL returned
+        # by two queries is fetched/extracted once, never counted twice
+        section_seen_urls = {self._normalize_url(p.source_url)
+                             for p in section_content_parts}
 
         # Research iterations for this section
         iteration = 0
         while iteration < self.max_iterations:
+            self.cancel_check()
             iteration += 1
             iter_record = ResearchIteration(
                 iteration_number=iteration,
@@ -884,6 +1000,7 @@ class Researcher:
             # Execute searches and extract content
             for qi, query in enumerate(queries_to_run, 1):
                 print(f"[Search] ({qi}/{len(queries_to_run)}) Query: {query}")
+                self.cancel_check()          # before a new search starts
                 try:
                     # Use multilingual search if enabled, otherwise standard search
                     if self.multilingual_searcher:
@@ -913,6 +1030,12 @@ class Researcher:
                     iter_record.sources_found += len(results)
 
                     for result in results[:self.max_pages_per_query]:
+                        self.cancel_check()  # before a new fetch starts
+                        norm_url = self._normalize_url(result.url)
+                        if norm_url in section_seen_urls:
+                            print(f"[DEBUG] Skipped duplicate URL: {result.url[:60]}")
+                            continue
+                        section_seen_urls.add(norm_url)
                         print(f"[DEBUG] Processing: {result.url[:60]}...")
 
                         # Apply content filter to URL first
@@ -923,7 +1046,8 @@ class Researcher:
                                 continue
 
                         try:
-                            page = self.search.get_page_content(result.url)
+                            page = self._fetch_page_cached(result.url)
+                            self.cancel_check()  # before the LLM extraction
 
                             # Apply content filter to page content
                             if self.content_filter:
@@ -942,7 +1066,7 @@ class Researcher:
                             if len(raw_content) > self.max_content_length:
                                 raw_content = raw_content[:self.max_content_length]
 
-                            extracted = self.content_extractor.extract_relevant_content(
+                            extracted = self._extract_cached(
                                 raw_content=raw_content,
                                 source_url=result.url,
                                 source_title=result.title,
@@ -970,9 +1094,15 @@ class Researcher:
                             for doc_link in doc_links[:2]:  # Limit to 2 document links per page
                                 doc_url = doc_link.get("url", "")
                                 if doc_url:
+                                    # the same PDF linked from two result pages is
+                                    # fetched / extracted / cited once per section
+                                    doc_norm = self._normalize_url(doc_url)
+                                    if doc_norm in section_seen_urls:
+                                        continue
+                                    section_seen_urls.add(doc_norm)
                                     try:
                                         print(f"[DEBUG] Following document link: {doc_url[:60]}...")
-                                        doc_page = self.search.get_page_content(doc_url)
+                                        doc_page = self._fetch_page_cached(doc_url)
                                         if doc_page.text_content and len(doc_page.text_content) > 50:
                                             doc_extracted = self.content_extractor.extract_relevant_content(
                                                 raw_content=doc_page.text_content[:self.max_content_length],
@@ -1077,18 +1207,19 @@ class Researcher:
             iter_record.completed_at = datetime.now().isoformat()
             self.session.iterations.append(iter_record)
 
-            # Check if we have enough content
-            if iteration >= self.min_iterations and len(section_content_parts) >= 2:
+            # Termination counts INDEPENDENT sources (distinct normalized
+            # URLs), never duplicate copies of the same page
+            independent = self._independent_source_count(section_content_parts)
+            if iteration >= self.min_iterations and independent >= 2:
                 break
 
-            # Early exit: once a section already has plenty of sources there is
-            # little value in spending more iterations (each one costs extra
-            # searches + per-page LLM extractions). This keeps standard-mode
-            # sections from running far longer than necessary.
+            # Early exit: once a section already has plenty of independent
+            # sources there is little value in spending more iterations
+            # (each one costs extra searches + per-page LLM extractions).
             enough = max(4, self.max_pages_per_query * 2)
-            if len(section_content_parts) >= enough:
-                print(f"[Search] Section {section.section}: {len(section_content_parts)} "
-                      f"sources gathered (>= {enough}); ending research early")
+            if independent >= enough:
+                print(f"[Search] Section {section.section}: {independent} "
+                      f"independent sources gathered (>= {enough}); ending research early")
                 break
 
         # IMMEDIATE CONTENT GENERATION after research for this section
@@ -1143,7 +1274,10 @@ class Researcher:
                 if not follow_up_queries:
                     break
 
-                new_parts = self._collect_additional_parts(section, follow_up_queries)
+                new_parts = self._collect_additional_parts(
+                    section, follow_up_queries,
+                    exclude_urls={self._normalize_url(p.source_url)
+                                  for p in section_content_parts})
                 if not new_parts:
                     print(f"[GapFill] No new sources found for section {section.section}")
                     break
@@ -1436,6 +1570,7 @@ Output JSON only:"""
         self,
         section: TableOfContentsItem,
         queries: List[str],
+        exclude_urls: set = None,
     ) -> List[ExtractedContent]:
         """
         Collect additional sources for gap-fill using the active source mode.
@@ -1491,21 +1626,30 @@ Output JSON only:"""
                 )
             return parts
 
-        # Standard mode: direct search + fetch
+        # Standard mode: direct search + fetch (URLs already used for this
+        # section are never fetched/extracted again)
+        seen = set(exclude_urls or set())
         for query in queries[:2]:
+            self.cancel_check()
             try:
                 results = self.search.search(query, max_results=self.max_pages_per_query)
             except Exception as e:
                 print(f"[GapFill] Search failed for '{query}': {e}")
                 continue
             for result in results[:self.max_pages_per_query]:
+                self.cancel_check()
+                norm = self._normalize_url(result.url)
+                if norm in seen:
+                    continue
+                seen.add(norm)
                 try:
                     if self.content_filter:
                         url_filter_result = self.content_filter.filter_url(result.url)
                         if not url_filter_result.should_include:
                             continue
-                    page = self.search.get_page_content(result.url)
-                    extracted = self.content_extractor.extract_relevant_content(
+                    page = self._fetch_page_cached(result.url)
+                    self.cancel_check()
+                    extracted = self._extract_cached(
                         raw_content=page.text_content,
                         source_url=result.url,
                         source_title=page.title or result.title,
@@ -1806,16 +1950,208 @@ Return as JSON:
                 output_dir=self.output_dir / "evidence",
             )
 
-        # Continue research with additional iterations
+        # Continue research: COMPLETED sections are reused verbatim, only
+        # the unfinished ones are processed, and the resumed result is
+        # persisted with the same atomic checkpoint as a fresh run
         if self.session.state != ResearchState.COMPLETED:
+            sections = []
+            if self.session.research_plan is not None:
+                sections = self.session.research_plan.table_of_contents \
+                    .get_flat_sections()
+            self._resume_skip = {
+                s.section for s in sections
+                if self.session.is_section_done(s.section)}
+            self.resume_plan = {
+                "reused": sorted(self._resume_skip),
+                "to_process": [s.section for s in sections
+                               if s.section not in self._resume_skip],
+            }
+            print(f"[Resume] reusing {len(self.resume_plan['reused'])} "
+                  f"completed section(s), processing "
+                  f"{len(self.resume_plan['to_process'])}")
             self.min_iterations = additional_iterations
             self.session.state = ResearchState.RESEARCHING
-            self._conduct_research_loop()
-            self._synthesize_findings()
-            self.session.state = ResearchState.COMPLETED
-            self.session.completed_at = datetime.now().isoformat()
+            self.session.error_message = None
+            try:
+                self._conduct_research_loop()
+                self._synthesize_findings()
+                self.session.state = ResearchState.COMPLETED
+                self.session.completed_at = datetime.now().isoformat()
+                self._checkpoint("completed", "resumed research finished")
+            except RunCancelled:
+                self.session.state = ResearchState.CANCELLED
+                self._checkpoint("cancelled", "cancelled during resume")
+                raise
+            except Exception as e:
+                self.session.state = ResearchState.ERROR
+                self.session.error_message = str(e)
+                self._checkpoint("error", str(e)[:200])
+                raise
+            finally:
+                self._resume_skip = set()
 
         return self.session
+
+    # ------------------------------------------------------------------
+    # checkpoints / dedup helpers
+    # ------------------------------------------------------------------
+
+    def _checkpoint(self, stage: str, reason: str = "") -> Dict[str, str]:
+        """Persist session + evidence ATOMICALLY and record what was saved.
+
+        Returns the artifacts that were ACTUALLY written (the UI shows
+        "saved" only for these). Never raises — a failed save is reported
+        as a warning, and the run's own outcome is unaffected.
+        """
+        saved: Dict[str, str] = {}
+        if self.session is None:
+            return saved
+        self.session.stage = stage
+        self.session.run_config = dict(self.run_config)
+        self.session.checkpoints.append({
+            "stage": stage,
+            "reason": reason,
+            "at": datetime.now().isoformat(),
+            "completed_sections": list(self.session.completed_sections),
+        })
+        if self.evidence_locker is not None:
+            try:
+                ev_path = self.evidence_locker.export_to_json()
+                if Path(ev_path).exists():
+                    saved["evidence_json"] = str(ev_path)
+            except Exception as e:
+                print(f"[Checkpoint] evidence export failed: {e}")
+        session_path = self.output_dir / f"session_{self.session.session_id}.json"
+        saved["session"] = str(session_path)
+        self.session.saved_artifacts = dict(saved)
+        try:
+            self.session.save(session_path)
+        except Exception as e:
+            print(f"[Checkpoint] session save failed: {e}")
+            saved.pop("session", None)
+            self.session.saved_artifacts = dict(saved)
+        return saved
+
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        """Canonical form for duplicate detection (scheme/host case,
+        trailing slash, fragment, tracking parameters)."""
+        from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+        if not url:
+            return ""
+        try:
+            parts = urlsplit(url.strip())
+        except Exception:
+            return url.strip().lower()
+        query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+                 if not k.lower().startswith(("utm_", "fbclid", "gclid"))]
+        path = parts.path.rstrip("/") or "/"
+        return urlunsplit((parts.scheme.lower() or "https",
+                           parts.netloc.lower(), path,
+                           urlencode(sorted(query)), ""))
+
+    def _independent_source_count(self, parts: List[ExtractedContent]) -> int:
+        """Distinct sources by normalized URL (duplicates never inflate)."""
+        return len({self._normalize_url(p.source_url) for p in parts
+                    if getattr(p, "source_url", "")})
+
+    def _freshness_demanded(self) -> bool:
+        """True when the topic/requirements ask for up-to-date information
+        (recency markers) or the user chose to refresh fetched pages."""
+        if self.refresh_fetched:
+            return True
+        try:
+            from ..report.finalization_runner import _FRESHNESS_MARKERS
+            text = f"{getattr(self.session, 'query', '')} " \
+                   f"{getattr(self.session, 'requirements', '')}"
+            return bool(_FRESHNESS_MARKERS.search(text))
+        except Exception:
+            return False
+
+    def _fetch_page_cached(self, url: str):
+        """Fetch a page once per run; later requests for the same URL
+        (other query / section) reuse the text instead of refetching.
+        With a disk cache attached, pages fetched by EARLIER runs are
+        reused too — unless the topic demands fresh information."""
+        key = self._normalize_url(url)
+        cached = self._page_cache.get(key)
+        if cached is not None:
+            self.page_reuse_hits += 1
+            print(f"[Cache] reusing fetched page: {url[:60]}")
+            return cached
+        if self.fetch_cache is not None:
+            entry = self.fetch_cache.get_page(
+                key, refresh=self._freshness_demanded())
+            if entry is not None:
+                from types import SimpleNamespace
+                page = SimpleNamespace(
+                    url=url, title=entry.get("title", ""),
+                    text_content=entry.get("text", ""), html_content="",
+                    images=[], links=[],
+                    metadata={"cached": True,
+                              "fetched_at": entry.get("fetched_at")})
+                self._page_cache[key] = page
+                print(f"[Cache] reusing page from disk cache: {url[:60]}")
+                return page
+        page = self.search.get_page_content(url)
+        self._page_cache[key] = page
+        if self.fetch_cache is not None:
+            try:
+                meta = getattr(page, "metadata", {}) or {}
+                self.fetch_cache.put_page(
+                    key, getattr(page, "text_content", "") or "",
+                    title=getattr(page, "title", "") or "",
+                    etag=str(meta.get("etag", "") or ""),
+                    last_modified=str(meta.get("last_modified", "") or ""))
+            except Exception:
+                pass
+        return page
+
+    def _extract_cached(self, raw_content: str, source_url: str,
+                        source_title: str, section_context: str,
+                        research_query: str) -> ExtractedContent:
+        """LLM extraction with a content-addressed disk cache: identical
+        (content, section, query, model, prompt version) never costs a
+        second LLM call."""
+        cache = self.fetch_cache
+        key = None
+        if cache is not None:
+            from .fetch_cache import EXTRACTION_PROMPT_VERSION
+            model = str(getattr(self.writing_llm, "model", "") or "")
+            key = cache.extraction_key(raw_content, section_context,
+                                       research_query, model,
+                                       EXTRACTION_PROMPT_VERSION)
+            hit = cache.get_extraction(key)
+            if hit and isinstance(hit.get("extracted"), dict):
+                d = hit["extracted"]
+                try:
+                    return ExtractedContent(
+                        source_url=source_url, source_title=source_title,
+                        raw_content=raw_content,
+                        processed_content=d.get("processed_content", ""),
+                        key_points=list(d.get("key_points", [])),
+                        quotes=list(d.get("quotes", [])),
+                        relevance_score=float(d.get("relevance_score", 0.0)),
+                        extraction_notes=(d.get("extraction_notes", "")
+                                          + " [cache]").strip())
+                except Exception:
+                    pass
+        extracted = self.content_extractor.extract_relevant_content(
+            raw_content=raw_content, source_url=source_url,
+            source_title=source_title, section_context=section_context,
+            research_query=research_query)
+        if cache is not None and key is not None:
+            try:
+                cache.put_extraction(key, {
+                    "processed_content": extracted.processed_content,
+                    "key_points": list(extracted.key_points),
+                    "quotes": list(extracted.quotes),
+                    "relevance_score": extracted.relevance_score,
+                    "extraction_notes": extracted.extraction_notes,
+                })
+            except Exception:
+                pass
+        return extracted
 
     def expand_section_content(
         self,
@@ -1870,6 +2206,11 @@ Return as JSON:
             existing_text = existing_content.get("content", "")
             original_length = len(existing_text)
             gaps = existing_content.get("gaps", [])
+            # sources already cited by this section (normalized), grown as
+            # expansion queries return new ones — a page is fetched and
+            # extracted at most once per section across all iterations
+            expansion_seen_urls = {self._normalize_url(u)
+                                   for u in existing_content.get("sources", []) if u}
 
             # Collect new content parts
             new_content_parts: List[ExtractedContent] = []
@@ -1921,10 +2262,12 @@ Return as JSON:
 
                         for result in results[:self.max_pages_per_query]:
                             try:
-                                # Skip if we already have this source
-                                existing_sources = existing_content.get("sources", [])
-                                if result.url in existing_sources:
+                                # Skip if we already have this source (normalized:
+                                # utm_* / trailing slash / case variants count once)
+                                norm_url = self._normalize_url(result.url)
+                                if norm_url in expansion_seen_urls:
                                     continue
+                                expansion_seen_urls.add(norm_url)
 
                                 # Apply content filter
                                 if self.content_filter:
@@ -1932,7 +2275,7 @@ Return as JSON:
                                     if not url_filter_result.should_include:
                                         continue
 
-                                page = self.search.get_page_content(result.url)
+                                page = self._fetch_page_cached(result.url)
 
                                 # Apply content filter to page content
                                 if self.content_filter:

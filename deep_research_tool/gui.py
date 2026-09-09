@@ -78,7 +78,7 @@ class GUIConfig:
 
 
 
-from .gui_config import build_gui_config
+from .gui_config import build_gui_config, describe_outcome
 
 
 class DeepResearchGUI:
@@ -292,10 +292,14 @@ class DeepResearchGUI:
 
         row = ttk.Frame(frame)
         row.pack(fill=tk.X, pady=5)
-        ttk.Label(row, text="Strictness:", width=20, anchor="w").pack(side=tk.LEFT)
+        ttk.Label(row, text="Strictness (verify cmd only):", width=26,
+                  anchor="w").pack(side=tk.LEFT)
         ttk.Combobox(row, textvariable=self.var_verification_strictness,
                      values=["low", "medium", "high"], state="readonly",
                      width=15).pack(side=tk.LEFT)
+        ttk.Label(row, text="※ 単体検証コマンド専用。調査の検証は下の"
+                  "プロファイルで制御されます",
+                  foreground="gray").pack(side=tk.LEFT, padx=(8, 0))
 
         # Verification profile (fast / balanced / strict / custom)
         row = ttk.Frame(frame)
@@ -887,6 +891,12 @@ This helps gather more comprehensive information from diverse sources."""
             "consistency_threshold": self.var_consistency_threshold.get(),
             "consistency_mode": self.var_consistency_mode.get(),
             "fidelity_threshold": self.var_fidelity_threshold.get(),
+            "temperature": self.var_temperature.get(),
+            "max_tokens": self.var_max_tokens.get(),
+            "region": self.var_region.get(),
+            "include_images": self.var_include_images.get(),
+            "include_citations": self.var_include_citations.get(),
+            "include_toc": self.var_include_toc.get(),
             "openai_api_key": self.var_openai_key.get(),
             "openai_model": self.var_openai_model.get(),
             "anthropic_api_key": self.var_anthropic_key.get(),
@@ -972,18 +982,31 @@ This helps gather more comprehensive information from diverse sources."""
             if isinstance(e, RunCancelled):
                 self.root.after(0, self._on_research_cancelled)
             else:
-                self.root.after(0, lambda: self._on_research_error(str(e)))
+                # bind the message NOW: a deferred lambda referencing ``e``
+                # runs after the except block ended (NameError)
+                message = f"{type(e).__name__}: {e}"
+                self.root.after(0, lambda msg=message:
+                                self._on_research_error(msg))
+
+    @staticmethod
+    def describe_outcome(result) -> dict:
+        """See gui_config.describe_outcome (pure, headlessly testable)."""
+        return describe_outcome(result)
 
     def _on_research_complete(self, result):
-        """Handle research completion."""
+        """Handle research completion (process/verification/quality)."""
         self.is_running = False
         self.btn_start.config(state=tk.NORMAL)
         self.btn_stop.config(state=tk.DISABLED)
         self.progress_var.set(100)
-        self.progress_label.config(text="Complete")
+        outcome = self.describe_outcome(result)
+        self.progress_label.config(text=outcome["headline"])
 
         self._log("=" * 50)
-        self._log("Research completed!")
+        self._log(outcome["headline"])
+        self._log(f"  process={outcome['process']} "
+                  f"verification={outcome['verification']} "
+                  f"quality={outcome['quality']}")
 
         if result:
             if isinstance(result, dict) and "report_path" in result:
@@ -998,13 +1021,19 @@ This helps gather more comprehensive information from diverse sources."""
         self._log(token_stats.get_summary(language))
 
         # Build completion message with token info
-        completion_msg = "Research completed successfully!\n\n"
+        completion_msg = outcome["headline"] + "\n\n"
+        completion_msg += (f"処理: {outcome['process']} / 検証: "
+                           f"{outcome['verification']} / 品質: "
+                           f"{outcome['quality']}\n\n")
         completion_msg += f"Total tokens used: {token_stats.total_tokens:,}\n"
         completion_msg += f"  - Input: {token_stats.total_prompt_tokens:,}\n"
         completion_msg += f"  - Output: {token_stats.total_completion_tokens:,}\n"
         completion_msg += f"API calls: {token_stats.total_calls}"
 
-        messagebox.showinfo("Complete", completion_msg)
+        if outcome["ok"]:
+            messagebox.showinfo("Complete", completion_msg)
+        else:
+            messagebox.showwarning("要確認", completion_msg)
 
     def _on_research_error(self, error: str):
         """Handle research error."""

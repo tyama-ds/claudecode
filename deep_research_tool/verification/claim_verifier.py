@@ -67,6 +67,7 @@ from ..report.finalization import (
     decide_section_action,
 )
 from ..report.length_planner import _jaccard_bigram
+from ..utils.concurrency import ContextThreadPoolExecutor
 
 # Section text is processed in chunks of this size so that long chapters
 # are fully covered without overloading a single prompt
@@ -273,7 +274,7 @@ class ClaimVerifier:
             return [fn(item) for item in items]
         import concurrent.futures
         workers = min(self._workers, len(items))
-        with concurrent.futures.ThreadPoolExecutor(
+        with ContextThreadPoolExecutor(
                 max_workers=workers) as ex:
             return list(ex.map(fn, items))
 

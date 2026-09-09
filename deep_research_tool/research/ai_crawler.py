@@ -185,6 +185,7 @@ class AICrawler:
         seed_from_queries(queries)
 
         while frontier and pages_fetched < self.max_total_pages:
+            getattr(self, "cancel_check", lambda: None)()   # no new fetch after cancel
             neg_priority, _, url, depth, site_depth, anchor, query = heapq.heappop(frontier)
 
             if url in visited:

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
+from ..utils.concurrency import ContextThreadPoolExecutor
 from ..utils.helpers import (
     ResearchWarnings,
     extract_json_array_from_response,
@@ -300,7 +301,7 @@ Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
                                         self.CHUNK_WORKERS, len(chunks))
             if workers > 1:
                 import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                with ContextThreadPoolExecutor(max_workers=workers) as ex:
                     # map preserves input order, so merged output is deterministic
                     results = list(ex.map(_work, list(enumerate(chunks))))
             else:

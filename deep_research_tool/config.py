@@ -604,6 +604,17 @@ class ResearchConfig:
     # EXISTING search clients with internal RRF merging. Off = the
     # pre-1.2 behavior, unchanged.
     adaptive_coverage: bool = True
+
+    # --- Fetch / extraction reuse (local disk cache under the output dir) ---
+    # Pages are keyed by normalized URL, extractions by content hash +
+    # section context + model + prompt version. refresh_fetched=True (or a
+    # topic demanding recency) bypasses cached pages and re-fetches.
+    cache_reuse: bool = True
+    cache_max_age_hours: int = 72
+    refresh_fetched: bool = False
+    # cache location (None = <output_dir>/.cache; the Web UI points every
+    # job at ONE shared cache under the server's base output directory)
+    cache_dir: Optional[str] = None
     # gap searches allowed per requirement before it is closed as
     # unavailable_after_search
     requirement_max_search_attempts: int = 2
@@ -887,6 +898,13 @@ def create_config(
     local_backend: str = "ollama",
     local_timeout: Optional[int] = None,
     local_concurrency: Optional[int] = None,
+    # LLM sampling knobs (GUI "Temperature" / "Max Tokens"); None = default
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    # report rendering toggles (GUI "Images" / "Citations" / "TOC")
+    include_images: Optional[bool] = None,
+    include_citations: Optional[bool] = None,
+    include_toc: Optional[bool] = None,
     model: Optional[str] = None,
     search_method: str = "duckduckgo",
     search_region: str = "wt-wt",
@@ -1004,6 +1022,10 @@ def create_config(
     verification_minor_claim_sample_rate: Optional[float] = None,
     # Adaptive coverage / audit log / Local LLM role routing
     adaptive_coverage: bool = True,
+    cache_reuse: bool = True,
+    cache_max_age_hours: int = 72,
+    refresh_fetched: bool = False,
+    cache_dir: Optional[str] = None,
     requirement_max_search_attempts: int = 2,
     max_stall_rounds: int = 2,
     audit_log_enabled: bool = True,
@@ -1262,6 +1284,8 @@ def create_config(
         local_backend=LocalLLMBackend(local_backend),
         local_timeout=local_timeout,
         local_concurrency=local_concurrency,
+        **({"temperature": float(temperature)} if temperature is not None else {}),
+        **({"max_tokens": int(max_tokens)} if max_tokens is not None else {}),
         stage_overrides=dict(stage_llm) if stage_llm else {},
     )
 
@@ -1338,6 +1362,10 @@ def create_config(
         min_high_importance_sources=min_high_importance_sources,
         max_gap_fill_rounds=max_gap_fill_rounds,
         adaptive_coverage=adaptive_coverage,
+        cache_reuse=cache_reuse,
+        cache_max_age_hours=cache_max_age_hours,
+        refresh_fetched=refresh_fetched,
+        cache_dir=cache_dir,
         requirement_max_search_attempts=requirement_max_search_attempts,
         max_stall_rounds=max_stall_rounds,
         audit_log_enabled=audit_log_enabled,
@@ -1368,6 +1396,9 @@ def create_config(
         hard_max_body_chars=hard_max_body_chars,
         length_tolerance=length_tolerance,
         exclude_references_from_count=exclude_references_from_count,
+        **({"include_images": bool(include_images)} if include_images is not None else {}),
+        **({"include_citations": bool(include_citations)} if include_citations is not None else {}),
+        **({"include_toc": bool(include_toc)} if include_toc is not None else {}),
         auto_figures_include_images=auto_figures_include_images,
         auto_figures_include_tables=auto_figures_include_tables,
         auto_figures_include_charts=auto_figures_include_charts,

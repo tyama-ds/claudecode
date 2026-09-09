@@ -4,9 +4,12 @@ Main module for Deep Research Tool.
 This module provides the main interface for conducting automated research.
 """
 
+import json
 import logging
+import os
 import re
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable
 
@@ -34,6 +37,7 @@ from .utils.document_reader import DocumentReader, auto_detect_additional_docume
 from .thinking import DeepThinkProcessor, DeepThinkConfig as ThinkingConfig
 from .thinking.reasoning_chain import ConsistencyMode
 from .estimation import FermiEstimator, FermiEstimationConfig as EstimationConfig
+from .utils.concurrency import ContextThreadPoolExecutor
 
 
 # Style/Audience mapping for V2
@@ -128,13 +132,9 @@ def _create_report_generator(
         return generator, "v1"
 
 
-class RunCancelled(Exception):
-    """Raised at a safe checkpoint after the user cancelled the run.
-
-    Carries the stage name; the partial artifacts produced so far stay
-    on disk / in the live sink and are surfaced as a CANCELLED result —
-    never as a normal completion.
-    """
+# RunCancelled lives in utils.cancellation so the researcher/crawlers can
+# raise it without importing main; re-exported here for existing callers.
+from .utils.cancellation import RunCancelled  # noqa: E402
 
 
 class DeepResearchTool:
@@ -436,6 +436,142 @@ class DeepResearchTool:
 
         return content_filter
 
+    def _save_final_body(self, session, outcome, output_dir) -> Optional[Path]:
+        """Write final_body_<session>.json: the frozen, verified chapters
+        (display-numbered) with their status axes and manifest hash."""
+        try:
+            path = Path(output_dir) / f"final_body_{session.session_id}.json"
+            data = {
+                "session_id": session.session_id,
+                "saved_at": datetime.now().isoformat(),
+                "decision": outcome.get("decision"),
+                "status": self._status_axes(),
+                "chapters": dict(outcome.get("chapters") or {}),
+                "raw_chapters": dict(outcome.get("raw_chapters") or {}),
+                "ordered_evidence_ids": list(outcome.get("ordered_evidence_ids")
+                                             or []),
+                "manifest_hash": getattr(self, "semantic_manifest_hash", None),
+            }
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+            os.replace(tmp, path)
+            return path
+        except Exception as e:
+            print(f"[FinalBody] save failed: {e}")
+            return None
+
+    def _collect_timings(self, run_token_stats) -> Dict[str, Any]:
+        """Measured stage durations + API/reuse counters (no estimates)."""
+        timer = getattr(self, "timer", None)
+        if timer is None:
+            return {}
+        try:
+            timer.set_count("api_calls", int(run_token_stats.total_calls))
+        except Exception:
+            pass
+        cache = getattr(self, "fetch_cache", None)
+        if cache is not None:
+            for k, v in cache.stats().items():
+                timer.set_count(f"cache_{k}", v)
+        researcher = getattr(self, "researcher", None)
+        if researcher is not None:
+            timer.set_count("page_reuse_in_run",
+                            int(getattr(researcher, "page_reuse_hits", 0)))
+        runner = getattr(self, "finalization_runner", None)
+        vcache = getattr(runner, "verification_cache", None)
+        if vcache is not None:
+            timer.set_count("verification_cache_hits", int(vcache.hits))
+        timer.finish()
+        return timer.to_dict()
+
+    def _run_config_snapshot(self) -> Dict[str, Any]:
+        """Non-secret configuration snapshot stored in every checkpoint
+        (resume / "duplicate these conditions"). NEVER contains API keys."""
+        c = self.config
+        try:
+            return {
+                "provider": c.api.provider.value,
+                "model": c.api.get_active_model(),
+                "search_method": c.search.method.value,
+                "crawl_mode": c.research.crawl_mode.value,
+                "source_mode": c.research.source_mode.value,
+                "language": c.research.language,
+                "min_iterations": c.research.min_iterations,
+                "max_iterations": c.research.max_iterations,
+                "max_queries_per_iteration": c.research.max_queries_per_iteration,
+                "max_pages_per_query": c.research.max_pages_per_query,
+                "parallel_max_workers": c.research.parallel_max_workers,
+                "verification_enabled": bool(c.enable_verification),
+                "verification_profile": c.research.verification_profile,
+                "report_version": c.report.generator_version.value,
+                "output_format": c.report.format.value,
+                "auto_figures": bool(c.report.auto_figures),
+                "target_pages": c.report.target_pages,
+                "target_characters": c.report.target_characters,
+            }
+        except Exception:
+            return {}
+
+    def _status_axes(self, semantic_artifact_check=None,
+                     semantic_drift: bool = False) -> Dict[str, str]:
+        """Process / verification / quality — three independent facts.
+
+        process:      completed | cancelled
+        verification: performed | skipped | cancelled | timeout | failed
+        quality:      passed | limitations | failed | unverified
+        """
+        outcome = getattr(self, "finalization_outcome", None) or {}
+        decision = outcome.get("decision")
+        verdict = outcome.get("verdict")
+        verified_failed = bool(
+            verdict is not None
+            and getattr(getattr(verdict, "metrics", None),
+                        "verification_failed", False))
+
+        if not self.config.enable_verification:
+            verification = "skipped"
+        elif not outcome:
+            verification = "skipped"
+        elif decision == "cancelled":
+            verification = "cancelled"
+        elif decision == "timeout":
+            verification = "timeout"
+        elif verified_failed:
+            verification = "failed"
+        else:
+            verification = "performed"
+
+        process = "cancelled" if decision == "cancelled" else "completed"
+
+        if semantic_artifact_check == "fail" or semantic_drift:
+            quality = "failed"
+        elif verification != "performed":
+            quality = "unverified"
+        elif decision == "accept":
+            quality = "passed"
+        elif decision in ("finalize_with_limitations",):
+            quality = "limitations"
+        else:
+            quality = "failed"
+        return {"process": process, "verification": verification,
+                "quality": quality, "decision": decision or "",
+                "artifact_check": semantic_artifact_check or "skipped"}
+
+    def current_saved_artifacts(self) -> Dict[str, str]:
+        """Artifacts the researcher has ACTUALLY written so far (checkpoint
+        files that exist on disk). Empty until the first checkpoint."""
+        researcher = getattr(self, "researcher", None)
+        if researcher is None:
+            return {}
+        try:
+            session = researcher.get_session()
+        except Exception:
+            return {}
+        if session is None:
+            return {}
+        return dict(getattr(session, "saved_artifacts", {}) or {})
+
     def request_cancel(self) -> None:
         """Cancel the running research (thread-safe, idempotent).
 
@@ -464,6 +600,7 @@ class DeepResearchTool:
         plan_review_callback: Callable = None,
         live_sink=None,
         cancel_event: Optional[threading.Event] = None,
+        resume_from: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run the complete research workflow.
@@ -516,6 +653,18 @@ class DeepResearchTool:
             _cancel_checkpoint()
             if _cb:
                 _cb(message, percentage)
+
+        # --- measured stage timings (facts only; no speed-up claims) ----
+        from .utils.timing import StageTimer
+        self.timer = StageTimer()
+        # --- page / extraction reuse cache (local disk, under output) ----
+        from .research.fetch_cache import FetchCache
+        rc_ = self.config.research
+        cache_dir = getattr(rc_, "cache_dir", None) or \
+            (Path(self.config.report.output_dir) / ".cache")
+        self.fetch_cache = FetchCache(
+            Path(cache_dir), max_age_hours=rc_.cache_max_age_hours,
+            enabled=bool(rc_.cache_reuse))
 
         # --- run-scoped concurrency + token accounting ---
         # One RunLimits per run: every leaf LLM/HTTP call takes a composed
@@ -623,15 +772,40 @@ class DeepResearchTool:
             target_pages=self.config.report.target_pages,
             target_characters=self.config.report.target_characters,
             plan_review_callback=plan_review_callback,
+            cancel_check=_cancel_checkpoint,
+            run_config=self._run_config_snapshot(),
+            fetch_cache=self.fetch_cache,
+            refresh_fetched=bool(rc_.refresh_fetched),
         )
 
-        # Conduct research
-        session = self.researcher.conduct_research(
-            query=query,
-            requirements=requirements,
-            additional_context=additional_context,
-            additional_documents=doc_contents,
-        )
+        # Conduct research. On cancel/error the researcher has ALREADY
+        # persisted an atomic checkpoint (bodies, evidence, stage); the
+        # artifacts it actually wrote are exposed for the UI before the
+        # exception propagates — a cancelled run reports what was saved,
+        # never "saved" for files that do not exist.
+        self.partial_artifacts = {}
+        self.timer.start("research")
+        try:
+            if resume_from:
+                # GUI/CLI resume: completed sections are reused verbatim,
+                # only unfinished ones are researched (see Researcher)
+                session = self.researcher.resume_research(Path(resume_from))
+                self.resume_plan = getattr(self.researcher, "resume_plan", None)
+            else:
+                session = self.researcher.conduct_research(
+                    query=query,
+                    requirements=requirements,
+                    additional_context=additional_context,
+                    additional_documents=doc_contents,
+                )
+        except (RunCancelled, Exception):
+            self.timer.stop("research", interrupted=True)
+            sess = self.researcher.get_session()
+            if sess is not None:
+                self.partial_artifacts = dict(sess.saved_artifacts)
+                self.partial_session_id = sess.session_id
+            raise
+        self.timer.stop("research")
 
         evidence_locker = self.researcher.get_evidence_locker()
 
@@ -1079,6 +1253,15 @@ class DeepResearchTool:
                     f"{rp_cfg.hard_min_body_chars})に達していません。水増しは"
                     f"行いません。追加調査で情報を増やしてください。")
 
+        # Persist the FINAL VERIFIED body as its own artifact: later
+        # re-outputs (summary / other formats) start from the frozen
+        # text, never from the pre-finalization session JSON
+        final_body_path = None
+        if getattr(self, "finalization_outcome", None):
+            final_body_path = self._save_final_body(
+                session, self.finalization_outcome,
+                self.config.report.output_dir)
+
         # Semantic freeze check: the content about to ship must hash
         # IDENTICALLY to the snapshot taken at freeze time. Renderers may
         # only have done non-semantic work since (layout, format
@@ -1115,14 +1298,17 @@ class DeepResearchTool:
                 refs = [e.citation_text
                         for e in evidence_locker.get_all_evidence()]
                 outcome = getattr(self, "finalization_outcome", None)
+                axes = self._status_axes()
                 if outcome is not None:
-                    live_sink.on_finalized(outcome["chapters"], refs)
+                    live_sink.on_finalized(outcome["chapters"], refs,
+                                           verification=axes)
                 else:
                     final_chapters = {
                         sid: sd.get("content", "")
                         for sid, sd in session.section_contents.items()
                         if not sid.startswith("_") and sd.get("content")}
-                    live_sink.on_finalized(final_chapters, refs)
+                    live_sink.on_finalized(final_chapters, refs,
+                                           verification=axes)
             except Exception as e:
                 print(f"[LiveReport] finalize event failed: {e}")
             finally:
@@ -1160,6 +1346,22 @@ class DeepResearchTool:
                     or (semantic_freeze_hash and semantic_output_hash
                         and semantic_output_hash != semantic_freeze_hash))
                 else "completed"),
+            # THREE separate axes — "the process ended", "verification was
+            # performed", "the quality gate passed" are different facts
+            # and are never collapsed into one green checkmark
+            "status": self._status_axes(
+                semantic_artifact_check=semantic_artifact_check,
+                semantic_drift=bool(
+                    semantic_freeze_hash and semantic_output_hash
+                    and semantic_output_hash != semantic_freeze_hash)),
+            "saved_artifacts": {
+                **(getattr(session, "saved_artifacts", {}) or {}),
+                **({"final_body": str(final_body_path)}
+                   if final_body_path else {}),
+                **({"report": str(active_report_path)}
+                   if active_report_path else {})},
+            "resume_plan": getattr(self, "resume_plan", None),
+            "timings": self._collect_timings(run_token_stats),
             "verification_summary": (getattr(self, "finalization_outcome",
                                              None) or {}).get(
                 "verification_summary"),
@@ -2719,7 +2921,7 @@ Output only the text (no JSON, no heading):"""
         if candidates:
             workers = min(EXTRACT_WORKERS, len(candidates))
             if workers > 1:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                with ContextThreadPoolExecutor(max_workers=workers) as ex:
                     for i, data_points in enumerate(ex.map(_extract_one, candidates), 1):
                         store.add_many(data_points)
                         if i % 10 == 0 or i == len(candidates):
@@ -2819,7 +3021,7 @@ Output only the text (no JSON, no heading):"""
 
         import concurrent.futures
         completed = 0
-        with concurrent.futures.ThreadPoolExecutor(
+        with ContextThreadPoolExecutor(
                 max_workers=max_workers) as executor:
             futures = {
                 executor.submit(_process_one, sid, content): (sid, content)
@@ -3066,6 +3268,13 @@ def run_research(
     # previously progress_callback fell into **kwargs and was dropped)
     progress_callback: Callable[[str, float], None] = None,
     cancel_event: Optional[threading.Event] = None,
+    # LLM sampling / rendering knobs (GUI-forwarded; None = config default)
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    search_region: Optional[str] = None,
+    include_images: Optional[bool] = None,
+    include_citations: Optional[bool] = None,
+    include_toc: Optional[bool] = None,
     report_generator_version: str = "v1",
     v2_writing_style: str = "business",
     v2_target_audience: str = "business",
@@ -3291,6 +3500,13 @@ def run_research(
         v2_enable_two_phase=v2_enable_two_phase,
         v2_include_glossary=v2_include_glossary,
         **api_key_param,
+        **{k: val for k, val in {
+            "temperature": temperature, "max_tokens": max_tokens,
+            "search_region": search_region,
+            "include_images": include_images,
+            "include_citations": include_citations,
+            "include_toc": include_toc,
+        }.items() if val is not None},
         **kwargs,
     )
 
@@ -3947,11 +4163,129 @@ def run_manual_research(
     }
 
 
+def regenerate_from_session(
+    session_path,
+    output_format: str = "markdown",
+    mode: str = "full",
+    output_dir=None,
+    language: str = None,
+) -> Dict[str, Any]:
+    """Re-output a FINISHED research without searching again.
+
+    Uses the frozen, verified body (``final_body_<session>.json``) when it
+    exists — never the stale pre-finalization session text — and renders
+    it with the deterministic V1 renderer in the requested format.
+
+    mode:
+      full     the complete verified report in another format
+      summary  a short digest: executive summary, key findings,
+               recommendations and one paragraph per chapter (built
+               deterministically from the saved data — no LLM, no web)
+
+    Returns {"report_path", "source", "mode", "format", "chapters"}.
+    """
+    from .research.researcher import ResearchSession
+    from .evidence.locker import EvidenceLocker
+    from .report.generator import ReportGenerator, ReportFormat
+
+    session_path = Path(session_path)
+    session = ResearchSession.load(session_path)
+    session_dir = session_path.parent
+    lang = language or (session.run_config or {}).get("language") or "ja"
+
+    final_body = session_dir / f"final_body_{session.session_id}.json"
+    source = "session"
+    chapters: Dict[str, str] = {}
+    # status axes travel WITH the body: a final body frozen after a
+    # cancelled / timed-out verification is re-output as exactly that,
+    # never relabelled "verified"; a session-only re-output is unverified
+    status = {"process": "completed", "verification": "skipped",
+              "quality": "unverified"}
+    decision = None
+    if final_body.is_file():
+        try:
+            data = json.loads(final_body.read_text(encoding="utf-8"))
+            chapters = {str(k): str(v) for k, v in
+                        (data.get("chapters") or {}).items()}
+            source = "final_body"
+            if isinstance(data.get("status"), dict) and data["status"]:
+                status = dict(data["status"])
+            decision = data.get("decision")
+        except Exception:
+            chapters = {}
+    if not chapters:
+        chapters = {sid: (sd.get("content") or "")
+                    for sid, sd in session.section_contents.items()
+                    if not sid.startswith("_") and sd.get("content")}
+
+    evidence_path = session_dir / "evidence" / f"evidence_{session.session_id}.json"
+    locker = EvidenceLocker.load_from_json(evidence_path) \
+        if evidence_path.exists() else EvidenceLocker(
+            research_id=session.session_id, output_dir=session_dir / "evidence")
+
+    # render copy: chapters come from the frozen body; nothing is re-cut
+    render_session = ResearchSession.load(session_path)
+    for sid, text in chapters.items():
+        entry = dict(render_session.section_contents.get(sid) or {})
+        entry.setdefault("title", sid)
+        entry["content"] = text
+        render_session.section_contents[sid] = entry
+
+    if mode == "summary":
+        exec_data = session.section_contents.get("_executive_summary") or {}
+        lines = []
+        ja = lang == "ja"
+        if exec_data.get("executive_summary"):
+            lines += [f"## {'要旨' if ja else 'Executive Summary'}", "",
+                      str(exec_data["executive_summary"]), ""]
+        if exec_data.get("key_findings"):
+            lines += [f"### {'主要な発見' if ja else 'Key Findings'}"]
+            lines += [f"- {f}" for f in exec_data["key_findings"]] + [""]
+        if exec_data.get("recommendations"):
+            lines += [f"### {'提言' if ja else 'Recommendations'}"]
+            lines += [f"- {r}" for r in exec_data["recommendations"]] + [""]
+        lines += [f"## {'章別要約' if ja else 'Chapter Summaries'}", ""]
+        # numeric chapter ids first (natural order), then named extras
+        # (要旨 / 付録 …) — mixed str/int keys must never raise
+        for sid in sorted(chapters, key=lambda k: [(0, int(t)) if t.isdigit() else (1, t)
+                                                    for t in re.split(r"[.]", k)]):
+            sd = session.section_contents.get(sid) or {}
+            title = sd.get("title", sid)
+            summary = (sd.get("summary") or "").strip()
+            if not summary:
+                body = re.sub(r"^#.*$", "", chapters[sid], flags=re.M).strip()
+                summary = body.split("\n\n")[0][:400] if body else ""
+            lines += [f"### {sid}. {title}", "", summary, ""]
+        digest = "\n".join(lines).strip()
+        render_session.section_contents = {
+            "1": {"title": "要約" if ja else "Summary", "content": digest,
+                  "sources": [], "extracted_content": []},
+        }
+        if "_executive_summary" in session.section_contents:
+            render_session.section_contents["_executive_summary"] = \
+                session.section_contents["_executive_summary"]
+
+    out_dir = Path(output_dir) if output_dir else session_dir / "reports"
+    generator = ReportGenerator(output_dir=out_dir, language=lang)
+    suffix = "summary" if mode == "summary" else "reoutput"
+    render_session.session_id = f"{session.session_id}_{suffix}"
+    report_path = generator.generate_report(
+        session=render_session, evidence_locker=locker,
+        format=ReportFormat(output_format), verification_result=None,
+        target_pages=None, target_characters=None,
+    )
+    return {"report_path": str(report_path), "source": source,
+            "mode": mode, "format": output_format,
+            "chapters": sorted(chapters), "status": status,
+            "decision": decision}
+
+
 # Export for notebook/script usage
 __all__ = [
     "DeepResearchTool",
     "run_research",
     "run_manual_research",
+    "regenerate_from_session",
     "diagnose_session",
     "Config",
     "LLMProvider",

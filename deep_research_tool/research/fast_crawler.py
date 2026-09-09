@@ -15,6 +15,7 @@ from typing import List, Dict, Any, Optional, Callable, Tuple
 from urllib.parse import urlparse
 
 from ..evidence.content_filter import ContentFilter, create_moderate_filter
+from ..utils.concurrency import ContextThreadPoolExecutor
 
 
 class EvaluationMode(str, Enum):
@@ -110,6 +111,9 @@ class FastCrawler:
         self.fetch_timeout = fetch_timeout
         self.batch_size = batch_size
         self.language = language
+        # run-level cancel token (set by the Researcher): checked before
+        # every search, fetch and LLM evaluation this crawler starts
+        self.cancel_check = lambda: None
 
     def _extract_research_context(self, research_topic: str) -> dict:
         """
@@ -247,7 +251,8 @@ Output only JSON:"""
                 50, 100
             )
 
-        # Phase 2: Relevance evaluation
+        # Phase 2: Relevance evaluation (no NEW LLM work after a cancel)
+        self.cancel_check()
         if progress_callback:
             progress_callback("Phase 2: Evaluating relevance...", 50, 100)
 
@@ -323,6 +328,7 @@ Output only JSON:"""
         all_results = []
         for qi, query in enumerate(queries, 1):
             print(f"[FastCrawler] ({qi}/{len(queries)}) Query: {query}")
+            self.cancel_check()
             try:
                 results = self.search.search(query, max_results=max_pages_per_query)
                 for result in results[:max_pages_per_query]:
@@ -357,6 +363,7 @@ Output only JSON:"""
             """Fetch a single page."""
             start = time.time()
             try:
+                self.cancel_check()      # no new fetch after a cancel
                 page = self.search.get_page_content(result["url"])
                 return CrawledPage(
                     url=result["url"],
@@ -367,6 +374,9 @@ Output only JSON:"""
                     metadata={"query": result["query"]},
                 )
             except Exception as e:
+                from ..utils.cancellation import RunCancelled
+                if isinstance(e, RunCancelled):
+                    raise                      # cancel propagates, never swallowed
                 return CrawledPage(
                     url=result["url"],
                     title=result["title"],
@@ -376,7 +386,7 @@ Output only JSON:"""
                     error=str(e),
                 )
 
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+        with ContextThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {
                 executor.submit(fetch_page, result): result
                 for result in unique_results
@@ -662,9 +672,18 @@ Output only the JSON array:"""
                     evaluation_time=time.time() - start,
                 )
 
+        # ZERO pages (all searches empty / everything filtered) is a
+        # normal "insufficient information" outcome, not an error: an
+        # empty pool would raise ValueError(max_workers=0) and abort the
+        # whole section. Return the empty list so the caller records the
+        # gap and moves on to other queries / methods.
+        if not pages:
+            return evaluated_pages
+
         # Use ThreadPoolExecutor for parallel LLM calls
         # Note: For true async, would need async LLM client
-        with ThreadPoolExecutor(max_workers=min(5, len(pages))) as executor:
+        with ContextThreadPoolExecutor(
+                max_workers=max(1, min(5, len(pages)))) as executor:
             futures = {executor.submit(evaluate_single, page): page for page in pages}
 
             completed = 0

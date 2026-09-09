@@ -4,6 +4,7 @@ Evidence Locker - Track and manage research sources and citations.
 
 import json
 import csv
+import os
 import hashlib
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -746,10 +747,27 @@ class EvidenceLocker:
                 section: [self._evidence[eid].to_dict() for eid in eids if eid in self._evidence]
                 for section, eids in self._section_evidence.items()
             },
+            # id-only mapping so load_from_json restores section relations
+            # exactly (the "sections" block above is for human readers)
+            "section_evidence": {
+                section: list(eids)
+                for section, eids in self._section_evidence.items()
+            },
         }
 
-        with open(filepath, "w", encoding="utf-8") as f:
+        # ATOMIC write: a cancel/crash mid-export never leaves a truncated
+        # evidence file (readers see the previous or the new complete file)
+        filepath = Path(filepath)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        tmp = filepath.with_name(filepath.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(export_data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        os.replace(tmp, filepath)
 
         return filepath
 
@@ -924,7 +942,16 @@ class EvidenceLocker:
             locker._evidence[evidence.id] = evidence
             locker._citation_map[evidence.citation_key] = evidence.id
 
-        locker._section_evidence = data.get("section_evidence", {})
+        section_evidence = data.get("section_evidence")
+        if not section_evidence and data.get("sections"):
+            # legacy exports carried only the expanded "sections" block
+            section_evidence = {
+                section: [e.get("id") for e in items
+                          if isinstance(e, dict) and e.get("id")]
+                for section, items in data["sections"].items()
+            }
+        locker._section_evidence = {
+            str(k): list(v) for k, v in (section_evidence or {}).items()}
 
         return locker
 

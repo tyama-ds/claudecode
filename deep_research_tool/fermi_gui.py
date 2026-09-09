@@ -119,6 +119,12 @@ class FermiEstimatorGUI:
         self.run_button.config(state=tk.DISABLED)
         self.status_var.set("推定中... (LLM呼び出し)")
         self.result_text.delete("1.0", tk.END)
+        # the displayed result and the savable result must always be the
+        # SAME estimate: drop the previous one and disable saving until
+        # this run succeeds (a failure never leaves the old result savable)
+        self.last_estimate = None
+        self.save_docx_button.config(state=tk.DISABLED)
+        self.save_pdf_button.config(state=tk.DISABLED)
 
         thread = threading.Thread(target=self._run_estimation, args=(question,), daemon=True)
         thread.start()
@@ -159,6 +165,10 @@ class FermiEstimatorGUI:
         self.result_text.insert("1.0", f"エラー: {message}\n")
         self.status_var.set("エラー")
         self.run_button.config(state=tk.NORMAL)
+        # nothing valid to save after a failure
+        self.last_estimate = None
+        self.save_docx_button.config(state=tk.DISABLED)
+        self.save_pdf_button.config(state=tk.DISABLED)
         messagebox.showerror("推定エラー", message)
 
     def _on_save_docx(self):

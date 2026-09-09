@@ -24,6 +24,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from urllib.parse import urlparse, urljoin
 
 import requests
+from ..utils.concurrency import ContextThreadPoolExecutor
 
 
 class FigureType(str, Enum):
@@ -283,7 +284,7 @@ class FigureTableGenerator:
         workers = min(self.max_workers, len(items))
         if workers <= 1:
             return [(sid, worker(sid, sdata)) for sid, sdata in items]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        with ContextThreadPoolExecutor(max_workers=workers) as ex:
             results = list(ex.map(lambda it: worker(*it), items))
         return list(zip([sid for sid, _ in items], results))
 

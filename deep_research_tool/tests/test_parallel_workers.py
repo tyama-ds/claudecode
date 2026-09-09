@@ -350,7 +350,7 @@ class TestLocalLLMAuthChain(unittest.TestCase):
 
         config = create_config(**{
             k: v for k, v in gui_config.items()
-            if k not in ("topic",)})
+            if k not in ("topic", "iterations")})   # run_research-only keys
         self.assertEqual(config.api.get_active_api_key(), "gui-token")
         client = LocalLLMClient(
             model=config.api.local_model,

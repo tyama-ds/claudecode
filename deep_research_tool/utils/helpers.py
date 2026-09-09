@@ -2,6 +2,7 @@
 Helper utilities for Deep Research Tool.
 """
 
+import contextvars
 import json
 import logging
 import re
@@ -37,22 +38,58 @@ class ResearchWarnings:
     _instance: Optional["ResearchWarnings"] = None
     _lock = threading.Lock()
     _active_runs = 0  # research runs currently executing (parallel Web UI jobs)
+    # Per-run collector bound to the CURRENT CONTEXT (contextvars). Every
+    # parallel stage in this package uses ContextThreadPoolExecutor, so
+    # worker threads inherit the binding and a Web UI job's warnings are
+    # isolated from other jobs. Unbound code paths (CLI, tests) fall back
+    # to the process-wide singleton exactly as before.
+    _current: contextvars.ContextVar = contextvars.ContextVar(
+        "research_warnings_current", default=None)
 
     def __init__(self) -> None:
         self._warnings: List[Dict[str, str]] = []
         self._lock_inst = threading.Lock()
 
-    # --- singleton access (so every module can record warnings) ---
+    # --- singleton / per-run access (so every module can record warnings) ---
     @classmethod
     def get_instance(cls) -> "ResearchWarnings":
+        bound = cls._current.get()
+        if bound is not None:
+            return bound
         with cls._lock:
             if cls._instance is None:
                 cls._instance = cls()
             return cls._instance
 
     @classmethod
+    def bind(cls, collector: Optional["ResearchWarnings"] = None
+             ) -> "ResearchWarnings":
+        """Bind a (fresh) collector to the current context and return it.
+
+        Call at the start of a job thread; parallel workers spawned from
+        that context inherit it. Returns the bound collector so the job
+        can read ITS warnings back regardless of what other jobs did.
+        """
+        collector = collector or cls()
+        cls._current.set(collector)
+        return collector
+
+    @classmethod
+    def unbind(cls) -> None:
+        cls._current.set(None)
+
+    @classmethod
+    def current(cls) -> Optional["ResearchWarnings"]:
+        """The context-bound collector, or None when unbound."""
+        return cls._current.get()
+
+    @classmethod
     def reset(cls) -> None:
-        """Reset the singleton (call at the start of each run)."""
+        """Reset the process-wide singleton (CLI / tests). A context-bound
+        collector is replaced by a fresh one instead."""
+        if cls._current.get() is not None:
+            cls._current.set(cls())
+            return
         with cls._lock:
             cls._instance = cls()
 
@@ -60,11 +97,13 @@ class ResearchWarnings:
     def reset_if_idle(cls) -> None:
         """Reset only when no other research run is active.
 
-        With parallel Web UI jobs an unconditional reset at run start would
-        wipe the warnings of a job that is still running. When runs overlap,
-        warnings are shared between them (a known cosmetic limitation) but
-        never silently destroyed.
+        With a context-bound collector (Web UI job) this is a no-op for the
+        shared singleton — the job already has its own collector. For the
+        singleton path it resets only when no run is active, so a
+        concurrent run's warnings are never wiped.
         """
+        if cls._current.get() is not None:
+            return
         with cls._lock:
             if cls._active_runs == 0:
                 cls._instance = cls()
