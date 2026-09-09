@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Deep Research Tool</title>
+<link rel="icon" href="data:,">
 <style>
 :root {
   --bg: #f4f5fb;
@@ -162,7 +163,42 @@ details .body { padding: 0 2px 14px; }
   cursor: pointer; transition: all .15s; display: block;
 }
 .mode-card:hover { border-color: var(--accent); }
-.mode-card input { display: none; }
+/* radios stay in the accessibility tree and Tab order (visually hidden) */
+.mode-card input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; pointer-events: none; }
+.mode-card { position: relative; }
+.mode-card:focus-within { outline: 3px solid var(--accent); outline-offset: 2px; }
+.mode-cards-3 { grid-template-columns: repeat(3, 1fr); }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.chip { border: 1px solid var(--border); background: var(--bg); border-radius: 999px; padding: 3px 10px; font-size: 11.5px; cursor: pointer; color: var(--text); }
+.chip:hover, .chip:focus-visible { border-color: var(--accent); outline: none; }
+.dropzone { border: 2px dashed var(--border); border-radius: 10px; padding: 14px; text-align: center; font-size: 12.5px; color: var(--muted); cursor: pointer; margin-top: 6px; }
+.dropzone.over, .dropzone:focus-visible { border-color: var(--accent); background: var(--accent-soft); outline: none; }
+.doclist { margin-top: 6px; display: grid; gap: 4px; }
+.doc-row { display: flex; gap: 8px; align-items: center; font-size: 12px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; }
+.doc-row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.doc-row button { border: none; background: transparent; cursor: pointer; color: var(--muted); }
+.preset-effects { margin-top: 6px; font-size: 12px; color: var(--muted); line-height: 1.6; background: var(--bg); border-radius: 8px; padding: 8px 10px; }
+.start-box { position: sticky; bottom: 0; background: var(--card); padding-top: 10px; margin-top: 14px; border-top: 1px solid var(--border); }
+.summary-strip { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 8px; }
+.summary-strip b { color: var(--text); }
+button.secondary { border: 1.5px solid var(--border); background: var(--card); color: var(--text); border-radius: 10px; padding: 8px 12px; font-size: 12.5px; cursor: pointer; font-family: inherit; }
+button.secondary:hover:not(:disabled), button.secondary:focus-visible { border-color: var(--accent); outline: none; }
+button.secondary:disabled { opacity: .5; cursor: not-allowed; }
+.exec-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 4px 12px; font-size: 12px; color: var(--muted); margin-top: 8px; }
+.exec-summary b { color: var(--text); }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-top: 6px; }
+.tabs .tab { border: none; background: transparent; padding: 8px 12px; font-size: 13px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; font-family: inherit; }
+.tabs .tab.sel { color: var(--accent); border-bottom-color: var(--accent); font-weight: 700; }
+.tabs .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tab-pane { padding-top: 10px; }
+.livebody { max-height: 480px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; font-size: 13.5px; line-height: 1.8; }
+.history { margin-top: 10px; display: grid; gap: 6px; max-height: 320px; overflow-y: auto; }
+.hist-row { border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; font-size: 12.5px; }
+.hist-row .q { font-weight: 700; }
+.hist-row .meta { color: var(--muted); font-size: 11.5px; margin: 2px 0 6px; }
+.hist-row .acts { display: flex; gap: 6px; flex-wrap: wrap; }
+.hist-row .acts button, .reoutput button { font-size: 11.5px; padding: 4px 9px; }
+.reoutput { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .mode-card .t { font-weight: 700; font-size: 13px; }
 .mode-card .d { font-size: 11px; color: var(--muted); }
 .mode-card.sel { border-color: var(--accent); background: var(--accent-soft); }
@@ -247,6 +283,13 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
   background: var(--accent-soft); color: var(--accent); font-weight: 700;
 }
 .banner { display:none; margin-top: 12px; padding: 12px 14px; border-radius: 10px; font-size: 13px; }
+input.invalid, textarea.invalid, select.invalid { border-color: var(--error, #b91c1c) !important; box-shadow: 0 0 0 2px #fee2e2; }
+.field-err { display:block; color: var(--error, #b91c1c); font-size: 12px; margin-top: 3px; }
+.badge { display:inline-block; font-size:11.5px; border-radius:999px; padding:1px 9px; margin:0 4px 4px 0; border:1px solid var(--border,#ddd); }
+.badge.ok { background:#dcfce7; color:#166534; border-color:#86efac; }
+.badge.warn { background:#fef3c7; color:#92400e; border-color:#fcd34d; }
+.badge.bad { background:#fee2e2; color:#991b1b; border-color:#fca5a5; }
+.badge.muted { background:#f1f5f9; color:#475569; }
 .banner.error { background: #fee2e2; color: var(--error); display: block; white-space: pre-wrap; }
 .banner.success { background: #dcfce7; color: var(--success); display: block; font-weight: 700; }
 .idle-hint { color: var(--muted); text-align: center; padding: 40px 0; font-size: 13px; }
@@ -457,243 +500,323 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
 
 <main>
   <!-- ==================== 設定フォーム ==================== -->
-  <section class="card">
-    <h2><span class="n">1</span>調査の設定</h2>
+  <section class="card" id="formCard">
+    <h2><span class="n">1</span>新規調査</h2>
 
+    <!-- 1. 何を調べるか -->
     <label for="query">調査テーマ <span style="color:var(--error)">*</span></label>
-    <textarea id="query" placeholder="例: 国内の炭素繊維市場の動向と主要メーカーの戦略"></textarea>
+    <textarea id="query" placeholder="例: 国内の炭素繊維市場の動向と主要メーカーの戦略" aria-describedby="queryHint"></textarea>
+    <div class="chips" id="exampleChips" aria-label="テーマの例（クリックで入力）">
+      <button type="button" class="chip" data-example="国内の炭素繊維市場の動向と主要メーカーの戦略">炭素繊維市場</button>
+      <button type="button" class="chip" data-example="生成AIの製造業における活用事例と導入課題（2025〜2026年）">製造業×生成AI</button>
+      <button type="button" class="chip" data-example="洋上風力発電の国内政策動向とサプライチェーンの課題">洋上風力の政策</button>
+    </div>
+    <p class="hint" id="queryHint">例を選んで書き換えることもできます。</p>
 
-    <label for="requirements">要件・観点（任意）</label>
-    <textarea id="requirements" placeholder="例: 直近5年の市場規模データを重視。経営層向けに簡潔に。"></textarea>
+    <label for="requirements">目的・読者・必須の観点（任意）</label>
+    <textarea id="requirements" placeholder="例: 経営層向けに簡潔に。直近5年の市場規模データを重視。主要3社の比較を必須。"></textarea>
 
-    <details open>
-      <summary>🌐 情報収集の設定</summary>
-      <div class="body">
-        <label>情報ソース</label>
-        <div class="mode-cards" id="sourceModes">
-          <label class="mode-card sel"><input type="radio" name="source_mode" value="web" checked>
-            <span class="t">Web</span><span class="d">　Web検索・クロールで情報収集</span></label>
-          <label class="mode-card"><input type="radio" name="source_mode" value="local">
-            <span class="t">ローカル文献のみ</span><span class="d">　手元の文書だけを使用（Webアクセスなし）</span></label>
-          <label class="mode-card"><input type="radio" name="source_mode" value="hybrid">
-            <span class="t">ハイブリッド</span><span class="d">　ローカル文献＋Webの両方を使用</span></label>
-        </div>
-        <div id="localDocsBox" style="display:none">
-          <label>ローカル文書のパス（1行に1つ。フォルダ指定可: pdf/docx/txt/md等を自動検出）</label>
+    <!-- 2. どの資料を使うか -->
+    <label id="sourceLabel">使用する資料</label>
+    <div class="mode-cards" id="sourceModes" role="radiogroup" aria-labelledby="sourceLabel">
+      <label class="mode-card sel"><input type="radio" name="source_mode" value="web" checked>
+        <span class="t">Web</span><span class="d">　Web検索・クロールで情報収集</span></label>
+      <label class="mode-card"><input type="radio" name="source_mode" value="local">
+        <span class="t">手元の資料のみ</span><span class="d">　アップロード／サーバー上の文書だけを使用（Webアクセスなし）</span></label>
+      <label class="mode-card"><input type="radio" name="source_mode" value="hybrid">
+        <span class="t">両方</span><span class="d">　手元の資料＋Webの両方を使用</span></label>
+    </div>
+    <div id="localDocsBox" style="display:none">
+      <label>手元の資料（この端末のファイル）</label>
+      <div class="dropzone" id="dropZone" tabindex="0" role="button" aria-label="ファイルをドラッグ＆ドロップ、またはクリックして選択">
+        📎 ここにファイルをドラッグ＆ドロップ、またはクリックして選択（pdf / docx / txt / md / csv / xlsx / pptx）
+        <input type="file" id="fileInput" multiple accept=".pdf,.docx,.txt,.md,.csv,.xlsx,.pptx" style="display:none">
+      </div>
+      <div id="docList" class="doclist" aria-live="polite"></div>
+      <details style="margin-top:8px">
+        <summary>サーバー側のファイルパスを直接指定（詳細）</summary>
+        <div class="body">
+          <p class="hint">この欄は<b>サーバーが動いているPC上のパス</b>です。ブラウザ端末のファイルは上のアップロードを使ってください。フォルダ指定可（pdf/docx/txt/md等を自動検出）。</p>
           <textarea id="local_documents" placeholder="C:\docs\市場調査レポート.pdf&#10;/home/user/documents/"></textarea>
+          <button type="button" class="secondary" id="precheckBtn">読み取り可否を確認</button>
+          <div id="precheckResult" class="doclist" aria-live="polite"></div>
         </div>
+      </details>
+    </div>
 
-        <label>クロールモード</label>
-        <div class="mode-cards" id="crawlModes">
-          <label class="mode-card sel"><input type="radio" name="crawl_mode" value="standard" checked>
-            <span class="t">標準</span><span class="d">　検索結果を順番に取得（軽量・確実）</span></label>
-          <label class="mode-card"><input type="radio" name="crawl_mode" value="fast_batch">
-            <span class="t">高速</span><span class="d">　並列取得＋バッチ評価（速い）</span></label>
-          <label class="mode-card"><input type="radio" name="crawl_mode" value="aicrawl">
-            <span class="t">AIクロール</span><span class="d">　AIがページを読み、辿るべきリンクを判断</span></label>
-          <label class="mode-card"><input type="radio" name="crawl_mode" value="ai_crawl_selenium">
-            <span class="t">AIクロール（ブラウザ）</span><span class="d">　Seleniumで取得。JS描画サイト対応</span></label>
-        </div>
-        <label>⚙ 全体の並列ワーカー数（1〜16。LLM・通信の同時実行数の上限。DeepThink・図表などの個別ワーカー数はこの範囲内で機能タブから調整）</label>
-        <input type="number" id="parallel_max_workers" value="8" min="1" max="16" step="1" style="width:100px">
+    <!-- 3. どの仕上がりにするか -->
+    <label id="deliverableLabel">仕上がり</label>
+    <div class="mode-cards mode-cards-3" id="deliverableModes" role="radiogroup" aria-labelledby="deliverableLabel">
+      <label class="mode-card"><input type="radio" name="deliverable" value="summary">
+        <span class="t">要約</span><span class="d">　要点中心・約4,000字</span></label>
+      <label class="mode-card sel"><input type="radio" name="deliverable" value="standard" checked>
+        <span class="t">標準レポート</span><span class="d">　情報量に応じた章立て</span></label>
+      <label class="mode-card"><input type="radio" name="deliverable" value="detailed">
+        <span class="t">詳細調査</span><span class="d">　長文・図表・根拠を厚く</span></label>
+    </div>
+    <div class="grid2">
+      <div><label for="language">言語</label>
+        <select id="language"><option value="ja" selected>日本語</option><option value="en">English</option></select></div>
+      <div><label for="output_format">出力形式</label>
+        <select id="output_format">
+          <option value="markdown">Markdown</option>
+          <option value="docx">Word (docx)</option>
+          <option value="pdf">PDF</option>
+          <option value="html">HTML</option>
+        </select></div>
+    </div>
+
+    <!-- 4. どこまで時間をかけるか -->
+    <label id="presetLabel">調査全体のプリセット（時間のかけ方）　<span class="hint" style="display:inline">※検証モードのプリセットとは別です</span></label>
+    <div class="mode-cards mode-cards-3" id="presetModes" role="radiogroup" aria-labelledby="presetLabel">
+      <label class="mode-card"><input type="radio" name="research_preset" value="quick">
+        <span class="t">短時間</span><span class="d">　最小限の収集・高速検証</span></label>
+      <label class="mode-card sel"><input type="radio" name="research_preset" value="standard" checked>
+        <span class="t">標準</span><span class="d">　バランス型（推奨）</span></label>
+      <label class="mode-card"><input type="radio" name="research_preset" value="thorough">
+        <span class="t">詳細</span><span class="d">　多段推論・厳格検証</span></label>
+    </div>
+    <div id="presetEffects" class="preset-effects" aria-live="polite"></div>
+
+    <!-- 詳細設定（折り畳み） -->
+    <details id="advancedSettings">
+      <summary>🔧 詳細設定（選択中のモードに関係する項目のみ表示）</summary>
+      <div class="body">
         <div class="grid2">
-          <div><label>最大取得ページ数 / 章</label><input type="number" id="ai_crawl_max_pages" value="15" min="3" max="50"></div>
-          <div><label>サイト内の探索階層</label><input type="number" id="ai_crawl_site_depth" value="2" min="0" max="5"></div>
-          <div><label>不足時の再調査回数</label><input type="number" id="gap_fill_rounds" value="1" min="0" max="3"></div>
-          <div><label>ページ数 / クエリ</label><input type="number" id="max_pages_per_query" value="3" min="1" max="10"></div>
+          <div><label for="iterations">章ごとの最小調査回数</label><input type="number" id="iterations" value="2" min="1" max="10"></div>
+          <div><label for="max_iterations">章ごとの最大調査回数</label><input type="number" id="max_iterations" value="4" min="1" max="20"></div>
         </div>
-        <label>ブラウザ（Selenium使用時）</label>
-        <select id="browser">
-          <option value="chrome">Chrome</option>
-          <option value="edge">Microsoft Edge</option>
-          <option value="firefox">Firefox</option>
+        <label class="check"><input type="checkbox" id="cache_reuse" checked> 取得済みページ・抽出結果を再利用する（同じURL・同じ内容の再取得／再抽出を省略）</label>
+        <label class="check"><input type="checkbox" id="refresh_fetched"> 鮮度を優先して更新確認する（取得済みページを再取得。最新動向の調査向け）</label>
+        <details>
+              <summary>🌐 情報収集の設定（Web検索を使う場合）</summary>
+              <div class="body" id="webCollectBody">
+                <p class="hint" id="webCollectHidden" style="display:none">「手元の資料のみ」ではWebアクセスを行わないため、この設定は使われません。</p>
+                <label id="crawlLabel">クロールモード</label>
+                <div class="mode-cards" id="crawlModes" role="radiogroup" aria-labelledby="crawlLabel">
+                  <label class="mode-card sel"><input type="radio" name="crawl_mode" value="standard" checked>
+                    <span class="t">標準</span><span class="d">　検索結果を順番に取得（軽量・確実）</span></label>
+                  <label class="mode-card"><input type="radio" name="crawl_mode" value="fast_batch">
+                    <span class="t">高速</span><span class="d">　並列取得＋バッチ評価（速い）</span></label>
+                  <label class="mode-card"><input type="radio" name="crawl_mode" value="aicrawl">
+                    <span class="t">AIクロール</span><span class="d">　AIがページを読み、辿るべきリンクを判断</span></label>
+                  <label class="mode-card"><input type="radio" name="crawl_mode" value="ai_crawl_selenium">
+                    <span class="t">AIクロール（ブラウザ）</span><span class="d">　Seleniumで取得。JS描画サイト対応</span></label>
+                </div>
+                <label>⚙ 全体の並列ワーカー数（1〜16。LLM・通信の同時実行数の上限。DeepThink・図表などの個別ワーカー数はこの範囲内で機能タブから調整）</label>
+                <input type="number" id="parallel_max_workers" value="8" min="1" max="16" step="1" style="width:100px">
+                <div class="grid2">
+                  <div data-crawl="aicrawl ai_crawl_selenium"><label for="ai_crawl_max_pages">最大取得ページ数 / 章</label><input type="number" id="ai_crawl_max_pages" value="15" min="3" max="50"></div>
+                  <div data-crawl="aicrawl ai_crawl_selenium"><label for="ai_crawl_site_depth">サイト内の探索階層</label><input type="number" id="ai_crawl_site_depth" value="2" min="0" max="5"></div>
+                  <div><label for="gap_fill_rounds">不足時の再調査回数</label><input type="number" id="gap_fill_rounds" value="1" min="0" max="3"></div>
+                  <div><label for="max_pages_per_query">ページ数 / クエリ</label><input type="number" id="max_pages_per_query" value="3" min="1" max="10"></div>
+                </div>
+                <div id="seleniumBox" data-crawl="ai_crawl_selenium">
+                  <label for="browser">ブラウザ（Selenium使用時）</label>
+                  <select id="browser">
+                    <option value="chrome">Chrome</option>
+                    <option value="edge">Microsoft Edge</option>
+                    <option value="firefox">Firefox</option>
+                  </select>
+                  <label for="driver_path">WebDriverのパス（Selenium使用時。空欄=自動ダウンロードを試行）</label>
+                  <input type="text" id="driver_path" placeholder="C:\tools\msedgedriver.exe / /usr/local/bin/chromedriver">
+                  <p class="hint">社内ネットワーク等でドライバの自動ダウンロードが失敗する場合は、ブラウザのバージョンに合ったWebDriver（msedgedriver / chromedriver / geckodriver）を手動配置し、そのフルパスを指定してください。環境変数 SELENIUM_DRIVER_PATH でも指定できます。</p>
+                </div>
+                <div id="wafBox" data-crawl="standard fast_batch">
+                  <label class="check"><input type="checkbox" id="waf_mitigation" checked> WAF/ボット対策を有効化（標準・高速クロールのページ取得）</label>
+                  <p class="hint">ブラウザ風ヘッダ・接続の再利用・429/5xxの自動リトライ（Retry-After準拠）・同一ドメインへの待機・チャレンジページ検知＋再取得を行います。JSチャレンジ必須のサイトは Selenium系モードが必要です。</p>
+                  <div><label for="per_domain_delay">同一ドメインへの待機秒数（0=無効。WAFのレート制限回避）</label>
+                    <input type="number" id="per_domain_delay" value="1.0" min="0" max="10" step="0.5"></div>
+                </div>
+              </div>
+            </details>
+        <details>
+              <summary>📝 レポートの詳細（生成エンジン・文体・図表）</summary>
+              <div class="body">
+                <div class="grid2">
+                  <div>
+                    <label>生成エンジン</label>
+                    <select id="report_version">
+                      <option value="v1">V1（章ごとに執筆・多形式出力）</option>
+                      <option value="v2">V2（一貫性重視・用語統一・推敲）</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label>文体</label>
+                    <select id="v2_writing_style">
+                      <option value="business">ビジネス（です・ます調）</option>
+                      <option value="formal">学術・フォーマル（である調）</option>
+                      <option value="technical">技術文書</option>
+                      <option value="executive">経営層向け</option>
+                      <option value="casual">平易</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label>チャートライブラリ</label>
+                    <select id="chart_library">
+                      <option value="matplotlib">matplotlib</option>
+                      <option value="seaborn">seaborn</option>
+                    </select>
+                  </div>
+                </div>
+                <label class="check"><input type="checkbox" id="auto_figures" checked> 図表を自動生成してレポートに挿入する（数値データが少ないテーマでは生成されないことがあります）</label>
+                <label class="check"><input type="checkbox" id="v2_enable_polish" checked> 日本語の自然さを磨く推敲パス（V2）</label>
+                <label class="check"><input type="checkbox" id="live_report_word"> 🖋 Wordへライブ書き込み（このサーバーがWindows + Microsoft Word + pywin32 の場合のみ。Wordが起動し、章・グラフが順次書き込まれます）</label>
+                <p class="hint">検証前の内容には【草稿】マークが付き、最終確定時に検証済み本文へ自動で置き換わります。下の「ライブレポート」ペインはどの環境でも利用できます。</p>
+              </div>
+            </details>
+        <details>
+              <summary>📏 文章量と最終検証の設定</summary>
+              <div class="body">
+                <div class="grid2">
+                  <div>
+                    <label>文章量モード</label>
+                    <select id="length_mode">
+                      <option value="adaptive">適応（情報量から推奨レンジを算出）</option>
+                      <option value="fixed">固定（目標文字数を明示）</option>
+                    </select>
+                  </div>
+                  <div><label>目標本文文字数（空欄=自動）</label>
+                    <input type="number" id="preferred_body_chars" min="0" placeholder="例: 20000"></div>
+                  <div><label>本文の下限文字数（空欄=なし・水増しは行いません）</label>
+                    <input type="number" id="hard_min_body_chars" min="0" placeholder="空欄=制約なし"></div>
+                  <div><label>本文の上限文字数（空欄=なし）</label>
+                    <input type="number" id="hard_max_body_chars" min="0" placeholder="空欄=制約なし"></div>
+                  <div><label>許容幅（0〜0.99）</label>
+                    <input type="number" id="length_tolerance" min="0" max="0.99" step="0.05" value="0.20"></div>
+                </div>
+                <p class="hint">下限・上限は明示した場合のみ絶対制約になります。下限未達でも水増しは行わず、追加調査または「調査上の限界」記載で対応します。上限超過が圧縮でも解消しない場合、レポートは警告付きの完了になります。</p>
+              </div>
+            </details>
+        <details>
+              <summary>🛡 検証モード（Verification）</summary>
+              <div class="body">
+                <div class="mode-cards" id="verifyModes" style="flex-wrap:wrap">
+                  <label class="mode-card"><input type="radio" name="verification_profile" value="fast">
+                    <span class="t">⚡ Fast</span>
+                    <span class="d">短時間で結果を確認したい場合。<br>
+                    速度: ◎ 最速／検証品質: △<br>
+                    追加調査 0回・自動修正 0回<br>
+                    <b>最短時間で検証します。追加調査や自動修正を行わないため、未解決のクレームが残る場合があります。</b>品質スコアと未解決クレームは結果画面に表示されます。</span></label>
+                  <label class="mode-card sel"><input type="radio" name="verification_profile" value="balanced" checked>
+                    <span class="t">⚖ Balanced <span style="color:#2e7d32;border:1px solid #2e7d32;border-radius:4px;font-size:11px;padding:0 4px">推奨</span></span>
+                    <span class="d">通常のレポート作成に。<br>
+                    速度: ○／検証品質: ○<br>
+                    追加調査 1回・自動修正 1回<br>
+                    <b>速度と検証品質のバランスを取った推奨設定です。</b>全クレームを検証し、キャッシュ・並列・バッチ検証を使用します。</span></label>
+                  <label class="mode-card"><input type="radio" name="verification_profile" value="strict">
+                    <span class="t">🔒 Strict</span>
+                    <span class="d">提出用・最終版の厳格検証に。<br>
+                    速度: △ 長時間化の可能性あり／検証品質: ◎<br>
+                    追加調査 2回・自動修正 2回<br>
+                    <b>すべてのクレームを厳格に検証します。レポートの内容によっては完了まで長時間かかる場合があります。</b>判定基準は一切緩和されません。</span></label>
+                  <label class="mode-card"><input type="radio" name="verification_profile" value="custom">
+                    <span class="t">⚙ Custom</span>
+                    <span class="d">検証条件を個別に設定。<br>
+                    速度: 設定次第／検証品質: 設定次第<br>
+                    追加調査・自動修正: 任意<br>
+                    設定によっては<b>非常に長い時間</b>がかかる可能性があります。</span></label>
+                </div>
+
+                <div id="verifyCustomPane" style="display:none;margin-top:12px">
+                  <div class="banner error" style="display:block">
+                    ⚠ 注意: 設定内容やレポートの長さによっては、Verificationに非常に長い時間がかかる可能性があります。特に追加調査回数、修正回数、検証対象クレーム数、並列数を変更する場合はご注意ください。
+                  </div>
+                  <label style="margin-top:12px">検証ループ</label>
+                  <div class="grid2">
+                    <div><label>追加調査ラウンド上限</label>
+                      <input type="number" id="max_final_research_rounds" min="0" max="5" value="1">
+                      <span class="field-warn" data-warn-for="max_final_research_rounds" style="display:none;color:#b71c1c;font-size:11px">⚠ 3回以上は処理時間が大幅に増加します</span></div>
+                    <div><label>リライト/圧縮ラウンド上限</label>
+                      <input type="number" id="max_final_revision_rounds" min="0" max="5" value="1">
+                      <span class="field-warn" data-warn-for="max_final_revision_rounds" style="display:none;color:#b71c1c;font-size:11px">⚠ 3回以上は処理時間が大幅に増加します</span></div>
+                    <div><label>改善なし許容ラウンド数</label>
+                      <input type="number" id="max_no_improvement_rounds" min="0" max="5" value="1"></div>
+                    <div><label>進捗と見なす最小スコア改善（0〜1）</label>
+                      <input type="number" id="min_score_improvement" min="0" max="1" step="0.01" value="0.03"></div>
+                    <div><label>進捗と見なす新規独立ソース数</label>
+                      <input type="number" id="min_new_independent_sources" min="0" max="10" value="1"></div>
+                    <div><label>主張サポート合格スコア（0〜1）</label>
+                      <input type="number" id="min_claim_support_score" min="0" max="1" step="0.05" value="0.85"></div>
+                    <div><label>必須の重要質問カバレッジ（0〜1）</label>
+                      <input type="number" id="required_critical_coverage" min="0" max="1" step="0.05" value="1.0"></div>
+                  </div>
+                  <label style="margin-top:12px">実行方法</label>
+                  <div class="grid2">
+                    <div><label>検証の並列ワーカー数（1〜16）</label>
+                      <input type="number" id="verification_max_workers" min="1" max="16" value="8">
+                      <span class="field-warn" data-warn-for="verification_max_workers" style="display:none;color:#b71c1c;font-size:11px">⚠ 9以上はLLMのレート制限に注意</span></div>
+                    <div><label>1リクエストで検証するクレーム数（1〜32）</label>
+                      <input type="number" id="verification_batch_size" min="1" max="32" value="10">
+                      <span class="field-warn" data-warn-for="verification_batch_size" style="display:none;color:#b71c1c;font-size:11px">⚠ 17以上は応答の欠落・再試行が増える可能性</span></div>
+                    <div><label>軽微なクレームの検証率（0〜1）</label>
+                      <input type="number" id="verification_minor_sample_rate" min="0" max="1" step="0.05" value="1.0"></div>
+                    <div><label>Verification全体のタイムアウト（秒、0=なし）</label>
+                      <input type="number" id="verification_timeout_seconds" min="0" max="86400" value="0"></div>
+                  </div>
+                  <label class="check"><input type="checkbox" id="verification_cache_enabled" checked> 同一内容の再検証をキャッシュで省略する（推奨）</label>
+                </div>
+              </div>
+            </details>
+        <details>
+              <summary>🤖 AIモデルの設定</summary>
+              <div class="body">
+                <div class="grid2">
+                  <div>
+                    <label>既定プロバイダー</label>
+                    <select id="provider">
+                      <option value="openai">OpenAI</option>
+                      <option value="anthropic">Anthropic</option>
+                      <option value="local">ローカルLLM</option>
+                    </select>
+                  </div>
+                  <div><label>既定モデル（空欄=標準）</label><input type="text" id="model" placeholder="gpt-5-mini など"></div>
+                </div>
+                <p class="hint">各プロバイダーのAPIキー・エンドポイント・プロキシは右上の <b>⚙ 設定</b> から入力してください。工程別に複数プロバイダーを使う場合も、それぞれのキーを設定しておけば自動で使い分けられます。</p>
+
+                <label style="margin-top:16px">工程別のAI切り替え（空欄=既定を使用）</label>
+                <div class="stage-row"><span class="name">計画</span>
+                  <select data-stage="planning" class="stage-provider"><option value="">既定</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="local">ローカル</option></select>
+                  <input type="text" data-stage="planning" class="stage-model" placeholder="モデル名"></div>
+                <div class="stage-row"><span class="name">クロール判断</span>
+                  <select data-stage="crawling" class="stage-provider"><option value="">既定</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="local">ローカル</option></select>
+                  <input type="text" data-stage="crawling" class="stage-model" placeholder="モデル名"></div>
+                <div class="stage-row"><span class="name">評価・採点</span>
+                  <select data-stage="evaluation" class="stage-provider"><option value="">既定</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="local">ローカル</option></select>
+                  <input type="text" data-stage="evaluation" class="stage-model" placeholder="モデル名"></div>
+                <div class="stage-row"><span class="name">文章作成</span>
+                  <select data-stage="writing" class="stage-provider"><option value="">既定</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="local">ローカル</option></select>
+                  <input type="text" data-stage="writing" class="stage-model" placeholder="モデル名"></div>
+              </div>
+            </details>
+      </div>
+    </details>
+
+    <!-- 5. 計画を確認して開始（常に見える位置） -->
+    <div class="start-box" id="startBox">
+      <div class="summary-strip" id="summaryStrip" aria-live="polite"></div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin-top:8px">
+        <label class="check" style="margin:0"><input type="checkbox" id="plan_review" checked> 開始前に計画（目次・検索クエリ）を確認する</label>
+        <select id="plan_review_mode" aria-label="計画確認の待ち方" style="width:auto">
+          <option value="explicit" selected>承認・修正・中止を選ぶまで待つ</option>
+          <option value="auto60">60秒で自動開始（応答がなければそのまま開始）</option>
         </select>
-        <label>WebDriverのパス（Selenium使用時。空欄=自動ダウンロードを試行）</label>
-        <input type="text" id="driver_path" placeholder="C:\tools\msedgedriver.exe / /usr/local/bin/chromedriver">
-        <p class="hint">社内ネットワーク等でドライバの自動ダウンロードが失敗する場合は、ブラウザのバージョンに合ったWebDriver（msedgedriver / chromedriver / geckodriver）を手動配置し、そのフルパスを指定してください。環境変数 SELENIUM_DRIVER_PATH でも指定できます。</p>
-
-        <label class="check"><input type="checkbox" id="waf_mitigation" checked> WAF/ボット対策を有効化（標準・高速クロールのページ取得）</label>
-        <p class="hint">ブラウザ風ヘッダ・接続の再利用・429/5xxの自動リトライ（Retry-After準拠）・同一ドメインへの待機・チャレンジページ検知＋再取得を行います。JSチャレンジ必須のサイトは Selenium系モードが必要です。</p>
-        <div><label>同一ドメインへの待機秒数（0=無効。WAFのレート制限回避）</label>
-          <input type="number" id="per_domain_delay" value="1.0" min="0" max="10" step="0.5"></div>
       </div>
-    </details>
+      <button class="primary" id="startBtn">🚀 調査を開始</button>
+      <div class="banner" id="formError" role="alert"></div>
+    </div>
+  </section>
 
-    <details>
-      <summary>📝 レポートの設定</summary>
-      <div class="body">
-        <div class="grid2">
-          <div>
-            <label>生成エンジン</label>
-            <select id="report_version">
-              <option value="v1">V1（章ごとに執筆・多形式出力）</option>
-              <option value="v2">V2（一貫性重視・用語統一・推敲）</option>
-            </select>
-          </div>
-          <div>
-            <label>文体</label>
-            <select id="v2_writing_style">
-              <option value="business">ビジネス（です・ます調）</option>
-              <option value="formal">学術・フォーマル（である調）</option>
-              <option value="technical">技術文書</option>
-              <option value="executive">経営層向け</option>
-              <option value="casual">平易</option>
-            </select>
-          </div>
-          <div>
-            <label>出力形式</label>
-            <select id="output_format">
-              <option value="markdown">Markdown</option>
-              <option value="docx">Word (docx)</option>
-              <option value="pdf">PDF</option>
-              <option value="html">HTML</option>
-            </select>
-          </div>
-          <div>
-            <label>チャートライブラリ</label>
-            <select id="chart_library">
-              <option value="matplotlib">matplotlib</option>
-              <option value="seaborn">seaborn</option>
-            </select>
-          </div>
-        </div>
-        <label class="check"><input type="checkbox" id="auto_figures" checked> 図表を自動生成してレポートに挿入する（数値データが少ないテーマでは生成されないことがあります）</label>
-        <label class="check"><input type="checkbox" id="v2_enable_polish" checked> 日本語の自然さを磨く推敲パス（V2）</label>
-        <label class="check"><input type="checkbox" id="live_report_word"> 🖋 Wordへライブ書き込み（このサーバーがWindows + Microsoft Word + pywin32 の場合のみ。Wordが起動し、章・グラフが順次書き込まれます）</label>
-        <p class="hint">検証前の内容には【草稿】マークが付き、最終確定時に検証済み本文へ自動で置き換わります。下の「ライブレポート」ペインはどの環境でも利用できます。</p>
-      </div>
-    </details>
-
-    <details>
-      <summary>📏 文章量と最終検証の設定</summary>
-      <div class="body">
-        <div class="grid2">
-          <div>
-            <label>文章量モード</label>
-            <select id="length_mode">
-              <option value="adaptive">適応（情報量から推奨レンジを算出）</option>
-              <option value="fixed">固定（目標文字数を明示）</option>
-            </select>
-          </div>
-          <div><label>目標本文文字数（空欄=自動）</label>
-            <input type="number" id="preferred_body_chars" min="0" placeholder="例: 20000"></div>
-          <div><label>本文の下限文字数（空欄=なし・水増しは行いません）</label>
-            <input type="number" id="hard_min_body_chars" min="0" placeholder="空欄=制約なし"></div>
-          <div><label>本文の上限文字数（空欄=なし）</label>
-            <input type="number" id="hard_max_body_chars" min="0" placeholder="空欄=制約なし"></div>
-          <div><label>許容幅（0〜0.99）</label>
-            <input type="number" id="length_tolerance" min="0" max="0.99" step="0.05" value="0.20"></div>
-        </div>
-        <p class="hint">下限・上限は明示した場合のみ絶対制約になります。下限未達でも水増しは行わず、追加調査または「調査上の限界」記載で対応します。上限超過が圧縮でも解消しない場合、レポートは警告付きの完了になります。</p>
-      </div>
-    </details>
-
-    <details>
-      <summary>🛡 検証モード（Verification）</summary>
-      <div class="body">
-        <div class="mode-cards" id="verifyModes" style="flex-wrap:wrap">
-          <label class="mode-card"><input type="radio" name="verification_profile" value="fast">
-            <span class="t">⚡ Fast</span>
-            <span class="d">短時間で結果を確認したい場合。<br>
-            速度: ◎ 最速／検証品質: △<br>
-            追加調査 0回・自動修正 0回<br>
-            <b>最短時間で検証します。追加調査や自動修正を行わないため、未解決のクレームが残る場合があります。</b>品質スコアと未解決クレームは結果画面に表示されます。</span></label>
-          <label class="mode-card sel"><input type="radio" name="verification_profile" value="balanced" checked>
-            <span class="t">⚖ Balanced <span style="color:#2e7d32;border:1px solid #2e7d32;border-radius:4px;font-size:11px;padding:0 4px">推奨</span></span>
-            <span class="d">通常のレポート作成に。<br>
-            速度: ○／検証品質: ○<br>
-            追加調査 1回・自動修正 1回<br>
-            <b>速度と検証品質のバランスを取った推奨設定です。</b>全クレームを検証し、キャッシュ・並列・バッチ検証を使用します。</span></label>
-          <label class="mode-card"><input type="radio" name="verification_profile" value="strict">
-            <span class="t">🔒 Strict</span>
-            <span class="d">提出用・最終版の厳格検証に。<br>
-            速度: △ 長時間化の可能性あり／検証品質: ◎<br>
-            追加調査 2回・自動修正 2回<br>
-            <b>すべてのクレームを厳格に検証します。レポートの内容によっては完了まで長時間かかる場合があります。</b>判定基準は一切緩和されません。</span></label>
-          <label class="mode-card"><input type="radio" name="verification_profile" value="custom">
-            <span class="t">⚙ Custom</span>
-            <span class="d">検証条件を個別に設定。<br>
-            速度: 設定次第／検証品質: 設定次第<br>
-            追加調査・自動修正: 任意<br>
-            設定によっては<b>非常に長い時間</b>がかかる可能性があります。</span></label>
-        </div>
-
-        <div id="verifyCustomPane" style="display:none;margin-top:12px">
-          <div class="banner error" style="display:block">
-            ⚠ 注意: 設定内容やレポートの長さによっては、Verificationに非常に長い時間がかかる可能性があります。特に追加調査回数、修正回数、検証対象クレーム数、並列数を変更する場合はご注意ください。
-          </div>
-          <label style="margin-top:12px">検証ループ</label>
-          <div class="grid2">
-            <div><label>追加調査ラウンド上限</label>
-              <input type="number" id="max_final_research_rounds" min="0" max="5" value="1">
-              <span class="field-warn" data-warn-for="max_final_research_rounds" style="display:none;color:#b71c1c;font-size:11px">⚠ 3回以上は処理時間が大幅に増加します</span></div>
-            <div><label>リライト/圧縮ラウンド上限</label>
-              <input type="number" id="max_final_revision_rounds" min="0" max="5" value="1">
-              <span class="field-warn" data-warn-for="max_final_revision_rounds" style="display:none;color:#b71c1c;font-size:11px">⚠ 3回以上は処理時間が大幅に増加します</span></div>
-            <div><label>改善なし許容ラウンド数</label>
-              <input type="number" id="max_no_improvement_rounds" min="0" max="5" value="1"></div>
-            <div><label>進捗と見なす最小スコア改善（0〜1）</label>
-              <input type="number" id="min_score_improvement" min="0" max="1" step="0.01" value="0.03"></div>
-            <div><label>進捗と見なす新規独立ソース数</label>
-              <input type="number" id="min_new_independent_sources" min="0" max="10" value="1"></div>
-            <div><label>主張サポート合格スコア（0〜1）</label>
-              <input type="number" id="min_claim_support_score" min="0" max="1" step="0.05" value="0.85"></div>
-            <div><label>必須の重要質問カバレッジ（0〜1）</label>
-              <input type="number" id="required_critical_coverage" min="0" max="1" step="0.05" value="1.0"></div>
-          </div>
-          <label style="margin-top:12px">実行方法</label>
-          <div class="grid2">
-            <div><label>検証の並列ワーカー数（1〜16）</label>
-              <input type="number" id="verification_max_workers" min="1" max="16" value="8">
-              <span class="field-warn" data-warn-for="verification_max_workers" style="display:none;color:#b71c1c;font-size:11px">⚠ 9以上はLLMのレート制限に注意</span></div>
-            <div><label>1リクエストで検証するクレーム数（1〜32）</label>
-              <input type="number" id="verification_batch_size" min="1" max="32" value="10">
-              <span class="field-warn" data-warn-for="verification_batch_size" style="display:none;color:#b71c1c;font-size:11px">⚠ 17以上は応答の欠落・再試行が増える可能性</span></div>
-            <div><label>軽微なクレームの検証率（0〜1）</label>
-              <input type="number" id="verification_minor_sample_rate" min="0" max="1" step="0.05" value="1.0"></div>
-            <div><label>Verification全体のタイムアウト（秒、0=なし）</label>
-              <input type="number" id="verification_timeout_seconds" min="0" max="86400" value="0"></div>
-          </div>
-          <label class="check"><input type="checkbox" id="verification_cache_enabled" checked> 同一内容の再検証をキャッシュで省略する（推奨）</label>
-        </div>
-      </div>
-    </details>
-
-    <details>
-      <summary>🤖 AIモデルの設定</summary>
-      <div class="body">
-        <div class="grid2">
-          <div>
-            <label>既定プロバイダー</label>
-            <select id="provider">
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="local">ローカルLLM</option>
-            </select>
-          </div>
-          <div><label>既定モデル（空欄=標準）</label><input type="text" id="model" placeholder="gpt-5-mini など"></div>
-        </div>
-        <p class="hint">各プロバイダーのAPIキー・エンドポイント・プロキシは右上の <b>⚙ 設定</b> から入力してください。工程別に複数プロバイダーを使う場合も、それぞれのキーを設定しておけば自動で使い分けられます。</p>
-
-        <label style="margin-top:16px">工程別のAI切り替え（空欄=既定を使用）</label>
-        <div class="stage-row"><span class="name">計画</span>
-          <select data-stage="planning" class="stage-provider"><option value="">既定</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="local">ローカル</option></select>
-          <input type="text" data-stage="planning" class="stage-model" placeholder="モデル名"></div>
-        <div class="stage-row"><span class="name">クロール判断</span>
-          <select data-stage="crawling" class="stage-provider"><option value="">既定</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="local">ローカル</option></select>
-          <input type="text" data-stage="crawling" class="stage-model" placeholder="モデル名"></div>
-        <div class="stage-row"><span class="name">評価・採点</span>
-          <select data-stage="evaluation" class="stage-provider"><option value="">既定</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="local">ローカル</option></select>
-          <input type="text" data-stage="evaluation" class="stage-model" placeholder="モデル名"></div>
-        <div class="stage-row"><span class="name">文章作成</span>
-          <select data-stage="writing" class="stage-provider"><option value="">既定</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="local">ローカル</option></select>
-          <input type="text" data-stage="writing" class="stage-model" placeholder="モデル名"></div>
-      </div>
-    </details>
-
-    <label class="check"><input type="checkbox" id="plan_review" checked> 調査開始前に計画（目次・検索クエリ）を確認する（60秒で自動開始）</label>
-    <button class="primary" id="startBtn">🚀 調査を開始</button>
-    <div class="banner" id="formError"></div>
+  <!-- ==================== 履歴・プリセット ==================== -->
+  <section class="card" id="historyCard">
+    <h2><span class="n">📚</span>調査履歴と設定プリセット</h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <select id="formPresetSelect" aria-label="保存した設定プリセット" style="width:auto;min-width:180px"><option value="">— 保存した設定を読み込む —</option></select>
+      <button type="button" class="secondary" id="formPresetSaveBtn">現在の設定を保存</button>
+      <button type="button" class="secondary" id="formPresetDeleteBtn">選択中を削除</button>
+    </div>
+    <p class="hint">設定プリセットはこのブラウザに保存されます（APIキーは含みません）。履歴はサーバーの出力フォルダに保存され、再起動後も残ります。</p>
+    <div id="historyList" class="history" aria-live="polite"></div>
   </section>
 
   <!-- ==================== 進捗・結果 ==================== -->
@@ -721,13 +844,14 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
       </div>
       <div class="bar-wrap"><div class="bar" id="bar"></div></div>
       <div class="msg" id="currentMsg">待機中...</div>
+      <div class="exec-summary" id="execSummary" aria-live="polite"></div>
 
       <div class="plan-review" id="planReviewPanel" style="display:none">
         <div class="pr-head">
           <span class="pr-title">📋 調査計画のレビュー</span>
           <span class="pr-count" id="planCountdown"></span>
         </div>
-        <p class="hint">計画を確認してください。修正指示を書いて「修正を依頼」するか、「この計画で開始」を押してください。残り時間内に操作がなければ、この計画のまま自動で調査を開始します。</p>
+        <p class="hint" id="planReviewHint">計画を確認してください。修正指示を書いて「修正を依頼」するか、「この計画で開始」を押してください。中止する場合は上の「調査を中止」を押してください。</p>
         <div class="pr-plan" id="planContent"></div>
         <textarea id="planInstructions" rows="3" placeholder="修正指示（例: 3章を価格動向の章に差し替えて。競合比較の章を追加して。）"></textarea>
         <div class="pr-actions">
@@ -767,9 +891,32 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
       <div class="banner" id="jobBanner"></div>
 
       <div class="result" id="resultPanel">
-        <label>生成されたファイル</label>
-        <div class="files" id="resultFiles"></div>
-        <div id="resultWarnings" style="display:none"></div>
+        <div class="tabs" role="tablist" id="resultTabs">
+          <button class="tab sel" role="tab" data-tab="overview" aria-selected="true">概要</button>
+          <button class="tab" role="tab" data-tab="body" aria-selected="false">本文</button>
+          <button class="tab" role="tab" data-tab="evidence" aria-selected="false">根拠</button>
+          <button class="tab" role="tab" data-tab="review" aria-selected="false">要確認事項</button>
+          <button class="tab" role="tab" data-tab="output" aria-selected="false">出力</button>
+        </div>
+        <div class="tab-pane" data-pane="overview">
+          <div id="resultOverview"></div>
+          <div id="vSummary"></div>
+        </div>
+        <div class="tab-pane" data-pane="body" style="display:none">
+          <div id="resultBody" class="livebody"></div>
+        </div>
+        <div class="tab-pane" data-pane="evidence" style="display:none">
+          <div id="resultEvidence"></div>
+        </div>
+        <div class="tab-pane" data-pane="review" style="display:none">
+          <div id="resultReview"></div>
+          <div id="resultWarnings" style="display:none"></div>
+        </div>
+        <div class="tab-pane" data-pane="output" style="display:none">
+          <label>生成されたファイル</label>
+          <div class="files" id="resultFiles"></div>
+          <div class="reoutput" id="reoutputBox"></div>
+        </div>
       </div>
     </div>
   </section>
@@ -778,6 +925,7 @@ button.primary:disabled { opacity: .5; cursor: not-allowed; }
 <script>
 const $ = (id) => document.getElementById(id);
 let logLength = 0;
+let logSeq = -1;
 let selectedJobId = null;
 let lastRenderedJobId = null;
 
@@ -933,7 +1081,7 @@ function settingsParams() {
 document.querySelectorAll('.modal-tab').forEach(tab => {
   tab.addEventListener('click', () => {
     document.querySelectorAll('.modal-tab').forEach(t => t.classList.toggle('sel', t === tab));
-    document.querySelectorAll('.tab-pane').forEach(p => {
+    document.querySelectorAll('#settingsModal .tab-pane').forEach(p => {
       p.style.display = p.id === tab.dataset.tab ? 'block' : 'none';
     });
   });
@@ -1011,16 +1159,31 @@ $('settingsModal').addEventListener('click', (e) => {
 });
 loadSettings();
 
-// mode card selection highlight (per radio group)
+// mode card selection highlight (per radio group). The radios themselves
+// stay keyboard-operable (arrow keys / Space); the card is just the visual.
+function syncModeCards(name) {
+  document.querySelectorAll(`.mode-card input[name=${name}]`).forEach(other => {
+    other.closest('.mode-card').classList.toggle('sel', other.checked);
+  });
+}
+function radioValue(name) {
+  const el = document.querySelector(`input[name=${name}]:checked`);
+  return el ? el.value : '';
+}
+function setRadio(name, value) {
+  const el = document.querySelector(`input[name=${name}][value="${value}"]`);
+  if (!el) return false;
+  el.checked = true;
+  syncModeCards(name);
+  return true;
+}
 document.querySelectorAll('.mode-card input').forEach(input => {
   input.addEventListener('change', () => {
-    document.querySelectorAll(`.mode-card input[name=${input.name}]`).forEach(other => {
-      other.closest('.mode-card').classList.toggle('sel', other.checked);
-    });
-    if (input.name === 'source_mode') {
-      const needsDocs = input.value === 'local' || input.value === 'hybrid';
-      $('localDocsBox').style.display = needsDocs ? 'block' : 'none';
-    }
+    syncModeCards(input.name);
+    if (input.name === 'deliverable') applyDeliverablePreset(input.value);
+    if (input.name === 'research_preset') applyResearchPreset(input.value);
+    applyModeVisibility();
+    updateSummaryStrip();
   });
 });
 
@@ -1047,20 +1210,59 @@ const VERIFY_FIELDS = {
   verification_timeout_seconds: {type: 'int', min: 0, max: 86400},
 };
 
+// Field-level validation. Empty -> undefined (server default); "0" is a
+// REAL value (never replaced by a default); invalid -> Error carrying
+// .field so the message is shown next to that input.
+function fieldLabel(id) {
+  const el = $(id);
+  const lbl = el && el.closest('div') && el.closest('div').querySelector('label');
+  return (lbl && lbl.textContent.trim()) || id;
+}
+function fieldError(id, message) {
+  const err = new Error(message);
+  err.field = id;
+  return err;
+}
+function clearFieldErrors() {
+  document.querySelectorAll('.invalid').forEach(el => el.classList.remove('invalid'));
+  document.querySelectorAll('.field-err').forEach(el => el.remove());
+}
+function showFieldError(id, message) {
+  const el = $(id);
+  if (!el) return false;
+  el.classList.add('invalid');
+  const span = document.createElement('span');
+  span.className = 'field-err';
+  span.textContent = message;
+  el.insertAdjacentElement('afterend', span);
+  el.focus();
+  el.scrollIntoView({block: 'center'});
+  return true;
+}
 function readField(id, spec) {
   const raw = $(id).value.trim();
-  if (raw === '') return undefined;
+  if (raw === '') {
+    if (spec.required) throw fieldError(id, `${fieldLabel(id)} を入力してください`);
+    return undefined;
+  }
   const v = spec.type === 'int' ? parseInt(raw, 10) : parseFloat(raw);
-  if (Number.isNaN(v)) throw new Error(`${id} は数値で入力してください`);
+  if (Number.isNaN(v)) throw fieldError(id, `${fieldLabel(id)} は数値で入力してください`);
   if (spec.type === 'int' && !Number.isInteger(parseFloat(raw)))
-    throw new Error(`${id} は整数で入力してください`);
+    throw fieldError(id, `${fieldLabel(id)} は整数で入力してください`);
   if (spec.min !== undefined && v < spec.min)
-    throw new Error(`${id} は ${spec.min} 以上で入力してください`);
+    throw fieldError(id, `${fieldLabel(id)} は ${spec.min} 以上で入力してください`);
   if (spec.max !== undefined &&
       (spec.maxExclusive ? v >= spec.max : v > spec.max))
-    throw new Error(`${id} は ${spec.maxExclusive ? spec.max + '未満' : spec.max + '以下'}で入力してください`);
+    throw fieldError(id, `${fieldLabel(id)} は ${spec.maxExclusive ? spec.max + '未満' : spec.max + '以下'}で入力してください`);
   return v;
 }
+const CRAWL_FIELDS = {
+  ai_crawl_max_pages: {type: 'int', min: 1, max: 200},
+  ai_crawl_site_depth: {type: 'int', min: 0, max: 10},    // 0 = seeds only
+  gap_fill_rounds: {type: 'int', min: 0, max: 10},
+  max_pages_per_query: {type: 'int', min: 1, max: 50},
+  per_domain_delay: {type: 'float', min: 0, max: 60},
+};
 
 function collectVerificationParams() {
   const profile = document.querySelector(
@@ -1136,6 +1338,11 @@ function collectWorkerParam() {
   return {parallel_max_workers: v};
 }
 
+const ITERATION_FIELDS = {
+  iterations: {type: 'int', min: 1, max: 10},
+  max_iterations: {type: 'int', min: 1, max: 20},
+};
+
 function collectParams() {
   const provider = $('provider').value;
   const params = {
@@ -1146,16 +1353,22 @@ function collectParams() {
     requirements: $('requirements').value.trim(),
     provider: provider,
     model: $('model').value.trim(),
-    source_mode: document.querySelector('input[name=source_mode]:checked').value,
-    crawl_mode: document.querySelector('input[name=crawl_mode]:checked').value,
+    language: $('language').value,
+    deliverable: radioValue('deliverable'),
+    research_preset: radioValue('research_preset'),
+    source_mode: radioValue('source_mode'),
+    crawl_mode: radioValue('crawl_mode'),
     browser: $('browser').value,
     driver_path: $('driver_path').value.trim(),
     waf_mitigation: $('waf_mitigation').checked,
-    per_domain_delay: parseFloat($('per_domain_delay').value),
-    ai_crawl_max_pages: parseInt($('ai_crawl_max_pages').value) || 15,
-    ai_crawl_site_depth: parseInt($('ai_crawl_site_depth').value) || 2,
-    gap_fill_rounds: parseInt($('gap_fill_rounds').value),
-    max_pages_per_query: parseInt($('max_pages_per_query').value) || 3,
+    ...Object.fromEntries(Object.entries(CRAWL_FIELDS)
+      .map(([id, spec]) => [id, readField(id, spec)])
+      .filter(([, v]) => v !== undefined)),
+    ...Object.fromEntries(Object.entries(ITERATION_FIELDS)
+      .map(([id, spec]) => [id, readField(id, spec)])
+      .filter(([, v]) => v !== undefined)),
+    cache_reuse: $('cache_reuse').checked,
+    refresh_fetched: $('refresh_fetched').checked,
     report_version: $('report_version').value,
     v2_writing_style: $('v2_writing_style').value,
     v2_enable_polish: $('v2_enable_polish').checked,
@@ -1163,15 +1376,24 @@ function collectParams() {
     chart_library: $('chart_library').value,
     auto_figures: $('auto_figures').checked,
     plan_review: $('plan_review').checked,
-    plan_review_timeout: 60,
+    // 0 = wait for an EXPLICIT approve/revise/cancel (default); the
+    // 60-second auto-start is opt-in
+    plan_review_timeout: ($('plan_review_mode') && $('plan_review_mode').value === 'auto60') ? 60 : 0,
     live_report_word: $('live_report_word').checked,
     // provider credentials / endpoints / proxy from the ⚙ settings modal:
     // all providers' keys are sent so per-stage overrides can mix providers
     ...settingsParams(),
   };
-  const docsText = $('local_documents').value.trim();
-  if (docsText && params.source_mode !== 'web') {
-    params.local_documents = docsText.split('\n').map(s => s.trim()).filter(Boolean);
+  if (params.iterations !== undefined && params.max_iterations !== undefined
+      && params.max_iterations < params.iterations)
+    throw fieldError('max_iterations', '章ごとの最大調査回数は最小調査回数以上にしてください');
+  if (params.source_mode !== 'web') {
+    // browser uploads (already on the server) + server-side paths typed
+    // by the user — the two are never confused with each other
+    const docs = uploadedDocs.filter(d => d.readable).map(d => d.path);
+    const docsText = $('local_documents').value.trim();
+    if (docsText) docs.push(...docsText.split('\n').map(s => s.trim()).filter(Boolean));
+    if (docs.length) params.local_documents = docs;
   }
   // per-stage LLM overrides
   const stages = {};
@@ -1191,11 +1413,13 @@ function collectParams() {
 
 async function startResearch() {
   let params;
+  clearFieldErrors();
   try {
     params = collectParams();
   } catch (e) {
     $('formError').className = 'banner error';
     $('formError').textContent = '設定エラー: ' + e.message;
+    if (e.field) showFieldError(e.field, e.message);
     return;
   }
   $('formError').className = 'banner';
@@ -1206,8 +1430,11 @@ async function startResearch() {
   }
   if (params.source_mode === 'local' && !params.local_documents) {
     $('formError').className = 'banner error';
-    $('formError').textContent = 'ローカル文献モードには文書パスの入力が必要です';
+    $('formError').textContent = '「手元の資料のみ」では、読み取り可能なファイルのアップロードまたはサーバー側パスの指定が必要です';
     return;
+  }
+  if (uploadedDocs.some(d => !d.readable) && params.source_mode !== 'web') {
+    if (!confirm('読み取れないファイルが含まれています（❌ の行）。これらは使用せずに開始しますか？')) return;
   }
   $('startBtn').disabled = true;   // only while submitting
   try {
@@ -1217,18 +1444,30 @@ async function startResearch() {
       body: JSON.stringify(params),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'failed');
+    if (!res.ok) {
+      const err = new Error(data.error || 'failed');
+      if (data.field) err.field = data.field;
+      throw err;
+    }
     selectedJobId = data.job_id;   // focus the new job
+    if (data.state === 'queued') {
+      $('formError').className = 'banner';
+      $('formError').textContent = `実行待ちに入りました（${data.queue_position || '?'}番目）。同時実行数の上限に達しているため、順番が来ると自動で開始します。`;
+    }
     await pollJobs();
+    loadHistory();
+    $('progressPanel').scrollIntoView({behavior: 'smooth', block: 'start'});
   } catch (e) {
     $('formError').className = 'banner error';
     $('formError').textContent = '開始できませんでした: ' + e.message;
+    if (e.field) showFieldError(e.field, e.message);
   } finally {
     $('startBtn').disabled = false;  // parallel runs allowed (server caps them)
   }
 }
 
-const STATE_ICON = {running: '🔄', plan_review: '📋', completed: '✅', error: '❌'};
+const STATE_ICON = {queued: '⏳', running: '🔄', plan_review: '📋', completed: '✅',
+                    error: '❌', cancelled: '⏹', interrupted: '⚠'};
 
 function renderTabs(jobs) {
   if (!jobs.length) {
@@ -1283,8 +1522,15 @@ function formatPlan(plan) {
 
 function renderPlanReview(status) {
   $('planReviewPanel').style.display = 'block';
-  const remaining = Math.max(0, Math.round(status.plan_review_remaining || 0));
-  $('planCountdown').textContent = `自動開始まで 約${remaining}秒`;
+  if (status.plan_review_remaining === null || status.plan_review_remaining === undefined) {
+    // explicit mode: nothing happens until the user approves / revises / cancels
+    $('planCountdown').textContent = '操作を選ぶまで待機中（自動開始しません）';
+    $('planReviewHint').textContent = '計画を確認してください。修正指示を書いて「修正を依頼」するか、「この計画で開始」を押してください。中止する場合は上の「調査を中止」を押してください。';
+  } else {
+    const remaining = Math.max(0, Math.round(status.plan_review_remaining || 0));
+    $('planCountdown').textContent = `自動開始まで 約${remaining}秒`;
+    $('planReviewHint').textContent = '計画を確認してください。残り時間内に操作がなければ、この計画のまま自動で調査を開始します（開始前の設定で「60秒で自動開始」を選択中）。';
+  }
   const planJson = JSON.stringify(status.plan || {});
   if (planJson !== lastPlanJson) {
     lastPlanJson = planJson;
@@ -1320,19 +1566,27 @@ async function sendPlanReview(action) {
   }
 }
 
+let lastStatus = null;
+
 function render(status) {
+  lastStatus = status;
   // when switching between job tabs, reset per-job view state —
   // INCLUDING cancel-button states (a cancel requested on another job
   // must not leave this job's buttons stuck)
   if (status.job_id !== lastRenderedJobId) {
     lastRenderedJobId = status.job_id;
     logLength = -1;
+    logSeq = -1;
     lastPlanJson = null;
     $('jobBanner').className = 'banner';
     $('resultPanel').style.display = 'none';
     vCancelRequested = false;
     $('vCancelBtn').disabled = false;
     $('vCancelBtn').textContent = '⏹ キャンセル';
+    // the live preview belongs to ONE job: never show job A's body under
+    // job B — clear immediately and let the next poll fill it in
+    resetLivePanel();
+    pollLiveReport();
   }
 
   const pct = status.progress || 0;
@@ -1343,16 +1597,18 @@ function render(status) {
   const min = Math.floor((status.elapsed_seconds || 0) / 60);
   const sec = Math.round((status.elapsed_seconds || 0) % 60);
   $('elapsed').textContent = `経過 ${min}分${sec}秒`;
+  renderExecSummary(status);
 
   // run-level cancel button: visible only for jobs still running
   const runCancel = $('runCancelBtn');
   if (runCancel) {
     const running = status.state === 'running' ||
-                    status.state === 'plan_review';
+                    status.state === 'plan_review' ||
+                    status.state === 'queued';     // a queued job can be withdrawn
     runCancel.style.display = running ? 'inline-block' : 'none';
     if (!runCancelRequested[status.job_id]) {
       runCancel.disabled = false;
-      runCancel.textContent = '⏹ 調査を中止';
+      runCancel.textContent = status.state === 'queued' ? '✕ 実行待ちを取り消す' : '⏹ 調査を中止';
     } else {
       runCancel.disabled = true;
       runCancel.textContent = '中止処理中…';
@@ -1378,28 +1634,78 @@ function render(status) {
 
   renderVerification(status);
 
-  // append new log lines
+  // re-render the log whenever its SEQUENCE advances (the server only
+  // returns the last 50 entries, so a length comparison went stale once
+  // the window was full)
   const log = status.log || [];
-  if (log.length !== logLength) {
+  const seq = status.log_seq !== undefined ? status.log_seq
+    : (log.length ? log[log.length - 1].seq || log.length : 0);
+  if (seq !== logSeq || log.length !== logLength) {
     $('log').innerHTML = log.map(l =>
       `<span class="pct-tag">[${String(l.pct).padStart(5)}%]</span> ${escapeHtml(l.msg)}`
     ).join('\n');
     $('log').scrollTop = $('log').scrollHeight;
     logLength = log.length;
+    logSeq = seq;
   }
 
   if (status.state === 'completed') {
+    const axes = (status.result && status.result.status) || {};
     $('jobBanner').className = 'banner success';
-    $('jobBanner').textContent = '✅ 調査が完了しました';
+    $('jobBanner').innerHTML = '✅ ' + escapeHtml(outcomeHeadline(axes, status.result || {}))
+      + '<div style="margin-top:6px">' + statusBadges(axes, status.result || {}) + '</div>';
     showResults(status.result || {});
+  } else if (status.state === 'cancelled') {
+    const saved = (status.result && status.result.saved_artifacts) || {};
+    const keys = Object.keys(saved);
+    $('jobBanner').className = 'banner error';
+    $('jobBanner').innerHTML = '⏹ 中止しました。'
+      + (keys.length ? `保存済み: ${escapeHtml(keys.join(', '))}` : '保存済みの成果物はありません')
+      + '<div style="margin-top:6px">' + statusBadges((status.result || {}).status || {}, status.result || {}) + '</div>';
+    if (keys.length) showResults(status.result || {}); else $('resultPanel').style.display = 'none';
   } else if (status.state === 'error') {
     $('jobBanner').className = 'banner error';
     $('jobBanner').textContent = '❌ エラー: ' + (status.error || '不明なエラー');
+    if (status.result && (status.result.report_path || Object.keys(status.result.saved_artifacts || {}).length))
+      showResults(status.result);      // failed artifact check: files stay inspectable
+    else $('resultPanel').style.display = 'none';
+  } else if (status.state === 'queued') {
+    $('jobBanner').className = 'banner';
     $('resultPanel').style.display = 'none';
+    $('currentMsg').textContent = `実行待ち（${status.queue_position || '?'}番目）— ${status.message || ''}`;
   } else {
     $('jobBanner').className = 'banner';
     $('resultPanel').style.display = 'none';
+    if (status.cancel_requested)
+      $('currentMsg').textContent = '⏹ 停止要求を受け付けました。実行中のリクエストの終了を待っています…';
   }
+}
+
+// --- process / verification / quality are THREE facts, not one checkmark
+function statusBadges(axes, result) {
+  const b = [];
+  const proc = axes.process || (result.run_status === 'cancelled' ? 'cancelled' : 'completed');
+  b.push(`<span class="badge ${proc === 'completed' ? 'ok' : 'bad'}">処理: ${proc === 'completed' ? '終了' : '中止'}</span>`);
+  const ver = axes.verification || 'unknown';
+  const verLabel = {performed: '検証: 実施済み', skipped: '検証: 未実施（無効）', cancelled: '検証: 中止',
+                    timeout: '検証: タイムアウト', failed: '検証: 実行不能', unknown: '検証: 不明'}[ver] || ver;
+  b.push(`<span class="badge ${ver === 'performed' ? 'ok' : (ver === 'skipped' ? 'muted' : 'warn')}">${verLabel}</span>`);
+  const q = axes.quality || 'unknown';
+  const qLabel = {passed: '品質: 基準達成', limitations: '品質: 制約付き（要確認）', failed: '品質: 検査失敗',
+                  unverified: '品質: 未検証', unknown: '品質: 不明'}[q] || q;
+  b.push(`<span class="badge ${q === 'passed' ? 'ok' : (q === 'failed' ? 'bad' : 'warn')}">${qLabel}</span>`);
+  if (result.semantic_artifact_check)
+    b.push(`<span class="badge muted">成果物検査: ${escapeHtml(String(result.semantic_artifact_check))}</span>`);
+  return b.join('');
+}
+function outcomeHeadline(axes, result) {
+  if ((result.run_status && result.run_status !== 'completed') || axes.quality === 'failed')
+    return '成果物検査に失敗しました（要確認）';
+  if (axes.verification === 'performed' && axes.quality === 'passed') return '検証済み・品質基準を達成して完了しました';
+  if (axes.verification === 'performed') return '検証済み・制約付きで完了しました（要確認事項あり）';
+  if (axes.verification === 'skipped') return '処理が完了しました（検証は実施していません）';
+  if (axes.verification === 'cancelled' || axes.verification === 'timeout') return '処理は終了しましたが検証は完了していません（要確認）';
+  return '調査が完了しました';
 }
 
 // ==================== Verification進捗・キャンセル ====================
@@ -1481,7 +1787,10 @@ const runCancelEl = $('runCancelBtn');
 if (runCancelEl) runCancelEl.addEventListener('click', async () => {
   const jobId = selectedJobId;
   if (!jobId || runCancelRequested[jobId]) return;
-  if (!confirm('調査全体を安全に中止しますか？\n次の安全なチェックポイントで停止し、途中までの成果物（収集済みエビデンス・下書きプレビュー）は残ります。')) return;
+  const queued = lastStatus && lastStatus.job_id === jobId && lastStatus.state === 'queued';
+  if (!confirm(queued
+      ? 'この実行待ちのジョブを取り消しますか？（まだ処理は始まっていません）'
+      : '調査全体を安全に中止しますか？\n次の安全なチェックポイントで停止し、途中までの成果物（収集済みエビデンス・下書きプレビュー）は残ります。')) return;
   runCancelRequested[jobId] = true;
   runCancelEl.disabled = true;
   runCancelEl.textContent = '中止処理中…';
@@ -1528,45 +1837,226 @@ function renderVerificationSummary(s) {
     ${skipped ? `<label style="margin-top:8px">省略された処理</label>${skipped}` : ''}`;
 }
 
-function showResults(result) {
-  const files = [];
-  if (result.report_path) files.push({label: '📄 レポート', path: result.report_path});
-  if (result.evidence_csv) files.push({label: '🗂 エビデンス (CSV)', path: result.evidence_csv});
-  if (result.evidence_json) files.push({label: '🗂 エビデンス (JSON)', path: result.evidence_json});
-  if (result.verification_html) files.push({label: '✅ 検証レポート', path: result.verification_html});
-  $('resultFiles').innerHTML = files.map(f => `
+const ARTIFACT_LABELS = {
+  session: 'セッション（再開用）', evidence_json: 'エビデンス (JSON)',
+  evidence_csv: 'エビデンス (CSV)', report: 'レポート', final_body: '検証済み本文',
+  verification_html: '検証レポート', figures: '図表',
+};
+const STAGE_LABELS = {
+  planning: '計画', research: '調査・収集', synthesis: '統合・評価',
+  verification: '検証', report: 'レポート生成', figures: '図表生成',
+  finalization: '最終確定', deep_think: 'DeepThink', fermi: 'Fermi推定',
+};
+const COUNTER_LABELS = {
+  api_calls: 'LLM API呼び出し', llm_calls: 'LLM呼び出し',
+  cache_page_hits: 'ページ再利用（ディスクキャッシュ）', cache_page_misses: 'ページ新規取得',
+  cache_extract_hits: '抽出結果の再利用', cache_extract_misses: '抽出（新規）',
+  cache_refreshed: '鮮度優先で再取得', page_reuse_in_run: '同一ページの再利用（実行内）',
+  verification_cache_hits: '検証キャッシュの再利用',
+  total_prompt_tokens: '入力トークン', total_completion_tokens: '出力トークン',
+  total_tokens: '総トークン', total_calls: 'API呼び出し回数',
+};
+
+function fileRows(files) {
+  return files.map(f => `
     <div class="file-row">
-      <span class="fname">${f.label}　<span style="color:var(--muted);font-weight:400">${escapeHtml(f.path.split(/[\\/]/).pop())}</span></span>
+      <span class="fname">${f.label}　<span style="color:var(--muted);font-weight:400">${escapeHtml(String(f.path).split(/[\\/]/).pop())}</span></span>
       <span class="actions">
         <a href="/api/report-file?path=${encodeURIComponent(f.path)}" target="_blank">開く</a>
         <a href="/api/report-file?path=${encodeURIComponent(f.path)}&download=1">保存</a>
       </span>
     </div>`).join('');
+}
 
-  // verification completion summary
-  const vs = renderVerificationSummary(result.verification_summary);
-  let vSummaryEl = document.getElementById('vSummary');
-  if (!vSummaryEl) {
-    vSummaryEl = document.createElement('div');
-    vSummaryEl.id = 'vSummary';
-    $('resultPanel').insertBefore(vSummaryEl, $('resultWarnings'));
-  }
-  vSummaryEl.innerHTML = vs;
+function renderTimings(t) {
+  if (!t) return '<p class="hint">所要時間の計測データはありません</p>';
+  const rows = (t.stages || []).map(s =>
+    `<span>${escapeHtml(STAGE_LABELS[s.stage] || s.stage)}: <b>${fmtSec(s.seconds)}</b>${s.interrupted ? '（中断）' : ''}</span>`);
+  const counters = Object.entries(t.counters || {}).map(([k, v]) =>
+    `<span>${escapeHtml(COUNTER_LABELS[k] || k)}: <b>${escapeHtml(String(v))}</b></span>`);
+  return `<label style="margin-top:10px">⏱ 実測の所要時間（合計 ${fmtSec(t.total_seconds)}）</label>
+    <div class="exec-summary" style="margin-top:4px">${rows.join('') || '<span>—</span>'}</div>
+    ${counters.length ? `<label style="margin-top:8px">📊 実測のカウンタ（API呼び出し・再利用）</label>
+    <div class="exec-summary" style="margin-top:4px">${counters.join('')}</div>` : ''}
+    <p class="hint">短縮率や残り時間の推定は表示しません（計測した値のみ）。</p>`;
+}
 
-  // processing warnings (fallbacks, skipped figures, etc.)
+function renderTokenUsage(u) {
+  if (!u || typeof u !== 'object') return '';
+  const entries = Object.entries(u).filter(([, v]) => typeof v === 'number' || typeof v === 'string');
+  if (!entries.length) return '';
+  return `<label style="margin-top:10px">🔢 使用量</label><div class="exec-summary" style="margin-top:4px">${
+    entries.map(([k, v]) => `<span>${escapeHtml(COUNTER_LABELS[k] || k)}: <b>${escapeHtml(String(v))}</b></span>`).join('')}</div>`;
+}
+
+function renderResumePlan(rp) {
+  if (!rp) return '';
+  const reused = rp.reused || [], todo = rp.to_process || [];
+  return `<label style="margin-top:10px">🔁 再開の内訳</label>
+    <div class="exec-summary" style="margin-top:4px">
+      <span>再利用した章（再調査なし）: <b>${reused.length}</b>${reused.length ? ' — ' + escapeHtml(reused.join(', ')) : ''}</span>
+      <span>再実行した章: <b>${todo.length}</b>${todo.length ? ' — ' + escapeHtml(todo.join(', ')) : ''}</span>
+    </div>`;
+}
+
+let currentResult = null;
+
+function showResults(result) {
+  currentResult = result;
+  const axes = result.status || {};
+  const saved = result.saved_artifacts || {};
+
+  // --- 概要
+  const savedRows = Object.entries(saved).map(([k, p]) =>
+    `<span>${escapeHtml(ARTIFACT_LABELS[k] || k)}: <b>${escapeHtml(String(p).split(/[\\/]/).pop())}</b></span>`);
+  $('resultOverview').innerHTML = `
+    <div style="font-weight:700;margin-bottom:4px">${escapeHtml(outcomeHeadline(axes, result))}</div>
+    <div>${statusBadges(axes, result)}</div>
+    ${result.regenerated_from ? `<p class="hint">保存済みの調査結果から再出力しました（元データ: ${result.regenerated_from === 'final_body' ? '検証済みの最終本文' : '章本文（未検証・草稿）'}、検索・LLM呼び出しなし）</p>` : ''}
+    ${renderResumePlan(result.resume_plan)}
+    ${renderTimings(result.timings)}
+    ${renderTokenUsage(result.token_usage)}
+    <label style="margin-top:10px">💾 保存済みの成果物（実際に書き込まれたファイルのみ）</label>
+    <div class="exec-summary" style="margin-top:4px">${savedRows.join('') || '<span>保存済みの成果物はありません</span>'}</div>`;
+  $('vSummary').innerHTML = renderVerificationSummary(result.verification_summary);
+
+  // --- 本文（ライブスナップショットの最終本文。なければレポートファイル）
+  $('resultBody').innerHTML = '<p class="hint">本文を読み込んでいます…</p>';
+  loadResultBody(result);
+
+  // --- 根拠
+  $('resultEvidence').innerHTML = '<p class="hint">根拠を読み込んでいます…</p>';
+  loadResultEvidence(result);
+
+  // --- 要確認事項
+  const vsum = result.verification_summary || {};
+  const unresolved = (vsum.unresolved_claims || []);
   const warns = result.warnings || [];
+  let review = '';
+  if (axes.quality === 'passed' && !unresolved.length && !warns.length)
+    review = '<p class="hint">要確認事項はありません（検証済み・品質基準達成）。</p>';
+  if (axes.verification !== 'performed')
+    review += `<div class="warn-row"><b>未検証:</b> この結果には最終検証が${{skipped: '実施されていません（検証機能OFF）', cancelled: '中止されました', timeout: 'タイムアウトで完了していません', failed: '実行できませんでした'}[axes.verification] || '実施されていません'}。本文の主張は根拠と照合してご確認ください。</div>`;
+  if (unresolved.length)
+    review += `<label style="margin-top:8px">未解決クレーム（${unresolved.length}件）</label>` +
+      unresolved.slice(0, 30).map(u =>
+        `<div class="warn-row">[${escapeHtml(u.severity || '')}] §${escapeHtml(u.section_id || '')} ${escapeHtml(u.claim || '')}</div>`).join('');
+  if ((vsum.skipped_work || []).length)
+    review += `<label style="margin-top:8px">省略された処理</label>` +
+      vsum.skipped_work.map(x => `<div class="warn-row">${escapeHtml(x)}</div>`).join('');
+  $('resultReview').innerHTML = review;
   if (warns.length) {
     $('resultWarnings').style.display = 'block';
     $('resultWarnings').innerHTML =
-      `<label>⚠ 処理中の警告（${warns.length}件）</label>` +
-      warns.slice(0, 12).map(w =>
+      `<label style="margin-top:8px">⚠ 処理中の警告（${warns.length}件）</label>` +
+      warns.slice(0, 30).map(w =>
         `<div class="warn-row"><b>[${escapeHtml(w.severity || '')}]</b> ${escapeHtml(w.message || '')}</div>`
       ).join('') +
-      (warns.length > 12 ? `<div class="warn-row">…ほか${warns.length - 12}件</div>` : '');
+      (warns.length > 30 ? `<div class="warn-row">…ほか${warns.length - 30}件</div>` : '');
   } else {
     $('resultWarnings').style.display = 'none';
   }
+  const reviewCount = unresolved.length + warns.length + (axes.verification !== 'performed' ? 1 : 0);
+  const reviewTab = document.querySelector('#resultTabs .tab[data-tab=review]');
+  if (reviewTab) reviewTab.textContent = reviewCount ? `要確認事項（${reviewCount}）` : '要確認事項';
+
+  // --- 出力
+  const files = [];
+  if (result.report_path) files.push({label: '📄 レポート', path: result.report_path});
+  if (result.evidence_csv) files.push({label: '🗂 エビデンス (CSV)', path: result.evidence_csv});
+  if (result.evidence_json) files.push({label: '🗂 エビデンス (JSON)', path: result.evidence_json});
+  if (result.verification_html) files.push({label: '✅ 検証レポート', path: result.verification_html});
+  for (const [k, p] of Object.entries(saved)) {
+    if (!files.some(f => f.path === p) && /\.(md|html|json|csv|docx|pdf)$/i.test(String(p)))
+      files.push({label: '💾 ' + (ARTIFACT_LABELS[k] || k), path: p});
+  }
+  $('resultFiles').innerHTML = fileRows(files) || '<p class="hint">生成されたファイルはありません</p>';
+  renderReoutputBox(saved.session ? {job_id: selectedJobId} : null);
+
   $('resultPanel').style.display = 'block';
+}
+
+async function loadResultBody(result) {
+  const jobAtRequest = selectedJobId;
+  try {
+    const res = await fetch(`/api/live-report?job_id=${encodeURIComponent(jobAtRequest)}`);
+    const data = await res.json();
+    if (jobAtRequest !== selectedJobId) return;
+    if (data.available && Object.keys(data.sections || {}).length) {
+      $('resultBody').innerHTML = `<div class="hint" style="margin-bottom:6px">${escapeHtml(liveMetaLabel(data, Object.keys(data.sections).length))}</div>` + liveHtml(data);
+      return;
+    }
+  } catch (e) { /* fall through to the report file */ }
+  if (result.report_path && /\.md$/i.test(result.report_path)) {
+    try {
+      const res = await fetch(`/api/report-file?path=${encodeURIComponent(result.report_path)}`);
+      if (res.ok) {
+        const text = await res.text();
+        if (jobAtRequest !== selectedJobId) return;
+        $('resultBody').innerHTML = liveMd(text);
+        return;
+      }
+    } catch (e) { /* ignore */ }
+  }
+  $('resultBody').innerHTML = result.report_path
+    ? `<p class="hint">本文のプレビューはありません。「出力」タブからレポートを開いてください。</p>`
+    : '<p class="hint">本文はまだ生成されていません。</p>';
+}
+
+async function loadResultEvidence(result) {
+  const jobAtRequest = selectedJobId;
+  const parts = [];
+  if (result.evidence_json) {
+    try {
+      const res = await fetch(`/api/report-file?path=${encodeURIComponent(result.evidence_json)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (jobAtRequest !== selectedJobId) return;
+        const items = data.evidence || [];
+        parts.push(`<div class="hint">収集した根拠 ${items.length} 件（${escapeHtml(String(result.evidence_json).split(/[\\/]/).pop())}）</div>`);
+        const bySection = data.section_evidence || {};
+        const secIds = Object.keys(bySection).sort((a, b) => a.localeCompare(b, undefined, {numeric: true}));
+        const byId = Object.fromEntries(items.map(e => [e.evidence_id || e.id, e]));
+        const seen = new Set();
+        for (const sid of secIds) {
+          const rows = (bySection[sid] || []).map(id => byId[id]).filter(Boolean).slice(0, 15);
+          if (!rows.length) continue;
+          parts.push(`<label style="margin-top:8px">§${escapeHtml(sid)}</label>`);
+          rows.forEach(e => { seen.add(e.evidence_id || e.id); parts.push(evidenceRow(e)); });
+        }
+        const rest = items.filter(e => !seen.has(e.evidence_id || e.id)).slice(0, 30);
+        if (rest.length) {
+          parts.push('<label style="margin-top:8px">その他</label>');
+          rest.forEach(e => parts.push(evidenceRow(e)));
+        }
+      }
+    } catch (e) { parts.push('<p class="hint">エビデンスファイルを読み込めませんでした</p>'); }
+  }
+  try {
+    const res = await fetch(`/api/live-report?job_id=${encodeURIComponent(jobAtRequest)}`);
+    const data = await res.json();
+    if (jobAtRequest !== selectedJobId) return;
+    if (data.available && (data.references || []).length) {
+      parts.push('<label style="margin-top:8px">参考文献</label>');
+      data.references.forEach((r, i) => parts.push(`<div style="font-size:12px">${i + 1}. ${linkify(r)}</div>`));
+    }
+  } catch (e) { /* ignore */ }
+  $('resultEvidence').innerHTML = parts.join('') || '<p class="hint">根拠の一覧はありません。</p>';
+}
+
+function evidenceRow(e) {
+  const url = e.source_url || e.url || '';
+  const title = e.source_title || e.title || url || '(出典不明)';
+  const q = (e.content || e.quote || e.text || '').toString().slice(0, 160);
+  return `<div class="warn-row" style="border-left-color:var(--border)">
+    ${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(title)}</a>` : escapeHtml(title)}
+    ${e.quality_category ? `<span class="badge muted">${escapeHtml(e.quality_category)}</span>` : ''}
+    ${q ? `<div class="hint" style="margin-top:2px">${escapeHtml(q)}${q.length >= 160 ? '…' : ''}</div>` : ''}</div>`;
+}
+
+function linkify(text) {
+  const s = escapeHtml(text);
+  return s.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
 }
 
 function escapeHtml(s) {
@@ -1591,7 +2081,9 @@ function liveMd(text) {
   }).join('');
 }
 
-function renderLive(data) {
+let liveSectionStats = {job: null, total: 0, final: 0};
+
+function liveHtml(data) {
   const secs = data.sections || {};
   const ids = Object.keys(secs).sort((a, b) =>
     a.localeCompare(b, undefined, {numeric: true}));
@@ -1616,24 +2108,64 @@ function renderLive(data) {
     data.references.forEach((r, i) =>
       parts.push(`<div style="font-size:12px">${i + 1}. ${escapeHtml(r)}</div>`));
   }
-  $('liveContent').innerHTML = parts.join('') ||
+  return parts.join('');
+}
+
+function renderLive(data) {
+  const secs = data.sections || {};
+  const ids = Object.keys(secs);
+  liveSectionStats = {job: data.job_id || selectedJobId, total: ids.length,
+                      final: ids.filter(id => !secs[id].draft).length};
+  // the execution panel shows chapter counts from THIS snapshot right away
+  if (lastStatus && lastStatus.job_id === liveSectionStats.job) renderExecSummary(lastStatus);
+  $('liveContent').innerHTML = liveHtml(data) ||
     '<p class="hint">章が書き上がるとここに表示されます…</p>';
-  $('liveMeta').textContent = data.finalized
-    ? '✅ 検証済みの最終本文です'
-    : `章 ${ids.length} 件を表示中（検証前の草稿。最終確定時に置き換わります）`;
+  $('liveMeta').textContent = liveMetaLabel(data, ids.length);
+}
+
+// "検証済み" is claimed ONLY when verification was actually performed;
+// a finalized-but-unverified / cancelled / limited body says so
+function liveMetaLabel(data, count) {
+  if (!data.finalized)
+    return `章 ${count} 件を表示中（検証前の草稿。最終確定時に置き換わります）`;
+  const v = data.verification || {};
+  if (v.verification === 'performed' && v.quality === 'passed')
+    return '✅ 検証済み・品質基準を達成した最終本文です';
+  if (v.verification === 'performed')
+    return '✅ 検証済みの最終本文です（制約付き: 要確認事項があります）';
+  if (v.verification === 'cancelled') return '⚠ 最終本文（検証は中止されました・未検証）';
+  if (v.verification === 'timeout') return '⚠ 最終本文（検証はタイムアウト・未完了）';
+  if (v.verification === 'failed') return '⚠ 最終本文（検証を実行できませんでした・未検証）';
+  return '⚠ 最終本文（検証は実施していません・未検証）';
+}
+
+function resetLivePanel() {
+  liveJobId = null;
+  liveRev = -1;
+  $('liveContent').innerHTML = '<p class="hint">章が書き上がるとここに表示されます…</p>';
+  $('liveMeta').textContent = '';
 }
 
 async function pollLiveReport() {
-  if (!$('livePanel').open || !selectedJobId) return;
+  if (!selectedJobId) return;
+  const jobAtRequest = selectedJobId;     // pin the job this request is FOR
   try {
-    const res = await fetch(`/api/live-report?job_id=${encodeURIComponent(selectedJobId)}`);
+    const res = await fetch(`/api/live-report?job_id=${encodeURIComponent(jobAtRequest)}`);
     const data = await res.json();
+    // a late response for another job is DISCARDED, never drawn as ours
+    if (jobAtRequest !== selectedJobId) return;
+    if (data.job_id && data.job_id !== jobAtRequest) return;
     if (!data.available) {
+      if (liveJobId !== jobAtRequest) {
+        liveJobId = jobAtRequest;
+        liveRev = -1;
+        $('liveContent').innerHTML = '<p class="hint">このジョブのライブレポートはありません</p>';
+      }
       $('liveMeta').textContent = 'このジョブのライブレポートはありません';
       return;
     }
-    if (selectedJobId !== liveJobId || data.rev !== liveRev) {
-      liveJobId = selectedJobId;
+    if (jobAtRequest !== liveJobId || data.rev !== liveRev) {
+      liveJobId = jobAtRequest;
       liveRev = data.rev;
       renderLive(data);
     }
@@ -1663,6 +2195,544 @@ async function pollJobs() {
 }
 
 setInterval(pollJobs, 1500);   // continuous polling covers all parallel jobs
+
+// ==================== 主画面: 例・プリセット・設定要約 ====================
+document.querySelectorAll('#exampleChips .chip').forEach(chip => {
+  chip.addEventListener('click', () => {
+    $('query').value = chip.dataset.example || '';
+    $('query').focus();
+    updateSummaryStrip();
+  });
+});
+
+// 仕上がり（要約／標準／詳細）: what it changes is listed in presetEffects
+const DELIVERABLE_PRESETS = {
+  summary:  {label: '要約', length_mode: 'fixed', preferred_body_chars: 4000,
+             auto_figures: false, gap_fill_rounds: 0,
+             desc: '文章量=固定 約4,000字／図表の自動生成=OFF／不足時の再調査=0回'},
+  standard: {label: '標準レポート', length_mode: 'adaptive', preferred_body_chars: '',
+             auto_figures: true, gap_fill_rounds: 1,
+             desc: '文章量=適応（情報量から算出）／図表の自動生成=ON／不足時の再調査=1回'},
+  detailed: {label: '詳細調査', length_mode: 'adaptive', preferred_body_chars: 20000,
+             auto_figures: true, gap_fill_rounds: 2,
+             desc: '文章量=適応（目標 約20,000字・水増しなし）／図表の自動生成=ON／不足時の再調査=2回'},
+};
+// 調査全体プリセット（短時間／標準／詳細）: time budget knobs. NOTE: this is
+// different from the verification preset (Fast/Balanced/Strict) — it SETS
+// that preset as one of its effects, and says so.
+const RESEARCH_PRESETS = {
+  quick: {label: '短時間', iterations: 1, max_iterations: 2, max_pages_per_query: 2,
+          ai_crawl_max_pages: 8, verification_profile: 'fast', deep_think: false,
+          v2_enable_polish: false, crawl_mode: 'fast_batch',
+          desc: '章ごとの調査回数=1〜2／ページ数/クエリ=2／クロール=高速（並列取得）／検証モード=Fast（追加調査・自動修正なし）／DeepThink=OFF／推敲パス=OFF'},
+  standard: {label: '標準', iterations: 2, max_iterations: 4, max_pages_per_query: 3,
+             ai_crawl_max_pages: 15, verification_profile: 'balanced', deep_think: false,
+             v2_enable_polish: true, crawl_mode: 'standard',
+             desc: '章ごとの調査回数=2〜4／ページ数/クエリ=3／クロール=標準／検証モード=Balanced（追加調査1回・自動修正1回）／DeepThink=OFF／推敲パス=ON'},
+  thorough: {label: '詳細', iterations: 3, max_iterations: 6, max_pages_per_query: 5,
+             ai_crawl_max_pages: 25, verification_profile: 'strict', deep_think: true,
+             v2_enable_polish: true, crawl_mode: 'standard',
+             desc: '章ごとの調査回数=3〜6／ページ数/クエリ=5／クロール=標準／検証モード=Strict（追加調査2回・自動修正2回・長時間化の可能性）／DeepThink=ON／推敲パス=ON'},
+};
+
+function applyDeliverablePreset(key) {
+  const p = DELIVERABLE_PRESETS[key];
+  if (!p) return;
+  $('length_mode').value = p.length_mode;
+  $('preferred_body_chars').value = p.preferred_body_chars === '' ? '' : String(p.preferred_body_chars);
+  $('auto_figures').checked = p.auto_figures;
+  $('gap_fill_rounds').value = String(p.gap_fill_rounds);
+  renderPresetEffects();
+}
+
+function applyResearchPreset(key) {
+  const p = RESEARCH_PRESETS[key];
+  if (!p) return;
+  $('iterations').value = String(p.iterations);
+  $('max_iterations').value = String(p.max_iterations);
+  $('max_pages_per_query').value = String(p.max_pages_per_query);
+  $('ai_crawl_max_pages').value = String(p.ai_crawl_max_pages);
+  setRadio('verification_profile', p.verification_profile);
+  $('verifyCustomPane').style.display = 'none';
+  $('feat_deep_think').checked = p.deep_think;
+  $('v2_enable_polish').checked = p.v2_enable_polish;
+  if (radioValue('source_mode') !== 'local') setRadio('crawl_mode', p.crawl_mode);
+  renderPresetEffects();
+}
+
+function renderPresetEffects() {
+  const d = DELIVERABLE_PRESETS[radioValue('deliverable')];
+  const r = RESEARCH_PRESETS[radioValue('research_preset')];
+  $('presetEffects').innerHTML =
+    (d ? `<div><b>仕上がり「${escapeHtml(d.label)}」</b>で変わる項目: ${escapeHtml(d.desc)}</div>` : '') +
+    (r ? `<div><b>プリセット「${escapeHtml(r.label)}」</b>で変わる項目: ${escapeHtml(r.desc)}</div>` : '') +
+    '<div>いずれも「詳細設定」で個別に上書きできます（上書き後の値は下の設定要約に反映されます）。</div>';
+}
+
+// show only the advanced items that matter for the chosen modes
+function applyModeVisibility() {
+  const source = radioValue('source_mode');
+  const needsDocs = source === 'local' || source === 'hybrid';
+  $('localDocsBox').style.display = needsDocs ? 'block' : 'none';
+  const web = source !== 'local';
+  Array.from($('webCollectBody').children).forEach(el => {
+    if (el.id === 'webCollectHidden') el.style.display = web ? 'none' : 'block';
+    else el.style.display = web ? '' : 'none';
+  });
+  $('refresh_fetched').closest('label').style.display = web ? '' : 'none';
+  const crawl = radioValue('crawl_mode');
+  document.querySelectorAll('[data-crawl]').forEach(el => {
+    const modes = (el.dataset.crawl || '').split(/\s+/);
+    el.style.display = (web && modes.includes(crawl)) ? '' : 'none';
+  });
+  const v2 = $('report_version').value === 'v2';
+  $('v2_writing_style').closest('div').style.display = v2 ? '' : 'none';
+  $('v2_enable_polish').closest('label').style.display = v2 ? '' : 'none';
+  $('chart_library').closest('div').style.display = $('auto_figures').checked ? '' : 'none';
+  $('preferred_body_chars').closest('div').style.display = '';
+}
+
+const LABELS = {
+  source_mode: {web: 'Web', local: '手元の資料のみ', hybrid: '手元の資料＋Web'},
+  crawl_mode: {standard: '標準', fast_batch: '高速', aicrawl: 'AIクロール', ai_crawl_selenium: 'AIクロール（ブラウザ）'},
+  verification_profile: {fast: 'Fast', balanced: 'Balanced', strict: 'Strict', custom: 'Custom'},
+  output_format: {markdown: 'Markdown', docx: 'Word', pdf: 'PDF', html: 'HTML'},
+};
+
+function updateSummaryStrip() {
+  const source = radioValue('source_mode');
+  const d = DELIVERABLE_PRESETS[radioValue('deliverable')];
+  const r = RESEARCH_PRESETS[radioValue('research_preset')];
+  const items = [
+    ['資料', LABELS.source_mode[source] || source],
+    ['仕上がり', d ? d.label : '—'],
+    ['言語', $('language').selectedOptions[0] ? $('language').selectedOptions[0].textContent : ''],
+    ['形式', LABELS.output_format[$('output_format').value] || $('output_format').value],
+    ['プリセット', r ? r.label : '—'],
+    ['調査回数/章', `${$('iterations').value || '既定'}〜${$('max_iterations').value || '既定'}`],
+    ['検証', LABELS.verification_profile[radioValue('verification_profile')] || ''],
+  ];
+  if (source !== 'local') items.push(['クロール', LABELS.crawl_mode[radioValue('crawl_mode')] || '']);
+  if (source !== 'web') {
+    const n = uploadedDocs.filter(x => x.readable).length +
+      $('local_documents').value.split('\n').map(s => s.trim()).filter(Boolean).length;
+    items.push(['資料ファイル', `${n}件`]);
+  }
+  items.push(['再利用', $('cache_reuse').checked ? ($('refresh_fetched').checked ? 'ON（鮮度優先で更新確認）' : 'ON') : 'OFF']);
+  items.push(['計画確認', $('plan_review').checked ? ($('plan_review_mode').value === 'auto60' ? '60秒で自動開始' : '操作を待つ') : 'なし']);
+  $('summaryStrip').innerHTML = items.map(([k, v]) => `<span>${escapeHtml(k)}: <b>${escapeHtml(v)}</b></span>`).join('');
+}
+
+// any change in the form refreshes the visible summary
+$('formCard').addEventListener('change', () => { applyModeVisibility(); updateSummaryStrip(); });
+$('formCard').addEventListener('input', (e) => {
+  if (e.target && /^(iterations|max_iterations|local_documents|query)$/.test(e.target.id)) updateSummaryStrip();
+});
+
+// ==================== 手元の資料: アップロード / D&D / 事前確認 ====================
+const uploadedDocs = [];   // {path, name, size, readable, chars, error}
+
+function docRow(d, removable) {
+  const st = d.readable ? '<span class="badge ok">✅ 読取可</span>' : `<span class="badge bad">❌ ${escapeHtml(d.error || '読み取れません')}</span>`;
+  const info = d.readable ? `${(d.chars || 0).toLocaleString()}文字` : `${((d.size || 0) / 1024).toFixed(0)} KB`;
+  return `<div class="doc-row" data-path="${escapeHtml(d.path)}">${st}<span class="nm" title="${escapeHtml(d.path)}">${escapeHtml(d.name)}</span>
+    <span class="hint" style="margin:0">${info}</span>${removable ? '<button type="button" class="rm" aria-label="この資料を外す">✕</button>' : ''}</div>`;
+}
+
+function renderDocList() {
+  $('docList').innerHTML = uploadedDocs.map(d => docRow(d, true)).join('') ||
+    (radioValue('source_mode') === 'web' ? '' : '<p class="hint" style="margin:4px 0">まだ資料はありません</p>');
+  $('docList').querySelectorAll('.rm').forEach(btn => btn.addEventListener('click', () => {
+    const path = btn.closest('.doc-row').dataset.path;
+    const i = uploadedDocs.findIndex(d => d.path === path);
+    if (i >= 0) uploadedDocs.splice(i, 1);
+    renderDocList(); updateSummaryStrip();
+  }));
+}
+
+async function uploadFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  const fd = new FormData();
+  files.forEach(f => fd.append('files', f, f.name));
+  $('dropZone').classList.add('busy');
+  $('docList').insertAdjacentHTML('afterbegin', `<p class="hint" id="uploadBusy">📤 ${files.length}件をアップロードして読み取り確認中…</p>`);
+  try {
+    const res = await fetch('/api/upload', {method: 'POST', body: fd});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'upload failed');
+    (data.files || []).forEach(d => {
+      const i = uploadedDocs.findIndex(x => x.path === d.path);
+      if (i >= 0) uploadedDocs[i] = d; else uploadedDocs.push(d);
+    });
+  } catch (e) {
+    alert('アップロードに失敗しました: ' + e.message);
+  } finally {
+    $('dropZone').classList.remove('busy');
+    renderDocList(); updateSummaryStrip();
+  }
+}
+
+$('dropZone').addEventListener('click', () => $('fileInput').click());
+$('dropZone').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('fileInput').click(); }
+});
+$('fileInput').addEventListener('change', () => { uploadFiles($('fileInput').files); $('fileInput').value = ''; });
+['dragenter', 'dragover'].forEach(ev => $('dropZone').addEventListener(ev, (e) => {
+  e.preventDefault(); $('dropZone').classList.add('over');
+}));
+['dragleave', 'drop'].forEach(ev => $('dropZone').addEventListener(ev, (e) => {
+  e.preventDefault(); $('dropZone').classList.remove('over');
+}));
+$('dropZone').addEventListener('drop', (e) => uploadFiles(e.dataTransfer && e.dataTransfer.files));
+
+$('precheckBtn').addEventListener('click', async () => {
+  const paths = $('local_documents').value.split('\n').map(s => s.trim()).filter(Boolean);
+  if (!paths.length) { $('precheckResult').innerHTML = '<p class="hint">確認するパスを入力してください</p>'; return; }
+  $('precheckBtn').disabled = true;
+  $('precheckResult').innerHTML = '<p class="hint">読み取りを確認しています…</p>';
+  try {
+    const res = await fetch('/api/precheck', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({paths})});
+    const data = await res.json();
+    const files = data.files || [];
+    const ok = files.filter(f => f.readable).length;
+    $('precheckResult').innerHTML =
+      `<p class="hint" style="margin:4px 0">読取可 ${ok} / ${files.length} 件（サーバー側のパス）</p>` +
+      files.map(f => docRow(f, false)).join('');
+  } catch (e) {
+    $('precheckResult').innerHTML = `<p class="hint">確認に失敗しました: ${escapeHtml(e.message)}</p>`;
+  } finally {
+    $('precheckBtn').disabled = false;
+  }
+});
+
+// ==================== 結果タブ ====================
+function selectResultTab(name) {
+  document.querySelectorAll('#resultTabs .tab').forEach(t => {
+    const sel = t.dataset.tab === name;
+    t.classList.toggle('sel', sel);
+    t.setAttribute('aria-selected', sel ? 'true' : 'false');
+    t.tabIndex = sel ? 0 : -1;
+  });
+  document.querySelectorAll('#resultPanel .tab-pane').forEach(p => {
+    p.style.display = p.dataset.pane === name ? 'block' : 'none';
+  });
+}
+document.querySelectorAll('#resultTabs .tab').forEach((t, i, all) => {
+  t.addEventListener('click', () => selectResultTab(t.dataset.tab));
+  t.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    e.preventDefault();
+    const next = all[(i + (e.key === 'ArrowRight' ? 1 : all.length - 1)) % all.length];
+    selectResultTab(next.dataset.tab); next.focus();
+  });
+});
+
+// re-output from the SAVED research (no search, no LLM)
+function renderReoutputBox(target) {
+  if (!target) {
+    $('reoutputBox').innerHTML = '<p class="hint" style="margin:0">保存済みセッションがないため、再出力はできません。</p>';
+    return;
+  }
+  $('reoutputBox').innerHTML = `
+    <span class="hint" style="margin:0">💾 保存済みの調査結果から再出力（検索・LLM呼び出しなし・検証済み本文があればそれを使用）:</span>
+    <select id="reoutFormat" aria-label="再出力の形式" style="width:auto">
+      <option value="markdown">Markdown</option><option value="docx">Word</option>
+      <option value="pdf">PDF</option><option value="html">HTML</option></select>
+    <button type="button" class="secondary" id="reoutFull">本文を再出力</button>
+    <button type="button" class="secondary" id="reoutSummary">要約版を出力</button>
+    <span id="reoutMsg" class="hint" style="margin:0"></span>`;
+  const go = async (mode) => {
+    $('reoutMsg').textContent = '再出力ジョブを開始しています…';
+    try {
+      const body = {...target, output_format: $('reoutFormat').value, mode};
+      const res = await fetch('/api/regenerate', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body)});
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'failed');
+      $('reoutMsg').textContent = '再出力ジョブを開始しました（進捗タブに表示されます）';
+      selectedJobId = data.job_id;
+      pollJobs();
+    } catch (e) {
+      $('reoutMsg').textContent = '再出力できません: ' + e.message;
+    }
+  };
+  $('reoutFull').addEventListener('click', () => go('full'));
+  $('reoutSummary').addEventListener('click', () => go('summary'));
+}
+
+// ==================== 実行パネル（現在の工程・完了章・使用量・保存・停止） ====================
+const STEP_NAMES = ['計画', '調査・収集', '統合・評価', 'レポート生成'];
+function renderExecSummary(status) {
+  const rows = [];
+  let stage = STEP_NAMES[stepIndex(status.progress || 0)];
+  if (status.state === 'plan_review') stage = '計画のレビュー待ち';
+  else if (status.state === 'queued') stage = `実行待ち（${status.queue_position || '?'}番目）`;
+  else if (status.state === 'completed') stage = '完了';
+  else if (status.state === 'cancelled') stage = '中止';
+  else if (status.state === 'error') stage = 'エラー';
+  else if (status.verification && status.verification.phase && status.verification.phase !== 'idle') stage = '検証';
+  rows.push(['現在の工程', stage]);
+  const ls = liveSectionStats.job === status.job_id ? liveSectionStats : null;
+  rows.push(['書き上がった章', ls && ls.total ? `${ls.total}章（確定 ${ls.final}）` : '—']);
+  const usage = status.result && status.result.token_usage;
+  if (usage && typeof usage === 'object' && Object.keys(usage).length) {
+    const tot = usage.total_tokens !== undefined ? `${usage.total_tokens} トークン` : `${Object.keys(usage).length}項目`;
+    rows.push(['使用量', tot]);
+  } else {
+    rows.push(['使用量', ['completed', 'cancelled', 'error'].includes(status.state) ? '記録なし' : '完了後に表示']);
+  }
+  const saved = status.saved_artifacts || (status.result && status.result.saved_artifacts) || {};
+  const keys = Object.keys(saved);
+  rows.push(['保存済み', keys.length ? keys.map(k => ARTIFACT_LABELS[k] || k).join('・') : 'まだありません']);
+  let stop = '—';
+  if (status.state === 'cancelled') stop = '中止済み（保存済みの成果物のみ表示）';
+  else if (status.cancel_requested) stop = '停止要求済み（次の安全な地点で停止）';
+  else if (status.state === 'running' || status.state === 'plan_review') stop = '実行中（「調査を中止」で安全に停止）';
+  rows.push(['停止状態', stop]);
+  $('execSummary').innerHTML = rows.map(([k, v]) => `<span>${escapeHtml(k)}: <b>${escapeHtml(v)}</b></span>`).join('');
+}
+
+// ==================== 履歴（サーバー保存・再起動後も残る） ====================
+const HIST_STATE = {completed: '✅ 完了', cancelled: '⏹ 中止', error: '❌ エラー',
+                    running: '🔄 実行中', queued: '⏳ 実行待ち', plan_review: '📋 計画確認中',
+                    interrupted: '⚠ 中断（サーバー再起動）'};
+let historyCache = [];
+
+function fmtDate(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts * 1000);
+  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+function renderHistory(records) {
+  if (!records.length) {
+    $('historyList').innerHTML = '<p class="hint">履歴はまだありません</p>';
+    return;
+  }
+  $('historyList').innerHTML = records.slice(0, 50).map(r => {
+    const res = r.result || {};
+    const saved = res.saved_artifacts || {};
+    const axes = res.status || {};
+    const ps = r.params_summary || {};
+    const canResume = !!saved.session && ['cancelled', 'error', 'interrupted'].includes(r.state);
+    const canReout = !!saved.session;
+    return `<div class="hist-row" data-job="${escapeHtml(r.job_id)}">
+      <div class="q">${escapeHtml(r.query || '(無題)')}</div>
+      <div class="meta">${HIST_STATE[r.state] || escapeHtml(r.state || '')} ・ ${fmtDate(r.started_at || r.created_at)} ・ ${fmtSec(r.elapsed_seconds)}
+        ・ ${escapeHtml(LABELS.source_mode[ps.source_mode] || ps.source_mode || '')}${ps.research_preset ? ' ・ ' + escapeHtml((RESEARCH_PRESETS[ps.research_preset] || {}).label || ps.research_preset) : ''}
+        ${axes.verification ? '<div>' + statusBadges(axes, res) + '</div>' : ''}</div>
+      <div class="acts">
+        <button type="button" class="secondary" data-act="dup">条件を複製</button>
+        ${canResume ? '<button type="button" class="secondary" data-act="resume">中断箇所から再開</button>' : ''}
+        ${canReout ? '<button type="button" class="secondary" data-act="reout">再出力</button>' : ''}
+        ${res.report_path ? `<a class="secondary" style="font-size:11.5px;padding:4px 9px;border:1.5px solid var(--border);border-radius:10px;text-decoration:none" href="/api/report-file?path=${encodeURIComponent(res.report_path)}" target="_blank">レポートを開く</a>` : ''}
+        ${['running', 'queued', 'plan_review'].includes(r.state) ? '' : '<button type="button" class="secondary" data-act="forget">履歴から削除</button>'}
+      </div>
+      <div class="hint hist-msg" style="margin:4px 0 0"></div>
+    </div>`;
+  }).join('');
+  $('historyList').querySelectorAll('button[data-act]').forEach(btn => {
+    btn.addEventListener('click', () => historyAction(btn.dataset.act, btn.closest('.hist-row')));
+  });
+}
+
+async function historyAction(act, row) {
+  const jobId = row.dataset.job;
+  const rec = historyCache.find(r => r.job_id === jobId) || {};
+  const msg = row.querySelector('.hist-msg');
+  if (act === 'dup') {
+    applyParamsToForm(rec.params_summary || {}, rec.query);
+    msg.textContent = '条件をフォームに反映しました（APIキーは含まれません。上のフォームで確認して開始してください）';
+    $('formCard').scrollIntoView({behavior: 'smooth', block: 'start'});
+    return;
+  }
+  if (act === 'forget') {
+    if (!confirm('この履歴を一覧から削除しますか？（出力フォルダのファイルは削除されません）')) return;
+    await fetch('/api/history/forget', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({job_id: jobId})});
+    loadHistory();
+    return;
+  }
+  if (act === 'resume') {
+    msg.textContent = '再開ジョブを開始しています…';
+    const secrets = {};
+    for (const [el, key] of Object.entries(SECRET_FIELDS)) {
+      const v = ($(el).value || '').trim();
+      if (v) secrets[key] = v;
+    }
+    try {
+      const res = await fetch('/api/resume', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({job_id: jobId, ...secrets})});
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'failed');
+      msg.textContent = '再開しました。完了した章は再利用し、未完了の章のみ再調査します（内訳は結果の「概要」に表示）';
+      selectedJobId = data.job_id;
+      pollJobs();
+      $('progressPanel').scrollIntoView({behavior: 'smooth', block: 'start'});
+    } catch (e) {
+      msg.textContent = '再開できません: ' + e.message;
+    }
+    return;
+  }
+  if (act === 'reout') {
+    const fmt = prompt('再出力の形式を入力してください（markdown / docx / pdf / html）。先頭に "summary:" を付けると要約版になります。', 'markdown');
+    if (!fmt) return;
+    let mode = 'full', format = fmt.trim().toLowerCase();
+    if (format.startsWith('summary:')) { mode = 'summary'; format = format.slice(8).trim() || 'markdown'; }
+    if (!['markdown', 'docx', 'pdf', 'html'].includes(format)) { msg.textContent = '形式は markdown / docx / pdf / html のいずれかです'; return; }
+    msg.textContent = '再出力ジョブを開始しています…';
+    try {
+      const res = await fetch('/api/regenerate', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({job_id: jobId, output_format: format, mode})});
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'failed');
+      msg.textContent = '再出力ジョブを開始しました（検索・LLM呼び出しなし）';
+      selectedJobId = data.job_id;
+      pollJobs();
+    } catch (e) {
+      msg.textContent = '再出力できません: ' + e.message;
+    }
+  }
+}
+
+async function loadHistory() {
+  try {
+    const res = await fetch('/api/history');
+    const data = await res.json();
+    historyCache = data.history || [];
+    renderHistory(historyCache);
+  } catch (e) { /* server briefly unavailable */ }
+}
+setInterval(loadHistory, 10000);
+
+// ==================== フォーム設定プリセット（このブラウザ・APIキーなし） ====================
+const FORM_PRESETS_KEY = 'drt_form_presets';
+const FORM_TEXT_IDS = ['requirements', 'language', 'output_format', 'iterations', 'max_iterations',
+  'ai_crawl_max_pages', 'ai_crawl_site_depth', 'gap_fill_rounds', 'max_pages_per_query',
+  'parallel_max_workers', 'browser', 'driver_path', 'per_domain_delay', 'report_version',
+  'v2_writing_style', 'chart_library', 'length_mode', 'preferred_body_chars', 'hard_min_body_chars',
+  'hard_max_body_chars', 'length_tolerance', 'provider', 'model', 'plan_review_mode',
+  ...Object.keys(VERIFY_FIELDS)];
+const FORM_CHECK_IDS = ['cache_reuse', 'refresh_fetched', 'waf_mitigation', 'auto_figures',
+  'v2_enable_polish', 'live_report_word', 'plan_review', 'verification_cache_enabled'];
+const FORM_RADIOS = ['source_mode', 'deliverable', 'research_preset', 'crawl_mode', 'verification_profile'];
+
+function formSnapshot() {
+  const s = {text: {}, check: {}, radio: {}, stages: {}};
+  FORM_TEXT_IDS.forEach(id => { if ($(id)) s.text[id] = $(id).value; });
+  FORM_CHECK_IDS.forEach(id => { if ($(id)) s.check[id] = $(id).checked; });
+  FORM_RADIOS.forEach(n => { s.radio[n] = radioValue(n); });
+  document.querySelectorAll('.stage-provider').forEach(sel => {
+    const st = sel.dataset.stage;
+    s.stages[st] = {provider: sel.value, model: document.querySelector(`.stage-model[data-stage=${st}]`).value};
+  });
+  return s;                       // no query, no secrets
+}
+
+function applySnapshot(s) {
+  Object.entries(s.text || {}).forEach(([id, v]) => { if ($(id)) $(id).value = v; });
+  Object.entries(s.check || {}).forEach(([id, v]) => { if ($(id)) $(id).checked = !!v; });
+  Object.entries(s.radio || {}).forEach(([n, v]) => setRadio(n, v));
+  Object.entries(s.stages || {}).forEach(([st, spec]) => {
+    const sel = document.querySelector(`.stage-provider[data-stage=${st}]`);
+    const inp = document.querySelector(`.stage-model[data-stage=${st}]`);
+    if (sel) sel.value = spec.provider || '';
+    if (inp) inp.value = spec.model || '';
+  });
+  $('verifyCustomPane').style.display = radioValue('verification_profile') === 'custom' ? 'block' : 'none';
+  renderPresetEffects(); applyModeVisibility(); updateSummaryStrip();
+}
+
+function loadFormPresets() {
+  try { return JSON.parse(localStorage.getItem(FORM_PRESETS_KEY) || '{}'); } catch (e) { return {}; }
+}
+function renderFormPresetOptions() {
+  const presets = loadFormPresets();
+  const sel = $('formPresetSelect');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">— 保存した設定を読み込む —</option>' +
+    Object.keys(presets).sort().map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('');
+  if (presets[cur]) sel.value = cur;
+}
+$('formPresetSaveBtn').addEventListener('click', () => {
+  const name = prompt('この設定の名前を入力してください（APIキーと調査テーマは保存されません）', $('formPresetSelect').value || '');
+  if (!name || !name.trim()) return;
+  const presets = loadFormPresets();
+  presets[name.trim()] = formSnapshot();
+  try { localStorage.setItem(FORM_PRESETS_KEY, JSON.stringify(presets)); } catch (e) { alert('保存できませんでした: ' + e.message); return; }
+  renderFormPresetOptions();
+  $('formPresetSelect').value = name.trim();
+});
+$('formPresetDeleteBtn').addEventListener('click', () => {
+  const name = $('formPresetSelect').value;
+  if (!name) return;
+  if (!confirm(`設定「${name}」を削除しますか？`)) return;
+  const presets = loadFormPresets();
+  delete presets[name];
+  try { localStorage.setItem(FORM_PRESETS_KEY, JSON.stringify(presets)); } catch (e) {}
+  renderFormPresetOptions();
+});
+$('formPresetSelect').addEventListener('change', () => {
+  const presets = loadFormPresets();
+  const s = presets[$('formPresetSelect').value];
+  if (s) applySnapshot(s);
+});
+renderFormPresetOptions();
+
+// history "条件を複製": server param names -> form controls (no secrets)
+const PARAM_TO_ID = {verification_minor_claim_sample_rate: 'verification_minor_sample_rate'};
+function applyParamsToForm(params, query) {
+  if (query !== undefined) $('query').value = query || '';
+  const p = params || {};
+  FORM_RADIOS.forEach(n => { if (p[n] !== undefined) setRadio(n, p[n]); });
+  const skip = new Set(['query', 'local_documents', 'stage_llm', ...FORM_RADIOS,
+    ...Object.keys(SETTINGS_FIELDS).map(k => SETTINGS_FIELDS[k]), ...Object.values(SECRET_FIELDS)]);
+  Object.entries(p).forEach(([k, v]) => {
+    if (skip.has(k) || v === null || v === undefined) return;
+    const id = PARAM_TO_ID[k] || k;
+    const el = $(id);
+    if (!el || !FORM_TEXT_IDS.concat(FORM_CHECK_IDS).includes(id)) return;
+    if (el.type === 'checkbox') el.checked = !!v; else el.value = String(v);
+  });
+  if (p.plan_review_timeout !== undefined) $('plan_review_mode').value = Number(p.plan_review_timeout) > 0 ? 'auto60' : 'explicit';
+  if (Array.isArray(p.local_documents)) {
+    // server-side paths only: browser uploads are NOT re-attached
+    $('local_documents').value = p.local_documents.filter(x => !/[\\/]uploads[\\/]/.test(x)).join('\n');
+  }
+  document.querySelectorAll('.stage-provider').forEach(sel => {
+    const st = sel.dataset.stage;
+    const spec = (p.stage_llm || {})[st] || {};
+    sel.value = spec.provider || '';
+    document.querySelector(`.stage-model[data-stage=${st}]`).value = spec.model || '';
+  });
+  $('verifyCustomPane').style.display = radioValue('verification_profile') === 'custom' ? 'block' : 'none';
+  renderPresetEffects(); applyModeVisibility(); updateSummaryStrip();
+}
+
+// ==================== キーボード操作・フォーカス ====================
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && $('settingsModal').style.display !== 'none') {
+    $('settingsModal').style.display = 'none';
+    $('settingsBtn').focus();
+  }
+});
+$('settingsBtn').addEventListener('click', () => {
+  const first = $('settingsModal').querySelector('input, select, button.modal-tab');
+  if (first) first.focus();
+});
+// Ctrl/⌘+Enter in the theme box starts the research
+$('query').addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); startResearch(); }
+});
+
+// initial state
+renderPresetEffects();
+applyModeVisibility();
+updateSummaryStrip();
+renderDocList();
+loadHistory();
 
 $('startBtn').addEventListener('click', startResearch);
 $('planApproveBtn').addEventListener('click', () => sendPlanReview('approve'));
