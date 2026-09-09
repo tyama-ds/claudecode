@@ -293,17 +293,170 @@ input.invalid, textarea.invalid, select.invalid { border-color: var(--error, #b9
 .banner.error { background: #fee2e2; color: var(--error); display: block; white-space: pre-wrap; }
 .banner.success { background: #dcfce7; color: var(--success); display: block; font-weight: 700; }
 .idle-hint { color: var(--muted); text-align: center; padding: 40px 0; font-size: 13px; }
+
+/* ==================== ✨ eye-candy layer (purely decorative) ==================== */
+/* everything below is cosmetic: it never changes what the UI does, and it is
+   switched off entirely by the ✨ toggle or prefers-reduced-motion */
+body { position: relative; isolation: isolate; }
+body::before {                      /* slow aurora behind everything */
+  content: ""; position: fixed; inset: -20%; z-index: -2; pointer-events: none;
+  background:
+    radial-gradient(40% 35% at 15% 20%, color-mix(in srgb, var(--accent) 22%, transparent), transparent 70%),
+    radial-gradient(35% 40% at 85% 15%, color-mix(in srgb, var(--accent2) 20%, transparent), transparent 70%),
+    radial-gradient(45% 40% at 60% 90%, color-mix(in srgb, #22d3ee 16%, transparent), transparent 70%),
+    radial-gradient(30% 30% at 20% 80%, color-mix(in srgb, #f472b6 14%, transparent), transparent 70%);
+  filter: blur(40px); animation: aurora 28s ease-in-out infinite alternate;
+}
+body::after {                       /* faint dot grid */
+  content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background-image: radial-gradient(color-mix(in srgb, var(--text) 9%, transparent) 1px, transparent 1.2px);
+  background-size: 22px 22px; mask-image: linear-gradient(180deg, rgba(0,0,0,.6), rgba(0,0,0,.15));
+}
+@keyframes aurora {
+  0%   { transform: translate3d(0,0,0) rotate(0deg) scale(1); }
+  50%  { transform: translate3d(3%,-2%,0) rotate(4deg) scale(1.06); }
+  100% { transform: translate3d(-3%,3%,0) rotate(-3deg) scale(1.02); }
+}
+header {
+  position: relative; overflow: hidden;
+  background: linear-gradient(120deg, var(--accent), var(--accent2), #22d3ee, var(--accent));
+  background-size: 300% 300%; animation: headerFlow 14s ease infinite;
+  box-shadow: 0 10px 40px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+@keyframes headerFlow { 0%,100% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } }
+#fxCanvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; opacity: .7; }
+header > * { position: relative; z-index: 1; }
+header .logo { animation: bob 3.2s ease-in-out infinite; filter: drop-shadow(0 4px 10px rgba(0,0,0,.35)); }
+@keyframes bob { 0%,100% { transform: translateY(0) rotate(-6deg); } 50% { transform: translateY(-4px) rotate(6deg); } }
+header h1 {
+  background: linear-gradient(90deg, #fff 0%, #fff 40%, #e0e7ff 50%, #fff 60%, #fff 100%);
+  background-size: 250% 100%; -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: shine 5s linear infinite; text-shadow: none;
+}
+@keyframes shine { to { background-position: -250% 0; } }
+header .version { position: relative; overflow: hidden; color: #fff; }
+header .version::before {
+  content: ""; position: absolute; inset: -40%; z-index: -1;
+  background: conic-gradient(from 0deg, transparent 0 70%, rgba(255,255,255,.9) 85%, transparent 100%);
+  animation: spin 3.5s linear infinite;
+}
+header .version::after { content: ""; position: absolute; inset: 1.5px; border-radius: 999px; z-index: -1;
+  background: color-mix(in srgb, var(--accent) 70%, #000 10%); }
+@keyframes spin { to { transform: rotate(360deg); } }
+.fx-btn { background: rgba(255,255,255,.16); color: #fff; border: 1px solid rgba(255,255,255,.35);
+  border-radius: 10px; padding: 8px 12px; font-size: 13px; cursor: pointer; font-family: inherit; }
+.fx-btn:hover { background: rgba(255,255,255,.28); }
+body.fx-off .fx-btn { opacity: .6; }
+.card {
+  background: color-mix(in srgb, var(--card) 88%, transparent);
+  backdrop-filter: blur(10px) saturate(1.2); -webkit-backdrop-filter: blur(10px) saturate(1.2);
+  transition: transform .25s ease, box-shadow .25s ease, border-color .25s ease;
+  animation: fadeUp .7s cubic-bezier(.2,.8,.2,1) both;
+}
+main > .card:nth-child(2) { animation-delay: .08s; }
+main > .card:nth-child(3) { animation-delay: .16s; }
+main > .card:nth-child(4) { animation-delay: .24s; }
+.card:hover { transform: translateY(-2px); box-shadow: 0 2px 6px rgba(28,32,51,.06), 0 18px 40px color-mix(in srgb, var(--accent) 18%, transparent); }
+@keyframes fadeUp { from { opacity: 0; transform: translateY(14px) scale(.985); } to { opacity: 1; transform: none; } }
+h2 .n { animation: bob 4s ease-in-out infinite; animation-delay: var(--d, 0s); }
+.mode-card { transition: transform .18s ease, box-shadow .18s ease, border-color .15s, background .15s; will-change: transform; }
+.mode-card:hover { transform: translateY(-2px) scale(1.012); box-shadow: 0 10px 24px color-mix(in srgb, var(--accent) 18%, transparent); }
+.mode-card.sel { box-shadow: 0 0 0 1px var(--accent), 0 8px 26px color-mix(in srgb, var(--accent) 25%, transparent); }
+.mode-card.sel::after {              /* orbiting highlight on the selected card */
+  content: ""; position: absolute; inset: -1.5px; border-radius: 11px; pointer-events: none;
+  padding: 1.5px; -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
+  background: conic-gradient(from var(--ang, 0deg), transparent 0 60%, var(--accent2) 80%, #22d3ee 90%, transparent 100%);
+  animation: orbit 3s linear infinite;
+}
+@property --ang { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+@keyframes orbit { to { --ang: 360deg; } }
+.chip { transition: transform .15s ease, border-color .15s, box-shadow .15s; }
+.chip:hover { transform: translateY(-2px) rotate(-1.5deg); box-shadow: 0 6px 14px color-mix(in srgb, var(--accent) 22%, transparent); }
+button.primary { position: relative; overflow: hidden;
+  box-shadow: 0 10px 26px color-mix(in srgb, var(--accent) 40%, transparent);
+  background: linear-gradient(120deg, var(--accent), var(--accent2), #22d3ee, var(--accent)); background-size: 300% 100%;
+  animation: btnFlow 6s ease infinite; }
+@keyframes btnFlow { 0%,100% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } }
+button.primary::before {              /* shimmer sweep */
+  content: ""; position: absolute; top: -50%; bottom: -50%; width: 40%; left: -60%;
+  background: linear-gradient(100deg, transparent, rgba(255,255,255,.45), transparent);
+  transform: skewX(-20deg); animation: sweep 3.2s ease-in-out infinite;
+}
+@keyframes sweep { 0%, 60% { left: -60%; } 100% { left: 130%; } }
+button.primary:hover:not(:disabled) { transform: translateY(-2px) scale(1.01); box-shadow: 0 16px 34px color-mix(in srgb, var(--accent) 50%, transparent); }
+button.primary:active:not(:disabled) { transform: translateY(0) scale(.99); }
+.ripple { position: absolute; border-radius: 50%; background: rgba(255,255,255,.55); transform: scale(0);
+  animation: ripple .65s ease-out forwards; pointer-events: none; }
+@keyframes ripple { to { transform: scale(4); opacity: 0; } }
+.bar { box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 60%, transparent), 0 0 2px #fff inset; }
+.bar.moving::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.5), transparent);
+  animation: barGlow 1.8s ease-in-out infinite; }
+.bar-wrap { position: relative; box-shadow: inset 0 1px 3px rgba(0,0,0,.08); }
+.bar { position: relative; }
+@keyframes barGlow { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+.pct { background: linear-gradient(90deg, var(--accent), var(--accent2), #22d3ee); background-size: 200% 100%;
+  -webkit-background-clip: text; background-clip: text; color: transparent; animation: shine 4s linear infinite; }
+.step.active .dot { animation: pulse 1.6s infinite, bob 2.4s ease-in-out infinite; }
+.step.done .dot { animation: pop .5s cubic-bezier(.2,1.6,.4,1) both; }
+@keyframes pop { 0% { transform: scale(.6); } 100% { transform: scale(1); } }
+.log { position: relative; box-shadow: inset 0 0 40px rgba(0,0,0,.35), 0 0 0 1px rgba(127,139,217,.25); }
+.log::before {                      /* scanline sweep over the console */
+  content: ""; position: absolute; left: 0; right: 0; height: 18%; top: -20%; pointer-events: none;
+  background: linear-gradient(180deg, transparent, rgba(127,139,217,.10), transparent);
+  animation: scan 5s linear infinite;
+}
+@keyframes scan { to { top: 110%; } }
+.log .ln { display: block; }
+.log .ln.new { animation: lineIn .45s ease both; }
+@keyframes lineIn { from { opacity: 0; transform: translateX(-6px); filter: blur(2px); } to { opacity: 1; transform: none; filter: none; } }
+.log .caret { display: inline-block; width: 7px; height: 12px; background: #7f8bd9; vertical-align: -2px; margin-left: 2px;
+  animation: blink 1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.job-tab { transition: transform .15s ease, box-shadow .15s ease; position: relative; overflow: hidden; }
+.job-tab:hover { transform: translateY(-1px); box-shadow: 0 6px 16px color-mix(in srgb, var(--accent) 20%, transparent); }
+.job-tab.running::after { content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(100deg, transparent 30%, rgba(255,255,255,.35) 50%, transparent 70%);
+  transform: translateX(-100%); animation: tabShine 2.2s ease-in-out infinite; }
+@keyframes tabShine { to { transform: translateX(100%); } }
+.badge.ok { animation: pop .5s cubic-bezier(.2,1.6,.4,1) both; }
+.banner.success { animation: fadeUp .6s ease both, glowPulse 2.4s ease-in-out 2; }
+@keyframes glowPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(22,163,74,0); } 50% { box-shadow: 0 0 24px 2px rgba(22,163,74,.35); } }
+#confetti, #sparks { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 80; }
+.spark { position: fixed; width: 6px; height: 6px; border-radius: 50%; pointer-events: none; z-index: 81;
+  animation: sparkFly .7s ease-out forwards; }
+@keyframes sparkFly { to { transform: translate(var(--dx), var(--dy)) scale(0); opacity: 0; } }
+details summary::before { transition: transform .25s cubic-bezier(.2,1.6,.4,1); }
+.tabs .tab { transition: transform .15s ease, color .15s; }
+.tabs .tab:hover { transform: translateY(-1px); }
+input:focus, textarea:focus, select:focus { box-shadow: 0 0 0 3px var(--accent-soft), 0 6px 18px color-mix(in srgb, var(--accent) 18%, transparent); }
+/* ---- off switch: reduced motion or the ✨ toggle ---- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+  body::before, body::after, #fxCanvas, #confetti { display: none !important; }
+}
+body.fx-off *, body.fx-off *::before, body.fx-off *::after { animation: none !important; }
+body.fx-off::before, body.fx-off::after, body.fx-off #fxCanvas, body.fx-off #confetti { display: none !important; }
+body.fx-off header { background: linear-gradient(120deg, var(--accent), var(--accent2)); box-shadow: none; }
+body.fx-off .card { backdrop-filter: none; -webkit-backdrop-filter: none; background: var(--card); }
+body.fx-off header h1 { color: #fff; background: none; -webkit-text-fill-color: #fff; }
+body.fx-off .pct { color: var(--text); background: none; -webkit-text-fill-color: var(--text); }
+body.fx-off button.primary { background: linear-gradient(120deg, var(--accent), var(--accent2)); }
+body.fx-off button.primary::before, body.fx-off .mode-card.sel::after, body.fx-off .log::before, body.fx-off .log .caret { display: none; }
 </style>
 </head>
 <body>
 <header>
+  <canvas id="fxCanvas" aria-hidden="true"></canvas>
   <div class="logo">🔎</div>
   <div style="flex:1">
     <h1>Deep Research Tool <span class="version" id="appVersion"></span></h1>
-    <p>調査テーマを入力するだけで、Web調査からレポート生成まで自動実行（最大3件まで同時実行できます）</p>
+    <p id="tagline">調査テーマを入力するだけで、Web調査からレポート生成まで自動実行（最大3件まで同時実行できます）</p>
   </div>
+  <button id="fxBtn" class="fx-btn" title="見た目のエフェクト（動作には影響しません）" aria-pressed="true">✨ エフェクト ON</button>
   <button id="settingsBtn" class="settings-btn">⚙ 設定</button>
 </header>
+<canvas id="confetti" aria-hidden="true"></canvas>
 
 <!-- ==================== 設定モーダル（生成AI・プロキシ） ==================== -->
 <div class="modal-overlay" id="settingsModal" style="display:none">
@@ -1537,7 +1690,7 @@ function renderTabs(jobs) {
   $('jobTabs').style.display = 'flex';
   $('progressPanel').style.display = 'block';
   $('jobTabs').innerHTML = jobs.map(j => `
-    <div class="job-tab ${j.job_id === selectedJobId ? 'sel' : ''}" data-job="${j.job_id}"
+    <div class="job-tab ${j.job_id === selectedJobId ? 'sel' : ''} ${j.state === 'running' ? 'running' : ''}" data-job="${j.job_id}"
          title="${escapeHtml(j.query || '')}">
       <span class="st">${STATE_ICON[j.state] || '⏳'}</span>${escapeHtml((j.query || j.job_id).slice(0, 24))}
     </div>`).join('');
@@ -1624,6 +1777,7 @@ async function sendPlanReview(action) {
 }
 
 let lastStatus = null;
+const seenStates = {};          // job_id -> last state seen (for the completion burst)
 
 function render(status) {
   lastStatus = status;
@@ -1698,15 +1852,20 @@ function render(status) {
   const seq = status.log_seq !== undefined ? status.log_seq
     : (log.length ? log[log.length - 1].seq || log.length : 0);
   if (seq !== logSeq || log.length !== logLength) {
-    $('log').innerHTML = log.map(l =>
-      `<span class="pct-tag">[${String(l.pct).padStart(5)}%]</span> ${escapeHtml(l.msg)}`
-    ).join('\n');
+    // lines that were not shown before slide in (cosmetic only)
+    const firstNew = (logSeq < 0 || seq - logSeq > log.length) ? log.length
+      : Math.max(0, log.length - (seq - logSeq));
+    const live = status.state === 'running' || status.state === 'plan_review' || status.state === 'queued';
+    $('log').innerHTML = log.map((l, i) =>
+      `<span class="ln ${i >= firstNew ? 'new' : ''}"><span class="pct-tag">[${String(l.pct).padStart(5)}%]</span> ${escapeHtml(l.msg)}</span>`
+    ).join('') + (live ? '<span class="caret"></span>' : '');
     $('log').scrollTop = $('log').scrollHeight;
     logLength = log.length;
     logSeq = seq;
   }
 
   if (status.state === 'completed') {
+    if (seenStates[status.job_id] && seenStates[status.job_id] !== 'completed') confettiBurst();
     const axes = (status.result && status.result.status) || {};
     $('jobBanner').className = 'banner success';
     $('jobBanner').innerHTML = '✅ ' + escapeHtml(outcomeHeadline(axes, status.result || {}))
@@ -1736,6 +1895,7 @@ function render(status) {
     if (status.cancel_requested)
       $('currentMsg').textContent = '⏹ 停止要求を受け付けました。実行中のリクエストの終了を待っています…';
   }
+  seenStates[status.job_id] = status.state;
 }
 
 // --- process / verification / quality are THREE facts, not one checkmark
@@ -2879,6 +3039,7 @@ function fermiFileRows(saved) {
 
 function renderFermiResult(result) {
   const f = result.fermi || {};
+  confettiBurst(60);
   $('fermiRunBtn').disabled = false;
   $('fermiStatus').textContent = `完了 — 推定値 ${fmtNum(f.value)} ${escapeHtml(f.unit || '')}（範囲 ${fmtNum(f.low)}〜${fmtNum(f.high)}、確信度 ${Math.round((f.confidence || 0) * 100)}%）。検証はしていません。`;
   $('fermiResult').style.display = 'block';
@@ -2947,6 +3108,145 @@ fetch('/api/version').then(r => r.json()).then(v => {
     document.title = `Deep Research Tool v${v.version}`;
   }
 }).catch(() => {});
+
+
+// ==================== ✨ 意味のないエフェクト（見た目だけ・動作に影響なし） ====================
+const FX_KEY = 'drt_fx';
+let fxOn = true;
+try { fxOn = localStorage.getItem(FX_KEY) !== 'off'; } catch (e) {}
+const reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+if (reducedMotion) fxOn = false;
+
+function applyFx() {
+  document.body.classList.toggle('fx-off', !fxOn);
+  $('fxBtn').textContent = fxOn ? '✨ エフェクト ON' : '✨ エフェクト OFF';
+  $('fxBtn').setAttribute('aria-pressed', fxOn ? 'true' : 'false');
+}
+$('fxBtn').addEventListener('click', () => {
+  fxOn = !fxOn;
+  try { localStorage.setItem(FX_KEY, fxOn ? 'on' : 'off'); } catch (e) {}
+  applyFx();
+  if (fxOn) { startParticles(); confettiBurst(40); }
+});
+applyFx();
+
+// --- constellation particles drifting through the header
+let particleRaf = null;
+function startParticles() {
+  const canvas = $('fxCanvas');
+  if (!canvas || particleRaf) return;
+  const ctx = canvas.getContext('2d');
+  const N = 42;
+  let w = 0, h = 0, pts = [];
+  const resize = () => {
+    w = canvas.width = canvas.offsetWidth || 1;
+    h = canvas.height = canvas.offsetHeight || 1;
+    if (!pts.length) pts = Array.from({length: N}, (_, i) => ({
+      x: (i * 97 % 100) / 100 * w, y: (i * 61 % 100) / 100 * h,
+      vx: ((i * 37 % 10) - 5) / 30, vy: ((i * 53 % 10) - 5) / 30, r: 1 + (i % 3) * .7,
+    }));
+  };
+  resize();
+  window.addEventListener('resize', resize);
+  const tick = () => {
+    if (!fxOn || document.hidden) { particleRaf = null; ctx.clearRect(0, 0, w, h); return; }
+    ctx.clearRect(0, 0, w, h);
+    for (const p of pts) {
+      p.x += p.vx; p.y += p.vy;
+      if (p.x < 0 || p.x > w) p.vx *= -1;
+      if (p.y < 0 || p.y > h) p.vy *= -1;
+    }
+    ctx.lineWidth = .6;
+    for (let i = 0; i < pts.length; i++) {
+      for (let j = i + 1; j < pts.length; j++) {
+        const a = pts[i], b = pts[j], d = Math.hypot(a.x - b.x, a.y - b.y);
+        if (d < 110) { ctx.strokeStyle = `rgba(255,255,255,${(1 - d / 110) * .35})`; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); }
+      }
+    }
+    ctx.fillStyle = 'rgba(255,255,255,.85)';
+    for (const p of pts) { ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill(); }
+    particleRaf = requestAnimationFrame(tick);
+  };
+  particleRaf = requestAnimationFrame(tick);
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) startParticles(); });
+startParticles();
+
+// --- confetti burst (completion of a job / a fermi estimate / turning fx on)
+function confettiBurst(count = 140) {
+  if (!fxOn) return;
+  const canvas = $('confetti');
+  const ctx = canvas.getContext('2d');
+  canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+  const colors = ['#5b5fe9', '#8b5cf6', '#22d3ee', '#f472b6', '#facc15', '#34d399'];
+  const parts = Array.from({length: count}, (_, i) => ({
+    x: canvas.width / 2 + (Math.random() - .5) * 200, y: canvas.height * .35,
+    vx: (Math.random() - .5) * 14, vy: -Math.random() * 12 - 4,
+    s: 5 + Math.random() * 6, c: colors[i % colors.length], a: Math.random() * Math.PI, va: (Math.random() - .5) * .3,
+  }));
+  const t0 = performance.now();
+  const draw = (t) => {
+    const dt = (t - t0) / 1000;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (const p of parts) {
+      p.vy += .35; p.x += p.vx; p.y += p.vy; p.a += p.va; p.vx *= .99;
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.a);
+      ctx.globalAlpha = Math.max(0, 1 - dt / 2.2);
+      ctx.fillStyle = p.c; ctx.fillRect(-p.s / 2, -p.s / 4, p.s, p.s / 2); ctx.restore();
+    }
+    if (dt < 2.4) requestAnimationFrame(draw); else ctx.clearRect(0, 0, canvas.width, canvas.height);
+  };
+  requestAnimationFrame(draw);
+}
+
+// --- ripple on buttons, sparks on any click
+document.addEventListener('click', (e) => {
+  if (!fxOn) return;
+  const btn = e.target.closest('button.primary, button.secondary, .settings-btn, .fx-btn, .chip, .tab');
+  if (btn) {
+    const r = btn.getBoundingClientRect();
+    const rip = document.createElement('span');
+    rip.className = 'ripple';
+    const size = Math.max(r.width, r.height);
+    rip.style.cssText = `width:${size}px;height:${size}px;left:${e.clientX - r.left - size / 2}px;top:${e.clientY - r.top - size / 2}px`;
+    if (getComputedStyle(btn).position === 'static') btn.style.position = 'relative';
+    btn.style.overflow = 'hidden';
+    btn.appendChild(rip);
+    setTimeout(() => rip.remove(), 700);
+  }
+  const colors = ['#5b5fe9', '#8b5cf6', '#22d3ee', '#f472b6', '#facc15'];
+  for (let i = 0; i < 7; i++) {
+    const sp = document.createElement('span');
+    sp.className = 'spark';
+    const ang = (i / 7) * Math.PI * 2 + Math.random() * .5, dist = 26 + Math.random() * 30;
+    sp.style.cssText = `left:${e.clientX - 3}px;top:${e.clientY - 3}px;background:${colors[i % colors.length]};--dx:${Math.cos(ang) * dist}px;--dy:${Math.sin(ang) * dist}px`;
+    document.body.appendChild(sp);
+    setTimeout(() => sp.remove(), 750);
+  }
+});
+
+// --- tilt the mode cards toward the pointer
+document.addEventListener('pointermove', (e) => {
+  const card = e.target.closest && e.target.closest('.mode-card');
+  document.querySelectorAll('.mode-card.tilt').forEach(c => { if (c !== card) { c.style.transform = ''; c.classList.remove('tilt'); } });
+  if (!card || !fxOn) return;
+  const r = card.getBoundingClientRect();
+  const dx = (e.clientX - r.left) / r.width - .5, dy = (e.clientY - r.top) / r.height - .5;
+  card.classList.add('tilt');
+  card.style.transform = `perspective(600px) rotateX(${(-dy * 6).toFixed(2)}deg) rotateY(${(dx * 8).toFixed(2)}deg) translateY(-2px) scale(1.012)`;
+});
+document.addEventListener('pointerleave', () => document.querySelectorAll('.mode-card.tilt').forEach(c => { c.style.transform = ''; c.classList.remove('tilt'); }), true);
+
+// --- typewriter tagline (once per page load)
+(function typeTagline() {
+  const el = $('tagline');
+  if (!el || !fxOn) return;
+  const full = el.textContent;
+  el.textContent = '';
+  let i = 0;
+  const step = () => { el.textContent = full.slice(0, ++i); if (i < full.length && fxOn) setTimeout(step, 18); else el.textContent = full; };
+  setTimeout(step, 300);
+})();
 
 // initial load: pick up any jobs already running on the server
 pollJobs();
