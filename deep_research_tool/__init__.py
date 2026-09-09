@@ -42,16 +42,25 @@ from .evidence.manual_loader import ManualEvidenceLoader, load_evidence_file
 from .research.manual_researcher import ManualResearcher
 
 
-def launch_gui():
-    """Launch the graphical user interface."""
-    from .gui import main as gui_main
-    gui_main()
+def launch_gui(host: str = "127.0.0.1", port: int = 8765,
+               output_dir: str = "./output", open_browser: bool = True):
+    """Launch the graphical user interface.
+
+    The GUI is the browser-based Web UI (HTML/JS served by the local
+    stdlib HTTP server) — no Tkinter is required. Blocks until Ctrl+C.
+    """
+    from .webui.server import run_server
+    run_server(host=host, port=port, output_dir=output_dir,
+               open_browser=open_browser)
 
 
-def launch_fermi_gui():
-    """Launch the provisional Fermi estimation GUI."""
-    from .fermi_gui import main as fermi_gui_main
-    fermi_gui_main()
+def launch_fermi_gui(host: str = "127.0.0.1", port: int = 8765,
+                     output_dir: str = "./output", open_browser: bool = True):
+    """Launch the Fermi estimation GUI (the Web UI opened on its
+    フェルミ推定 panel). No Tkinter is required."""
+    from .webui.server import run_server
+    run_server(host=host, port=port, output_dir=output_dir,
+               open_browser=open_browser, fragment="fermi")
 
 
 __all__ = [

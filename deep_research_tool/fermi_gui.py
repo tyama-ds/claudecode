@@ -1,14 +1,10 @@
 """
-Provisional GUI for Fermi estimation (フェルミ推定 仮GUI).
+Legacy Tkinter GUI for Fermi estimation (DEPRECATED).
 
-A minimal Tkinter interface for running Fermi estimations with the
-FermiEstimator. Intended as a provisional tool; the main research GUI
-lives in gui.py.
-
-Usage:
-    python -m deep_research_tool.fermi_gui
-    or
-    from deep_research_tool import launch_fermi_gui; launch_fermi_gui()
+The supported Fermi GUI is the 🧮 フェルミ推定 panel of the HTML/JS Web UI:
+``deep-research gui --fermi`` or ``deep_research_tool.launch_fermi_gui()``
+(no Tkinter needed). This module remains only for environments that
+still have Tk and explicitly run ``python -m deep_research_tool.fermi_gui``.
 """
 
 import threading

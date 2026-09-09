@@ -1,7 +1,10 @@
 """
-GUI for Deep Research Tool.
+Legacy Tkinter GUI for Deep Research Tool (DEPRECATED).
 
-Provides a graphical interface for configuring and running research.
+The supported GUI is the browser-based HTML/JS Web UI: run
+``deep-research gui`` or ``deep_research_tool.launch_gui()`` — neither
+needs Tkinter. This module is kept only for environments that still have
+Tk and explicitly run ``python -m deep_research_tool.gui``.
 """
 
 import os

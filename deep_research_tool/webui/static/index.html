@@ -659,6 +659,12 @@ input.invalid, textarea.invalid, select.invalid { border-color: var(--error, #b9
                     </select>
                   </div>
                 </div>
+                <div class="grid2">
+                  <div><label for="target_pages">目標ページ数（空欄=自動）</label><input type="number" id="target_pages" min="1" max="500" placeholder="例: 10"></div>
+                </div>
+                <label class="check"><input type="checkbox" id="include_toc" checked> 目次を含める</label>
+                <label class="check"><input type="checkbox" id="include_citations" checked> 出典（引用）を含める</label>
+                <label class="check"><input type="checkbox" id="include_images" checked> Webページの画像を含める</label>
                 <label class="check"><input type="checkbox" id="auto_figures" checked> 図表を自動生成してレポートに挿入する（数値データが少ないテーマでは生成されないことがあります）</label>
                 <label class="check"><input type="checkbox" id="v2_enable_polish" checked> 日本語の自然さを磨く推敲パス（V2）</label>
                 <label class="check"><input type="checkbox" id="live_report_word"> 🖋 Wordへライブ書き込み（このサーバーがWindows + Microsoft Word + pywin32 の場合のみ。Wordが起動し、章・グラフが順次書き込まれます）</label>
@@ -770,7 +776,17 @@ input.invalid, textarea.invalid, select.invalid { border-color: var(--error, #b9
                       <option value="local">ローカルLLM</option>
                     </select>
                   </div>
-                  <div><label>既定モデル（空欄=標準）</label><input type="text" id="model" placeholder="gpt-5-mini など"></div>
+                  <div><label for="model">既定モデル（空欄=標準）</label><input type="text" id="model" placeholder="gpt-5-mini など"></div>
+                  <div><label for="temperature">Temperature（0〜2、空欄=既定）</label><input type="number" id="temperature" min="0" max="2" step="0.1" placeholder="0.7"></div>
+                  <div><label for="max_tokens">Max Tokens（空欄=既定）</label><input type="number" id="max_tokens" min="1" placeholder="4096"></div>
+                  <div><label for="max_results">検索結果数 / クエリ（空欄=既定 10）</label><input type="number" id="max_results" min="1" max="100" placeholder="10"></div>
+                  <div><label for="search_region">検索地域（DuckDuckGo）</label>
+                    <select id="search_region">
+                      <option value="wt-wt">全世界（既定）</option><option value="jp-jp">日本</option>
+                      <option value="us-en">米国</option><option value="uk-en">英国</option>
+                      <option value="de-de">ドイツ</option><option value="fr-fr">フランス</option>
+                      <option value="cn-zh">中国</option><option value="kr-kr">韓国</option>
+                    </select></div>
                 </div>
                 <p class="hint">各プロバイダーのAPIキー・エンドポイント・プロキシは右上の <b>⚙ 設定</b> から入力してください。工程別に複数プロバイダーを使う場合も、それぞれのキーを設定しておけば自動で使い分けられます。</p>
 
@@ -817,6 +833,32 @@ input.invalid, textarea.invalid, select.invalid { border-color: var(--error, #b9
     </div>
     <p class="hint">設定プリセットはこのブラウザに保存されます（APIキーは含みません）。履歴はサーバーの出力フォルダに保存され、再起動後も残ります。</p>
     <div id="historyList" class="history" aria-live="polite"></div>
+  </section>
+
+  <!-- ==================== フェルミ推定（旧 Tk fermi_gui の置き換え） ==================== -->
+  <section class="card" id="fermiCard">
+    <details id="fermiDetails">
+      <summary style="font-size:15px">🧮 フェルミ推定（数量の概算・LLM呼び出し1回）</summary>
+      <div class="body">
+        <p class="hint">定量的な問いを要素に分解し、各要素の低・中・高の範囲から概算値を求めます。Web検索は行いません。推定値は検証していない概算です。</p>
+        <label for="fermi_question">質問 <span style="color:var(--error)">*</span></label>
+        <input type="text" id="fermi_question" placeholder="例: 日本国内のEV充電スタンドの総数は？">
+        <label for="fermi_context">参考情報（任意。調査結果の抜粋など）</label>
+        <textarea id="fermi_context" rows="3" placeholder="推定の前提となる情報があれば貼り付けてください"></textarea>
+        <div class="grid2">
+          <div><label for="fermi_known">既知の値（任意。「名前=数値」を1行ずつ）</label>
+            <textarea id="fermi_known" rows="3" placeholder="日本の人口=125000000&#10;乗用車保有台数=62000000"></textarea></div>
+          <div><label for="fermi_language">出力言語</label>
+            <select id="fermi_language"><option value="ja" selected>日本語</option><option value="en">English</option></select>
+            <p class="hint">プロバイダー・モデル・APIキーは「詳細設定 → AIモデルの設定」と右上の「⚙ 設定」の値を使います。</p></div>
+        </div>
+        <button type="button" class="primary" id="fermiRunBtn" style="margin-top:10px">🧮 推定を実行</button>
+        <div class="banner" id="fermiError" role="alert"></div>
+        <div id="fermiStatus" class="hint" aria-live="polite"></div>
+        <div id="fermiResult" class="livebody" style="display:none;margin-top:8px"></div>
+        <div class="files" id="fermiFiles"></div>
+      </div>
+    </details>
   </section>
 
   <!-- ==================== 進捗・結果 ==================== -->
@@ -1342,6 +1384,13 @@ const ITERATION_FIELDS = {
   iterations: {type: 'int', min: 1, max: 10},
   max_iterations: {type: 'int', min: 1, max: 20},
 };
+// settings the former Tk GUI offered; empty = server default, 0 kept, invalid = error
+const PARITY_FIELDS = {
+  temperature: {type: 'float', min: 0, max: 2},
+  max_tokens: {type: 'int', min: 1},
+  max_results: {type: 'int', min: 1, max: 100},
+  target_pages: {type: 'int', min: 1, max: 500},
+};
 
 function collectParams() {
   const provider = $('provider').value;
@@ -1369,6 +1418,12 @@ function collectParams() {
       .filter(([, v]) => v !== undefined)),
     cache_reuse: $('cache_reuse').checked,
     refresh_fetched: $('refresh_fetched').checked,
+    ...Object.fromEntries(Object.entries(PARITY_FIELDS)
+      .map(([id, spec]) => [id, readField(id, spec)])
+      .filter(([, v]) => v !== undefined)),
+    include_toc: $('include_toc').checked,
+    include_citations: $('include_citations').checked,
+    include_images: $('include_images').checked,
     report_version: $('report_version').value,
     v2_writing_style: $('v2_writing_style').value,
     v2_enable_polish: $('v2_enable_polish').checked,
@@ -1384,6 +1439,8 @@ function collectParams() {
     // all providers' keys are sent so per-stage overrides can mix providers
     ...settingsParams(),
   };
+  if ($('search_region').value && $('search_region').value !== 'wt-wt')
+    params.search_region = $('search_region').value;
   if (params.iterations !== undefined && params.max_iterations !== undefined
       && params.max_iterations < params.iterations)
     throw fieldError('max_iterations', '章ごとの最大調査回数は最小調査回数以上にしてください');
@@ -1858,7 +1915,7 @@ const COUNTER_LABELS = {
 };
 
 function fileRows(files) {
-  return files.map(f => `
+  return files.filter(f => f.path && f.path !== 'None' && f.path !== 'null').map(f => `
     <div class="file-row">
       <span class="fname">${f.label}　<span style="color:var(--muted);font-weight:400">${escapeHtml(String(f.path).split(/[\\/]/).pop())}</span></span>
       <span class="actions">
@@ -1905,6 +1962,22 @@ function showResults(result) {
   currentResult = result;
   const axes = result.status || {};
   const saved = result.saved_artifacts || {};
+  if (result.kind === 'fermi') {
+    const f = result.fermi || {};
+    $('resultOverview').innerHTML = `<div style="font-weight:700;margin-bottom:4px">🧮 フェルミ推定が完了しました（推定値は未検証の概算）</div>
+      <div>${statusBadges(axes, result)}</div>
+      <div class="exec-summary" style="margin-top:6px"><span>推定値: <b>${fmtNum(f.value)} ${escapeHtml(f.unit || '')}</b></span>
+      <span>範囲: <b>${fmtNum(f.low)}〜${fmtNum(f.high)}</b></span><span>確信度: <b>${Math.round((f.confidence || 0) * 100)}%</b></span></div>`;
+    $('vSummary').innerHTML = '';
+    $('resultBody').innerHTML = liveMd(result.fermi_markdown || '');
+    $('resultEvidence').innerHTML = '<p class="hint">フェルミ推定はWeb検索を行わないため根拠一覧はありません。前提条件は本文を参照してください。</p>';
+    $('resultReview').innerHTML = '<div class="warn-row"><b>未検証:</b> 推定値は要素分解による概算で、外部データと照合していません。</div>';
+    $('resultWarnings').style.display = 'none';
+    $('resultFiles').innerHTML = fermiFileRows(saved) || '<p class="hint">生成されたファイルはありません</p>';
+    renderReoutputBox(null);
+    $('resultPanel').style.display = 'block';
+    return;
+  }
 
   // --- 概要
   const savedRows = Object.entries(saved).map(([k, p]) =>
@@ -2614,9 +2687,11 @@ const FORM_TEXT_IDS = ['requirements', 'language', 'output_format', 'iterations'
   'parallel_max_workers', 'browser', 'driver_path', 'per_domain_delay', 'report_version',
   'v2_writing_style', 'chart_library', 'length_mode', 'preferred_body_chars', 'hard_min_body_chars',
   'hard_max_body_chars', 'length_tolerance', 'provider', 'model', 'plan_review_mode',
+  'temperature', 'max_tokens', 'max_results', 'target_pages', 'search_region',
   ...Object.keys(VERIFY_FIELDS)];
 const FORM_CHECK_IDS = ['cache_reuse', 'refresh_fetched', 'waf_mitigation', 'auto_figures',
-  'v2_enable_polish', 'live_report_word', 'plan_review', 'verification_cache_enabled'];
+  'v2_enable_polish', 'live_report_word', 'plan_review', 'verification_cache_enabled',
+  'include_toc', 'include_citations', 'include_images'];
 const FORM_RADIOS = ['source_mode', 'deliverable', 'research_preset', 'crawl_mode', 'verification_profile'];
 
 function formSnapshot() {
@@ -2710,6 +2785,126 @@ function applyParamsToForm(params, query) {
   $('verifyCustomPane').style.display = radioValue('verification_profile') === 'custom' ? 'block' : 'none';
   renderPresetEffects(); applyModeVisibility(); updateSummaryStrip();
 }
+
+// ==================== フェルミ推定 ====================
+let fermiJobId = null;
+
+function parseKnownValues(text) {
+  const out = {};
+  for (const raw of String(text || '').split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#') || !line.includes('=')) continue;
+    const i = line.indexOf('=');
+    const name = line.slice(0, i).trim(), num = line.slice(i + 1).trim().replace(/,/g, '');
+    if (!name) continue;
+    if (num === '' || Number.isNaN(Number(num))) throw fieldError('fermi_known', `既知の値「${name}」は数値で入力してください`);
+    out[name] = Number(num);
+  }
+  return out;
+}
+
+async function runFermi() {
+  clearFieldErrors();
+  $('fermiError').className = 'banner';
+  $('fermiError').textContent = '';
+  const question = $('fermi_question').value.trim();
+  if (!question) {
+    $('fermiError').className = 'banner error';
+    $('fermiError').textContent = '質問を入力してください';
+    showFieldError('fermi_question', '質問を入力してください');
+    return;
+  }
+  let known;
+  try { known = parseKnownValues($('fermi_known').value); }
+  catch (e) {
+    $('fermiError').className = 'banner error';
+    $('fermiError').textContent = e.message;
+    if (e.field) showFieldError(e.field, e.message);
+    return;
+  }
+  // the previous result must never look like this run's: clear first
+  $('fermiResult').style.display = 'none';
+  $('fermiResult').innerHTML = '';
+  $('fermiFiles').innerHTML = '';
+  $('fermiRunBtn').disabled = true;
+  $('fermiStatus').textContent = '推定中…（LLM呼び出し 1回）';
+  try {
+    const res = await fetch('/api/fermi', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({question, context: $('fermi_context').value.trim(), known_values: known,
+        language: $('fermi_language').value, provider: $('provider').value, model: $('model').value.trim(),
+        ...settingsParams()})});
+    const data = await res.json();
+    if (!res.ok) { const err = new Error(data.error || 'failed'); if (data.field) err.field = data.field; throw err; }
+    fermiJobId = data.job_id;
+    pollFermi();
+  } catch (e) {
+    $('fermiRunBtn').disabled = false;
+    $('fermiStatus').textContent = '';
+    $('fermiError').className = 'banner error';
+    $('fermiError').textContent = '推定を開始できませんでした: ' + e.message;
+    if (e.field) showFieldError(e.field, e.message);
+  }
+}
+
+async function pollFermi() {
+  if (!fermiJobId) return;
+  const jobAtRequest = fermiJobId;
+  try {
+    const res = await fetch(`/api/status?job_id=${encodeURIComponent(jobAtRequest)}`);
+    const st = await res.json();
+    if (jobAtRequest !== fermiJobId) return;
+    if (st.state === 'completed' && st.result && st.result.fermi_markdown) {
+      renderFermiResult(st.result);
+      fermiJobId = null;
+      return;
+    }
+    if (st.state === 'error' || st.state === 'cancelled' || st.state === 'interrupted') {
+      $('fermiRunBtn').disabled = false;
+      $('fermiStatus').textContent = '';
+      $('fermiError').className = 'banner error';
+      $('fermiError').textContent = '推定エラー: ' + (st.error || st.state);
+      fermiJobId = null;
+      return;
+    }
+    $('fermiStatus').textContent = (st.message || '推定中…') + (st.state === 'queued' ? `（実行待ち ${st.queue_position || '?'}番目）` : '');
+    setTimeout(pollFermi, 1000);
+  } catch (e) { setTimeout(pollFermi, 1500); }
+}
+
+function fermiFileRows(saved) {
+  const labels = {fermi_md: '📄 Markdown', fermi_json: '🗂 JSON', fermi_docx: '📝 Word', fermi_pdf: '📕 PDF'};
+  return fileRows(Object.entries(saved || {}).filter(([k]) => k.startsWith('fermi_'))
+    .map(([k, p]) => ({label: labels[k] || k, path: p})));
+}
+
+function renderFermiResult(result) {
+  const f = result.fermi || {};
+  $('fermiRunBtn').disabled = false;
+  $('fermiStatus').textContent = `完了 — 推定値 ${fmtNum(f.value)} ${escapeHtml(f.unit || '')}（範囲 ${fmtNum(f.low)}〜${fmtNum(f.high)}、確信度 ${Math.round((f.confidence || 0) * 100)}%）。検証はしていません。`;
+  $('fermiResult').style.display = 'block';
+  $('fermiResult').innerHTML = liveMd(result.fermi_markdown);
+  $('fermiFiles').innerHTML = fermiFileRows(result.saved_artifacts);
+}
+
+function fmtNum(v) {
+  if (v === undefined || v === null || Number.isNaN(Number(v))) return '—';
+  const n = Number(v);
+  return Math.abs(n) >= 1000 ? Math.round(n).toLocaleString() : n.toLocaleString(undefined, {maximumSignificantDigits: 3});
+}
+
+$('fermiRunBtn').addEventListener('click', runFermi);
+$('fermi_question').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); runFermi(); } });
+
+// deep link: deep-research gui --fermi opens the UI on this panel
+function applyHash() {
+  if (location.hash === '#fermi') {
+    $('fermiDetails').open = true;
+    $('fermiCard').scrollIntoView({block: 'start'});
+    $('fermi_question').focus();
+  }
+}
+window.addEventListener('hashchange', applyHash);
+applyHash();
 
 // ==================== キーボード操作・フォーカス ====================
 document.addEventListener('keydown', (e) => {

@@ -115,6 +115,15 @@ _CONFIG_PARAM_MAP = {
     "max_iterations": "max_iterations",
     "deep_think": "deep_think",
     "v2_enable_polish": "v2_enable_polish",
+    # settings the Tk GUI used to offer (the Web UI is now the GUI)
+    "temperature": "temperature",
+    "max_tokens": "max_tokens",
+    "max_results": "max_results",
+    "target_pages": "target_pages",
+    "search_region": "search_region",
+    "include_images": "include_images",
+    "include_citations": "include_citations",
+    "include_toc": "include_toc",
 }
 
 
@@ -221,6 +230,10 @@ _PARAM_CONVERTERS = {
     "min_new_independent_sources": _int_ge0,
     "min_claim_support_score": _float_range(0.0, 1.0),
     "required_critical_coverage": _float_range(0.0, 1.0),
+    "temperature": _float_range(0.0, 2.0),
+    "max_tokens": _int_range(1, 1_000_000),
+    "max_results": _int_range(1, 100),
+    "target_pages": _int_range(1, 500),
 }
 
 
@@ -809,6 +822,69 @@ class JobManager:
             for job in sorted(finished, key=lambda j: j.started_at)[:excess]:
                 self.jobs.pop(job.job_id, None)
 
+    def _run_fermi(self, job: ResearchJob, params: Dict[str, Any],
+                   job_warnings) -> None:
+        """Fermi estimation as a lightweight job (one LLM call, no web):
+        the browser-based replacement for the former Tk fermi_gui."""
+        from ..api import get_client
+        from ..thinking import FermiEstimator
+        spec = params["fermi"]
+        question = (spec.get("question") or "").strip()
+        provider = params.get("provider") or "openai"
+        key_name = {"openai": "openai_api_key", "anthropic": "anthropic_api_key",
+                    "local": "local_api_key"}.get(provider, "openai_api_key")
+        base_url = {"openai": "openai_base_url", "anthropic": "anthropic_base_url",
+                    "local": "local_base_url"}.get(provider)
+        job.update("フェルミ推定を実行しています（LLM呼び出し 1回）…", 20)
+        llm = get_client(
+            provider=provider, api_key=params.get(key_name) or None,
+            model=params.get("model") or None,
+            http_proxy=params.get("http_proxy") or None,
+            https_proxy=params.get("https_proxy") or None,
+            verify_ssl=params.get("verify_ssl", True) is not False,
+            base_url=params.get(base_url) or None if base_url else None,
+            backend=params.get("local_backend") or None,
+        )
+        estimator = FermiEstimator(llm_client=llm,
+                                   language=spec.get("language") or "ja")
+        estimate = estimator.estimate(
+            question=question, context=spec.get("context") or "",
+            known_values=spec.get("known_values") or None)
+        out_dir = Path(params.get("output_dir") or self.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = out_dir / f"fermi_{job.job_id}"
+        saved: Dict[str, str] = {}
+        md_path = stem.with_suffix(".md")
+        md_path.write_text(estimate.to_markdown(), encoding="utf-8")
+        saved["fermi_md"] = str(md_path)
+        json_path = stem.with_suffix(".json")
+        json_path.write_text(json.dumps(estimate.to_dict(), ensure_ascii=False,
+                                        indent=1), encoding="utf-8")
+        saved["fermi_json"] = str(json_path)
+        for ext, fn in (("docx", estimate.save_docx), ("pdf", estimate.save_pdf)):
+            try:
+                path = fn(stem.with_suffix("." + ext))
+                saved[f"fermi_{ext}"] = str(path)
+            except Exception as e:            # optional dependency missing
+                job_warnings.add(job_warnings.LOW, "Fermi",
+                                 f"{ext} 出力を省略しました: {e}")
+        job.result = {
+            "kind": "fermi",
+            "fermi": estimate.to_dict(),
+            "fermi_markdown": estimate.to_markdown(),
+            "report_path": str(md_path),
+            "saved_artifacts": saved,
+            "warnings": job_warnings.to_dict_list(),
+            "warning_count": job_warnings.count(),
+            "status": {"process": "completed", "verification": "skipped",
+                       "quality": "unverified"},
+            "run_status": "completed",
+            "output_dir": str(out_dir),
+        }
+        job.progress = 100.0
+        job.finish("completed")
+        job.update("フェルミ推定が完了しました（推定値は検証していません）", 100)
+
     def _run(self, job: ResearchJob, params: Dict[str, Any]) -> None:
         from ..utils.helpers import ResearchWarnings
         # PER-JOB warning collector bound to this thread's context; every
@@ -849,6 +925,10 @@ class JobManager:
                 job.progress = 100.0
                 job.finish("completed")
                 job.update("再出力が完了しました", 100)
+                return
+
+            if params.get("fermi"):
+                self._run_fermi(job, params, job_warnings)
                 return
 
             config = create_config(**build_config_kwargs(params))
@@ -1217,7 +1297,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                "/api/cancel-verification",
                                "/api/cancel-run", "/api/precheck",
                                "/api/resume", "/api/regenerate",
-                               "/api/history/forget"):
+                               "/api/history/forget", "/api/fermi"):
             self._send_json({"error": "not found"}, 404)
             return
 
@@ -1235,6 +1315,38 @@ class WebUIHandler(BaseHTTPRequestHandler):
             # with the browser's local files, which go through /api/upload)
             self._send_json({"files": precheck_documents(
                 params.get("paths") or [])})
+            return
+
+        if parsed.path == "/api/fermi":
+            question = (params.get("question") or "").strip()
+            if not question:
+                self._send_json({"error": "question is required",
+                                 "field": "fermi_question"}, 400)
+                return
+            known = params.get("known_values") or {}
+            if not isinstance(known, dict):
+                self._send_json({"error": "known_values must be an object",
+                                 "field": "fermi_known"}, 400)
+                return
+            cleaned = {}
+            for name, value in known.items():
+                try:
+                    cleaned[str(name)] = float(str(value).replace(",", ""))
+                except (TypeError, ValueError):
+                    self._send_json({"error": f"known value '{name}' is not a number",
+                                     "field": "fermi_known"}, 400)
+                    return
+            job_params = {k: v for k, v in params.items()
+                          if k not in ("question", "context", "known_values",
+                                       "language")}
+            job_params["query"] = f"フェルミ推定: {question}"
+            job_params["fermi"] = {
+                "question": question, "context": params.get("context") or "",
+                "known_values": cleaned or None,
+                "language": params.get("language") or "ja",
+            }
+            job = manager.start(job_params)
+            self._send_json({"job_id": job.job_id, "state": job.state}, 202)
             return
 
         if parsed.path == "/api/history/forget":
@@ -1363,15 +1475,21 @@ class WebUIHandler(BaseHTTPRequestHandler):
 
 
 def run_server(host: str = "127.0.0.1", port: int = 8765,
-               output_dir: str = "./output") -> None:
-    """Start the Web UI server (blocking)."""
+               output_dir: str = "./output", open_browser: bool = False,
+               fragment: str = "") -> None:
+    """Start the Web UI server (blocking). With ``open_browser`` the
+    default browser is opened on the UI (this is the GUI — no Tk)."""
     from ..utils.helpers import ensure_utf8_output
     ensure_utf8_output()  # avoid cp932 print crashes on Windows
     server = ThreadingHTTPServer((host, port), WebUIHandler)
     server.job_manager = JobManager(output_dir=output_dir)
     server.output_dir = output_dir
-    print(f"Deep Research Tool v{__version__} Web UI: http://{host}:{port}")
+    url = f"http://{host}:{port}/{('#' + fragment) if fragment else ''}"
+    print(f"Deep Research Tool v{__version__} Web UI: {url}")
     print("Ctrl+C で終了")
+    if open_browser:
+        import webbrowser
+        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

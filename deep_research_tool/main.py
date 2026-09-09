@@ -1326,7 +1326,8 @@ class DeepResearchTool:
             "report_path_original": str(report_path),
             "figures_report_path": str(figures_report_path) if figures_report_path else None,
             "evidence_json": str(evidence_json),
-            "evidence_csv": str(evidence_csv),
+            # None stays None (the UI must not offer a file called "None")
+            "evidence_csv": str(evidence_csv) if evidence_csv else None,
             "verification_html": str(verification_html) if verification_html else None,
             "session": session,
             "evidence_locker": evidence_locker,
@@ -4149,7 +4150,7 @@ def run_manual_research(
         "session_id": session.session_id,
         "report_path": str(report_path),
         "evidence_json": str(evidence_json),
-        "evidence_csv": str(evidence_csv),
+        "evidence_csv": str(evidence_csv) if evidence_csv else None,
         "verification_html": str(verification_html) if verification_html else None,
         "session": session,
         "evidence_locker": evidence_locker,

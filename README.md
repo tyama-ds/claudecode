@@ -152,11 +152,19 @@ print(f"エビデンス: {result['evidence_json']}")
 | エビデンス (CSV) | `output/evidence/evidence_[session_id].csv` | 参照元一覧（Excel対応） |
 | セッション情報 | `output/session_[session_id].json` | リサーチプロセスの記録 |
 
-### Web UI（ブラウザ画面）での使用
+### GUI（ブラウザ画面）での使用
+
+GUI は HTML/JS の Web UI です（Tkinter は使いません。`python -m deep_research_tool.gui` 等の旧 Tk 画面は非推奨）。
 
 ```bash
-deep-research webui              # http://127.0.0.1:8765
-deep-research webui --port 8080 --output-dir ./output
+deep-research gui                # サーバーを起動し、既定のブラウザで http://127.0.0.1:8765 を開く
+deep-research gui --fermi        # フェルミ推定パネルを開いた状態で起動
+deep-research webui --port 8080 --output-dir ./output   # ブラウザを自動で開かずに起動
+```
+
+```python
+from deep_research_tool import launch_gui
+launch_gui()                     # 同上（Ctrl+C で終了）
 ```
 
 主画面は次の5つの選択だけで開始できます（詳細設定は折り畳み、選んだモードに関係する項目だけを表示）。
@@ -167,6 +175,7 @@ deep-research webui --port 8080 --output-dir ./output
 4. **調査全体のプリセット** — 短時間／標準／詳細。何が変わるか（調査回数・ページ数・クロール・検証モード・DeepThink・推敲）を画面に表示します。検証モードのプリセット（Fast/Balanced/Strict）とは別物で、プリセットがそれを設定する形です。
 5. **開始ボタンと設定要約** — 常に見える位置に固定。開始前の計画確認は既定で「承認・修正・中止を選ぶまで待つ」（60秒自動開始はオプトイン）。
 
+詳細設定には旧 Tk GUI にあった Temperature／Max Tokens／検索結果数／検索地域／目標ページ数／目次・出典・画像の有無も含まれます。
 実行中は「現在の工程／書き上がった章／使用量／保存済みの成果物（実際に書き込まれたファイルのみ）／停止状態」を表示し、
 結果は **概要（処理終了・検証実施・品質達成の3軸）／本文／根拠／要確認事項／出力** のタブで確認できます。
 
@@ -2724,21 +2733,21 @@ result.save_docx("./output/fermi_estimate.docx")  # pip install python-docx
 result.save_pdf("./output/fermi_estimate.pdf")    # pip install reportlab（日本語フォント対応）
 ```
 
-### 仮GUI（フェルミ推定ツール）
+### GUI（フェルミ推定パネル）
 
-フェルミ推定専用の簡易GUI（仮実装、Tkinter製）を同梱しています。
+フェルミ推定はブラウザGUI（HTML/JS の Web UI）の「🧮 フェルミ推定」パネルから実行できます。Tkinter は不要です。
 
 ```bash
-python -m deep_research_tool.fermi_gui
+deep-research gui --fermi        # ブラウザが開き、フェルミ推定パネルにフォーカスします
 ```
 
 ```python
-# Pythonから起動する場合
+# Pythonから起動する場合（Web UI を起動してブラウザを開く）
 from deep_research_tool import launch_fermi_gui
 launch_fermi_gui()
 ```
 
-GUIでは以下が設定できます：
+パネルでは以下が設定できます（結果は Markdown / JSON、依存があれば Word / PDF として出力フォルダに保存され、画面からダウンロードできます）：
 - 質問（定量的な問い）
 - プロバイダー / モデル / APIキー / 言語
 - 既知の値（「名前=数値」形式で1行ずつ）
