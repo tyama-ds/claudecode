@@ -431,59 +431,29 @@ def chunk_text(
     Returns:
         List of text chunks
     """
+    if chunk_size <= 0 or overlap < 0 or overlap >= chunk_size:
+        raise ValueError("chunk_size must be positive and 0 <= overlap < chunk_size")
     if not text or len(text) <= chunk_size:
         return [text] if text else []
 
+    # Every chunk is an exact source slice with a hard size bound, including
+    # long PDF/text paragraphs. Never loop over the final overlap indefinitely.
     chunks = []
-
-    if preserve_paragraphs:
-        # Split by paragraphs first
-        paragraphs = text.split("\n\n")
-        current_chunk = []
-        current_size = 0
-
-        for para in paragraphs:
-            para_size = len(para)
-
-            if current_size + para_size > chunk_size and current_chunk:
-                # Save current chunk
-                chunks.append("\n\n".join(current_chunk))
-
-                # Start new chunk with overlap
-                overlap_paras = []
-                overlap_size = 0
-                for p in reversed(current_chunk):
-                    if overlap_size + len(p) > overlap:
-                        break
-                    overlap_paras.insert(0, p)
-                    overlap_size += len(p)
-
-                current_chunk = overlap_paras
-                current_size = overlap_size
-
-            current_chunk.append(para)
-            current_size += para_size
-
-        if current_chunk:
-            chunks.append("\n\n".join(current_chunk))
-
-    else:
-        # Simple character-based chunking
-        start = 0
-        while start < len(text):
-            end = start + chunk_size
-
-            if end < len(text):
-                # Try to find a good break point
-                for sep in ["\n\n", "\n", ". ", " "]:
-                    break_point = text.rfind(sep, start, end)
-                    if break_point > start + chunk_size * 0.5:
-                        end = break_point + len(sep)
-                        break
-
-            chunks.append(text[start:end])
-            start = end - overlap
-
+    start = 0
+    separators = ["\n\n", "\n", "。", ". ", " "] if preserve_paragraphs else []
+    while start < len(text):
+        end = min(start + chunk_size, len(text))
+        if end < len(text):
+            minimum_end = start + max(overlap + 1, chunk_size // 2)
+            for separator in separators:
+                boundary = text.rfind(separator, minimum_end, end)
+                if boundary >= minimum_end:
+                    end = boundary + len(separator)
+                    break
+        chunks.append(text[start:end])
+        if end == len(text):
+            break
+        start = end - overlap
     return chunks
 
 

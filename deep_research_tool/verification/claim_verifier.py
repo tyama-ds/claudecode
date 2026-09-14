@@ -74,7 +74,6 @@ CLAIM_CHUNK_CHARS = 4000
 # Evidence bodies are chunked at this size for retrieval; the whole text
 # of every evidence item is searchable, not just its head
 EVIDENCE_CHUNK_CHARS = 900
-MAX_CHUNKS_PER_EVIDENCE = 60
 EVIDENCE_PER_CLAIM = 5          # top-k relevant evidence chunks per claim
 MAX_CHUNKS_PER_SOURCE_IN_JUDGE = 2
 IMPORTANCE_WEIGHT = {"critical": 3.0, "important": 2.0, "minor": 1.0}
@@ -185,6 +184,10 @@ class Claim:
     # uncited evidence that DOES support the claim — used ONLY as
     # citation-replacement candidates for the rewrite, never as support
     replacement_source_ids: List[str] = field(default_factory=list)
+    # Optional, validated positions of the verbatim extraction quote in
+    # the section. These disambiguate repeated/paraphrased statements.
+    source_start: Optional[int] = None
+    source_end: Optional[int] = None
 
 
 class ClaimVerifier:
@@ -341,9 +344,16 @@ class ClaimVerifier:
                     self.progress.set_waiting("retry")
                 try:
                     response = self._llm_generate(prompt)
-                    return (sid, ci,
-                            extract_json_from_response(response.content),
-                            None)
+                    data = extract_json_from_response(response.content)
+                    if not isinstance(data, dict) or \
+                            not isinstance(data.get("claims"), list):
+                        raise ValueError("schema anomaly: claims must be a list")
+                    if any(validate_extracted_claim(raw) is None
+                           for raw in data["claims"]):
+                        raise ValueError("schema anomaly in extracted claim")
+                    if not data["claims"] and self._chunk_requires_claims(chunk):
+                        raise ValueError("no claims extracted from factual chunk")
+                    return sid, ci, data, None
                 except Exception as e:
                     last_error = e
             return sid, ci, None, last_error
@@ -373,17 +383,11 @@ class ClaimVerifier:
                       f"({sid} chunk {ci + 1}): {error}")
                 continue
             items: List[Dict] = []
-            raw_claims_list = data.get("claims", []) \
-                if isinstance(data, dict) else []
-            if not isinstance(raw_claims_list, list):
-                raw_claims_list = []
+            raw_claims_list = data["claims"]
             for k, item in enumerate(raw_claims_list):
                 checked = validate_extracted_claim(item)
-                if checked is None:
-                    self.extraction_errors.append(
-                        f"schema anomaly in extracted claim "
-                        f"({sid} chunk {ci + 1} item {k + 1}) — dropped")
-                    continue
+                # The whole chunk was validated before returning from
+                # the retry loop; never silently drop a body claim.
                 importance = checked["importance"]
                 if importance not in IMPORTANCE_WEIGHT:
                     importance = "important"
@@ -397,12 +401,22 @@ class ClaimVerifier:
                             f"schema anomaly: source_numbers not "
                             f"list[int] ({sid} chunk {ci + 1} "
                             f"item {k + 1}) — field ignored")
+                quote = checked.get("source_quote", "")
+                chunk = pending[sid][ci]
+                start = chunk.find(quote) if quote else -1
+                if start >= 0 and chunk.find(quote, start + 1) < 0:
+                    source_start = ci * self.chunk_chars + start
+                    source_end = source_start + len(quote)
+                else:
+                    source_start = source_end = None
                 items.append(dict(
                     claim_id=f"C-{sid}.{ci + 1}.{k + 1}",
                     section_id=sid,
                     text=checked["claim"],
                     importance=importance,
                     cited_source_numbers=cited,
+                    source_start=source_start,
+                    source_end=source_end,
                 ))
             raw_by_section[sid][ci] = items
 
@@ -419,6 +433,20 @@ class ClaimVerifier:
         if self.progress is not None:
             self.progress.sync_cache(self.cache)
         return results
+
+    @classmethod
+    def _chunk_requires_claims(cls, text: str) -> bool:
+        """Conservative guard against a factual range disappearing.
+
+        A short heading or boilerplate may legitimately have no claims;
+        substantial prose, explicit citations or quantitative facts
+        require extraction, or an explicit verification failure.
+        """
+        if cls.CITATION_TAG_RE.search(text):
+            return True
+        body = re.sub(r"(?m)^#{1,6}[^\n]*$", "", text)
+        return (count_body_chars(body) >= MIN_FACTUAL_BODY_CHARS
+                or bool(re.search(r"\d+(?:[.,]\d+)?\s*(?:%|％|年|件|人|円|億|万|percent|million|billion)", body)))
 
     def _chunk(self, text: str) -> List[str]:
         text = text or ""
@@ -441,6 +469,7 @@ class ClaimVerifier:
 
 JSONで回答:
 {{"claims": [{{"claim": "主張の要約（原文の内容を保持）",
+  "source_quote": "対応する本文の一文を引用タグごと原文どおりに転記",
   "importance": "critical/important/minor",
   "source_numbers": [その主張の近くで引用されている [SOURCE N] のN。無ければ空リスト]}}]}}
 
@@ -457,6 +486,7 @@ dates, named entities, causal links, comparisons).
 
 Respond as JSON:
 {{"claims": [{{"claim": "the claim", "importance": "critical/important/minor",
+  "source_quote": "the exact original sentence including its citation tags",
   "source_numbers": [the N of [SOURCE N] citations next to the claim, or []]}}]}}
 
 Do not include opinions or generic statements. JSON only."""
@@ -469,7 +499,10 @@ Do not include opinions or generic statements. JSON only."""
 
     @classmethod
     def locate_cited_numbers(cls, claim_text: str,
-                             section_text: str) -> Tuple[bool, List[int]]:
+                             section_text: str,
+                             source_start: Optional[int] = None,
+                             source_end: Optional[int] = None,
+                             ) -> Tuple[bool, List[int]]:
         """Deterministically associate a claim with the [SOURCE N]
         citations of its OWN sentence — and only that sentence.
 
@@ -489,17 +522,69 @@ Do not include opinions or generic statements. JSON only."""
             return False, []
         claim_bi = _bigrams(claim_text)
         best_sent, best_score = "", 0.0
-        for para in text.split("\n\n"):
-            for sent in re.split(r"(?<=[。．！？!?.])\s*", para):
-                if len(sent.strip()) < 8:
-                    continue
-                score = _containment(claim_bi, _bigrams(sent))
-                if score > best_score:
-                    best_score, best_sent = score, sent
+        spans = cls._sentence_spans(text)
+        if (source_start is not None and source_end is not None
+                and 0 <= source_start < source_end <= len(text)):
+            matching = [text[start:end] for start, end in spans
+                        if start <= source_start < end]
+            if matching:
+                nums = cls.CITATION_TAG_RE.findall(matching[0])
+                return True, sorted({int(n) for n in nums})
+        # Exact original wording takes precedence over approximate
+        # similarity, which remains only a backward-compatible fallback.
+        exact_start = text.find(claim_text)
+        if exact_start >= 0 and text.find(claim_text, exact_start + 1) < 0:
+            for start, end in spans:
+                if start <= exact_start < end:
+                    nums = cls.CITATION_TAG_RE.findall(text[start:end])
+                    return True, sorted({int(n) for n in nums})
+        for start, end in spans:
+            sent = text[start:end]
+            if len(sent.strip()) < 8:
+                continue
+            score = _containment(claim_bi, _bigrams(sent))
+            if score > best_score:
+                best_score, best_sent = score, sent
         if best_score < 0.3:
             return False, []
         nums = [int(n) for n in cls.CITATION_TAG_RE.findall(best_sent)]
         return True, sorted(set(nums))
+
+    @classmethod
+    def _sentence_spans(cls, text: str) -> List[Tuple[int, int]]:
+        """Sentence positions, retaining trailing citation tags.
+
+        Decimal points and common English abbreviations are not sentence
+        boundaries. A citation immediately after terminal punctuation
+        belongs to the preceding sentence, never the following one.
+        """
+        spans = []
+        start = 0
+        for match in re.finditer(r"[。．！？!?]|\.(?!\d)|\n\n+", text):
+            pos = match.start()
+            if pos < start:
+                continue
+            if match.group() == ".":
+                prefix = text[start:pos + 1]
+                if re.search(r"\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|vs|etc)\.$", prefix, re.I):
+                    continue
+                if re.search(r"(?:\b[A-Za-z]\.){2,}$", prefix) or \
+                        re.match(r"[A-Za-z]\.", text[pos + 1:]):
+                    continue
+            end = match.end()
+            # Consume only citation tags, with any intervening spaces;
+            # normal words after punctuation begin the next sentence.
+            while True:
+                trailing = re.match(r"[ \t]*(?:\n[ \t]*)?\[SOURCE:?\s*\d+\]", text[end:])
+                if not trailing:
+                    break
+                end += trailing.end()
+            if text[start:end].strip():
+                spans.append((start, end))
+            start = end
+        if text[start:].strip():
+            spans.append((start, len(text)))
+        return spans
 
     @classmethod
     def parse_cited_numbers(cls, claim_text: str,
@@ -524,10 +609,10 @@ Do not include opinions or generic statements. JSON only."""
             url = getattr(ev, "url", "") or ""
             if not text.strip():
                 continue
-            fetched_at = str(getattr(ev, "collected_at", "") or
+            fetched_at = str(getattr(ev, "accessed_at", "") or
+                             getattr(ev, "collected_at", "") or
                              getattr(ev, "fetched_at", "") or "")
             meta = getattr(ev, "adaptive_meta", None) or {}
-            count = 0
             for pos in range(0, len(text), step):
                 chunk_text = text[pos:pos + step + 100]  # slight overlap
                 index.append(EvidenceChunk(
@@ -542,9 +627,6 @@ Do not include opinions or generic statements. JSON only."""
                                        or ""),
                     section_id=str(meta.get("section_id", "") or ""),
                     claim_id=str(meta.get("claim_id", "") or "")))
-                count += 1
-                if count >= MAX_CHUNKS_PER_EVIDENCE:
-                    break
         return index
 
     # ------------------------------------------------------------------
@@ -1361,7 +1443,17 @@ JSON only."""
     def _evidence_is_fresh(ev, now_year: int, max_age_years: int) -> bool:
         date = str(getattr(ev, "published_date", "") or "")
         m = re.search(r"(19|20)\d{2}", date)
-        return bool(m and now_year - int(m.group(0)) <= max_age_years)
+        if not m or not 0 <= now_year - int(m.group(0)) <= max_age_years:
+            return False
+        # Reject future dates within the current year too. Unknown or
+        # invalid full dates cannot establish freshness.
+        if re.fullmatch(r"\d{4}-\d{2}(?:-\d{2})?", date):
+            try:
+                dated = date if len(date) == 10 else date + "-01"
+                return datetime.fromisoformat(dated).date() <= datetime.now().date()
+            except ValueError:
+                return False
+        return bool(re.fullmatch(r"\d{4}", date))
 
     @staticmethod
     def _evidence_is_primary(ev) -> bool:
@@ -1485,7 +1577,8 @@ JSON only."""
                     claim.cited_source_numbers = []
                     continue
                 located, parsed = self.locate_cited_numbers(
-                    claim.text, chapters.get(claim.section_id, ""))
+                    claim.text, chapters.get(claim.section_id, ""),
+                    claim.source_start, claim.source_end)
                 # None = the extraction did not report the field at all;
                 # a reported list (even []) is compared STRICTLY
                 reported = claim.cited_source_numbers
@@ -1589,6 +1682,11 @@ JSON only."""
                 ))
             else:   # uncertain (including downgrades and judge errors)
                 verdict.metrics.uncertain_count += 1
+                if claim.importance == "critical":
+                    verdict.metrics.uncertain_critical_claims += 1
+                evidence_gap = (not claim.association_failed and
+                                not re.search(r"verification error|schema anomaly",
+                                              claim.reason, re.I))
                 verdict.issues.append(VerificationIssue(
                     section_id=claim.section_id,
                     claim_id=claim.claim_id,
@@ -1598,6 +1696,8 @@ JSON only."""
                     claim=claim.text,
                     reason=claim.reason,
                     supporting_source_ids=claim.supporting_source_ids,
+                    needed_evidence=claim.text if evidence_gap else "",
+                    search_queries=[claim.text[:60]] if evidence_gap else [],
                 ))
             # claim without citations -> integrity issue. Required for
             # critical/important claims REGARDLESS of whether the section

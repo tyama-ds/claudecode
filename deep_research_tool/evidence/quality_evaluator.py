@@ -7,6 +7,14 @@ import re
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, List
 from urllib.parse import urlparse
+from .source_metadata import source_type_for_url
+
+
+def _matches_domain(pattern: str, host: str) -> bool:
+    """Match an entire hostname suffix, never a substring of another host."""
+    if pattern.startswith(r"\."):
+        return re.search(pattern.rstrip("$") + "$", host) is not None
+    return re.search(r"(?:^|\.)(?:" + pattern.rstrip("$") + r")$", host) is not None
 
 from .locker import (
     Evidence,
@@ -98,7 +106,7 @@ class QualityEvaluator:
         """
         try:
             parsed = urlparse(url)
-            domain = parsed.netloc.lower()
+            domain = (parsed.hostname or "").lower().rstrip(".")
         except Exception:
             return {
                 "source_type": SourceType.UNKNOWN,
@@ -108,7 +116,7 @@ class QualityEvaluator:
 
         # Check authoritative domains
         for pattern in AUTHORITATIVE_DOMAINS:
-            if re.search(pattern, domain):
+            if _matches_domain(pattern, domain):
                 return {
                     "source_type": self._detect_source_type_from_domain(domain),
                     "quality_category": QualityCategory.AUTHORITATIVE,
@@ -117,7 +125,7 @@ class QualityEvaluator:
 
         # Check high quality domains
         for pattern in HIGH_QUALITY_DOMAINS:
-            if re.search(pattern, domain):
+            if _matches_domain(pattern, domain):
                 return {
                     "source_type": self._detect_source_type_from_domain(domain),
                     "quality_category": QualityCategory.HIGH,
@@ -126,7 +134,7 @@ class QualityEvaluator:
 
         # Check medium quality domains
         for pattern in MEDIUM_QUALITY_DOMAINS:
-            if re.search(pattern, domain):
+            if _matches_domain(pattern, domain):
                 return {
                     "source_type": self._detect_source_type_from_domain(domain),
                     "quality_category": QualityCategory.MEDIUM,
@@ -135,7 +143,7 @@ class QualityEvaluator:
 
         # Check low quality patterns
         for pattern in LOW_QUALITY_PATTERNS:
-            if re.search(pattern, domain):
+            if _matches_domain(pattern, domain):
                 return {
                     "source_type": self._detect_source_type_from_domain(domain),
                     "quality_category": QualityCategory.LOW,
@@ -151,44 +159,7 @@ class QualityEvaluator:
 
     def _detect_source_type_from_domain(self, domain: str) -> SourceType:
         """Detect source type from domain."""
-        domain = domain.lower()
-
-        # Government
-        if any(re.search(p, domain) for p in [r"\.gov", r"\.go\.", r"\.govt\."]):
-            return SourceType.OFFICIAL
-
-        # Academic
-        if any(re.search(p, domain) for p in [r"\.edu", r"\.ac\.", r"arxiv", r"pubmed"]):
-            return SourceType.ACADEMIC
-
-        # News
-        news_patterns = ["news", "times", "post", "guardian", "bbc", "cnn", "reuters", "nhk", "asahi", "nikkei"]
-        if any(p in domain for p in news_patterns):
-            return SourceType.NEWS
-
-        # Wiki
-        if "wiki" in domain:
-            return SourceType.WIKI
-
-        # Social
-        social_patterns = ["twitter", "facebook", "instagram", "tiktok", "reddit", "x.com"]
-        if any(p in domain for p in social_patterns):
-            return SourceType.SOCIAL
-
-        # Forum
-        if any(p in domain for p in ["forum", "quora", "stackoverflow"]):
-            return SourceType.FORUM
-
-        # Blog
-        blog_patterns = ["blog", "medium", "substack", "wordpress", "blogspot"]
-        if any(p in domain for p in blog_patterns):
-            return SourceType.BLOG
-
-        # Commercial
-        if any(p in domain for p in [".com", ".co.", "shop", "store", "buy"]):
-            return SourceType.COMMERCIAL
-
-        return SourceType.UNKNOWN
+        return SourceType(source_type_for_url("https://" + domain))
 
     def evaluate_content(
         self,

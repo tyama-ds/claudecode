@@ -3,6 +3,8 @@ Content Extractor - Extract and process information from search results.
 """
 
 import json
+import re
+from .cache import SingleFlightCache, content_hash
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from datetime import datetime
@@ -42,6 +44,7 @@ class ExtractedContent:
     importance_score: float = 0.0  # importance to the overall research purpose
     extraction_notes: str = ""
     extracted_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -57,6 +60,7 @@ class ExtractedContent:
             "importance_score": self.importance_score,
             "extraction_notes": self.extraction_notes,
             "extracted_at": self.extracted_at,
+            "metadata": self.metadata,
         }
 
 
@@ -97,6 +101,53 @@ class ContentExtractor:
         # app-wide parallelism ceiling (parallel_max_workers); the stage
         # cap CHUNK_WORKERS still applies on top
         self.max_parallel_workers = max_parallel_workers
+        self.max_selected_chars = None
+        self.extraction_cache = SingleFlightCache()
+        self.timings = None
+
+    def _check_cancel(self):
+        check = getattr(self, 'cancel_check', None)
+        if check is not None:
+            check()
+
+    def _select_chunks(self, raw_content, section_context, research_query):
+        """Rank bounded windows across the entire source; keep exact offsets."""
+        import math
+        # Bound each candidate BEFORE scoring: clipping a high-ranked 6k
+        # window to a 1k budget afterwards can remove the matching passage.
+        budget = int(self.max_selected_chars) if self.max_selected_chars else None
+        cap = self.MAX_CHUNKS or max(1, math.ceil(len(raw_content) / self.CHUNK_SIZE))
+        window = self.CHUNK_SIZE
+        if budget:
+            cap = min(cap, max(1, math.ceil(budget / self.CHUNK_SIZE)))
+            window = min(window, max(1, budget // cap))
+        overlap = min(self.CHUNK_OVERLAP, window // 4)
+        step = max(1, window - overlap)
+        starts = list(range(0, len(raw_content), step)) or [0]
+        chunks = [raw_content[start:start + window] for start in starts]
+        query = f"{section_context} {research_query}".lower()
+        terms = set(re.findall(r'[a-z0-9][a-z0-9_-]{2,}', query))
+        for word in re.findall(r'[\u3040-\u30ff\u3400-\u9fff]+', query):
+            terms.update(word[i:i + 2] for i in range(len(word) - 1))
+        scores = [sum(min(chunk.lower().count(term), 3) for term in terms)
+                  for chunk in chunks]
+        if len(chunks) > cap:
+            chosen = sorted(range(len(chunks)), key=lambda i: (-scores[i], i))[:cap]
+            if not any(scores):
+                chosen = ([round(i * (len(chunks) - 1) / (cap - 1)) for i in range(cap)]
+                          if cap > 1 else [0])
+            indices = sorted(chosen)
+        else:
+            indices = list(range(len(chunks)))
+        spans = []
+        for i in indices:
+            start = starts[i]
+            text = chunks[i]
+            if not text:
+                continue
+            spans.append({'start_offset': start, 'end_offset': start + len(text),
+                          'chunk_index': i, 'text': text})
+        return spans or [{'start_offset': 0, 'end_offset': 0, 'chunk_index': 0, 'text': ''}]
 
     def _split_into_chunks(self, text: str) -> List[str]:
         """Split text into overlapping chunks, merging runt tails."""
@@ -157,6 +208,7 @@ Include exact quotes that could be cited in the report.
 Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
 
         try:
+            self._check_cancel()
             response = self.eval_llm.generate(prompt)
             data = extract_json_from_response(response.content)
             if data is not None:
@@ -220,6 +272,26 @@ Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
         }
 
     def extract_relevant_content(
+        self, raw_content: str, source_url: str, source_title: str,
+        section_context: str, research_query: str,
+    ) -> ExtractedContent:
+        self._check_cancel()
+        key = (content_hash(raw_content), source_url, source_title, section_context,
+               research_query, self.language, id(self.eval_llm),
+               str(getattr(self.eval_llm, 'model', '')), 'extraction-v2-full-span',
+               self.CHUNK_SIZE, self.CHUNK_OVERLAP, self.MAX_CHUNKS, self.max_selected_chars)
+        def extract():
+            operation = self._extract_relevant_content_uncached
+            args = (raw_content, source_url, source_title, section_context, research_query)
+            return (self.timings.call('extract', operation, *args) if self.timings is not None
+                    else operation(*args))
+        return self.extraction_cache.get_or_compute(
+            key, extract,
+            cacheable=lambda value: (value.metadata.get('extraction_complete', True)
+                                     and 'failed' not in str(value.extraction_notes).lower()),
+        )
+
+    def _extract_relevant_content_uncached(
         self,
         raw_content: str,
         source_url: str,
@@ -249,7 +321,18 @@ Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
             else f"Respond in {self.language}."
         )
 
-        chunks = self._split_into_chunks(raw_content)
+        spans = self._select_chunks(raw_content, section_context, research_query)
+        chunks = [span['text'] for span in spans]
+        selected_spans = [{k: v for k, v in span.items() if k != 'text'} for span in spans]
+        source_metadata = {'source_spans': [], 'failed_spans': list(selected_spans),
+                           'extraction_complete': False,
+                           'source_hash': content_hash(raw_content),
+                           'source_characters': len(raw_content)}
+
+        def usable(data):
+            return isinstance(data, dict) and bool(
+                (isinstance(data.get('processed_content'), str) and data['processed_content'].strip())
+                or data.get('key_points') or data.get('quotes'))
 
         if len(chunks) == 1:
             # Single chunk – direct extraction (same as before but without truncation loss)
@@ -257,7 +340,8 @@ Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
                 chunks[0], source_url, source_title,
                 section_context, research_query, lang_instruction,
             )
-            if data:
+            if usable(data):
+                source_metadata.update(source_spans=selected_spans, failed_spans=[], extraction_complete=True)
                 processed = data.get("processed_content", "")
                 if not processed or len(processed.strip()) < 10:
                     processed = raw_content[:2000]
@@ -270,23 +354,16 @@ Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
                     quotes=data.get("quotes", []),
                     relevance_score=float(data.get("relevance_score", 0.5)),
                     extraction_notes=data.get("extraction_notes", ""),
+                    metadata=source_metadata,
                 )
         else:
-            # Cap runaway chunk counts (a 50k-char page would otherwise be
-            # ~9 LLM calls; without a cap this is the main cause of very slow
-            # sections). Keep the leading chunks, which hold the most on-topic
-            # content for a focused query.
-            if self.MAX_CHUNKS and len(chunks) > self.MAX_CHUNKS:
-                print(f"[ContentExtractor] capping {len(chunks)} chunks to "
-                      f"{self.MAX_CHUNKS} for '{source_title[:40]}'")
-                chunks = chunks[:self.MAX_CHUNKS]
-
             # Multi-chunk extraction. Chunks are independent, so extract them
             # concurrently instead of one blocking LLM call after another.
             print(f"[ContentExtractor] Chunked extraction: {len(chunks)} chunks "
                   f"for '{source_title[:40]}' ({len(raw_content):,} chars)")
 
             def _work(item):
+                self._check_cancel()
                 i, chunk = item
                 label = f"(Chunk {i + 1}/{len(chunks)})"
                 return self._extract_single_chunk(
@@ -305,10 +382,19 @@ Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
                     results = list(ex.map(_work, list(enumerate(chunks))))
             else:
                 results = [_work(item) for item in enumerate(chunks)]
-            chunk_results = [r for r in results if r]
+            chunk_results = [r for r in results if usable(r)]
+            source_metadata['source_spans'] = [span for span, result in zip(selected_spans, results) if usable(result)]
+            source_metadata['failed_spans'] = [span for span, result in zip(selected_spans, results) if not usable(result)]
+            source_metadata['extraction_complete'] = not source_metadata['failed_spans']
 
             if chunk_results:
                 merged = self._merge_chunk_results(chunk_results)
+                if source_metadata['failed_spans']:
+                    note = f"Partial extraction: {len(source_metadata['failed_spans'])}/{len(spans)} chunks failed"
+                    merged['extraction_notes'] = (str(merged.get('extraction_notes') or '') + ' | ' + note).strip(' |')
+                    ResearchWarnings.get_instance().add(
+                        ResearchWarnings.MEDIUM, 'ContentExtractor',
+                        f"{note} for '{source_title[:60]}'; failed spans remain available for retry.")
                 processed = merged.get("processed_content", "")
                 if not processed or len(processed.strip()) < 10:
                     processed = raw_content[:2000]
@@ -321,6 +407,7 @@ Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
                     quotes=merged.get("quotes", []),
                     relevance_score=float(merged.get("relevance_score", 0.5)),
                     extraction_notes=merged.get("extraction_notes", ""),
+                    metadata=source_metadata,
                 )
 
         # Fallback: all chunks failed
@@ -337,6 +424,7 @@ Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
             processed_content=raw_content[:2000],
             relevance_score=0.5,
             extraction_notes="LLM extraction failed for all chunks, returning raw content",
+            metadata=source_metadata,
         )
 
     def synthesize_section_content(
@@ -432,6 +520,7 @@ After the body, output this delimiter followed by metadata:
 {SECTION_META_DELIMITER}
 {{"summary": "Brief summary of key findings", "analysis_points": ["Your analytical insights"], "information_gaps": ["Areas needing more research"], "confidence_level": "high/medium/low"}}"""
 
+        self._check_cancel()
         response = self.llm.generate(prompt)
 
         # Prepare fallback content in case parsing fails or content is empty
@@ -540,22 +629,33 @@ Key Points: {', '.join(ec.key_points[:3]) if ec.key_points else 'N/A'}
         print(f"[DEBUG] Phase 2: Generating content for {num_points} outline points "
               f"(target {target_per_point} chars/point)")
 
-        detailed_sections = []
-        for i, point in enumerate(outline):
+        def generate_point(item):
+            self._check_cancel()
+            i, point = item
             print(f"[DEBUG] Generating content for point {i+1}: {point.get('title', '')[:30]}...")
             point_content = self._generate_point_content(
                 section_title, point, sources_text, lang_instruction,
                 target_chars=target_per_point,
             )
-            detailed_sections.append({
+            return {
                 "title": point.get("title", f"Point {i+1}"),
                 "content": point_content
-            })
+            }
+
+        from ..utils.concurrency import effective_workers
+        workers = effective_workers(self.max_parallel_workers, 4, len(outline))
+        if workers > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                detailed_sections = list(executor.map(generate_point, enumerate(outline)))
+        else:
+            detailed_sections = [generate_point(item) for item in enumerate(outline)]
 
         # Phase 3: Integrate all content
         print(f"[DEBUG] Phase 3: Integrating {len(detailed_sections)} sections")
-        final_content = self._integrate_content(
-            section_title, section_description, detailed_sections, lang_instruction
+        final_content, section_summary = self._integrate_content(
+            section_title, section_description, detailed_sections, lang_instruction,
+            include_summary=True,
         )
 
         # Collect source references
@@ -575,7 +675,7 @@ Key Points: {', '.join(ec.key_points[:3]) if ec.key_points else 'N/A'}
 
         return {
             "content": final_content,
-            "summary": self._generate_section_summary(section_title, final_content, lang_instruction),
+            "summary": section_summary,
             "source_references": source_refs,
             "analysis_points": [s["title"] for s in detailed_sections],
             "information_gaps": information_gaps,
@@ -634,6 +734,7 @@ Return as JSON:
 Output JSON only:"""
 
         try:
+            self._check_cancel()
             response = self.llm.generate(prompt)
             content = response.content
             outline = []
@@ -728,6 +829,7 @@ IMPORTANT:
 Write the content directly (no JSON):"""
 
         try:
+            self._check_cancel()
             response = self.llm.generate(prompt)
             content = response.content.strip()
             # Remove any JSON wrapping if present
@@ -740,6 +842,7 @@ Write the content directly (no JSON):"""
                     pass
             return content if content else f"{point.get('title', '')}: Information could not be generated."
         except Exception as e:
+            self._check_cancel()
             print(f"[WARNING] Point content generation failed: {e}")
             return f"{point.get('title', '')}: Information could not be generated due to an error."
 
@@ -749,6 +852,7 @@ Write the content directly (no JSON):"""
         section_description: str,
         detailed_sections: List[Dict[str, str]],
         lang_instruction: str,
+        include_summary: bool = False,
     ) -> str:
         """Integrate multiple content sections into cohesive text."""
         sections_text = "\n\n".join(
@@ -796,12 +900,24 @@ Requirements:
 
 Write the integrated content directly (no JSON, no section title):"""
 
+        if include_summary:
+            prompt += (f'\n本文の後に {SECTION_META_DELIMITER} を置き、'
+                       '続けて要約をJSONで出力: {"summary": "本文に基づく2〜3文の要約"}'
+                       if self.language == 'ja' else
+                       f'\nAfter the body write {SECTION_META_DELIMITER}, followed by '
+                       'JSON: {"summary": "2-3 sentences grounded in the body"}')
+
         try:
+            self._check_cancel()
             response = self.llm.generate(prompt)
             content = response.content.strip()
             if content:
+                if include_summary:
+                    body, meta = split_prose_and_meta(content, SECTION_META_DELIMITER)
+                    return body, str(meta.get('summary') or body[:300])
                 return content
         except Exception as e:
+            self._check_cancel()
             print(f"[WARNING] Content integration failed: {e}")
             ResearchWarnings.get_instance().add(
                 ResearchWarnings.MEDIUM,
@@ -812,7 +928,8 @@ Write the integrated content directly (no JSON, no section title):"""
             )
 
         # Fallback: just join the sections
-        return "\n\n".join(s['content'] for s in detailed_sections)
+        fallback = "\n\n".join(s['content'] for s in detailed_sections)
+        return (fallback, fallback[:300]) if include_summary else fallback
 
     def _generate_section_summary(
         self,
@@ -841,9 +958,11 @@ Write a brief summary (2-3 sentences) of this section's key points.
 Write the summary directly (no JSON):"""
 
         try:
+            self._check_cancel()
             response = self.llm.generate(prompt)
             return response.content.strip()
         except Exception:
+            self._check_cancel()
             return f"Summary of {section_title}"
 
     def evaluate_source_quality(
@@ -883,6 +1002,7 @@ Analyze and return as JSON:
     "evaluation_notes": "Brief notes on source quality"
 }}"""
 
+        self._check_cancel()
         response = self.eval_llm.generate(prompt)
 
         try:
@@ -955,6 +1075,7 @@ Which images might be useful for illustrating this research topic?
 Return as JSON array with relevance (high/medium/low/none):
 [{{"index": 1, "relevance": "high/medium/low/none", "suggested_caption": "..."}}]"""
 
+        self._check_cancel()
         response = self.eval_llm.generate(prompt)
 
         try:

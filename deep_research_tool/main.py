@@ -529,6 +529,8 @@ class DeepResearchTool:
         # live verification progress (phases / counters / cancel) — the
         # Web UI polls this and can request a safe cancellation
         self.verification_progress = VerificationProgress()
+        from .utils.timing import StageTimings
+        self.stage_timings = StageTimings()
         run_limits = RunLimits(self.config.research.parallel_max_workers)
         self.run_limits = run_limits
         run_token_stats = TokenUsageStats()
@@ -537,10 +539,12 @@ class DeepResearchTool:
             try:
                 _client.concurrency_limiter = run_limits
                 _client.token_stats = run_token_stats
+                _client.cancel_check = _cancel_checkpoint
             except Exception:
                 pass
         try:
             self.search_client.concurrency_limiter = run_limits
+            self.search_client.cancel_check = _cancel_checkpoint
         except Exception:
             pass
 
@@ -567,6 +571,11 @@ class DeepResearchTool:
 
         # Initialize researcher with content filter
         content_filter = self._create_content_filter()
+        # A tool instance can be run repeatedly. Reuse connections, never
+        # the previous run's snapshots or cache counters for a new query.
+        from .research.cache import CachedSearchClient
+        if isinstance(self.search_client, CachedSearchClient):
+            self.search_client = self.search_client._client
 
         # Plan review: explicit callback wins; otherwise use the console
         # prompt (with auto-continue timeout) when enabled in config
@@ -625,8 +634,14 @@ class DeepResearchTool:
             plan_review_callback=plan_review_callback,
         )
 
+        self.researcher.cancel_check = _cancel_checkpoint
+        for worker_name in ("content_extractor", "fast_crawler"):
+            worker = getattr(self.researcher, worker_name, None)
+            if worker is not None:
+                worker.cancel_check = _cancel_checkpoint
+
         # Conduct research
-        session = self.researcher.conduct_research(
+        session = self.stage_timings.call("research", self.researcher.conduct_research,
             query=query,
             requirements=requirements,
             additional_context=additional_context,
@@ -634,6 +649,9 @@ class DeepResearchTool:
         )
 
         evidence_locker = self.researcher.get_evidence_locker()
+        research_search = getattr(self.researcher, "search", None)
+        if research_search is not None:
+            self.search_client = research_search
 
         # --- live report sinks (Web UI preview and/or Word COM) ---
         # Everything emitted before on_finalized is a watermarked DRAFT;
@@ -667,7 +685,7 @@ class DeepResearchTool:
         # Apply DeepThink processing if enabled
         deep_think_results = None
         if self.config.deep_think.enabled and self.deep_think_processor:
-            session, deep_think_results = self._apply_deep_think(
+            session, deep_think_results = self.stage_timings.call("deep_think", self._apply_deep_think,
                 session=session,
                 evidence_locker=evidence_locker,
                 progress_callback=progress_callback,
@@ -700,7 +718,7 @@ class DeepResearchTool:
             if progress_callback:
                 progress_callback(
                     "Reviewing all evidence for report enhancement...", 88)
-            session = self._enhance_sections_with_full_evidence(
+            session = self.stage_timings.call("evidence_enhancement", self._enhance_sections_with_full_evidence,
                 session=session,
                 evidence_locker=evidence_locker,
                 query=query,
@@ -765,7 +783,7 @@ class DeepResearchTool:
             if progress_callback:
                 progress_callback("Running Fermi estimation...", 96)
 
-            fermi_results, fermi_markdown = self._run_fermi_estimation(
+            fermi_results, fermi_markdown = self.stage_timings.call("fermi", self._run_fermi_estimation,
                 session=session,
                 evidence_locker=evidence_locker,
                 query=query,
@@ -784,7 +802,7 @@ class DeepResearchTool:
                 progress_callback("Generating figures and tables...", 94)
             try:
                 figure_collection, fig_generator = \
-                    self._generate_figure_collection(
+                    self.stage_timings.call("figures", self._generate_figure_collection,
                         session=session, evidence_locker=evidence_locker)
             except Exception as e:
                 print(f"[AutoFigures] Failed with error: {e}. "
@@ -801,7 +819,7 @@ class DeepResearchTool:
         semantic_freeze_hash = None
         if version_tag == "v3":
             # V3: DOCX-native generation flow
-            result = generator.generate_report(
+            result = self.stage_timings.call("writing", generator.generate_report,
                 research_topic=query,
                 research_plan=session.research_plan,
                 section_contents=session.section_contents,
@@ -815,7 +833,7 @@ class DeepResearchTool:
                     generator, result, fermi_markdown,
                     figure_collection=figure_collection)
                 verification_result, verification_html = \
-                    self._run_finalization_loop(
+                    self.stage_timings.call("verification", self._run_finalization_loop,
                         result=result,
                         session=session,
                         evidence_locker=evidence_locker,
@@ -843,7 +861,7 @@ class DeepResearchTool:
 
             # Build DOCX directly via python-docx API
             output_dir = self.config.report.output_dir / "reports"
-            report_path = generator.generate_and_save(
+            report_path = self.stage_timings.call("rendering", generator.generate_and_save,
                 result=result,
                 output_dir=output_dir,
                 filename=f"report_{session.session_id}",
@@ -857,7 +875,7 @@ class DeepResearchTool:
 
         elif version_tag == "v2":
             # V2: Use new generation flow
-            result = generator.generate_report(
+            result = self.stage_timings.call("writing", generator.generate_report,
                 research_topic=query,
                 research_plan=session.research_plan,
                 section_contents=session.section_contents,
@@ -874,7 +892,7 @@ class DeepResearchTool:
                     generator, result, fermi_markdown,
                     figure_collection=figure_collection)
                 verification_result, verification_html = \
-                    self._run_finalization_loop(
+                    self.stage_timings.call("verification", self._run_finalization_loop,
                         result=result,
                         session=session,
                         evidence_locker=evidence_locker,
@@ -891,7 +909,7 @@ class DeepResearchTool:
                     figure_collection)
 
             # Generate final document as markdown
-            final_doc = generator.generate_final_document(
+            final_doc = self.stage_timings.call("rendering", generator.generate_final_document,
                 result,
                 include_glossary=(self.config.report.v2_include_glossary
                                   and not extras_flags.get("glossary")),
@@ -915,7 +933,7 @@ class DeepResearchTool:
 
             # Save to file in the configured format (DOCX/PDF/HTML/MD)
             output_dir = self.config.report.output_dir / "reports"
-            report_path = generator.save_report(
+            report_path = self.stage_timings.call("rendering", generator.save_report,
                 markdown_content=final_doc,
                 output_dir=output_dir,
                 filename=f"report_{session.session_id}",
@@ -938,7 +956,7 @@ class DeepResearchTool:
                             prev.rstrip() + "\n" + fermi_markdown)
                         fermi_markdown = ""
                 verification_result, verification_html = \
-                    self._run_finalization_v1(
+                    self.stage_timings.call("verification", self._run_finalization_v1,
                         session=session,
                         evidence_locker=evidence_locker,
                         query=query,
@@ -964,7 +982,7 @@ class DeepResearchTool:
             # After finalization the body is FROZEN: the legacy length
             # adjustment must never rewrite a verified body, so the
             # targets are only applied on the unverified path.
-            report_path = generator.generate_report(
+            report_path = self.stage_timings.call("writing", generator.generate_report,
                 session=session,
                 evidence_locker=evidence_locker,
                 format=self.config.report.format,
@@ -1131,6 +1149,23 @@ class DeepResearchTool:
                 except Exception:
                     pass
 
+        # Persist timings separately from report semantics. Rendering and
+        # verification can be compared without placing internals in the body.
+        performance = self.stage_timings.snapshot()
+        if isinstance(getattr(self.researcher, "timings", None), StageTimings):
+            performance["research_details"] = self.researcher.performance_snapshot()
+        performance["token_usage"] = run_token_stats.to_dict()
+        performance["max_concurrency_observed"] = run_limits.run_peak
+        for name, cache in (
+            ("pages", getattr(self.search_client, "_page_cache", None)),
+            ("extractions", getattr(getattr(self.researcher, "content_extractor", None), "extraction_cache", None)),
+        ):
+            if cache is not None and isinstance(getattr(cache, "hits", None), int):
+                performance.setdefault("cache", {})[name] = {"hits": cache.hits, "misses": cache.misses}
+        performance_path = self.config.report.output_dir / f"performance_{session.session_id}.json"
+        import json
+        performance_path.write_text(json.dumps(performance, ensure_ascii=False, indent=2), encoding="utf-8")
+
         # Get token usage statistics
         token_stats = get_token_stats()
 
@@ -1147,6 +1182,8 @@ class DeepResearchTool:
             "verification_result": verification_result,
             "deep_think_results": deep_think_results,
             "fermi_estimation_results": fermi_results,
+            "performance": performance,
+            "performance_json": str(performance_path),
             "token_usage": run_token_stats.to_dict(),
             "max_concurrency_observed": run_limits.run_peak,
             "semantic_manifest_hash_at_freeze": semantic_freeze_hash,
@@ -2026,6 +2063,17 @@ class DeepResearchTool:
             Enhanced ResearchSession with improved section contents
         """
         try:
+            section_keys = []
+            for key, data in session.section_contents.items():
+                if key.startswith("_"):
+                    continue
+                content = data.get("content", "")
+                if (len(content.strip()) < 200 or data.get("gaps") or data.get("information_gaps")
+                        or data.get("confidence", data.get("confidence_level")) == "low"
+                        or (data.get("sources") and "[SOURCE " not in content)):
+                    section_keys.append(key)
+            if not section_keys:
+                return session
             all_evidence = evidence_locker.get_all_evidence()
             if not all_evidence:
                 print("[Evidence Review] No evidence available for enhancement")
@@ -2074,11 +2122,15 @@ class DeepResearchTool:
                     if not url or not url.startswith("http"):
                         continue
                     try:
-                        page = self.search_client.get_page_content(url)
-                        if page.text_content and len(page.text_content) > 100:
+                        stored = evidence_locker.get_by_url(url)
+                        raw_text = getattr(stored, "extracted_text", "") if stored else ""
+                        if not raw_text:
+                            page = self.search_client.get_page_content(url)
+                            raw_text = page.text_content if not page.metadata.get("error") else ""
+                        if raw_text and len(raw_text) > 100:
                             re_extracted_data[url] = {
                                 "title": url_info["title"],
-                                "content": page.text_content[:3000],
+                                "content": raw_text[:3000],
                             }
                             print(f"[Evidence Review] Re-extracted data from: {url[:60]}")
                     except Exception as e:
@@ -2088,7 +2140,6 @@ class DeepResearchTool:
             evidence_overview = self._build_evidence_overview(evidence_summaries, re_extracted_data)
 
             # Step 4: Enhance each section with full evidence context
-            section_keys = [k for k in session.section_contents.keys() if not k.startswith("_")]
             if not section_keys:
                 print("[Evidence Review] No sections to enhance")
                 return session

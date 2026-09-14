@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pathlib import Path
+from contextlib import contextmanager
 
 
 @dataclass
@@ -53,6 +54,13 @@ class PageContent:
     metadata: Dict[str, Any] = field(default_factory=dict)
     extracted_at: datetime = field(default_factory=datetime.now)
 
+    def __post_init__(self):
+        from ..evidence.source_metadata import extract_source_metadata
+        self.metadata = dict(self.metadata) if isinstance(self.metadata, dict) else {}
+        self.metadata.update(extract_source_metadata(
+            self.url, self.text_content, self.metadata, self.html_content))
+        self.metadata.setdefault("retrieved_at", self.extracted_at.isoformat())
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
@@ -94,9 +102,14 @@ class BaseSearchClient(ABC):
         # RunLimits): leaf HTTP operations take one composed permit
         self.concurrency_limiter = None
 
-    def _leaf_permit(self):
+    @contextmanager
+    def _leaf_permit(self, timeout=None):
         from ..utils.concurrency import maybe_permit
-        return maybe_permit(getattr(self, "concurrency_limiter", None))
+        check = getattr(self, 'cancel_check', lambda: None)
+        check()
+        with maybe_permit(getattr(self, "concurrency_limiter", None), timeout=timeout):
+            check()
+            yield
 
     @abstractmethod
     def search(self, query: str, **kwargs) -> List[SearchResult]:

@@ -31,6 +31,8 @@ AIを活用した自動リサーチツール。OpenAI/Anthropic APIとWeb検索�
 
 ## インストール
 
+速度・精度の監査に基づく変更、互換性、計測方法は [2026-09-14 監査対応](deep_research_tool/AUDIT_FIXES_20260914.md) を参照してください。
+
 ```bash
 # リポジトリをクローン
 git clone https://github.com/your-repo/deep-research-tool.git

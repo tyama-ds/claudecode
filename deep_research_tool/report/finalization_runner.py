@@ -379,11 +379,18 @@ class FinalizationRunner:
             # report body + sections + claims-bearing text + evidence +
             # citation relations: when NOTHING substantive changed, the
             # previous verdict stands without any LLM call
-            evidence_sig = stable_hash(
-                "ev", *sorted(
-                    f"{getattr(e, 'id', '')}:"
-                    f"{stable_hash(getattr(e, 'extracted_text', '') or getattr(e, 'content_excerpt', '') or '')}"
-                    for e in self.locker.get_all_evidence()))
+            evidence_versions = []
+            for evidence in self.locker.get_all_evidence():
+                indicators = getattr(evidence, "quality_indicators", None)
+                evidence_versions.append(stable_hash(
+                    getattr(evidence, "id", ""),
+                    getattr(evidence, "extracted_text", "") or
+                    getattr(evidence, "content_excerpt", "") or "",
+                    str(getattr(evidence, "published_date", "")),
+                    str(getattr(evidence, "source_type", "")),
+                    str(getattr(evidence, "quality_category", "")),
+                    str(getattr(indicators, "is_primary_source", False))))
+            evidence_sig = stable_hash("ev", *sorted(evidence_versions))
             registry_sig = stable_hash(
                 "reg",
                 *[f"{sid}:" + ",".join(
@@ -401,7 +408,9 @@ class FinalizationRunner:
             fp = _fingerprint(body)
             if (self.verification_settings.cache_enabled
                     and last_verify["fingerprint"] == fp
-                    and last_verify["verdict"] is not None):
+                    and last_verify["verdict"] is not None
+                    and not last_verify["verdict"].metrics.chunks_failed
+                    and not last_verify["verdict"].metrics.verification_failed):
                 self.verification_cache.hits += 1
                 self.verification_progress.sync_cache(
                     self.verification_cache)
@@ -628,25 +637,13 @@ class FinalizationRunner:
     # research round (live locker updates, dedup, no refetch)
     # ------------------------------------------------------------------
 
-    _DATE_RE = re.compile(
-        r"((?:19|20)\d{2})[年/\-.](\d{1,2})[月/\-.]?(?:(\d{1,2})日?)?")
-
     def _classify_new_evidence(self, url: str, text: str):
         """(published_date, source_type, is_primary) for researched pages."""
         from ..evidence.locker import SourceType
-        published = ""
-        m = self._DATE_RE.search((text or "")[:3000])
-        if m:
-            month = int(m.group(2))
-            day = int(m.group(3) or 1)
-            if 1 <= month <= 12 and 1 <= day <= 31:
-                published = f"{m.group(1)}-{month:02d}-{day:02d}"
-        host = re.sub(r"^https?://", "", url or "").split("/")[0].lower()
-        if re.search(r"\.(go\.jp|gov(\.[a-z]{2})?)$|\.gouv\.", host):
-            return published, SourceType.OFFICIAL, True
-        if re.search(r"\.(ac\.jp|edu(\.[a-z]{2})?)$", host):
-            return published, SourceType.ACADEMIC, True
-        return published, SourceType.UNKNOWN, False
+        from ..evidence.source_metadata import extract_source_metadata
+        meta = extract_source_metadata(url, text=text)
+        return (meta["published_date"], SourceType(meta["source_type"]),
+                meta["is_primary_source"])
 
     def _is_duplicate_content(self, text: str) -> bool:
         """Reposts (URL-different copies) never count as new sources."""
@@ -708,6 +705,7 @@ class FinalizationRunner:
             section_reference=target_sections[0] if target_sections else "",
             published_date=published,
             source_type=src_type,
+            metadata=getattr(page, "metadata", None) or {},
         )
         if is_primary:
             evidence.quality_indicators.is_primary_source = True
@@ -1101,7 +1099,8 @@ class FinalizationRunner:
             REQ_OPEN, REQ_SUPPORTED, REQ_UNAVAILABLE)
         from ..report.finalization import (
             FRESHNESS_FAIL, ISSUE_CONTRADICTED, ISSUE_STALE_OR_NON_PRIMARY,
-            ISSUE_UNANSWERED_QUESTION, ISSUE_UNSUPPORTED)
+            ISSUE_UNANSWERED_QUESTION, ISSUE_UNSUPPORTED, ISSUE_UNCERTAIN,
+            ISSUE_CITATION_ASSOCIATION_FAILURE, ISSUE_VERIFICATION_FAILURE)
 
         m = verdict.metrics
         supported_claims = max(
@@ -1125,12 +1124,15 @@ class FinalizationRunner:
                 continue
             if not i.section_id:
                 continue
-            if i.type == ISSUE_UNSUPPORTED:
+            if i.type in (ISSUE_UNSUPPORTED, ISSUE_UNCERTAIN,
+                          ISSUE_CITATION_ASSOCIATION_FAILURE):
                 sec_open.setdefault(i.section_id, []).append(i.claim_id)
             elif i.type == ISSUE_CONTRADICTED:
                 sec_conflicted.setdefault(i.section_id, []).append(i.claim_id)
 
         freshness_failed = m.primary_freshness == FRESHNESS_FAIL
+        extraction_failed = (m.verification_failed or m.chunks_failed > 0
+                             or bool(verdict.issues_of(ISSUE_VERIFICATION_FAILURE)))
 
         def _freshness_blocks(req) -> bool:
             """True when THIS requirement's freshness demand is unmet."""
@@ -1162,7 +1164,10 @@ class FinalizationRunner:
                     target = REQ_SUPPORTED
             # freshness gate: an unmet freshness/primary demand keeps
             # the requirement OPEN even when its claims verified
-            if target == REQ_SUPPORTED and _freshness_blocks(req):
+            if target == REQ_SUPPORTED and extraction_failed:
+                target = REQ_OPEN
+                reason = "unverified body ranges remain"
+            elif target == REQ_SUPPORTED and _freshness_blocks(req):
                 target = REQ_OPEN
                 reason = ("一次情報・鮮度要件が未充足"
                           if self.language == "ja"

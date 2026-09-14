@@ -136,6 +136,7 @@ class VerificationMetrics:
     critical_question_coverage: float = 1.0
     claim_support_score: float = 1.0
     unsupported_critical_claims: int = 0
+    uncertain_critical_claims: int = 0
     unsupported_count: int = 0
     contradicted_count: int = 0
     uncertain_count: int = 0
@@ -167,6 +168,7 @@ class VerificationMetrics:
             "critical_question_coverage": self.critical_question_coverage,
             "claim_support_score": self.claim_support_score,
             "unsupported_critical_claims": self.unsupported_critical_claims,
+            "uncertain_critical_claims": self.uncertain_critical_claims,
             "unsupported_count": self.unsupported_count,
             "contradicted_count": self.contradicted_count,
             "uncertain_count": self.uncertain_count,
@@ -350,6 +352,10 @@ def passes_hard_gates(verdict: StructuredVerdict, budget: LoopBudget) -> bool:
         return False
     if m.unsupported_critical_claims > 0:
         return False
+    if m.uncertain_critical_claims > 0 or any(
+            i.severity == "critical" for i in verdict.issues_of(
+                ISSUE_UNCERTAIN, ISSUE_CITATION_ASSOCIATION_FAILURE)):
+        return False
     if not m.citations_valid:
         return False
     if m.primary_freshness == FRESHNESS_FAIL:
@@ -379,7 +385,7 @@ def decide(
     m = verdict.metrics
 
     # --- unverifiable body is never accepted ---
-    if m.verification_failed:
+    if m.verification_failed or m.chunks_failed > 0:
         return ResearchDecision.FINALIZE_WITH_LIMITATIONS
 
     # --- absolute ceiling: compress (keep claims & citations) ---
@@ -434,6 +440,13 @@ def decide(
             return ResearchDecision.REWRITE_FROM_EVIDENCE
         return ResearchDecision.FINALIZE_WITH_LIMITATIONS
 
+    # A critical judgement failure cannot be hidden by a high average.
+    # Evidence gaps and repairable citation failures were handled above.
+    if m.uncertain_critical_claims > 0 or any(
+            i.severity == "critical" for i in verdict.issues_of(
+                ISSUE_UNCERTAIN, ISSUE_CITATION_ASSOCIATION_FAILURE)):
+        return ResearchDecision.FINALIZE_WITH_LIMITATIONS
+
     # --- absolute floor (user-set only): expand from EVIDENCE, never
     #     padding — and NEVER research. A character count is a rendering
     #     concern, not an evidence gap: research is triggered ONLY by
@@ -480,12 +493,6 @@ def decide(
     )
     if shallow and budget.revision_allowed():
         return ResearchDecision.REWRITE_FROM_EVIDENCE
-
-    # --- unverified body ranges (chunk extraction failed after retries):
-    #     no edit can fix this; end EXPLICITLY with limitations instead of
-    #     looping or accepting a partially verified body ---
-    if m.chunks_failed > 0:
-        return ResearchDecision.FINALIZE_WITH_LIMITATIONS
 
     # Short but complete is acceptable; useful overshoot under the hard
     # ceiling is acceptable — no length-only rejections here by design.
@@ -763,7 +770,8 @@ class FinalizationController:
         """
         self._last_new_sources = 0
         issues = verdict.issues_of(
-            ISSUE_UNSUPPORTED, ISSUE_CONTRADICTED, ISSUE_UNANSWERED_QUESTION
+            ISSUE_UNSUPPORTED, ISSUE_CONTRADICTED, ISSUE_UNANSWERED_QUESTION,
+            ISSUE_UNCERTAIN,
         ) or verdict.issues
         queries = []
         for issue in issues:

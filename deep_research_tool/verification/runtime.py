@@ -21,10 +21,10 @@ import time
 from typing import Any, Dict, Optional
 
 # bump when verification prompt wording changes (cache invalidation)
-PROMPT_VERSION = "v3"
+PROMPT_VERSION = "v4"
 # bump when the VERIFIER LOGIC changes in a way that invalidates stored
 # judgements (independent of prompt wording) — part of every cache key
-VERIFIER_VERSION = "2"
+VERIFIER_VERSION = "3"
 
 PHASES = (
     "idle",              # 待機
