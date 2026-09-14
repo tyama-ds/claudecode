@@ -137,6 +137,10 @@ class Evidence:
     author: str = ""
     publisher: str = ""
     published_date: str = ""
+    updated_at: str = ""
+    effective_at: str = ""
+    data_period: str = ""
+    date_provenance: Dict[str, Any] = field(default_factory=dict)
 
     # Content
     content_excerpt: str = ""
@@ -221,6 +225,10 @@ class Evidence:
 
     def _generate_content_hash(self) -> str:
         """Generate a hash of the content for deduplication."""
+        if self.extracted_text:
+            from ..research.cache import canonical_url
+            content = (canonical_url(self.url) + '\0' + self.extracted_text).encode('utf-8')
+            return hashlib.sha256(content).hexdigest()
         content = (self.url + self.title + self.content_excerpt).encode("utf-8")
         return hashlib.md5(content).hexdigest()[:12]
 
@@ -363,6 +371,38 @@ class EvidenceLocker:
         Returns:
             Created Evidence object
         """
+        from .source_metadata import extract_source_metadata, normalize_source_date
+
+        raw_metadata = kwargs.get("metadata") or {}
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+        source = extract_source_metadata(
+            url, text=kwargs.get("extracted_text") or content_excerpt,
+            metadata=metadata,
+        )
+        for field_name in ("published_date", "updated_at", "effective_at", "data_period", "publisher"):
+            if not kwargs.get(field_name):
+                kwargs[field_name] = source[field_name]
+            elif field_name in ("published_date", "updated_at", "effective_at"):
+                raw_date = kwargs[field_name]
+                kwargs[field_name] = normalize_source_date(raw_date, allow_future=field_name == "effective_at")
+                if kwargs[field_name]:
+                    source["date_provenance"][field_name] = {"source": "explicit", "value": str(raw_date)}
+        provenance = dict(source["date_provenance"])
+        provenance.update(kwargs.get("date_provenance") or {})
+        kwargs["date_provenance"] = provenance
+        if kwargs.get("source_type", SourceType.UNKNOWN) in (SourceType.UNKNOWN, "unknown", None):
+            kwargs["source_type"] = SourceType(source["source_type"])
+        elif isinstance(kwargs["source_type"], str):
+            kwargs["source_type"] = SourceType(kwargs["source_type"])
+        indicators = kwargs.get("quality_indicators") or QualityIndicators()
+        if isinstance(indicators, dict):
+            indicators = QualityIndicators.from_dict(indicators)
+        indicators.has_date = bool(kwargs["published_date"])
+        if source["is_primary_source"]:
+            indicators.is_primary_source = True
+        kwargs["quality_indicators"] = indicators
+        metadata["date_provenance"] = provenance
+        kwargs["metadata"] = metadata
         evidence = Evidence(
             url=url,
             title=title,
@@ -376,7 +416,39 @@ class EvidenceLocker:
         # Check for duplicates by content hash
         for existing in self._evidence.values():
             if existing.content_hash == evidence.content_hash:
-                # Return existing evidence instead
+                # A cached document can support several sections. Preserve
+                # every association without duplicating the source itself.
+                if section_reference:
+                    ids = self._section_evidence.setdefault(section_reference, [])
+                    if existing.id not in ids:
+                        ids.append(existing.id)
+                if evidence.content_excerpt and evidence.content_excerpt not in existing.content_excerpt:
+                    existing.content_excerpt = '\n\n'.join(filter(None, (
+                        existing.content_excerpt, evidence.content_excerpt)))
+                for name in ("published_date", "updated_at", "effective_at", "data_period", "publisher", "extracted_text"):
+                    if not getattr(existing, name) and getattr(evidence, name):
+                        setattr(existing, name, getattr(evidence, name))
+                date_fields = ("published_date", "updated_at", "effective_at", "data_period")
+                for name in date_fields:
+                    kept, incoming = getattr(existing, name), getattr(evidence, name)
+                    if kept == incoming and name not in existing.date_provenance:
+                        if name in evidence.date_provenance:
+                            existing.date_provenance[name] = evidence.date_provenance[name]
+                    elif kept and incoming and kept != incoming:
+                        conflict = {"field": name, "kept": kept, "incoming": incoming,
+                                    "incoming_provenance": evidence.date_provenance.get(name, {})}
+                        conflicts = existing.metadata.setdefault("provenance_conflicts", [])
+                        if conflict not in conflicts:
+                            conflicts.append(conflict)
+                existing.metadata.update({k: v for k, v in evidence.metadata.items()
+                                          if k not in (*date_fields, "date_provenance", "provenance_conflicts")})
+                for name in date_fields:
+                    existing.metadata[name] = getattr(existing, name)
+                existing.metadata["date_provenance"] = dict(existing.date_provenance)
+                if existing.source_type == SourceType.UNKNOWN:
+                    existing.source_type = evidence.source_type
+                existing.quality_indicators.has_date = bool(existing.published_date)
+                existing.quality_indicators.is_primary_source |= evidence.quality_indicators.is_primary_source
                 return existing
 
         # Add to collection

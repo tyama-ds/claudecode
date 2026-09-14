@@ -33,6 +33,7 @@ moved to a ProcessPool without measured CPU-bound need.
 """
 
 import threading
+import time
 from contextlib import contextmanager
 from typing import Optional
 
@@ -170,8 +171,10 @@ class RunLimits:
 
     @contextmanager
     def permit(self, timeout: Optional[float] = None):
+        deadline = time.monotonic() + timeout if timeout is not None else None
         with self.run_limiter.permit(timeout=timeout):
-            with self.process_limiter.permit(timeout=timeout):
+            remaining = max(0, deadline - time.monotonic()) if deadline is not None else None
+            with self.process_limiter.permit(timeout=remaining):
                 yield
 
     @property

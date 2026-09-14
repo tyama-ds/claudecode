@@ -52,6 +52,7 @@ class ResearchIteration:
     gaps_identified: List[str] = field(default_factory=list)
     started_at: str = field(default_factory=lambda: datetime.now().isoformat())
     completed_at: Optional[str] = None
+    stop_reason: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -64,6 +65,7 @@ class ResearchIteration:
             "gaps_identified": self.gaps_identified,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
+            "stop_reason": self.stop_reason,
         }
 
 
@@ -255,7 +257,9 @@ class Researcher:
         self.crawling_llm = crawling_llm or llm_client
         self.evaluation_llm = evaluation_llm or llm_client
         self.writing_llm = writing_llm or llm_client
-        self.search = search_client
+        from .cache import CachedSearchClient
+        self.search = (search_client if isinstance(search_client, CachedSearchClient)
+                       else CachedSearchClient(search_client))
         self.min_iterations = min_iterations
         self.max_iterations = max_iterations
         self.max_queries_per_iteration = max_queries_per_iteration
@@ -278,6 +282,8 @@ class Researcher:
             evaluation_llm_client=self.evaluation_llm,
             max_parallel_workers=parallel_max_workers,
         )
+        self.content_extractor.max_selected_chars = max_content_length
+        self._reset_timings()
 
         # Use enhanced multi-pass content generation for better quality
         self.use_enhanced_synthesis = use_enhanced_synthesis
@@ -293,7 +299,7 @@ class Researcher:
         if multilingual_config and multilingual_config.enabled:
             self.multilingual_searcher = MultilingualSearcher(
                 config=multilingual_config,
-                search_client=search_client,
+                search_client=self.search,
                 llm_client=llm_client,
                 progress_callback=progress_callback,
                 max_parallel_workers=parallel_max_workers,
@@ -309,7 +315,7 @@ class Researcher:
         self.site_crawler: Optional[SiteCrawler] = None
         if extended_mode:
             self.site_crawler = SiteCrawler(
-                search_client=search_client,
+                search_client=self.search,
                 llm_client=self.crawling_llm,
                 max_pages=crawl_max_pages,
                 max_depth=crawl_max_depth,
@@ -342,11 +348,13 @@ class Researcher:
                 else EvaluationMode.PARALLEL
             )
             self.fast_crawler = FastCrawler(
-                search_client=search_client,
+                search_client=self.search,
                 llm_client=self.crawling_llm,
                 evaluation_mode=eval_mode,
                 content_filter=self.content_filter,
                 max_workers=min(fast_crawl_workers, parallel_max_workers),
+                max_parallel_workers=parallel_max_workers,
+                multilingual_searcher=self.multilingual_searcher,
                 batch_size=fast_crawl_batch_size,
                 language=language,
             )
@@ -355,7 +363,7 @@ class Researcher:
         self.ai_crawler: Optional[AICrawler] = None
         if crawl_mode == CrawlMode.AI_CRAWL:
             self.ai_crawler = AICrawler(
-                search_client=search_client,
+                search_client=self.search,
                 llm_client=self.crawling_llm,
                 content_filter=self.content_filter,
                 max_total_pages=ai_crawl_max_total_pages,
@@ -369,7 +377,7 @@ class Researcher:
         elif crawl_mode == CrawlMode.AI_CRAWL_SELENIUM:
             from .ai_crawler_selenium import AICrawlerSelenium
             self.ai_crawler = AICrawlerSelenium(
-                search_client=search_client,
+                search_client=self.search,
                 llm_client=self.crawling_llm,
                 content_filter=self.content_filter,
                 max_total_pages=ai_crawl_max_total_pages,
@@ -428,6 +436,11 @@ class Researcher:
             )
 
         # Initialize session
+        self._reset_timings()
+        self.search.clear_cache()
+        self.content_extractor.extraction_cache.clear()
+        if self.fast_crawler is not None:
+            self.fast_crawler.context_cache.clear()
         self.session = ResearchSession(query=query, requirements=requirements)
         self.evidence_locker = EvidenceLocker(
             research_id=self.session.session_id,
@@ -443,6 +456,7 @@ class Researcher:
                     title=doc.get("title", ""),
                     content=doc.get("content", ""),
                     path=str(doc.get("path", "")),
+                    metadata=doc.get("metadata", {}),
                 )
             print(f"[LocalStore] {self.local_store.document_count} documents, "
                   f"{self.local_store.chunk_count} chunks indexed "
@@ -466,6 +480,7 @@ class Researcher:
                         content_excerpt=full_content[:1000],
                         extracted_text=full_content,
                         evidence_type=EvidenceType.USER_PROVIDED,
+                        metadata=doc.get('metadata', {}),
                     )
                     doc_summaries.append(
                         f"Document: {doc.get('title', 'Unknown')}\n"
@@ -713,6 +728,7 @@ class Researcher:
                 key_points=page.key_points,
                 relevance_score=page.relevance_score,
                 extraction_notes=f"fast_crawler ({self.crawl_mode.value})",
+                metadata=dict(page.metadata),
             )
             section_content_parts.append(extracted)
 
@@ -727,6 +743,7 @@ class Researcher:
                 search_query=page.metadata.get("query", ""),
                 section_reference=section.section,
                 relevance_score=page.relevance_score,
+                metadata=dict(page.metadata),
             )
 
         # Create research iteration record
@@ -803,6 +820,7 @@ class Researcher:
                 relevance_score=page.relevance_score,
                 extraction_notes=f"ai_crawler (depth={page.metadata.get('depth', 0)}, "
                                  f"decided_by={page.metadata.get('decided_by', 'llm')})",
+                metadata=dict(page.metadata),
             )
             section_content_parts.append(extracted)
 
@@ -815,6 +833,7 @@ class Researcher:
                 search_query=page.metadata.get("query", "aicrawl"),
                 section_reference=section.section,
                 relevance_score=page.relevance_score,
+                metadata=dict(page.metadata),
             )
 
         iter_record = ResearchIteration(
@@ -830,270 +849,246 @@ class Researcher:
         print(f"[AICrawler] Section {section.section} complete. Parts: {len(section_content_parts)}")
         self._generate_and_save_section_content(section, section_content_parts)
 
+    def _check_cancel(self):
+        check = getattr(self, 'cancel_check', None)
+        if check is not None:
+            check()
+
+    def _reset_timings(self):
+        from ..utils.timing import StageTimings
+        self.timings = StageTimings()
+        self.content_extractor.timings = self.timings
+        self.search._timings = self.timings
+
+    def performance_snapshot(self):
+        """Detailed call timings, excluding reused cache results and content."""
+        snapshot = self.timings.snapshot()
+        snapshot['measurement'] = 'summed_elapsed_per_call; parallel calls may overlap; failures are exceptions'
+        snapshot['cache'] = {
+            'fetch': {'hits': self.search._page_cache.hits, 'misses': self.search._page_cache.misses},
+            'extract': {'hits': self.content_extractor.extraction_cache.hits,
+                        'misses': self.content_extractor.extraction_cache.misses},
+        }
+        return snapshot
+
+    def _fetch_section_result(self, result, section, queries):
+        """Worker: fetch/extract only. Evidence/session commits happen in order."""
+        from urllib.parse import urlsplit
+        from .cache import canonical_url
+
+        if self.content_filter and not self.content_filter.filter_url(result.url).should_include:
+            return []
+        collected = []
+        try:
+            self._check_cancel()
+            page = self.search.get_page_content(result.url)
+            if (getattr(page, 'metadata', {}) or {}).get('error'):
+                raise RuntimeError(page.metadata['error'])
+            candidates = [(result.url, result.title, page)]
+            doc_urls = set()
+            for link in (getattr(page, 'links', []) or []):
+                url = link.get('url', '')
+                if not urlsplit(url).path.lower().endswith(('.pdf', '.xlsx', '.xls', '.docx', '.csv')):
+                    continue
+                if canonical_url(url) in doc_urls or canonical_url(url) == canonical_url(result.url):
+                    continue
+                doc_urls.add(canonical_url(url))
+                try:
+                    self._check_cancel()
+                    doc = self.search.get_page_content(url)
+                    candidates.append((url, link.get('text') or doc.title, doc))
+                except Exception as exc:
+                    self._check_cancel()
+                    ResearchWarnings.get_instance().add(
+                        ResearchWarnings.HIGH, 'Researcher',
+                        f'Document extraction failed: {url[:80]}. Error: {exc}')
+                if len(doc_urls) >= 2:
+                    break
+            for url, title, source in candidates:
+                self._check_cancel()
+                try:
+                    if (getattr(source, 'metadata', {}) or {}).get('error'):
+                        ResearchWarnings.get_instance().add(
+                            ResearchWarnings.HIGH, 'Researcher',
+                            f"Source unavailable: {url[:80]}. Error: {source.metadata['error']}")
+                        continue
+                    raw = source.text_content or ''
+                    if not raw.strip():
+                        continue
+                    if self.content_filter and not self.content_filter.filter_content(
+                            url=url, title=title, content=raw).should_include:
+                        continue
+                    self._check_cancel()
+                    extracted = self.content_extractor.extract_relevant_content(
+                        raw_content=raw, source_url=url, source_title=title,
+                        section_context=f'{section.section}. {section.title}',
+                        research_query=' | '.join(queries),
+                    )
+                    if extracted.relevance_score < 0.2:
+                        continue
+                    if not extracted.images:
+                        extracted.images = [dict(img, page_title=title)
+                                            for img in (getattr(source, 'images', []) or [])[:5]
+                                            if img.get('src')]
+                    result_meta = getattr(result, 'metadata', None) or {}
+                    source_meta = getattr(source, 'metadata', None) or {}
+                    metadata = {**source_meta, **extracted.metadata, 'search_queries': queries}
+                    if result_meta.get('region'):
+                        metadata['region'] = result_meta['region']
+                    extracted.metadata = metadata
+                    evidence = dict(
+                        url=url, title=title, content_excerpt=extracted.processed_content[:500],
+                        extracted_text=raw,
+                        evidence_type=(EvidenceType.PDF_DOCUMENT if urlsplit(url).path.lower().endswith('.pdf')
+                                       else EvidenceType.WEB_PAGE),
+                        search_query=' | '.join(queries), section_reference=section.section,
+                        relevance_score=extracted.relevance_score, metadata=metadata,
+                    )
+                    if result_meta.get('source_language'):
+                        evidence.update(source_language=result_meta['source_language'],
+                                        is_translated=result_meta.get('is_translated', False),
+                                        translation_confidence=result_meta.get('translation_confidence', 1.0))
+                    collected.append((extracted, evidence))
+                except Exception as exc:
+                    self._check_cancel()
+                    ResearchWarnings.get_instance().add(
+                        ResearchWarnings.HIGH, 'Researcher',
+                        f'Source extraction failed for {url[:80]}. Error: {exc}')
+        except Exception as exc:
+            self._check_cancel()
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.HIGH, 'Researcher',
+                f'Content extraction failed for {result.url[:80]}. Error: {exc}')
+        return collected
+
     def _process_section_with_immediate_generation(
-        self,
-        section: TableOfContentsItem,
-        available_queries: List[str],
-        section_idx: int,
-        total_sections: int,
+        self, section: TableOfContentsItem, available_queries: List[str],
+        section_idx: int, total_sections: int,
         extra_parts: List[ExtractedContent] = None,
     ) -> None:
-        """
-        Process a section with immediate content generation after research.
+        """Bounded parallel I/O with deterministic evidence and section updates."""
+        from concurrent.futures import ThreadPoolExecutor
+        from ..utils.concurrency import effective_workers
+        from .cache import canonical_url, content_hash
 
-        This method:
-        1. Searches for information
-        2. Extracts relevant content
-        3. Immediately generates section content (not waiting until the end)
-        """
-        section_content_parts: List[ExtractedContent] = list(extra_parts or [])
+        parts = []
+        by_url, by_text = {}, {}
+        def add_unique(part):
+            url = canonical_url(part.source_url)
+            digest = content_hash(part.raw_content or part.processed_content)
+            existing = by_url.get(url) or by_text.get(digest)
+            if existing is not None:
+                # A new question can retrieve a different span of one source.
+                # Merge the support while preserving a single source count.
+                changed = False
+                if part.processed_content and part.processed_content not in existing.processed_content:
+                    existing.processed_content += '\n\n' + part.processed_content
+                    changed = True
+                for field in ('key_points', 'quotes', 'images'):
+                    values = getattr(existing, field)
+                    for value in getattr(part, field):
+                        if value not in values:
+                            values.append(value)
+                            changed = True
+                for field in ('source_spans', 'search_queries'):
+                    values = existing.metadata.setdefault(field, [])
+                    for value in part.metadata.get(field, []):
+                        if value not in values:
+                            values.append(value)
+                by_url[url] = existing
+                by_text[digest] = existing
+                return changed
+            by_url[url] = part
+            by_text[digest] = part
+            parts.append(part)
+            return True
+        for part in extra_parts or []:
+            add_unique(part)
+        attempted_contexts = set()
 
-        # Research iterations for this section
-        iteration = 0
-        while iteration < self.max_iterations:
-            iteration += 1
-            iter_record = ResearchIteration(
-                iteration_number=iteration,
-                section=section.section,
-            )
+        def context_key(url, source_queries):
+            normalized = tuple(sorted(set(' '.join(q.casefold().split()) for q in source_queries)))
+            return canonical_url(url), normalized
 
-            # Get queries for this iteration
+        for iteration in range(1, self.max_iterations + 1):
+            record = ResearchIteration(iteration_number=iteration, section=section.section)
             if iteration == 1 and available_queries:
                 queries = available_queries[:self.max_queries_per_iteration]
             else:
-                current_content = "\n".join(
-                    ec.processed_content for ec in section_content_parts
-                )
-                gaps = self.query_generator.identify_gaps(
-                    section, current_content, self.session.requirements
-                )
-                iter_record.gaps_identified = gaps
+                current = '\n'.join(p.processed_content for p in parts)
+                gaps = self.query_generator.identify_gaps(section, current, self.session.requirements)
+                record.gaps_identified = gaps
                 queries = self.query_generator.generate_follow_up_queries(
-                    section, current_content, gaps,
-                    research_topic=self.session.query,
-                )
-
+                    section, current, gaps, research_topic=self.session.query,
+                )[:self.max_queries_per_iteration]
             if not queries:
-                print(f"[WARNING] No queries generated for section {section.section}")
                 break
+            record.queries_executed = list(queries)
 
-            iter_record.queries_executed = queries
-            queries_to_run = queries[:self.max_queries_per_iteration]
-            print(f"\n[Search] Section {section.section} - {len(queries_to_run)} queries to execute")
-
-            # Execute searches and extract content
-            for qi, query in enumerate(queries_to_run, 1):
-                print(f"[Search] ({qi}/{len(queries_to_run)}) Query: {query}")
+            def search_query(query):
+                self._check_cancel()
                 try:
-                    # Use multilingual search if enabled, otherwise standard search
                     if self.multilingual_searcher:
-                        ml_results, ml_stats = self.multilingual_searcher.search_parallel(query)
-                        # Convert MultilingualSearchResult to SearchResult for unified processing
-                        results = [
-                            SearchResult(
-                                title=mr.title,
-                                url=mr.url,
-                                snippet=mr.snippet,
-                                metadata={
-                                    "source_language": mr.source_language,
-                                    "region": mr.region,
-                                    "is_translated": mr.is_translated,
-                                    "translation_confidence": mr.translation_confidence,
-                                    "relevance_score": mr.relevance_score,
-                                },
-                            )
-                            for mr in ml_results
-                        ]
-                        print(f"[DEBUG] Multilingual search returned {len(results)} results "
-                              f"(deduped from {ml_stats.total_results + ml_stats.duplicates_removed}, "
-                              f"languages: {ml_stats.results_by_language})")
-                    else:
-                        results = self.search.search(query)
-                    print(f"[DEBUG] Search returned {len(results)} results")
-                    iter_record.sources_found += len(results)
-
-                    for result in results[:self.max_pages_per_query]:
-                        print(f"[DEBUG] Processing: {result.url[:60]}...")
-
-                        # Apply content filter to URL first
-                        if self.content_filter:
-                            url_filter_result = self.content_filter.filter_url(result.url)
-                            if not url_filter_result.should_include:
-                                print(f"[FILTER] Skipped (URL): {url_filter_result.reason}")
-                                continue
-
-                        try:
-                            page = self.search.get_page_content(result.url)
-
-                            # Apply content filter to page content
-                            if self.content_filter:
-                                content_filter_result = self.content_filter.filter_content(
-                                    url=result.url,
-                                    title=result.title,
-                                    content=page.text_content,
-                                )
-                                if not content_filter_result.should_include:
-                                    print(f"[FILTER] Skipped (content): {content_filter_result.reason}")
-                                    continue
-                                print(f"[FILTER] Quality score: {content_filter_result.quality_score:.2f}")
-
-                            # Apply max_content_length truncation
-                            raw_content = page.text_content
-                            if len(raw_content) > self.max_content_length:
-                                raw_content = raw_content[:self.max_content_length]
-
-                            extracted = self.content_extractor.extract_relevant_content(
-                                raw_content=raw_content,
-                                source_url=result.url,
-                                source_title=result.title,
-                                section_context=f"{section.section}. {section.title}",
-                                research_query=query,
-                            )
-
-                            # Capture images from page content and attach to ExtractedContent
-                            page_images = getattr(page, 'images', []) or []
-                            if page_images and not extracted.images:
-                                extracted.images = [
-                                    {"src": img.get("src", ""), "alt": img.get("alt", ""),
-                                     "title": img.get("title", ""), "page_title": result.title}
-                                    for img in page_images[:5]
-                                    if img.get("src", "")
-                                ]
-
-                            # Follow links to PDF/XLSX/DOCX documents on the page
-                            page_links = getattr(page, 'links', []) or []
-                            doc_links = [
-                                link for link in page_links
-                                if any(link.get("url", "").lower().endswith(ext)
-                                       for ext in ('.pdf', '.xlsx', '.xls', '.docx', '.csv'))
-                            ]
-                            for doc_link in doc_links[:2]:  # Limit to 2 document links per page
-                                doc_url = doc_link.get("url", "")
-                                if doc_url:
-                                    try:
-                                        print(f"[DEBUG] Following document link: {doc_url[:60]}...")
-                                        doc_page = self.search.get_page_content(doc_url)
-                                        if doc_page.text_content and len(doc_page.text_content) > 50:
-                                            doc_extracted = self.content_extractor.extract_relevant_content(
-                                                raw_content=doc_page.text_content[:self.max_content_length],
-                                                source_url=doc_url,
-                                                source_title=doc_link.get("text", "") or doc_page.title,
-                                                section_context=f"{section.section}. {section.title}",
-                                                research_query=query,
-                                            )
-                                            if doc_extracted.relevance_score >= 0.2:
-                                                section_content_parts.append(doc_extracted)
-                                                iter_record.content_extracted += 1
-                                                # Determine evidence type from extension
-                                                doc_url_lower = doc_url.lower()
-                                                if doc_url_lower.endswith('.pdf'):
-                                                    ev_type = EvidenceType.PDF_DOCUMENT
-                                                else:
-                                                    ev_type = EvidenceType.WEB_PAGE
-                                                self.evidence_locker.add_evidence(
-                                                    url=doc_url,
-                                                    title=doc_link.get("text", "") or doc_page.title,
-                                                    content_excerpt=doc_extracted.processed_content[:500],
-                                                    extracted_text=doc_page.text_content or doc_extracted.processed_content,
-                                                    evidence_type=ev_type,
-                                                    search_query=query,
-                                                    section_reference=section.section,
-                                                    relevance_score=doc_extracted.relevance_score,
-                                                )
-                                                print(f"[DEBUG] Document content added from {doc_url[:50]}")
-                                    except Exception as doc_e:
-                                        print(f"[DEBUG] Failed to extract document link {doc_url[:50]}: {doc_e}")
-                                        ResearchWarnings.get_instance().add(
-                                            ResearchWarnings.HIGH,
-                                            "Researcher",
-                                            f"Document extraction failed: {doc_url[:80]}. "
-                                            f"PDF/XLSX/DOCX content lost. Error: {doc_e}",
-                                        )
-
-                            print(f"[DEBUG] Extracted relevance_score: {extracted.relevance_score}")
-
-                            # Lower threshold to 0.2 to get more content
-                            if extracted.relevance_score >= 0.2:
-                                section_content_parts.append(extracted)
-                                iter_record.content_extracted += 1
-                                print(f"[DEBUG] Content added. Total parts: {len(section_content_parts)}")
-
-                                # Build evidence kwargs with multilingual metadata
-                                evidence_kwargs = {
-                                    "url": result.url,
-                                    "title": result.title,
-                                    "content_excerpt": extracted.processed_content[:500],
-                                    "extracted_text": raw_content,
-                                    "evidence_type": EvidenceType.WEB_PAGE,
-                                    "search_query": query,
-                                    "section_reference": section.section,
-                                    "relevance_score": extracted.relevance_score,
-                                }
-                                # Guarded: a result object without metadata
-                                # must not abort evidence registration (an
-                                # exception here silently lost ALL evidence
-                                # for the page)
-                                result_meta = getattr(result, "metadata", None) or {}
-                                if result_meta.get("source_language"):
-                                    evidence_kwargs["source_language"] = result_meta["source_language"]
-                                    evidence_kwargs["is_translated"] = result_meta.get("is_translated", False)
-                                    evidence_kwargs["translation_confidence"] = result_meta.get("translation_confidence", 1.0)
-                                if result_meta.get("region"):
-                                    # locale search: which region the source
-                                    # was collected from (report grouping,
-                                    # exports, local-source auditing)
-                                    evidence_kwargs.setdefault("metadata", {})[
-                                        "region"] = result_meta["region"]
-
-                                self.evidence_locker.add_evidence(**evidence_kwargs)
-                            else:
-                                # Even low relevance content can be useful - add with note
-                                if extracted.processed_content and len(extracted.processed_content) > 100:
-                                    print(f"[DEBUG] Low relevance but adding anyway: {extracted.relevance_score}")
-                                    section_content_parts.append(extracted)
-
-                        except Exception as e:
-                            print(f"[ERROR] Content extraction error for {result.url}: {e}")
-                            ResearchWarnings.get_instance().add(
-                                ResearchWarnings.HIGH,
-                                "Researcher",
-                                f"Content extraction failed for {result.url[:80]}. "
-                                f"All evidence from this page lost. Error: {e}",
-                            )
-                            continue
-
-                    time.sleep(0.3)
-
-                except Exception as e:
-                    print(f"[ERROR] Search error for query '{query}': {e}")
+                        results, _ = self.multilingual_searcher.search_parallel(query)
+                        return [SearchResult(
+                            title=r.title, url=r.url, snippet=r.snippet,
+                            metadata={'source_language': r.source_language, 'region': r.region,
+                                      'is_translated': r.is_translated,
+                                      'translation_confidence': r.translation_confidence},
+                        ) for r in results]
+                    self._check_cancel()
+                    return self.search.search(query)
+                except Exception as exc:
+                    self._check_cancel()
                     ResearchWarnings.get_instance().add(
-                        ResearchWarnings.HIGH,
-                        "Researcher",
-                        f"Search query failed: '{query[:60]}'. "
-                        f"All results for this query lost. Error: {e}",
-                    )
-                    continue
+                        ResearchWarnings.HIGH, 'Researcher', f'Search failed: {query[:60]}. Error: {exc}')
+                    return []
 
-            iter_record.completed_at = datetime.now().isoformat()
-            self.session.iterations.append(iter_record)
-
-            # Check if we have enough content
-            if iteration >= self.min_iterations and len(section_content_parts) >= 2:
+            search_cap = 4 if getattr(self.search, 'supports_concurrent_search', False) is True else 1
+            workers = effective_workers(self.parallel_max_workers, search_cap, len(queries))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                searched = list(executor.map(search_query, queries))
+            candidates = {}
+            for query, results in zip(queries, searched):
+                record.sources_found += len(results)
+                for result in results[:self.max_pages_per_query]:
+                    key = canonical_url(result.url)
+                    if key not in candidates:
+                        candidates[key] = (result, [])
+                    if query not in candidates[key][1]:
+                        candidates[key][1].append(query)
+            candidates = {url: item for url, item in candidates.items()
+                          if context_key(url, item[1]) not in attempted_contexts}
+            if candidates:
+                workers = effective_workers(self.parallel_max_workers, 4, len(candidates))
+                def fetch(item):
+                    result, source_queries = item
+                    return self._fetch_section_result(result, section, source_queries)
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    # map preserves search ranking; workers never mutate the locker.
+                    for collected in executor.map(fetch, candidates.values()):
+                        for extracted, evidence in collected:
+                            if extracted.metadata.get('extraction_complete', True):
+                                attempted_contexts.add(context_key(
+                                    extracted.source_url, evidence.get('metadata', {}).get('search_queries', [])))
+                            updated = add_unique(extracted)
+                            merged = by_url[canonical_url(extracted.source_url)]
+                            evidence['metadata'] = {**evidence.get('metadata', {}),
+                                                    'source_spans': merged.metadata.get('source_spans', []),
+                                                    'search_queries': merged.metadata.get('search_queries', [])}
+                            self.evidence_locker.add_evidence(**evidence)
+                            if updated:
+                                record.content_extracted += 1
+            record.completed_at = datetime.now().isoformat()
+            self.session.iterations.append(record)
+            if iteration >= self.min_iterations and len(parts) >= 2:
+                record.stop_reason = 'minimum_iterations_and_sources_satisfied'
                 break
-
-            # Early exit: once a section already has plenty of sources there is
-            # little value in spending more iterations (each one costs extra
-            # searches + per-page LLM extractions). This keeps standard-mode
-            # sections from running far longer than necessary.
-            enough = max(4, self.max_pages_per_query * 2)
-            if len(section_content_parts) >= enough:
-                print(f"[Search] Section {section.section}: {len(section_content_parts)} "
-                      f"sources gathered (>= {enough}); ending research early")
+            # Repeated searches without new evidence should not consume all rounds.
+            if iteration > 1 and not record.content_extracted:
+                record.stop_reason = 'no_new_evidence'
                 break
-
-        # IMMEDIATE CONTENT GENERATION after research for this section
-        print(f"[DEBUG] Section {section.section} research complete. Parts: {len(section_content_parts)}")
-        self._generate_and_save_section_content(section, section_content_parts)
+        self._generate_and_save_section_content(section, parts)
 
     def _generate_and_save_section_content(
         self,
@@ -1256,6 +1251,7 @@ class Researcher:
 
         parts: List[ExtractedContent] = []
         for chunk in chunks:
+            self._check_cancel()
             extracted = self.content_extractor.extract_relevant_content(
                 raw_content=chunk.content,
                 source_url=chunk.source_url,
@@ -1269,11 +1265,16 @@ class Researcher:
                     url=chunk.source_url,
                     title=chunk.doc_title,
                     content_excerpt=extracted.processed_content[:500],
+                    extracted_text=chunk.content,
                     evidence_type=EvidenceType.USER_PROVIDED,
                     search_query="local_documents",
                     section_reference=section.section,
                     relevance_score=extracted.relevance_score,
                     access_method="local",
+                    metadata={**getattr(chunk, 'metadata', {}),
+                              'source_spans': extracted.metadata.get('source_spans', []),
+                              'document_path': chunk.doc_path,
+                              'chunk_index': chunk.chunk_index},
                 )
         return parts
 
@@ -1305,6 +1306,10 @@ class Researcher:
         section_content_parts: List[ExtractedContent],
     ) -> Dict[str, Any]:
         """Run the configured synthesis mode over the collected parts."""
+        return self.timings.call('synthesis', self._synthesize_parts_impl,
+                                 section, section_content_parts)
+
+    def _synthesize_parts_impl(self, section, section_content_parts):
         if self.use_enhanced_synthesis:
             print(f"[DEBUG] Using enhanced multi-pass synthesis")
             return self.content_extractor.synthesize_section_content_enhanced(
@@ -1479,54 +1484,51 @@ Output JSON only:"""
                     key_points=page.key_points,
                     relevance_score=page.relevance_score,
                     extraction_notes="gap_fill",
+                    metadata=dict(page.metadata),
                 ))
                 self.evidence_locker.add_evidence(
                     url=page.url,
                     title=page.title,
                     content_excerpt=(page.processed_content or "")[:500] or page.snippet,
+                    extracted_text=page.content,
                     evidence_type=EvidenceType.WEB_PAGE,
                     search_query=page.metadata.get("query", "gap_fill"),
                     section_reference=section.section,
                     relevance_score=page.relevance_score,
+                    metadata=dict(page.metadata),
                 )
             return parts
 
-        # Standard mode: direct search + fetch
+        # Standard gap-fill shares the same bounded fetch/extraction path.
+        from concurrent.futures import ThreadPoolExecutor
+        from ..utils.concurrency import effective_workers
+        from .cache import canonical_url, content_hash
+        candidates = {}
         for query in queries[:2]:
             try:
+                self._check_cancel()
                 results = self.search.search(query, max_results=self.max_pages_per_query)
-            except Exception as e:
-                print(f"[GapFill] Search failed for '{query}': {e}")
-                continue
-            for result in results[:self.max_pages_per_query]:
-                try:
-                    if self.content_filter:
-                        url_filter_result = self.content_filter.filter_url(result.url)
-                        if not url_filter_result.should_include:
-                            continue
-                    page = self.search.get_page_content(result.url)
-                    extracted = self.content_extractor.extract_relevant_content(
-                        raw_content=page.text_content,
-                        source_url=result.url,
-                        source_title=page.title or result.title,
-                        section_context=f"{section.section}. {section.title}",
-                        research_query=query,
-                    )
-                    if extracted.relevance_score >= 0.2:
-                        parts.append(extracted)
-                        self.evidence_locker.add_evidence(
-                            url=result.url,
-                            title=page.title or result.title,
-                            content_excerpt=extracted.processed_content[:500],
-                            evidence_type=EvidenceType.WEB_PAGE,
-                            search_query=query,
-                            section_reference=section.section,
-                            relevance_score=extracted.relevance_score,
-                        )
-                except Exception as e:
-                    print(f"[GapFill] Fetch failed for {result.url}: {e}")
-                    continue
-                time.sleep(0.3)
+                for result in results[:self.max_pages_per_query]:
+                    key = canonical_url(result.url)
+                    if key not in candidates:
+                        candidates[key] = (result, [])
+                    candidates[key][1].append(query)
+            except Exception as exc:
+                print(f'[GapFill] Search failed for {query}: {exc}')
+        if candidates:
+            workers = effective_workers(self.parallel_max_workers, 4, len(candidates))
+            seen = {content_hash(p.raw_content or p.processed_content) for p in parts}
+            def fetch(item):
+                result, source_queries = item
+                return self._fetch_section_result(result, section, source_queries)
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                for collected in executor.map(fetch, candidates.values()):
+                    for extracted, evidence in collected:
+                        self.evidence_locker.add_evidence(**evidence)
+                        digest = content_hash(extracted.raw_content or extracted.processed_content)
+                        if digest not in seen:
+                            seen.add(digest)
+                            parts.append(extracted)
         return parts
 
     def _create_fallback_content(
@@ -1672,6 +1674,7 @@ Return JSON:
             for crawled_page in crawl_result.crawled_pages:
                 if crawled_page.relevance_score >= 0.3:
                     # Create ExtractedContent from crawled page
+                    self._check_cancel()
                     extracted = self.content_extractor.extract_relevant_content(
                         raw_content=crawled_page.content,
                         source_url=crawled_page.url,
@@ -1916,6 +1919,7 @@ Return as JSON:
                                 for mr in ml_results
                             ]
                         else:
+                            self._check_cancel()
                             results = self.search.search(query)
                         iter_record.sources_found += len(results)
 
@@ -1932,6 +1936,7 @@ Return as JSON:
                                     if not url_filter_result.should_include:
                                         continue
 
+                                self._check_cancel()
                                 page = self.search.get_page_content(result.url)
 
                                 # Apply content filter to page content
@@ -1944,11 +1949,10 @@ Return as JSON:
                                     if not content_filter_result.should_include:
                                         continue
 
-                                # Apply max_content_length truncation
+                                # Extraction selects a bounded set of spans across the full source.
                                 raw_content = page.text_content
-                                if len(raw_content) > self.max_content_length:
-                                    raw_content = raw_content[:self.max_content_length]
 
+                                self._check_cancel()
                                 extracted = self.content_extractor.extract_relevant_content(
                                     raw_content=raw_content,
                                     source_url=result.url,

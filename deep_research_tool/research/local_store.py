@@ -7,7 +7,7 @@ keyword scoring — a lightweight local counterpart to web search.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from ..utils.helpers import chunk_text
 from .site_crawler import score_relevance_simple
@@ -21,6 +21,7 @@ class LocalChunk:
     content: str
     chunk_index: int
     score: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def source_url(self) -> str:
@@ -50,7 +51,8 @@ class LocalDocumentStore:
         self._chunks: List[LocalChunk] = []
         self._doc_titles: List[str] = []
 
-    def add_document(self, title: str, content: str, path: str = "") -> int:
+    def add_document(self, title: str, content: str, path: str = "",
+                     metadata: Optional[Dict[str, Any]] = None) -> int:
         """
         Add a document, splitting it into chunks.
 
@@ -66,13 +68,25 @@ class LocalDocumentStore:
             return 0
 
         pieces = chunk_text(content, chunk_size=self.chunk_size, overlap=self.overlap)
+        previous_end = 0
         for i, piece in enumerate(pieces):
+            start = content.find(piece, max(0, previous_end - self.overlap))
+            end = start + len(piece)
+            chunk_metadata = dict(metadata or {})
+            chunk_metadata.update(start_offset=start, end_offset=end,
+                                  chunk_index=i, document_path=path)
+            page_spans = chunk_metadata.get("page_spans", [])
+            if page_spans:
+                chunk_metadata["pages"] = [p["page"] for p in page_spans
+                    if p["start_offset"] < end and p["end_offset"] > start]
             self._chunks.append(LocalChunk(
                 doc_title=title or path or "document",
                 doc_path=path,
                 content=piece,
                 chunk_index=i,
+                metadata=chunk_metadata,
             ))
+            previous_end = end
         self._doc_titles.append(title or path or "document")
         return len(pieces)
 
@@ -125,6 +139,7 @@ class LocalDocumentStore:
                     content=chunk.content,
                     chunk_index=chunk.chunk_index,
                     score=score,
+                    metadata=dict(chunk.metadata),
                 ))
 
         scored.sort(key=lambda c: c.score, reverse=True)

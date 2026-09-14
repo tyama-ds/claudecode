@@ -62,7 +62,8 @@ class DocumentReader:
         ".htm": "html",
     }
 
-    def __init__(self, extract_images: bool = True, max_pages: int = None):
+    def __init__(self, extract_images: bool = True, max_pages: int = None,
+                 enable_ocr: bool = False, ocr_language: str = "jpn+eng"):
         """
         Initialize DocumentReader.
 
@@ -72,6 +73,8 @@ class DocumentReader:
         """
         self.extract_images = extract_images
         self.max_pages = max_pages
+        self.enable_ocr = enable_ocr
+        self.ocr_language = ocr_language
 
     def read_document(self, filepath: Path) -> DocumentContent:
         """
@@ -183,6 +186,10 @@ class DocumentReader:
         doc = fitz.open(filepath)
         content_parts = []
         images = []
+        page_spans = []
+        missing_text_pages = []
+        ocr_errors = []
+        offset = 0
 
         try:
             # Capture the page count up front: the document object can no
@@ -196,27 +203,33 @@ class DocumentReader:
 
                 # Extract text
                 text = page.get_text()
+                if not text.strip() and self.enable_ocr:
+                    try:
+                        textpage = page.get_textpage_ocr(language=self.ocr_language)
+                        text = page.get_text(textpage=textpage)
+                    except Exception as error:
+                        ocr_errors.append(f"Page {page_num + 1}: {error}")
+                if not text.strip():
+                    missing_text_pages.append(page_num + 1)
+                page_spans.append({"page": page_num + 1, "start_offset": offset,
+                                   "end_offset": offset + len(text)})
+                offset += len(text) + 2
                 content_parts.append(text)
 
                 # Extract images if enabled
                 if self.extract_images:
                     image_list = page.get_images()
                     for img_idx, img in enumerate(image_list[:5]):  # Limit images per page
-                        xref = img[0]
-                        try:
-                            base_image = doc.extract_image(xref)
-                            images.append({
-                                "page": page_num + 1,
-                                "index": img_idx,
-                                "width": base_image.get("width", 0),
-                                "height": base_image.get("height", 0),
-                                "format": base_image.get("ext", ""),
-                            })
-                        except Exception:
-                            pass
+                        # Only metadata is consumed downstream; avoid decoding
+                        # every embedded bitmap merely to read its dimensions.
+                        images.append({"page": page_num + 1, "index": img_idx,
+                                       "width": img[2], "height": img[3], "format": ""})
 
             # Get metadata (copy to a plain dict before the doc is closed)
             metadata = dict(doc.metadata or {})
+            metadata.update(page_spans=page_spans, missing_text_pages=missing_text_pages,
+                            needs_ocr=bool(missing_text_pages), ocr_errors=ocr_errors,
+                            pages_processed=len(content_parts))
         finally:
             doc.close()
 
@@ -229,6 +242,9 @@ class DocumentReader:
             metadata=metadata,
             pages=page_count,
             images=images,
+            error=("PDF contains no extractable text; OCR is required. "
+                   "Enable DocumentReader(enable_ocr=True) with Tesseract language data installed."
+                   if not any(text.strip() for text in content_parts) else None),
         )
 
     def _read_pdf_pypdf(self, filepath: Path) -> DocumentContent:
@@ -237,12 +253,20 @@ class DocumentReader:
 
         reader = PdfReader(filepath)
         content_parts = []
+        page_spans = []
+        missing_text_pages = []
+        offset = 0
 
         max_pages = self.max_pages or len(reader.pages)
 
         for page_num in range(min(len(reader.pages), max_pages)):
             page = reader.pages[page_num]
-            text = page.extract_text()
+            text = page.extract_text() or ""
+            if not text.strip():
+                missing_text_pages.append(page_num + 1)
+            page_spans.append({"page": page_num + 1, "start_offset": offset,
+                               "end_offset": offset + len(text)})
+            offset += len(text) + 2
             content_parts.append(text)
 
         # Get metadata
@@ -254,6 +278,8 @@ class DocumentReader:
                 "creator": reader.metadata.get("/Creator", ""),
                 "producer": reader.metadata.get("/Producer", ""),
             }
+        metadata.update(page_spans=page_spans, missing_text_pages=missing_text_pages,
+                        needs_ocr=bool(missing_text_pages), pages_processed=len(content_parts))
 
         return DocumentContent(
             filepath=str(filepath),
@@ -263,6 +289,8 @@ class DocumentReader:
             content="\n\n".join(content_parts),
             metadata=metadata,
             pages=len(reader.pages),
+            error=("PDF contains no extractable text; OCR is required."
+                   if not any(text.strip() for text in content_parts) else None),
         )
 
     def _read_docx(self, filepath: Path) -> DocumentContent:
@@ -279,20 +307,28 @@ class DocumentReader:
 
         doc = Document(filepath)
         content_parts = []
-
-        # Extract paragraphs
-        for para in doc.paragraphs:
-            if para.text.strip():
-                content_parts.append(para.text)
-
-        # Extract tables
-        for table in doc.tables:
-            table_text = []
-            for row in table.rows:
-                row_text = [cell.text for cell in row.cells]
-                table_text.append(" | ".join(row_text))
-            if table_text:
-                content_parts.append("\n".join(table_text))
+        from docx.text.paragraph import Paragraph
+        from docx.table import Table
+        from docx.oxml.ns import qn
+        block_spans = []
+        offset = 0
+        # Walk the body in XML order so headings remain attached to the tables
+        # and numbers they describe. Separate paragraph/table passes lose that.
+        for element in doc.element.body.iterchildren():
+            if element.tag == qn("w:p"):
+                text = Paragraph(element, doc).text
+                kind = "paragraph"
+            elif element.tag == qn("w:tbl"):
+                table = Table(element, doc)
+                text = "\n".join(" | ".join(cell.text for cell in row.cells) for row in table.rows)
+                kind = "table"
+            else:
+                continue
+            if text.strip():
+                block_spans.append({"kind": kind, "start_offset": offset,
+                                    "end_offset": offset + len(text)})
+                offset += len(text) + 2
+                content_parts.append(text)
 
         # Get core properties
         metadata = {}
@@ -306,6 +342,7 @@ class DocumentReader:
             }
         except Exception:
             pass
+        metadata["block_spans"] = block_spans
 
         return DocumentContent(
             filepath=str(filepath),

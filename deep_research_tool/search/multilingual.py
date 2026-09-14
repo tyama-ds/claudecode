@@ -5,19 +5,21 @@ Enables searching across multiple languages with query translation,
 result aggregation, and deduplication.
 """
 
-import asyncio
 import hashlib
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Callable, Any, Tuple
-from difflib import SequenceMatcher
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 from ..config import (
     LANGUAGE_REGION_MAP,
     MultilingualSearchConfig,
     REGION_LOCALE_MAP,
 )
+from ..utils.concurrency import effective_workers
+from ..utils.japanese_text import extract_keywords
 
 
 @dataclass
@@ -50,9 +52,11 @@ class MultilingualSearchResult:
     # Translation metadata
     is_translated: bool = False
     translation_confidence: float = 1.0
+    search_rank: int = 1
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def get_content_hash(self) -> str:
-        """Generate a hash for deduplication."""
+        """Legacy URL-identity hash (not a content-similarity judgment)."""
         # Use URL as primary dedup key
         return hashlib.md5(self.url.encode()).hexdigest()
 
@@ -66,6 +70,7 @@ class MultilingualSearchStats:
     duplicates_removed: int = 0
     queries_translated: int = 0
     translation_errors: int = 0
+    errors: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict:
         return {
@@ -75,17 +80,19 @@ class MultilingualSearchStats:
             "duplicates_removed": self.duplicates_removed,
             "queries_translated": self.queries_translated,
             "translation_errors": self.translation_errors,
+            "errors": list(self.errors),
         }
 
     def get_language_distribution(self) -> List[Tuple[str, int, float]]:
         """Get language distribution as (lang, count, percentage) tuples."""
-        if self.total_results == 0:
+        total = sum(self.results_by_language.values())
+        if total == 0:
             return []
 
         distribution = []
         for lang, count in sorted(self.results_by_language.items(),
                                    key=lambda x: x[1], reverse=True):
-            percentage = (count / self.total_results) * 100
+            percentage = (count / total) * 100
             lang_name = LANGUAGE_REGION_MAP.get(lang, {}).get("name", lang)
             distribution.append((lang_name, count, percentage))
 
@@ -118,6 +125,9 @@ class MultilingualSearcher:
         # app-wide parallelism ceiling (parallel_max_workers)
         self.max_parallel_workers = max_parallel_workers
         self.stats = MultilingualSearchStats()
+        self._stats_lock = threading.Lock()
+        self._search_lock = threading.RLock()
+        self._translation_cache = {}
 
     def _report_progress(self, message: str, progress: float):
         """Report progress if callback is set."""
@@ -170,7 +180,8 @@ Translated query:"""
             if not translated:
                 raise ValueError("empty translation")
 
-            self.stats.queries_translated += 1
+            with self._stats_lock:
+                self.stats.queries_translated += 1
 
             return TranslatedQuery(
                 original_query=query,
@@ -180,7 +191,8 @@ Translated query:"""
             )
 
         except Exception:
-            self.stats.translation_errors += 1
+            with self._stats_lock:
+                self.stats.translation_errors += 1
             # Fall back to original query
             return TranslatedQuery(
                 original_query=query,
@@ -226,7 +238,8 @@ Output ONLY the localized query, nothing else."""
             localized = self._llm_text(prompt)
             if not localized:
                 raise ValueError("empty localization")
-            self.stats.queries_translated += 1
+            with self._stats_lock:
+                self.stats.queries_translated += 1
             return TranslatedQuery(
                 original_query=query,
                 translated_query=localized,
@@ -235,7 +248,8 @@ Output ONLY the localized query, nothing else."""
                 region=region,
             )
         except Exception:
-            self.stats.translation_errors += 1
+            with self._stats_lock:
+                self.stats.translation_errors += 1
             return TranslatedQuery(
                 original_query=query,
                 translated_query=query,
@@ -245,44 +259,33 @@ Output ONLY the localized query, nothing else."""
             )
 
     def translate_queries(self, query: str) -> List[TranslatedQuery]:
-        """
-        Translate query to all configured languages.
+        """Localize independent locales concurrently and cache successful results."""
+        region_mode = bool(self.config.search_regions)
+        targets = self.config.search_regions if region_mode else self.config.search_languages
 
-        Args:
-            query: Original query text
-
-        Returns:
-            List of TranslatedQuery objects
-        """
-        translations = []
-
-        # REGION-FIRST mode: one localized query per region
-        if self.config.search_regions:
-            for region in self.config.search_regions:
-                if self.config.query_translation == "llm":
-                    translations.append(self.localize_query(query, region))
-                else:
-                    info = REGION_LOCALE_MAP.get(region, {})
-                    translations.append(TranslatedQuery(
-                        original_query=query, translated_query=query,
-                        target_language=info.get("language", "en"),
-                        confidence=1.0, region=region))
-            return translations
-
-        for lang in self.config.search_languages:
+        def translate(target):
+            key = (query, target, region_mode, self.config.query_translation, self.config.localize_queries)
+            with self._stats_lock:
+                cached = self._translation_cache.get(key)
+            if cached is not None:
+                return TranslatedQuery(**vars(cached))
             if self.config.query_translation == "llm":
-                translated = self.translate_query(query, lang)
+                result = (self.localize_query(query, target) if region_mode
+                          else self.translate_query(query, target))
             else:
-                # No translation - use original query
-                translated = TranslatedQuery(
-                    original_query=query,
-                    translated_query=query,
-                    target_language=lang,
-                    confidence=1.0
-                )
-            translations.append(translated)
+                language = REGION_LOCALE_MAP.get(target, {}).get("language", "en") if region_mode else target
+                result = TranslatedQuery(query, query, language, confidence=1.0,
+                                         region=target if region_mode else "")
+            if result.confidence >= 0.9:
+                with self._stats_lock:
+                    self._translation_cache[key] = result
+            return result
 
-        return translations
+        workers = effective_workers(self.max_parallel_workers, self.config.max_concurrent_searches, len(targets))
+        if workers == 1:
+            return [translate(target) for target in targets]
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            return list(executor.map(translate, targets))
 
     def search_single_language(
         self,
@@ -316,7 +319,8 @@ Output ONLY the localized query, nothing else."""
             )
 
             results = []
-            for r in raw_results:
+            for rank, r in enumerate(raw_results, 1):
+                raw_metadata = getattr(r, "metadata", {}) if not isinstance(r, dict) else r.get("metadata", {})
                 result = MultilingualSearchResult(
                     url=r.url if hasattr(r, 'url') else r.get('url', ''),
                     title=r.title if hasattr(r, 'title') else r.get('title', ''),
@@ -326,6 +330,8 @@ Output ONLY the localized query, nothing else."""
                     original_title=r.title if hasattr(r, 'title') else r.get('title', ''),
                     original_snippet=r.snippet if hasattr(r, 'snippet') else r.get('snippet', ''),
                     region=query.region,
+                    search_rank=rank,
+                    metadata=dict(raw_metadata) if isinstance(raw_metadata, dict) else {},
                 )
                 results.append(result)
 
@@ -333,6 +339,8 @@ Output ONLY the localized query, nothing else."""
 
         except Exception as e:
             # Log error but don't fail entire search
+            with self._stats_lock:
+                self.stats.errors.append(f"Search failed for {label}: {e}")
             return []
 
     def search_parallel(
@@ -348,6 +356,10 @@ Output ONLY the localized query, nothing else."""
         Returns:
             Tuple of (results list, statistics)
         """
+        with self._search_lock:
+            return self._search_parallel(query)
+
+    def _search_parallel(self, query):
         self.stats = MultilingualSearchStats()
 
         # Translate queries
@@ -360,6 +372,12 @@ Output ONLY the localized query, nothing else."""
         max_workers = effective_workers(self.max_parallel_workers,
                                         self.config.max_concurrent_searches,
                                         len(translated_queries))
+        client = getattr(self.search_client, "_client", self.search_client)
+        if (getattr(client, "supports_concurrent_search", False) is not True
+                or getattr(client, "requires_serial_access", False) is True
+                or "selenium" in type(client).__module__.lower()
+                or "selenium" in type(client).__name__.lower()):
+            max_workers = 1
 
         scope = (f"{len(self.config.search_regions)} regions"
                  if self.config.search_regions
@@ -367,13 +385,12 @@ Output ONLY the localized query, nothing else."""
         self._report_progress(f"Searching in {scope}...", 20)
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(self.search_single_language, tq): tq
-                for tq in translated_queries
-            }
+            futures = {executor.submit(self.search_single_language, tq): tq
+                       for tq in translated_queries}
 
             completed = 0
-            for future in as_completed(futures):
+            # Collect in configured locale order, independent of network timing.
+            for future in futures:
                 tq = futures[future]
                 try:
                     results = future.result()
@@ -390,7 +407,7 @@ Output ONLY the localized query, nothing else."""
                             + len(results))
 
                 except Exception as e:
-                    pass
+                    self.stats.errors.append(f"Search failed for {tq.region or tq.target_language}: {e}")
 
                 completed += 1
                 progress = 20 + (60 * completed / len(futures))
@@ -417,84 +434,50 @@ Output ONLY the localized query, nothing else."""
 
         return scored, self.stats
 
-    def _deduplicate_results(
-        self,
-        results: List[MultilingualSearchResult]
-    ) -> List[MultilingualSearchResult]:
+    @staticmethod
+    def _canonical_url(url):
+        parsed = urlsplit(url)
+        parameters = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                      if not key.lower().startswith("utm_") and key.lower() not in ("fbclid", "gclid")]
+        return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path or "/",
+                           urlencode(sorted(parameters)), ""))
+
+    def _deduplicate_results(self, results):
+        """Deduplicate URL identity while retaining independent source origins.
+
+        A generic title or search snippet is insufficient to declare two primary
+        documents identical. Preserve discovery locales when one URL is merged.
         """
-        Remove duplicate results based on URL and content similarity.
-
-        Args:
-            results: List of results to deduplicate
-
-        Returns:
-            Deduplicated list of results
-        """
-        seen_urls = set()
-        seen_hashes = set()
-        deduplicated = []
-
+        by_url = {}
         for result in results:
-            # Check URL
-            if result.url in seen_urls:
-                continue
+            key = self._canonical_url(result.url)
+            discovery = {"language": result.source_language, "region": result.region,
+                         "query": result.search_query, "rank": result.search_rank}
+            if key in by_url:
+                existing = by_url[key]
+                existing.metadata.setdefault("discovered_in", []).append(discovery)
+                existing.search_rank = min(existing.search_rank, result.search_rank)
+            else:
+                result.metadata.setdefault("discovered_in", []).append(discovery)
+                by_url[key] = result
+        return list(by_url.values())
 
-            # Check content hash
-            content_hash = result.get_content_hash()
-            if content_hash in seen_hashes:
-                continue
-
-            # Check title similarity against existing results
-            is_duplicate = False
-            for existing in deduplicated:
-                similarity = SequenceMatcher(
-                    None,
-                    result.title.lower(),
-                    existing.title.lower()
-                ).ratio()
-
-                if similarity >= self.config.dedup_threshold:
-                    is_duplicate = True
-                    break
-
-            if not is_duplicate:
-                seen_urls.add(result.url)
-                seen_hashes.add(content_hash)
-                deduplicated.append(result)
-
-        return deduplicated
-
-    def _score_results(
-        self,
-        results: List[MultilingualSearchResult]
-    ) -> List[MultilingualSearchResult]:
-        """
-        Score results based on relevance and language weights.
-
-        Args:
-            results: List of results to score
-
-        Returns:
-            Sorted list of results by score
-        """
+    def _score_results(self, results):
+        """Rank by lexical relevance, original SERP rank and locale preference."""
+        token_cache = {}
         for result in results:
-            # Base score from position (earlier results tend to be more relevant)
-            base_score = 1.0
-
-            # Apply language weight
-            lang_weight = self.config.get_language_weight(result.source_language)
-
-            result.relevance_score = base_score * lang_weight
-
-            # Region mode: genuinely LOCAL sources (the region's country
-            # TLD) get a boost so local portals/agencies/media outrank
-            # global aggregators
-            if result.region and self.config.prefer_local_sources:
-                if self._is_local_domain(result.url, result.region):
-                    result.relevance_score += self.config.local_source_boost
-
-        # Sort by score descending
-        return sorted(results, key=lambda r: r.relevance_score, reverse=True)
+            if result.search_query not in token_cache:
+                token_cache[result.search_query] = extract_keywords(result.search_query, max_keywords=20)
+            terms = token_cache[result.search_query]
+            text = (result.title + " " + result.snippet).casefold()
+            overlap = sum(term.casefold() in text for term in terms) / max(1, len(terms))
+            rank_score = 1.0 / max(1, result.search_rank)
+            weight = self.config.get_language_weight(result.source_language)
+            result.relevance_score = weight * (0.55 + 0.15 * rank_score + 0.30 * overlap)
+            if result.region and self.config.prefer_local_sources and self._is_local_domain(result.url, result.region):
+                result.relevance_score += self.config.local_source_boost
+        return sorted(results, key=lambda result: (-result.relevance_score, result.search_rank,
+                                                  self._canonical_url(result.url)))
 
     @staticmethod
     def _is_local_domain(url: str, region: str) -> bool:
