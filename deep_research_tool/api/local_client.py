@@ -9,6 +9,7 @@ Supports:
 
 import os
 import json
+import math
 import threading
 import time
 from typing import Optional, List, Dict, Any
@@ -100,11 +101,11 @@ class LocalLLMClient(BaseLLMClient):
         temperature: float = 0.7,
         max_tokens: int = 8192,
         max_tokens_limit: int = 200_000,
-        timeout: int = 120,
+        timeout: float = 600,
         http_proxy: str = None,
         https_proxy: str = None,
         verify_ssl: bool = True,
-        max_concurrency: int = None,
+        max_concurrency: int = 1,
     ):
         """
         Initialize LocalLLMClient.
@@ -116,8 +117,10 @@ class LocalLLMClient(BaseLLMClient):
             api_key: Optional API key for authentication
             temperature: Sampling temperature
             max_tokens: Maximum tokens in response
-            max_tokens_limit: Upper bound for auto-retry on truncation (default: 200000)
-            timeout: Request timeout in seconds
+            max_tokens_limit: Retained for compatibility; incomplete generations
+                are not automatically repeated by this client.
+            timeout: Maximum read inactivity in seconds, including first-token
+                wait. Streaming generations may take longer in total.
             http_proxy: HTTP proxy URL
             https_proxy: HTTPS proxy URL
             verify_ssl: Verify SSL certificates
@@ -147,7 +150,11 @@ class LocalLLMClient(BaseLLMClient):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.max_tokens_limit = max_tokens_limit
-        self.timeout = timeout
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            raise ValueError("Local LLM timeout must be a positive finite number")
+        self.timeout = float(timeout)
+        if not math.isfinite(self.timeout) or self.timeout <= 0:
+            raise ValueError("Local LLM timeout must be a positive finite number")
         self._http_proxy = http_proxy
         self._https_proxy = https_proxy
         self._verify_ssl = verify_ssl
@@ -156,12 +163,15 @@ class LocalLLMClient(BaseLLMClient):
         # base-class attributes (this __init__ does not chain to super)
         self.concurrency_limiter = None
         self.token_stats = None
-        # OPTIONAL per-client concurrency cap for small local servers:
+        # Serialize local inference by default; explicit larger caps are honored.
         # acquired IN ADDITION to the app-wide leaf permit around each
         # request (a llama.cpp box may only handle 1-2 parallel calls)
-        self._local_sem = (threading.BoundedSemaphore(int(max_concurrency))
-                           if max_concurrency and int(max_concurrency) > 0
-                           else None)
+        if max_concurrency is not None and (
+                isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int)
+                or max_concurrency < 1):
+            raise ValueError("Local LLM concurrency must be a positive integer")
+        self._local_sem = (threading.BoundedSemaphore(max_concurrency)
+                           if max_concurrency is not None else None)
         # requests.Session is NOT documented as thread-safe for concurrent
         # use; parallel workers each get a thread-local Session built with
         # the same proxies/verify/header configuration
@@ -238,10 +248,11 @@ class LocalLLMClient(BaseLLMClient):
     _MAX_RETRIES = 3
 
     def _post_with_retry(self, url: str, payload: dict):
-        """POST with bounded exponential backoff + jitter on 429/5xx.
+        """Consume one completion while holding its inference permits.
 
-        The concurrency permit is held only around each attempt (a leaf
-        operation); it is released while sleeping between retries.
+        Only connection-establishment timeouts and explicit transient HTTP
+        responses are retried. After a read timeout/disconnect the server may
+        still be generating, so resending the request could duplicate work.
         """
         import random
         import requests
@@ -249,26 +260,186 @@ class LocalLLMClient(BaseLLMClient):
         from contextlib import nullcontext
         last_error = None
         for attempt in range(self._MAX_RETRIES + 1):
+            response = None
             try:
                 # per-client cap (small local servers) + app-wide permit
                 with (self._local_sem or nullcontext()):
                     with self._leaf_permit():
-                        response = self._session.post(
-                            url, json=payload, timeout=self.timeout)
-                if response.status_code in self._RETRY_STATUSES:
-                    last_error = RuntimeError(
-                        f"HTTP {response.status_code} from local LLM server")
-                else:
-                    response.raise_for_status()
-                    return response
-            except requests.RequestException as e:
+                        try:
+                            response = self._session.post(
+                                url, json=payload, stream=True,
+                                timeout=(min(10.0, self.timeout), self.timeout))
+                            if response.status_code in self._RETRY_STATUSES:
+                                last_error = RuntimeError(
+                                    f"HTTP {response.status_code} from local LLM server")
+                            else:
+                                response.raise_for_status()
+                                return self._read_completion(response)
+                        finally:
+                            if response is not None:
+                                response.close()
+            except requests.ConnectTimeout as e:
+                if response is not None:
+                    raise RuntimeError(
+                        "Local LLM response was interrupted; request was not retried. "
+                        f"Details: {self._sanitize_error(e)}") from e
+                # No connection was established, so there is no generation to
+                # duplicate. Do not apply this retry to general ConnectionError.
                 last_error = e
+            except requests.ReadTimeout as e:
+                raise RuntimeError(
+                    f"Local LLM read inactivity exceeded {self.timeout:g}s. "
+                    "The server may still be generating; request was not retried. "
+                    "Check model load/queue status or increase local_timeout. "
+                    f"Details: {self._sanitize_error(e)}") from e
+            except requests.RequestException as e:
+                raise RuntimeError(
+                    "Local LLM request or response failed; request was not retried. "
+                    f"Details: {self._sanitize_error(e)}") from e
             if attempt < self._MAX_RETRIES:
+                getattr(self, "cancel_check", lambda: None)()
                 delay = (2 ** attempt) * 0.8 + random.uniform(0, 0.4)
                 time.sleep(delay)
         raise RuntimeError(
             f"local LLM request failed after {self._MAX_RETRIES + 1} "
             f"attempts: {self._sanitize_error(last_error)}")
+
+    def _read_completion(self, response) -> dict:
+        """Return a normal completion envelope from JSON, SSE, or NDJSON."""
+        content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type == "application/json" or content_type.endswith("+json"):
+            # Some compatible servers ignore stream=True. A complete normal
+            # response is acceptable, but a truncated JSON body is never used.
+            data = response.json()
+            getattr(self, "cancel_check", lambda: None)()
+            self._validate_completion(data)
+            return data
+        if self._use_openai_routing():
+            return self._read_openai_stream(response)
+        return self._read_ollama_stream(response)
+
+    def _response_lines(self, response):
+        # Decode each full line as UTF-8 instead of requests' text/* fallback
+        # encoding; SSE and NDJSON can contain Japanese text and split bytes.
+        for raw in response.iter_lines(chunk_size=128, decode_unicode=False):
+            getattr(self, "cancel_check", lambda: None)()
+            yield raw.decode("utf-8") if isinstance(raw, bytes) else raw
+        getattr(self, "cancel_check", lambda: None)()
+
+    @staticmethod
+    def _event_json(payload: str) -> dict:
+        try:
+            data = json.loads(payload)
+        except (json.JSONDecodeError, TypeError) as e:
+            raise RuntimeError("Invalid JSON in local LLM stream; partial output discarded") from e
+        if not isinstance(data, dict):
+            raise RuntimeError("Invalid local LLM response object; partial output discarded")
+        if data.get("error"):
+            raise RuntimeError(f"Local LLM server error: {data['error']}")
+        return data
+
+    def _sse_payloads(self, response):
+        lines = []
+        first_line = True
+        for line in self._response_lines(response):
+            if first_line:
+                line = line.lstrip("\ufeff")
+                first_line = False
+            if not line:
+                if lines:
+                    yield "\n".join(lines)
+                    lines = []
+                continue
+            # SSE comments/heartbeats and event/id/retry fields have no token
+            # data. Join multiple data: fields in the same event per SSE rules.
+            if line.startswith("data:"):
+                value = line[5:]
+                lines.append(value[1:] if value.startswith(" ") else value)
+            elif line == "data":
+                lines.append("")
+        if lines:
+            yield "\n".join(lines)
+
+    def _read_openai_stream(self, response) -> dict:
+        content = []
+        finish_reason = None
+        completed = False
+        envelope = {"model": self.model}
+        for payload in self._sse_payloads(response):
+            if payload.strip() == "[DONE]":
+                completed = True
+                break
+            data = self._event_json(payload)
+            for key in ("id", "created", "model", "system_fingerprint"):
+                if key in data:
+                    envelope[key] = data[key]
+            if data.get("usage") is not None:
+                if not isinstance(data["usage"], dict):
+                    raise RuntimeError("Invalid usage in local LLM stream")
+                envelope["usage"] = data["usage"]
+            choices = data.get("choices", [])
+            if not isinstance(choices, list):
+                raise RuntimeError("Invalid choices in local LLM stream")
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    raise RuntimeError("Invalid choice in local LLM stream")
+                if choice.get("index", 0) != 0:
+                    continue
+                delta = choice.get("delta") or {}
+                if not isinstance(delta, dict):
+                    raise RuntimeError("Invalid delta in local LLM stream")
+                token = delta.get("content")
+                if token is not None:
+                    if not isinstance(token, str):
+                        raise RuntimeError("Invalid text in local LLM stream")
+                    content.append(token)
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
+        if not completed or not finish_reason:
+            raise RuntimeError(
+                "Incomplete local LLM stream (missing completion marker or finish reason); "
+                "partial output discarded and request was not retried")
+        envelope["choices"] = [{
+            "index": 0, "message": {"role": "assistant", "content": "".join(content)},
+            "finish_reason": finish_reason,
+        }]
+        return envelope
+
+    def _read_ollama_stream(self, response) -> dict:
+        content = []
+        for line in self._response_lines(response):
+            if not line.strip():
+                continue
+            data = self._event_json(line)
+            message = data.get("message") or {}
+            if not isinstance(message, dict) or not isinstance(message.get("content", ""), str):
+                raise RuntimeError("Invalid message in local LLM stream")
+            content.append(message.get("content", ""))
+            if data.get("done") is True:
+                data["message"] = {**message, "role": "assistant", "content": "".join(content)}
+                return data
+        raise RuntimeError(
+            "Incomplete local LLM stream (missing done=true); "
+            "partial output discarded and request was not retried")
+
+    def _validate_completion(self, data: dict) -> None:
+        if not isinstance(data, dict):
+            raise RuntimeError("Invalid local LLM completion object")
+        if data.get("error"):
+            raise RuntimeError(f"Local LLM server error: {data['error']}")
+        if self._use_openai_routing():
+            choices = data.get("choices")
+            if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                raise RuntimeError("Incomplete local LLM JSON response: missing choices")
+            message = choices[0].get("message")
+            if (not isinstance(message, dict) or not isinstance(message.get("content"), str)
+                    or not choices[0].get("finish_reason")):
+                raise RuntimeError("Incomplete local LLM JSON response: missing message or finish reason")
+        else:
+            message = data.get("message")
+            if (data.get("done") is not True or not isinstance(message, dict)
+                    or not isinstance(message.get("content"), str)):
+                raise RuntimeError("Incomplete local LLM JSON response: missing message or done=true")
 
     def _base_has_version_segment(self) -> bool:
         """Whether base_url already ends with a REST version segment (/v1, /v2...)."""
@@ -391,7 +562,7 @@ class LocalLLMClient(BaseLLMClient):
         payload = {
             "model": self.model,
             "messages": messages,
-            "stream": False,
+            "stream": True,
             "options": {
                 "temperature": kwargs.get("temperature", self.temperature),
                 "num_predict": kwargs.get("max_tokens", self.max_tokens),
@@ -399,8 +570,7 @@ class LocalLLMClient(BaseLLMClient):
         }
 
         try:
-            response = self._post_with_retry(url, payload)
-            data = response.json()
+            data = self._post_with_retry(url, payload)
 
             # Extract response
             content = data.get("message", {}).get("content", "")
@@ -434,6 +604,9 @@ class LocalLLMClient(BaseLLMClient):
             )
 
         except Exception as e:
+            # Keep the run's cancellation exception type: job runners use it
+            # to distinguish an intentional stop from a transport failure.
+            getattr(self, "cancel_check", lambda: None)()
             raise RuntimeError(f"Ollama API error: {self._sanitize_error(e)}")
 
     def _send_openai_compatible_request(
@@ -449,7 +622,8 @@ class LocalLLMClient(BaseLLMClient):
             "messages": messages,
             "temperature": kwargs.get("temperature", self.temperature),
             "max_tokens": kwargs.get("max_tokens", self.max_tokens),
-            "stream": False,
+            "stream": True,
+            "stream_options": {"include_usage": True},
         }
 
         # Add optional parameters
@@ -461,8 +635,7 @@ class LocalLLMClient(BaseLLMClient):
             payload["presence_penalty"] = kwargs["presence_penalty"]
 
         try:
-            response = self._post_with_retry(url, payload)
-            data = response.json()
+            data = self._post_with_retry(url, payload)
 
             # Extract response (OpenAI format)
             choice = data.get("choices", [{}])[0]
@@ -498,6 +671,7 @@ class LocalLLMClient(BaseLLMClient):
             )
 
         except Exception as e:
+            getattr(self, "cancel_check", lambda: None)()
             raise RuntimeError(f"Local LLM API error: {self._sanitize_error(e)}")
 
     def _models_url(self) -> str:

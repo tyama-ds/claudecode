@@ -244,6 +244,8 @@ class DeepResearchGUI:
         self.var_local_model = tk.StringVar(value="llama3.1:8b")
         self.var_local_url = tk.StringVar(value=os.getenv("LOCAL_LLM_BASE_URL", ""))
         self.var_local_backend = tk.StringVar(value="ollama")
+        self.var_local_timeout = tk.StringVar(value="600")
+        self.var_local_concurrency = tk.StringVar(value="1")
         self.var_temperature = tk.DoubleVar(value=0.7)
         self.var_max_tokens = tk.IntVar(value=4096)
 
@@ -544,6 +546,18 @@ class DeepResearchGUI:
         ttk.Entry(row, textvariable=self.var_local_key, width=50,
                   show="*").pack(side=tk.LEFT)
         ttk.Label(frame, text="Optional. Empty: use the LOCAL_LLM_API_KEY environment variable.",
+                  style="Muted.TLabel", wraplength=600, justify=tk.LEFT).pack(anchor="w", pady=(0, 5))
+
+        for label, variable, maximum in (
+            ("Idle timeout (s):", self.var_local_timeout, 3600),
+            ("Local concurrency:", self.var_local_concurrency, 16),
+        ):
+            row = ttk.Frame(frame)
+            row.pack(fill=tk.X, pady=5)
+            ttk.Label(row, text=label, width=20, anchor="w").pack(side=tk.LEFT)
+            ttk.Spinbox(row, from_=1, to=maximum, textvariable=variable,
+                        width=10).pack(side=tk.LEFT)
+        ttk.Label(frame, text="Streaming keeps receiving generated text. Defaults: 600 seconds without data; 1 request at a time.",
                   style="Muted.TLabel", wraplength=600, justify=tk.LEFT).pack(anchor="w", pady=(0, 5))
 
         # Common Settings
@@ -924,6 +938,8 @@ This helps gather more comprehensive information from diverse sources."""
         self.var_provider.set("openai")
         self.var_openai_model.set("gpt-5-mini")
         self.var_anthropic_model.set("claude-3-5-sonnet-20241022")
+        self.var_local_timeout.set("600")
+        self.var_local_concurrency.set("1")
         self.var_temperature.set(0.7)
         self.var_max_tokens.set(4096)
         self.var_search_method.set("duckduckgo")
@@ -998,6 +1014,7 @@ This helps gather more comprehensive information from diverse sources."""
             from .utils.concurrency import validate_parallel_max_workers
             validate_parallel_max_workers(self.var_parallel_workers.get(),
                                           source="Parallel workers")
+            self._get_config_dict()
         except (ValueError, tk.TclError) as e:
             messagebox.showerror("Validation Error", str(e))
             return False
@@ -1042,6 +1059,8 @@ This helps gather more comprehensive information from diverse sources."""
             "local_model": self.var_local_model.get(),
             "local_base_url": self.var_local_url.get(),
             "local_backend": self.var_local_backend.get(),
+            "local_timeout": self.var_local_timeout.get(),
+            "local_concurrency": self.var_local_concurrency.get(),
             "target_pages": self.var_target_pages.get(),
             "target_characters": self.var_target_characters.get(),
             "multilingual": self.var_multilingual.get(),

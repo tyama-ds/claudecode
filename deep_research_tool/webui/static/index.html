@@ -394,10 +394,11 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--error)
           <option value="draft">draft: 本文の書き直しをローカルLLMで実行</option>
           <option value="all">all: 検証と書き直しの両方をローカルLLMで実行</option>
         </select>
-        <label>タイムアウト（秒、空欄=既定120秒）</label>
-        <input type="number" id="set_local_timeout" min="1" max="3600" placeholder="120">
-        <label>同時リクエスト上限（空欄=制限なし。小規模サーバーは1〜2推奨）</label>
-        <input type="number" id="set_local_concurrency" min="1" max="16" placeholder="例: 2">
+        <label>応答データが途切れた場合のタイムアウト（秒、空欄=600秒）</label>
+        <input type="number" id="set_local_timeout" min="1" max="3600" placeholder="600">
+        <label>同時リクエスト上限（空欄=1。小規模サーバーは1推奨）</label>
+        <input type="number" id="set_local_concurrency" min="1" max="16" placeholder="1">
+        <p class="hint">生成途中の応答も受信します。タイムアウトは最初の応答待ちと、途中でデータが来なくなった時間に適用されます。LM Studioの場合はOpenAI互換を選び、サーバーURLに http://127.0.0.1:1234/v1 を指定してください。</p>
         <p class="hint">ロールルーティングはサーバーURLが設定されている場合のみ有効です。URLが外部サービスへ自動設定されることはありません。</p>
       </div>
 

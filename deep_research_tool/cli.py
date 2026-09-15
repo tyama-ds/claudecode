@@ -429,15 +429,15 @@ def cli():
 )
 @click.option(
     "--local-timeout",
-    type=int,
+    type=click.IntRange(1, 3600),
     default=None,
-    help="Local LLM request timeout in seconds (unset: client default)"
+    help="Local LLM timeout without receiving data, in seconds (default: 600)"
 )
 @click.option(
     "--local-concurrency",
-    type=int,
+    type=click.IntRange(1, 16),
     default=None,
-    help="Max simultaneous requests to the local LLM server"
+    help="Max simultaneous requests per local LLM client (default: 1)"
 )
 def research(
     query: str,
