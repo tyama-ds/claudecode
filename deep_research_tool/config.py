@@ -208,9 +208,9 @@ class APIConfig:
     local_backend: LocalLLMBackend = LocalLLMBackend.OLLAMA
     local_base_url: Optional[str] = None  # e.g., "http://localhost:11434"
     local_api_key: Optional[str] = None  # Optional auth for local servers
-    # Local LLM request timeout (seconds) and per-client concurrency cap
+    # Local LLM stream idle timeout (seconds) and per-client concurrency cap
     # (small local servers often handle only 1-2 parallel requests);
-    # None = client defaults
+    # None = client defaults (600 seconds without data; 1 request at a time)
     local_timeout: Optional[int] = None
     local_concurrency: Optional[int] = None
 

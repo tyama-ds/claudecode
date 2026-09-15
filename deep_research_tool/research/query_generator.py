@@ -3,9 +3,10 @@ Query Generator - Create and manage research queries and plans.
 """
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import date, datetime
 
 from deep_research_tool.utils.helpers import extract_json_from_response
 from deep_research_tool.utils.japanese_text import (
@@ -406,6 +407,32 @@ class QueryGenerator:
         print(f"[QueryGenerator] Warning: Could not generate ideal ToC after {max_retries + 1} attempts. Using best effort.")
         return plan if plan else self._create_fallback_plan(query, "All generation attempts failed")
 
+    def _planning_context(self, today: date) -> str:
+        """Ground relative dates and distinguish a search plan from findings."""
+        try:
+            three_years_ago = today.replace(year=today.year - 3)
+        except ValueError:  # February 29 has no counterpart in most years.
+            three_years_ago = today.replace(year=today.year - 3, day=28)
+        if self.language == "ja":
+            return f"""【調査計画の基準】
+現在の日付: {today.isoformat()}
+「最新」「直近」「過去N年」などの相対期間は、この日付を基準に解釈してください。
+例: 「直近3年間」は {three_years_ago.isoformat()} から {today.isoformat()} までです。
+期間を指定された場合は、概要と検索クエリに対象期間を明示してください。
+ユーザーが明示した過去の年・期間や暦年の指定は、その指定を維持してください。
+これは検索前の計画です。未確認の企業名・技術名や実績を創作して、確認済みの事実として記載しないでください。
+未確認の候補は調査・検証する対象として記載し、章タイトルは短く、説明は各1文にしてください。
+出力は完全なJSONオブジェクト1個のみとし、説明文や途中で省略した配列を含めないでください。"""
+        return f"""[PLANNING CONTEXT]
+Current date: {today.isoformat()}
+Resolve relative periods such as latest, recent, and past N years against this date.
+For example, the past 3 years run from {three_years_ago.isoformat()} through {today.isoformat()}.
+When a period is requested, state it explicitly in the summary and search queries.
+Preserve the user's explicitly requested historical dates, periods, or calendar years.
+This is a plan before searching. Do not invent company names, technology names, or achievements and present them as verified facts.
+Describe unverified candidates as subjects to investigate. Keep titles short and each description to one sentence.
+Return one complete JSON object only, without commentary or abbreviated arrays."""
+
     def _generate_research_plan_attempt(
         self,
         query: str,
@@ -433,6 +460,8 @@ class QueryGenerator:
             "Respond entirely in Japanese." if self.language == "ja"
             else f"Respond in {self.language}."
         )
+        today = date.today()
+        planning_context = self._planning_context(today)
 
         # Build user ToC preference instruction
         user_toc_instruction = ""
@@ -520,6 +549,7 @@ When creating a research plan:
 要件: {requirements if requirements else "包括的な調査"}
 
 追加コンテキスト: {additional_context if additional_context else "なし"}
+{planning_context}
 {user_toc_instruction}{retry_instruction}
 詳細な調査計画を作成してください。以下のJSON形式で回答してください：
 {{
@@ -557,7 +587,7 @@ When creating a research plan:
   ✗ 悪い例: "IR KPI 必須項目 年度別売上・CF部門比率・生産能力・CAPEX・主要顧客・用途別比率 テンプレート"
   ○ 良い例: "IR KPI 年度別売上 テンプレート", "IR CF部門比率 開示事例", "IR CAPEX 開示項目", "IR 主要顧客 開示例", "IR 用途別比率 チェックリスト"
   ✗ 悪い例: "炭素繊維 市場規模・メーカーシェア・用途・価格動向 分析"
-  ○ 良い例: "炭素繊維 市場規模 2024", "炭素繊維 メーカー シェア", "炭素繊維 用途別 需要", "炭素繊維 価格動向"
+  ○ 良い例: "炭素繊維 市場規模 {today.year}", "炭素繊維 メーカー シェア", "炭素繊維 用途別 需要", "炭素繊維 価格動向"
 - 焦点を絞ったクエリを数多く生成することで、検索精度が向上する"""
         else:
             prompt = f"""Research Topic: {query}
@@ -565,6 +595,7 @@ When creating a research plan:
 Requirements: {requirements if requirements else "General comprehensive research"}
 
 Additional Context: {additional_context if additional_context else "None"}
+{planning_context}
 {user_toc_instruction}{retry_instruction}
 Create a detailed research plan. Return your response as a JSON object with this exact structure:
 {{
@@ -600,32 +631,108 @@ CRITICAL RULES FOR SEARCH QUERIES:
 - NEVER combine multiple items with separators like ・ 、 / , in a single query
 - Examples:
   ✗ Bad: "carbon fiber market size, manufacturer share, applications, price trends analysis"
-  ○ Good: "carbon fiber market size 2024", "carbon fiber manufacturer share", "carbon fiber applications demand", "carbon fiber price trends"
+  ○ Good: "carbon fiber market size {today.year}", "carbon fiber manufacturer share", "carbon fiber applications demand", "carbon fiber price trends"
 - More focused queries yield better search results"""
 
         response = self.llm.generate(prompt, system_prompt=system_prompt)
 
         # Parse response
         try:
-            content = response.content
-            if not content or not content.strip():
-                finish_reason = getattr(response, "finish_reason", "unknown")
-                model = getattr(response, "model", "unknown")
-                usage = getattr(response, "usage", {})
-                print(f"[QueryGenerator] Empty response from LLM. "
-                      f"finish_reason={finish_reason}, model={model}, usage={usage}")
-                return None
-
-            data = extract_json_from_response(content)
+            data = self._parse_plan_response(response)
             return self._build_plan_from_data(data, query)
 
         except (json.JSONDecodeError, ValueError) as e:
-            print(f"[QueryGenerator] JSON parsing failed: {e}")
+            print(f"[QueryGenerator] Plan response rejected: {e}; "
+                  f"finish_reason={getattr(response, 'finish_reason', 'unknown')}, "
+                  f"model={getattr(response, 'model', 'unknown')}, "
+                  f"usage={getattr(response, 'usage', {})}")
             return None
+
+    @staticmethod
+    def _parse_plan_response(response) -> Dict[str, Any]:
+        """Reject incomplete output even if the server reports a normal stop."""
+        finish_reason = getattr(response, "finish_reason", None)
+        if isinstance(finish_reason, str) and finish_reason.lower() in {
+            "length", "max_tokens", "max_output_tokens", "max_token_limit",
+        }:
+            raise ValueError("LLM reached its output token limit before completing the plan")
+        content = getattr(response, "content", None)
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("LLM returned an empty plan response")
+        content = content.strip()
+        # Accept an enclosing Markdown fence, but never salvage an inner object
+        # or a complete prefix followed by an unfinished array/object.
+        fenced = re.fullmatch(r"```(?:json)?\s*\n?(.*?)\s*```", content, re.DOTALL | re.IGNORECASE)
+        if fenced:
+            content = fenced.group(1)
+        data = json.loads(content)
+        QueryGenerator._validate_plan_data(data)
+        return data
+
+    @staticmethod
+    def _validate_plan_data(data: Any) -> None:
+        """Validate essential structure independently of optional ToC style rules."""
+        if not isinstance(data, dict):
+            raise ValueError("Plan must be a JSON object")
+
+        def require_text(value: Any, field_name: str) -> None:
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be a nonempty string")
+
+        section_ids = set()
+
+        def require_section_id(value: Any, field_name: str) -> None:
+            require_text(value, field_name)
+            section_id = value.strip()
+            if section_id in section_ids:
+                raise ValueError(f"{field_name} duplicates section ID {section_id!r}")
+            section_ids.add(section_id)
+
+        require_text(data.get("title"), "title")
+        toc = data.get("table_of_contents")
+        if not isinstance(toc, list) or not toc:
+            raise ValueError("table_of_contents must be a nonempty list")
+        for index, node in enumerate(toc):
+            name = f"table_of_contents[{index}]"
+            if not isinstance(node, dict):
+                raise ValueError(f"{name} must be an object")
+            require_section_id(node.get("section"), f"{name}.section")
+            require_text(node.get("title"), f"{name}.title")
+            if "description" in node and not isinstance(node["description"], str):
+                raise ValueError(f"{name}.description must be a string")
+            subsections = node.get("subsections", [])
+            if not isinstance(subsections, list):
+                raise ValueError(f"{name}.subsections must be a list")
+            for sub_index, sub in enumerate(subsections):
+                sub_name = f"{name}.subsections[{sub_index}]"
+                if not isinstance(sub, dict):
+                    raise ValueError(f"{sub_name} must be an object")
+                require_section_id(sub.get("section"), f"{sub_name}.section")
+                require_text(sub.get("title"), f"{sub_name}.title")
+                if "description" in sub and not isinstance(sub["description"], str):
+                    raise ValueError(f"{sub_name}.description must be a string")
+                if "subsections" in sub and sub["subsections"] != []:
+                    raise ValueError(f"{sub_name} contains unsupported nested subsections")
+
+        queries = data.get("search_queries")
+        if not isinstance(queries, list) or not queries:
+            raise ValueError("search_queries must be a nonempty list")
+        for item in queries:
+            require_text(item, "search_queries item")
+        for field_name in ("key_terms", "suggested_sources"):
+            if field_name in data:
+                if not isinstance(data[field_name], list):
+                    raise ValueError(f"{field_name} must be a list")
+                for item in data[field_name]:
+                    require_text(item, f"{field_name} item")
+        for field_name in ("summary", "methodology_notes", "estimated_complexity"):
+            if field_name in data and not isinstance(data[field_name], str):
+                raise ValueError(f"{field_name} must be a string")
 
     @staticmethod
     def _build_plan_from_data(data: Dict[str, Any], query: str) -> ResearchPlan:
         """Build a ResearchPlan from the plan-JSON structure the LLM returns."""
+        QueryGenerator._validate_plan_data(data)
         toc_items = []
         for item_data in data.get("table_of_contents", []):
             subsections = [
@@ -697,12 +804,14 @@ CRITICAL RULES FOR SEARCH QUERIES:
             ensure_ascii=False,
             indent=1,
         )
+        planning_context = self._planning_context(date.today())
 
         if self.language == "ja":
             prompt = f"""以下は調査計画です。ユーザーの修正指示に従って計画を修正してください。
 
 調査テーマ: {query}
 要件: {requirements if requirements else "包括的な調査"}
+{planning_context}
 
 【現在の調査計画】
 {plan_json}
@@ -720,6 +829,7 @@ CRITICAL RULES FOR SEARCH QUERIES:
 
 Research Topic: {query}
 Requirements: {requirements if requirements else "General comprehensive research"}
+{planning_context}
 
 [CURRENT PLAN]
 {plan_json}
@@ -735,19 +845,10 @@ Output the complete revised plan in the same JSON format as the current plan
 (JSON only, no other text)."""
 
         response = self.llm.generate(prompt)
-        if not response or not response.content:
-            raise ValueError("LLM returned empty response for plan revision")
-
-        data = extract_json_from_response(response.content)
+        data = self._parse_plan_response(response)
         revised = self._build_plan_from_data(data, query)
 
-        # Guard against a degenerate revision (LLM dropped the ToC or queries)
-        if not revised.table_of_contents.items:
-            raise ValueError("Revised plan has no table of contents")
-        if not revised.search_queries:
-            revised.search_queries = list(plan.search_queries)
-        else:
-            revised.search_queries = self.split_complex_queries(revised.search_queries)
+        revised.search_queries = self.split_complex_queries(revised.search_queries)
         return revised
 
     def generate_follow_up_queries(
@@ -1089,7 +1190,11 @@ Return as a JSON array of specific gaps:
 
         return ResearchPlan(
             title=f"Research Report: {query}",
-            summary=f"Research analysis of: {query}",
+            summary=(
+                f"完全な調査計画を取得できなかったため生成した暫定計画です。調査範囲・期間を確認してください。テーマ: {query}"
+                if self.language == "ja" else
+                f"Fallback plan: a complete LLM plan could not be obtained. Review the scope and dates before research. Topic: {query}"
+            ),
             table_of_contents=toc,
             search_queries=queries,
             key_terms=[query],

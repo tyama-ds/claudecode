@@ -87,8 +87,12 @@ class DeepResearchGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Deep Research Tool")
-        self.root.geometry("900x700")
-        self.root.minsize(800, 600)
+        initial_width = max(860, min(1080, self.root.winfo_screenwidth() - 80))
+        initial_height = max(660, min(820, self.root.winfo_screenheight() - 90))
+        self.root.geometry(f"{initial_width}x{initial_height}")
+        self.root.minsize(860, 660)
+        self._configure_styles()
+        self._tab_surfaces = []
 
         # Configuration
         self.config = GUIConfig()
@@ -102,6 +106,124 @@ class DeepResearchGUI:
         # Research state
         self.is_running = False
         self.research_thread: Optional[threading.Thread] = None
+
+    def _configure_styles(self):
+        """Use the bundled ttk theme so the workspace needs no theme files."""
+        self.colors = {
+            "bg": "#f3f6fa", "card": "#ffffff", "text": "#182c3e",
+            "muted": "#586d7e", "line": "#dce5ec", "accent": "#147d87",
+            "accent_hover": "#10656e", "soft": "#e8f4f4", "navy": "#112638",
+        }
+        c = self.colors
+        self.root.configure(background=c["bg"])
+        style = ttk.Style(self.root)
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+        style.configure(".", font=("Segoe UI", 10), background=c["card"],
+                        foreground=c["text"], bordercolor=c["line"],
+                        lightcolor=c["line"], darkcolor=c["line"])
+        style.configure("App.TFrame", background=c["bg"])
+        style.configure("Card.TFrame", background=c["card"], relief="solid", borderwidth=1)
+        style.configure("TLabel", background=c["card"])
+        style.configure("Muted.TLabel", foreground=c["muted"])
+        style.configure("Heading.TLabel", font=("Segoe UI", 11, "bold"))
+        style.configure("Percent.TLabel", font=("Consolas", 16, "bold"), foreground=c["accent"])
+        style.configure("TLabelframe", background=c["card"], borderwidth=1, relief="solid")
+        style.configure("TLabelframe.Label", font=("Segoe UI", 10, "bold"), foreground=c["muted"])
+        style.configure("TNotebook", background=c["bg"], borderwidth=0, tabmargins=(0, 0, 0, 0))
+        style.configure("TNotebook.Tab", padding=(15, 9), background=c["bg"],
+                        foreground=c["muted"], font=("Segoe UI", 10, "bold"))
+        style.map("TNotebook.Tab", background=[("selected", c["card"]), ("active", c["soft"])],
+                  foreground=[("selected", c["accent"])])
+        for widget in ("TEntry", "TCombobox", "TSpinbox"):
+            style.configure(widget, padding=6, fieldbackground=c["card"], arrowsize=14)
+            style.map(widget, bordercolor=[("focus", c["accent"])],
+                      fieldbackground=[("disabled", c["bg"]), ("readonly", c["card"])],
+                      foreground=[("disabled", "#718595")])
+        style.configure("Topic.TEntry", padding=10, font=("Segoe UI", 11))
+        style.configure("TButton", padding=(12, 8), background=c["card"], borderwidth=1,
+                        focusthickness=2, focuscolor=c["accent"])
+        style.map("TButton", background=[("disabled", c["bg"]), ("active", c["soft"])],
+                  foreground=[("disabled", "#718595")])
+        style.configure("Primary.TButton", background=c["accent"], foreground="white",
+                        font=("Segoe UI", 10, "bold"), padding=(20, 10), focuscolor="white")
+        style.map("Primary.TButton", background=[("disabled", "#d5e5e8"),
+                  ("pressed", "#0d555d"), ("active", c["accent_hover"])],
+                  foreground=[("disabled", "#516f77"), ("!disabled", "white")])
+        style.configure("Horizontal.TProgressbar", background=c["accent"],
+                        troughcolor=c["soft"], borderwidth=0, lightcolor=c["accent"],
+                        darkcolor=c["accent"], thickness=8)
+        style.configure("TScrollbar", background="#c8d7e1", troughcolor=c["bg"],
+                        borderwidth=0, arrowsize=12)
+        style.map("TCheckbutton", background=[("active", c["soft"])])
+        style.configure("TSeparator", background=c["line"])
+
+    def _build_header(self):
+        header = tk.Frame(self.root, bg=self.colors["navy"], padx=24, pady=17)
+        header.pack(fill=tk.X)
+        mark = tk.Canvas(header, width=42, height=42, bg="#183e4c", highlightthickness=0)
+        mark.pack(side=tk.LEFT, padx=(0, 14))
+        mark.create_oval(9, 8, 27, 26, outline="#87ddd3", width=2)
+        mark.create_line(25, 24, 34, 33, fill="#87ddd3", width=3)
+        titles = tk.Frame(header, bg=self.colors["navy"])
+        titles.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(titles, text="Deep Research Tool", font=("Segoe UI", 17, "bold"),
+                 bg=self.colors["navy"], fg="white", anchor="w").pack(anchor="w")
+        tk.Label(titles, text="問いから、根拠のあるレポートへ。", font=("Segoe UI", 10),
+                 bg=self.colors["navy"], fg="#b7cbd8", anchor="w").pack(anchor="w", pady=(3, 0))
+        tk.Label(header, text="DESKTOP", font=("Segoe UI", 9, "bold"), padx=11, pady=6,
+                 bg="#234252", fg="#bbe7e2").pack(side=tk.RIGHT)
+
+    def _settings_tab(self, notebook, title):
+        """Keep all settings reachable when the window or display is small."""
+        outer = ttk.Frame(notebook)
+        notebook.add(outer, text=title)
+        canvas = tk.Canvas(outer, background=self.colors["card"], highlightthickness=0,
+                           borderwidth=0, height=280)
+        scrollbar = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        content = ttk.Frame(canvas, padding=16)
+        window = canvas.create_window((0, 0), window=content, anchor="nw")
+        content.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
+        self._tab_surfaces.append((content, canvas))
+        return content
+
+    def _bind_tab_scrolling(self):
+        def descendants(widget):
+            yield widget
+            for child in widget.winfo_children():
+                yield from descendants(child)
+
+        for content, canvas in self._tab_surfaces:
+            def wheel(event, surface=canvas):
+                if surface.yview() == (0.0, 1.0):
+                    return
+                delta = getattr(event, "delta", 0)
+                steps = (-int(delta / 120) or (-1 if delta > 0 else 1)) if delta else (
+                    -1 if getattr(event, "num", None) == 4 else 1)
+                surface.yview_scroll(steps, "units")
+                return "break"
+
+            def reveal_focus(event, surface=canvas):
+                bounds = surface.bbox("all")
+                if not bounds or bounds[3] <= surface.winfo_height():
+                    return
+                top = event.widget.winfo_rooty() - surface.winfo_rooty() + surface.canvasy(0)
+                bottom = top + event.widget.winfo_height()
+                if bottom > surface.canvasy(0) + surface.winfo_height():
+                    surface.yview_moveto(max(0, (bottom - surface.winfo_height() + 12) / bounds[3]))
+                elif top < surface.canvasy(0):
+                    surface.yview_moveto(max(0, (top - 12) / bounds[3]))
+
+            for widget in [canvas, *descendants(content)]:
+                # Preserve the wheel behavior of inputs with their own value controls.
+                if not isinstance(widget, (ttk.Combobox, ttk.Spinbox, ttk.Scale)):
+                    for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                        widget.bind(sequence, wheel, add="+")
+                widget.bind("<FocusIn>", reveal_focus, add="+")
 
     def _init_variables(self):
         """Initialize tkinter variables."""
@@ -122,6 +244,8 @@ class DeepResearchGUI:
         self.var_local_model = tk.StringVar(value="llama3.1:8b")
         self.var_local_url = tk.StringVar(value=os.getenv("LOCAL_LLM_BASE_URL", ""))
         self.var_local_backend = tk.StringVar(value="ollama")
+        self.var_local_timeout = tk.StringVar(value="600")
+        self.var_local_concurrency = tk.StringVar(value="1")
         self.var_temperature = tk.DoubleVar(value=0.7)
         self.var_max_tokens = tk.IntVar(value=4096)
 
@@ -185,16 +309,21 @@ class DeepResearchGUI:
 
     def _build_ui(self):
         """Build the main user interface."""
+        self._build_header()
         # Main container
-        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame = ttk.Frame(self.root, padding=20, style="App.TFrame")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
         # Topic input at top
         self._build_topic_section(main_frame)
 
+        # Reserve the actions/status area before the settings take spare space.
+        self._build_bottom_section(main_frame)
+
         # Notebook for settings tabs
         notebook = ttk.Notebook(main_frame)
-        notebook.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        notebook.pack(fill=tk.BOTH, expand=True)
+        self.notebook = notebook
 
         # Create tabs
         self._build_research_tab(notebook)
@@ -205,22 +334,19 @@ class DeepResearchGUI:
         self._build_multilingual_tab(notebook)
         self._build_proxy_tab(notebook)
 
-        # Bottom section with buttons and log
-        self._build_bottom_section(main_frame)
+        self._bind_tab_scrolling()
 
     def _build_topic_section(self, parent):
         """Build the topic input section."""
-        frame = ttk.LabelFrame(parent, text="Research Topic", padding="10")
-        frame.pack(fill=tk.X, pady=(0, 10))
-
-        ttk.Label(frame, text="Topic:").pack(side=tk.LEFT)
-        topic_entry = ttk.Entry(frame, textvariable=self.var_topic, width=80)
-        topic_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10, 0))
+        frame = ttk.Frame(parent, padding=(16, 12), style="Card.TFrame")
+        frame.pack(fill=tk.X, pady=(0, 14))
+        ttk.Label(frame, text="Research topic", style="Heading.TLabel").pack(anchor="w", pady=(0, 7))
+        topic_entry = ttk.Entry(frame, textvariable=self.var_topic, style="Topic.TEntry")
+        topic_entry.pack(fill=tk.X)
 
     def _build_research_tab(self, notebook):
         """Build the Research Settings tab."""
-        frame = ttk.Frame(notebook, padding="10")
-        notebook.add(frame, text="Research")
+        frame = self._settings_tab(notebook, "Research")
 
         # Language
         row = ttk.Frame(frame)
@@ -230,7 +356,7 @@ class DeepResearchGUI:
                                   values=["ja", "en", "zh", "ko", "de", "fr", "es"],
                                   state="readonly", width=15)
         lang_combo.pack(side=tk.LEFT)
-        ttk.Label(row, text="(ja=Japanese, en=English)", foreground="gray").pack(side=tk.LEFT, padx=10)
+        ttk.Label(row, text="(ja=Japanese, en=English)", foreground=self.colors["muted"]).pack(side=tk.LEFT, padx=10)
 
         # Min Iterations
         row = ttk.Frame(frame)
@@ -308,9 +434,9 @@ class DeepResearchGUI:
             state="readonly", width=15)
         profile_combo.pack(side=tk.LEFT)
         ttk.Label(row, text="(balanced=推奨)",
-                  foreground="gray").pack(side=tk.LEFT, padx=8)
+                  foreground=self.colors["muted"]).pack(side=tk.LEFT, padx=8)
         self._verify_desc = ttk.Label(
-            frame, foreground="gray", wraplength=520, justify="left",
+            frame, foreground=self.colors["muted"], wraplength=520, justify="left",
             text="速度と検証品質のバランスを取った推奨設定です。")
         self._verify_desc.pack(anchor="w", padx=4)
 
@@ -335,13 +461,12 @@ class DeepResearchGUI:
         ttk.Spinbox(row, from_=1, to=16, increment=1,
                     textvariable=self.var_parallel_workers,
                     width=10).pack(side=tk.LEFT)
-        ttk.Label(row, text="(1-16; app-wide limit on concurrent LLM/network calls)",
-                  foreground="gray").pack(side=tk.LEFT, padx=10)
+        ttk.Label(frame, text="1–16 workers. Shared limit for concurrent LLM and network calls.",
+                  style="Muted.TLabel", wraplength=600, justify=tk.LEFT).pack(anchor="w", pady=(0, 5))
 
     def _build_api_tab(self, notebook):
         """Build the API Settings tab."""
-        frame = ttk.Frame(notebook, padding="10")
-        notebook.add(frame, text="API")
+        frame = self._settings_tab(notebook, "API")
 
         # Provider
         row = ttk.Frame(frame)
@@ -405,8 +530,8 @@ class DeepResearchGUI:
         row.pack(fill=tk.X, pady=5)
         ttk.Label(row, text="Base URL:", width=20, anchor="w").pack(side=tk.LEFT)
         ttk.Entry(row, textvariable=self.var_local_url, width=50).pack(side=tk.LEFT)
-        ttk.Label(row, text="(empty = LOCAL_LLM_BASE_URL / backend default)",
-                  foreground="gray").pack(side=tk.LEFT, padx=6)
+        ttk.Label(frame, text="Empty: use LOCAL_LLM_BASE_URL or the backend default.",
+                  style="Muted.TLabel", wraplength=600, justify=tk.LEFT).pack(anchor="w", pady=(0, 5))
 
         row = ttk.Frame(frame)
         row.pack(fill=tk.X, pady=5)
@@ -420,8 +545,20 @@ class DeepResearchGUI:
         ttk.Label(row, text="API Key (optional):", width=20, anchor="w").pack(side=tk.LEFT)
         ttk.Entry(row, textvariable=self.var_local_key, width=50,
                   show="*").pack(side=tk.LEFT)
-        ttk.Label(row, text="(empty = LOCAL_LLM_API_KEY env var)",
-                  foreground="gray").pack(side=tk.LEFT, padx=6)
+        ttk.Label(frame, text="Optional. Empty: use the LOCAL_LLM_API_KEY environment variable.",
+                  style="Muted.TLabel", wraplength=600, justify=tk.LEFT).pack(anchor="w", pady=(0, 5))
+
+        for label, variable, maximum in (
+            ("Idle timeout (s):", self.var_local_timeout, 3600),
+            ("Local concurrency:", self.var_local_concurrency, 16),
+        ):
+            row = ttk.Frame(frame)
+            row.pack(fill=tk.X, pady=5)
+            ttk.Label(row, text=label, width=20, anchor="w").pack(side=tk.LEFT)
+            ttk.Spinbox(row, from_=1, to=maximum, textvariable=variable,
+                        width=10).pack(side=tk.LEFT)
+        ttk.Label(frame, text="Streaming keeps receiving generated text. Defaults: 600 seconds without data; 1 request at a time.",
+                  style="Muted.TLabel", wraplength=600, justify=tk.LEFT).pack(anchor="w", pady=(0, 5))
 
         # Common Settings
         ttk.Separator(frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=15)
@@ -445,8 +582,7 @@ class DeepResearchGUI:
 
     def _build_search_tab(self, notebook):
         """Build the Search Settings tab."""
-        frame = ttk.Frame(notebook, padding="10")
-        notebook.add(frame, text="Search")
+        frame = self._settings_tab(notebook, "Search")
 
         # Search Method
         row = ttk.Frame(frame)
@@ -471,12 +607,11 @@ class DeepResearchGUI:
         ttk.Combobox(row, textvariable=self.var_region,
                      values=["wt-wt", "jp-jp", "us-en", "uk-en", "de-de", "fr-fr"],
                      width=15).pack(side=tk.LEFT)
-        ttk.Label(row, text="(wt-wt=Worldwide)", foreground="gray").pack(side=tk.LEFT, padx=10)
+        ttk.Label(row, text="(wt-wt=Worldwide)", foreground=self.colors["muted"]).pack(side=tk.LEFT, padx=10)
 
     def _build_deep_think_tab(self, notebook):
         """Build the DeepThink Settings tab."""
-        frame = ttk.Frame(notebook, padding="10")
-        notebook.add(frame, text="DeepThink")
+        frame = self._settings_tab(notebook, "DeepThink")
 
         # Enable DeepThink
         row = ttk.Frame(frame)
@@ -496,8 +631,8 @@ class DeepResearchGUI:
         level_label.pack(side=tk.LEFT)
         self.var_deep_think_level.trace_add("write",
             lambda *args: level_label.config(text=f"{self.var_deep_think_level.get():.2f}"))
-        ttk.Label(row, text="(0=Conservative, 1=Exploratory)",
-                  foreground="gray").pack(side=tk.LEFT, padx=10)
+        ttk.Label(frame, text="0 = Conservative, 1 = Exploratory", style="Muted.TLabel",
+                  wraplength=600).pack(anchor="w", pady=(0, 5))
 
         # Reasoning Iterations
         row = ttk.Frame(frame)
@@ -525,8 +660,8 @@ class DeepResearchGUI:
         ttk.Combobox(row, textvariable=self.var_consistency_mode,
                      values=["warn", "revise", "strict"],
                      state="readonly", width=15).pack(side=tk.LEFT)
-        ttk.Label(row, text="(warn=Log only, revise=Auto-fix, strict=Fail)",
-                  foreground="gray").pack(side=tk.LEFT, padx=10)
+        ttk.Label(frame, text="warn = Log only, revise = Auto-fix, strict = Fail",
+                  style="Muted.TLabel", wraplength=600).pack(anchor="w", pady=(0, 5))
 
         # Fidelity Threshold
         row = ttk.Frame(frame)
@@ -549,13 +684,12 @@ class DeepResearchGUI:
 - Consistency Mode: How to handle detected inconsistencies
 - Fidelity Threshold: Minimum source fidelity score required"""
 
-        desc_label = ttk.Label(frame, text=desc_text, justify=tk.LEFT, foreground="gray")
+        desc_label = ttk.Label(frame, text=desc_text, justify=tk.LEFT, foreground=self.colors["muted"])
         desc_label.pack(anchor="w")
 
     def _build_report_tab(self, notebook):
         """Build the Report Settings tab."""
-        frame = ttk.Frame(notebook, padding="10")
-        notebook.add(frame, text="Report")
+        frame = self._settings_tab(notebook, "Report")
 
         # Output Format
         row = ttk.Frame(frame)
@@ -569,8 +703,8 @@ class DeepResearchGUI:
         row = ttk.Frame(frame)
         row.pack(fill=tk.X, pady=5)
         ttk.Label(row, text="Output Directory:", width=20, anchor="w").pack(side=tk.LEFT)
-        ttk.Entry(row, textvariable=self.var_output_dir, width=40).pack(side=tk.LEFT)
-        ttk.Button(row, text="Browse...", command=self._browse_output_dir).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row, text="Browse...", command=self._browse_output_dir).pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Entry(row, textvariable=self.var_output_dir, width=30).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         # Target Length
         ttk.Separator(frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=15)
@@ -580,13 +714,13 @@ class DeepResearchGUI:
         row.pack(fill=tk.X, pady=5)
         ttk.Label(row, text="Target Pages:", width=20, anchor="w").pack(side=tk.LEFT)
         ttk.Entry(row, textvariable=self.var_target_pages, width=10).pack(side=tk.LEFT)
-        ttk.Label(row, text="(Leave empty for auto)", foreground="gray").pack(side=tk.LEFT, padx=10)
+        ttk.Label(row, text="(Leave empty for auto)", foreground=self.colors["muted"]).pack(side=tk.LEFT, padx=10)
 
         row = ttk.Frame(frame)
         row.pack(fill=tk.X, pady=5)
         ttk.Label(row, text="Target Characters:", width=20, anchor="w").pack(side=tk.LEFT)
         ttk.Entry(row, textvariable=self.var_target_characters, width=10).pack(side=tk.LEFT)
-        ttk.Label(row, text="(Leave empty for auto)", foreground="gray").pack(side=tk.LEFT, padx=10)
+        ttk.Label(row, text="(Leave empty for auto)", foreground=self.colors["muted"]).pack(side=tk.LEFT, padx=10)
 
         # Include Options
         ttk.Separator(frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=15)
@@ -609,8 +743,7 @@ class DeepResearchGUI:
 
     def _build_multilingual_tab(self, notebook):
         """Build the Multilingual Search tab."""
-        frame = ttk.Frame(notebook, padding="10")
-        notebook.add(frame, text="Multilingual")
+        frame = self._settings_tab(notebook, "Multilingual")
 
         # Enable Multilingual
         row = ttk.Frame(frame)
@@ -623,7 +756,7 @@ class DeepResearchGUI:
         # Language Selection
         ttk.Label(frame, text="Search Languages", font=("", 10, "bold")).pack(anchor="w")
         ttk.Label(frame, text="Select languages to search in:",
-                  foreground="gray").pack(anchor="w", pady=(0, 10))
+                  foreground=self.colors["muted"]).pack(anchor="w", pady=(0, 10))
 
         # Language checkboxes in a grid
         lang_frame = ttk.Frame(frame)
@@ -674,13 +807,12 @@ class DeepResearchGUI:
 
 This helps gather more comprehensive information from diverse sources."""
 
-        desc_label = ttk.Label(frame, text=desc_text, justify=tk.LEFT, foreground="gray")
+        desc_label = ttk.Label(frame, text=desc_text, justify=tk.LEFT, foreground=self.colors["muted"])
         desc_label.pack(anchor="w")
 
     def _build_proxy_tab(self, notebook):
         """Build the Proxy Settings tab."""
-        frame = ttk.Frame(notebook, padding="10")
-        notebook.add(frame, text="Proxy")
+        frame = self._settings_tab(notebook, "Proxy")
 
         # HTTP Proxy
         row = ttk.Frame(frame)
@@ -692,7 +824,7 @@ This helps gather more comprehensive information from diverse sources."""
         row.pack(fill=tk.X, pady=2)
         ttk.Label(row, text="", width=20).pack(side=tk.LEFT)
         ttk.Label(row, text="e.g., http://proxy.example.com:8080",
-                  foreground="gray").pack(side=tk.LEFT)
+                  foreground=self.colors["muted"]).pack(side=tk.LEFT)
 
         # HTTPS Proxy
         row = ttk.Frame(frame)
@@ -722,42 +854,71 @@ This helps gather more comprehensive information from diverse sources."""
         ttk.Checkbutton(row, text="Verify SSL Certificates",
                         variable=self.var_verify_ssl).pack(side=tk.LEFT)
         ttk.Label(row, text="(Disable for self-signed certificates)",
-                  foreground="gray").pack(side=tk.LEFT, padx=10)
+                  foreground=self.colors["muted"]).pack(side=tk.LEFT, padx=10)
 
     def _build_bottom_section(self, parent):
         """Build the bottom section with buttons and log."""
+        bottom = ttk.Frame(parent, style="App.TFrame")
+        bottom.pack(side=tk.BOTTOM, fill=tk.X, pady=(14, 0))
         # Buttons
-        btn_frame = ttk.Frame(parent)
-        btn_frame.pack(fill=tk.X, pady=10)
+        btn_frame = ttk.Frame(bottom, style="App.TFrame")
+        btn_frame.pack(fill=tk.X, pady=(0, 10))
 
         self.btn_start = ttk.Button(btn_frame, text="Start Research",
-                                    command=self._start_research)
+                                    command=self._start_research, style="Primary.TButton")
         self.btn_start.pack(side=tk.LEFT, padx=(0, 10))
 
         self.btn_stop = ttk.Button(btn_frame, text="Stop",
                                    command=self._stop_research, state=tk.DISABLED)
         self.btn_stop.pack(side=tk.LEFT, padx=(0, 10))
 
+        self.btn_log = ttk.Button(btn_frame, text="Show log", command=self._toggle_log)
+        self.btn_log.pack(side=tk.LEFT)
+
         ttk.Button(btn_frame, text="Reset to Defaults",
-                   command=self._reset_defaults).pack(side=tk.LEFT)
+                   command=self._reset_defaults).pack(side=tk.RIGHT)
 
         # Progress bar
+        status = ttk.Frame(bottom, padding=(14, 10), style="Card.TFrame")
+        status.pack(fill=tk.X)
+        status_row = ttk.Frame(status)
+        status_row.pack(fill=tk.X, pady=(0, 7))
         self.progress_var = tk.DoubleVar(value=0)
-        self.progress_bar = ttk.Progressbar(btn_frame, variable=self.progress_var,
-                                            maximum=100, length=200)
-        self.progress_bar.pack(side=tk.RIGHT)
-
-        self.progress_label = ttk.Label(btn_frame, text="Ready")
-        self.progress_label.pack(side=tk.RIGHT, padx=(0, 10))
+        # Two fixed lines keep long status messages from pushing settings out
+        # of view. The complete message remains available in the activity log.
+        self.progress_label = tk.Label(status_row, text="Ready", height=2, anchor="w",
+                                        font=("Segoe UI", 10), bg=self.colors["card"],
+                                        fg=self.colors["muted"], wraplength=640, justify=tk.LEFT)
+        self.progress_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.progress_percentage = ttk.Label(status_row, text="0%", style="Percent.TLabel")
+        self.progress_percentage.pack(side=tk.RIGHT, padx=(12, 0))
+        self.progress_var.trace_add("write", lambda *_: self.progress_percentage.configure(
+            text=f"{self.progress_var.get():.0f}%"))
+        status.bind("<Configure>", lambda event: self.progress_label.configure(
+            wraplength=max(120, event.width - 110)))
+        self.progress_bar = ttk.Progressbar(status, variable=self.progress_var, maximum=100)
+        self.progress_bar.pack(fill=tk.X)
 
         # Log area
-        log_frame = ttk.LabelFrame(parent, text="Log", padding="5")
-        log_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        log_frame = ttk.LabelFrame(bottom, text="Activity log", padding=8)
+        self.log_frame = log_frame
+        self.log_visible = False
 
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=8,
-                                                   state=tk.DISABLED,
-                                                   wrap=tk.WORD)
+        self.log_text = scrolledtext.ScrolledText(
+            log_frame, height=4, state=tk.DISABLED, wrap=tk.WORD,
+            font=("Consolas", 9), background="#102333", foreground="#d4e5ee",
+            insertbackground="white", selectbackground="#28546a",
+            selectforeground="white", relief=tk.FLAT, borderwidth=0,
+            padx=12, pady=8, highlightthickness=0)
         self.log_text.pack(fill=tk.BOTH, expand=True)
+
+    def _toggle_log(self):
+        self.log_visible = not self.log_visible
+        if self.log_visible:
+            self.log_frame.pack(fill=tk.X, pady=(10, 0))
+        else:
+            self.log_frame.pack_forget()
+        self.btn_log.configure(text="Hide log" if self.log_visible else "Show log")
 
     def _on_provider_change(self, event=None):
         """Handle provider change."""
@@ -777,6 +938,8 @@ This helps gather more comprehensive information from diverse sources."""
         self.var_provider.set("openai")
         self.var_openai_model.set("gpt-5-mini")
         self.var_anthropic_model.set("claude-3-5-sonnet-20241022")
+        self.var_local_timeout.set("600")
+        self.var_local_concurrency.set("1")
         self.var_temperature.set(0.7)
         self.var_max_tokens.set(4096)
         self.var_search_method.set("duckduckgo")
@@ -851,6 +1014,7 @@ This helps gather more comprehensive information from diverse sources."""
             from .utils.concurrency import validate_parallel_max_workers
             validate_parallel_max_workers(self.var_parallel_workers.get(),
                                           source="Parallel workers")
+            self._get_config_dict()
         except (ValueError, tk.TclError) as e:
             messagebox.showerror("Validation Error", str(e))
             return False
@@ -895,6 +1059,8 @@ This helps gather more comprehensive information from diverse sources."""
             "local_model": self.var_local_model.get(),
             "local_base_url": self.var_local_url.get(),
             "local_backend": self.var_local_backend.get(),
+            "local_timeout": self.var_local_timeout.get(),
+            "local_concurrency": self.var_local_concurrency.get(),
             "target_pages": self.var_target_pages.get(),
             "target_characters": self.var_target_characters.get(),
             "multilingual": self.var_multilingual.get(),
@@ -1045,13 +1211,6 @@ This helps gather more comprehensive information from diverse sources."""
 def main():
     """Main entry point for the GUI application."""
     root = tk.Tk()
-
-    # Set theme
-    try:
-        root.tk.call("source", "azure.tcl")
-        root.tk.call("set_theme", "light")
-    except tk.TclError:
-        pass  # Theme not available, use default
 
     app = DeepResearchGUI(root)
     root.mainloop()
