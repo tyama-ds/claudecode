@@ -1,0 +1,49 @@
+{
+  "slug": "info_gathering_agent",
+  "name": "Info Gathering Agent",
+  "path": "info_gathering_agent/",
+  "summary": "deep_research_tool から情報収集部分を切り出したツール。Web から集めた情報をセクション別要約とエグゼクティブサマリーに整理する。",
+  "status": "paused",
+  "phase": "検索クエリの最適化後、更新なし",
+  "progress": 60,
+  "started": "2026-02-14",
+  "ports": [],
+  "ci": false,
+  "portal": false,
+  "stack": [
+    "Python"
+  ],
+  "milestones": [
+    {
+      "title": "deep_research_tool からの切り出し",
+      "state": "done",
+      "date": "2026-02-14"
+    },
+    {
+      "title": "複合クエリの分割・フォローアップのテーマ固定",
+      "state": "done",
+      "date": "2026-02-19"
+    },
+    {
+      "title": "deep_research_tool の改善（7月以降）の取り込み",
+      "state": "todo"
+    }
+  ],
+  "next": [
+    "deep_research_tool 本体との差分の扱いを決める"
+  ],
+  "risks": [
+    "派生元の deep_research_tool が大きく進んでおり、差が広がっている"
+  ],
+  "log": [
+    {
+      "date": "2026-02-19",
+      "summary": "複合クエリの分割とフォローアップクエリのテーマ固定"
+    },
+    {
+      "date": "2026-02-14",
+      "summary": "初版（deep_research_tool から派生）"
+    }
+  ],
+  "updated": "2026-02-19"
+}

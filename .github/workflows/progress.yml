@@ -1,0 +1,30 @@
+# 開発進捗ダッシュボードの確認（生成スクリプトは tyama-ds/for_eigyo の progress/ にある）。
+#  このリポジトリの全プロジェクトに progress/projects/<slug>.json があり、書式が正しいこと
+name: progress dashboard
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: claudecode
+      - uses: actions/checkout@v4
+        with:
+          repository: tyama-ds/for_eigyo
+          path: for_eigyo
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check progress files
+        run: |
+          if [ ! -f for_eigyo/progress/build_dashboard.py ]; then
+            echo "for_eigyo に progress/build_dashboard.py がまだありません。確認を省略します。"
+            exit 0
+          fi
+          python for_eigyo/progress/build_dashboard.py --source claudecode="$PWD/claudecode" --check --data-only
