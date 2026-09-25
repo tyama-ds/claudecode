@@ -14,9 +14,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: claudecode
+      # 同じ名前のブランチが for_eigyo にあればそれを使う（両リポジトリにまたがる変更を一緒に確認するため）。なければ main
+      - name: Choose for_eigyo ref
+        id: other
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          if git ls-remote --exit-code --heads https://github.com/tyama-ds/for_eigyo "$BRANCH" >/dev/null; then
+            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          fi
+          echo "for_eigyo: $(grep -o 'ref=.*' "$GITHUB_OUTPUT" | tail -1)"
       - uses: actions/checkout@v4
         with:
           repository: tyama-ds/for_eigyo
+          ref: ${{ steps.other.outputs.ref }}
           path: for_eigyo
       - uses: actions/setup-python@v5
         with:
