@@ -1,0 +1,103 @@
+{
+  "slug": "deep_research_tool",
+  "name": "Deep Research Tool",
+  "path": "deep_research_tool/",
+  "summary": "Web検索→調査ループ→根拠管理→ハルシネーション検証→レポート生成（Markdown / DOCX / PDF）を自動で行うディープリサーチ。フェルミ推定・多言語検索・Web UI つき。",
+  "status": "active",
+  "phase": "v1.3.0 監査対応（出典の整合性・処理の重複削減）",
+  "progress": 85,
+  "started": "2026-02-04",
+  "version": "1.3.0",
+  "ports": [
+    8802
+  ],
+  "ci": false,
+  "portal": true,
+  "stack": [
+    "Python",
+    "OpenAI / Anthropic / ローカルLLM",
+    "DuckDuckGo / Selenium",
+    "python-docx"
+  ],
+  "milestones": [
+    {
+      "title": "基本リサーチ・レポート生成・ファクトチェック",
+      "state": "done",
+      "date": "2026-02-19"
+    },
+    {
+      "title": "フェルミ推定・Web UI・ソースモード（web / local / hybrid）",
+      "state": "done",
+      "date": "2026-07-04"
+    },
+    {
+      "title": "図表パイプラインの品質ゲート（v0.5.0）",
+      "state": "done",
+      "date": "2026-07-13"
+    },
+    {
+      "title": "最終化パイプラインの再構築（v0.6〜0.7）",
+      "state": "done",
+      "date": "2026-07-17"
+    },
+    {
+      "title": "並列化・厳密な引用検証（v1.0.0）",
+      "state": "done",
+      "date": "2026-07-21"
+    },
+    {
+      "title": "高速検証・Adaptive Deep Research（v1.1〜1.3）",
+      "state": "done",
+      "date": "2026-07-24"
+    },
+    {
+      "title": "速度・精度の監査対応",
+      "state": "done",
+      "date": "2026-09-14"
+    },
+    {
+      "title": "自動テストの CI 化",
+      "state": "todo"
+    }
+  ],
+  "next": [
+    "監査対応後の実調査での速度・精度の確認",
+    "テスト（43ファイル）の CI 化"
+  ],
+  "risks": [
+    "機能が多く README が約3,200行と大きい",
+    "Selenium・Word COM など環境依存の経路がある"
+  ],
+  "log": [
+    {
+      "date": "2026-09-14",
+      "summary": "出典の整合性を修正し、パイプラインの重複処理を削減（監査対応）",
+      "ref": "#76"
+    },
+    {
+      "date": "2026-07-24",
+      "summary": "Adaptive Deep Research の要件単位カバレッジと停止・凍結の保証（v1.2〜1.3）"
+    },
+    {
+      "date": "2026-07-22",
+      "summary": "高速検証（プロファイル・並列/バッチ/キャッシュ）とライブ GUI（v1.1.0）"
+    },
+    {
+      "date": "2026-07-21",
+      "summary": "アプリ全体の並列化・厳密な引用検証・ライブレポート・地域優先検索（v0.8〜1.0）"
+    },
+    {
+      "date": "2026-07-13",
+      "summary": "図表パイプラインを品質ゲート中心に再構築（v0.5.0）"
+    },
+    {
+      "date": "2026-07-04",
+      "summary": "フェルミ推定、Web UI、aicrawl、ソースモードを追加"
+    },
+    {
+      "date": "2026-02-04",
+      "summary": "初版"
+    }
+  ],
+  "updated": "2026-09-14"
+}

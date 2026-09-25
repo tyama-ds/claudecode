@@ -1,0 +1,41 @@
+{
+  "slug": "patent_research",
+  "name": "Patent Research",
+  "path": "patent_research/",
+  "summary": "特許を中心に、技術論文・審査書類・市場情報を補助検索する3層構造の特許リサーチモード。",
+  "status": "paused",
+  "phase": "初版公開後、更新なし",
+  "progress": 40,
+  "started": "2026-02-17",
+  "ports": [],
+  "ci": false,
+  "portal": false,
+  "stack": [
+    "Python"
+  ],
+  "milestones": [
+    {
+      "title": "3層検索アーキテクチャ・特許モデル・レポート",
+      "state": "done",
+      "date": "2026-02-17"
+    },
+    {
+      "title": "実データでの検証",
+      "state": "todo"
+    }
+  ],
+  "next": [
+    "for_eigyo の Patent Atlas との役割分担を決める"
+  ],
+  "risks": [
+    "コミット1件のみで検証が浅い",
+    "Patent Atlas と対象が重なる"
+  ],
+  "log": [
+    {
+      "date": "2026-02-17",
+      "summary": "初版: 3層検索の特許リサーチモード"
+    }
+  ],
+  "updated": "2026-02-17"
+}

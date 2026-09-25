@@ -10,6 +10,38 @@ This document provides guidance for AI assistants working with the `claudecode` 
 
 This repository is in its early stages of development. As the project evolves, this document should be updated to reflect new conventions, structures, and workflows.
 
+## 開発進捗ダッシュボード（必ず更新する）
+
+このリポジトリの開発状況は、for_eigyo（tyama-ds/for_eigyo）の開発ボードに for_eigyo のプロジェクトと一緒に表示する。
+
+- 正本: このリポジトリの `progress/projects/<slug>.json`（1プロジェクト1ファイル。slug はトップレベルのフォルダ名）
+- 生成スクリプト・画面・項目の説明: for_eigyo の `progress/`（[progress/README.md](https://github.com/tyama-ds/for_eigyo/blob/main/progress/README.md)）
+- 公開先（claude.ai Artifact）: https://claude.ai/artifact/ANrf5LMNjv2ojHr9JHZ3fP
+
+進捗ファイルの更新は、オーナーの許可を得た作業に付随して行う（この更新のために別途許可を求めなくてよい）。
+
+### プロジェクトのコードを変更したとき
+
+コミットの前に次を行う。
+
+1. 変更したプロジェクトの `progress/projects/<slug>.json` を更新する。
+   - `log` の先頭に `{"date": "YYYY-MM-DD", "summary": "何をしたか（1行）", "ref": "#PR番号（あれば）"}` を追加する
+   - `updated` を今日の日付にする
+   - 完了したマイルストーンは `state` を `done` にして `date` を入れる。着手中なら `doing`、新しい予定は `todo` で追加する
+   - `phase`・`progress`（0〜100 の目安）・`next`・`risks`・`status` を実態に合わせて見直す
+2. for_eigyo を同じ親フォルダに用意し（無ければ `git clone https://github.com/tyama-ds/for_eigyo ../for_eigyo`。リモート環境では add_repo で追加）、
+   `python ../for_eigyo/progress/build_dashboard.py --source claudecode=$(pwd)` を実行して検証と生成を行う。
+   新しいフォルダがあれば、このリポジトリの `progress/projects/` に下書きが自動作成されるので、記入してコミットする。
+3. push したら、生成された `../for_eigyo/progress/dashboard.html` を上記の公開先へ再公開する。
+   Artifact ツールで公開先を `action: "read"` してから、`url` に公開先を指定して publish する（新しい URL を作らない）。
+   for_eigyo 側の dashboard.html はコミットしなくてよい（for_eigyo での次の作業時に更新される）。
+   Artifact ツールが使えない環境では再公開を省略し、その旨をユーザーに伝える。
+
+### 確認
+
+`python ../for_eigyo/progress/build_dashboard.py --source claudecode=$(pwd) --check --data-only` で、
+進捗ファイルの欠けと書式の誤りを検出できる。CI（`.github/workflows/progress.yml`）でも同じ確認を行う。
+
 ## Repository Structure
 
 ```
