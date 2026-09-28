@@ -1,0 +1,56 @@
+{
+  "slug": "prompt_optimizer",
+  "name": "Prompt Optimizer",
+  "path": "prompt_optimizer/",
+  "summary": "プロンプト最適化エージェント。手法を選んで改善案を出す GUI（FastAPI 版とサーバー不要の HTML 版）。",
+  "status": "paused",
+  "phase": "GPT-5 対応後、更新なし",
+  "progress": 70,
+  "started": "2026-02-13",
+  "ports": [],
+  "ci": false,
+  "portal": false,
+  "stack": [
+    "FastAPI",
+    "HTML/JS"
+  ],
+  "milestones": [
+    {
+      "title": "GUI・最適化 API",
+      "state": "done",
+      "date": "2026-02-13"
+    },
+    {
+      "title": "単体 HTML 版・API キー暗号化保存・テストモード",
+      "state": "done",
+      "date": "2026-02-13"
+    },
+    {
+      "title": "GPT-5 系モデル対応",
+      "state": "done",
+      "date": "2026-02-16"
+    },
+    {
+      "title": "自動テスト",
+      "state": "todo"
+    }
+  ],
+  "next": [
+    "利用状況を見て継続を判断"
+  ],
+  "risks": [
+    "テストがない"
+  ],
+  "log": [
+    {
+      "date": "2026-02-16",
+      "summary": "GPT-5 mini に対応",
+      "ref": "#39"
+    },
+    {
+      "date": "2026-02-13",
+      "summary": "初版、単体 HTML 版、暗号化した API キー保存、テストモード"
+    }
+  ],
+  "updated": "2026-02-16"
+}

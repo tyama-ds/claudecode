@@ -1,0 +1,48 @@
+{
+  "slug": "lottery-tracker",
+  "name": "ポケカ抽選トラッカー",
+  "path": "lottery-tracker/",
+  "summary": "ポケモンカードの抽選情報を管理するモバイルアプリ（Expo / React Native + Supabase）。",
+  "status": "paused",
+  "phase": "初期実装のみ",
+  "progress": 25,
+  "started": "2026-02-16",
+  "ports": [],
+  "ci": false,
+  "portal": false,
+  "stack": [
+    "Expo",
+    "React Native",
+    "TypeScript",
+    "Supabase"
+  ],
+  "milestones": [
+    {
+      "title": "初期実装",
+      "state": "done",
+      "date": "2026-02-16"
+    },
+    {
+      "title": "Supabase の本番設定",
+      "state": "todo"
+    },
+    {
+      "title": "端末での動作確認",
+      "state": "todo"
+    }
+  ],
+  "next": [
+    "継続するかどうかの判断"
+  ],
+  "risks": [
+    "コミット1件のみ",
+    "テストがない"
+  ],
+  "log": [
+    {
+      "date": "2026-02-16",
+      "summary": "初期実装"
+    }
+  ],
+  "updated": "2026-02-16"
+}
