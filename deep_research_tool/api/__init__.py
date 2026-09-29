@@ -46,6 +46,8 @@ def get_client(
             local LLM server URL; for 'openai'/'anthropic' it overrides the
             official endpoint (corporate gateways, OpenAI-compatible APIs)
         backend: Backend type for local LLM ('ollama', 'vllm', 'openai_compatible')
+        local_timeout: Seconds without response data (default: 600 for local clients)
+        local_concurrency: Per-client local request cap (default: 1)
 
     Returns:
         Configured LLM client instance
@@ -72,10 +74,10 @@ def get_client(
         )
     elif provider.lower() == "local":
         kwargs = {}
-        if local_timeout:
-            kwargs["timeout"] = int(local_timeout)
-        if local_concurrency:
-            kwargs["max_concurrency"] = int(local_concurrency)
+        if local_timeout is not None:
+            kwargs["timeout"] = local_timeout
+        if local_concurrency is not None:
+            kwargs["max_concurrency"] = local_concurrency
         return LocalLLMClient(
             model=model,
             backend=backend,

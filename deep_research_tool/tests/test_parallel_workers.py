@@ -222,14 +222,16 @@ class FakeSession:
         self.status = status
         self.calls = 0
 
-    def post(self, url, json=None, timeout=None):
+    def post(self, url, json=None, timeout=None, stream=False):
         self.calls += 1
         if self.tracker is not None:
             self.tracker()
         time.sleep(0.02)
         return SimpleNamespace(
             status_code=self.status,
+            headers={"Content-Type": "application/json"},
             raise_for_status=lambda: None,
+            close=lambda: None,
             json=lambda: {"choices": [{"message": {"content": "ok"},
                                        "finish_reason": "stop"}],
                           "usage": {"prompt_tokens": 1,
@@ -244,7 +246,10 @@ class TestLocalClientConcurrency(unittest.TestCase):
         client = LocalLLMClient(model="gpt-oss-20b",
                                 backend="openai_compatible",
                                 base_url="http://llm.local/v1",
-                                api_key="tok-secret")
+                                api_key="tok-secret",
+                                # These tests exercise the app-wide cap and
+                                # thread-local sessions with parallel traffic.
+                                max_concurrency=4)
         client._build_session = session_factory
         client._thread_local = threading.local()
         return client
@@ -287,13 +292,15 @@ class TestLocalClientConcurrency(unittest.TestCase):
         attempts = {"n": 0}
 
         class FlakySession(FakeSession):
-            def post(self, url, json=None, timeout=None):
+            def post(self, url, json=None, timeout=None, stream=False):
                 attempts["n"] += 1
                 if attempts["n"] < 3:
                     return SimpleNamespace(status_code=429,
+                                           headers={"Content-Type": "application/json"},
                                            raise_for_status=lambda: None,
+                                           close=lambda: None,
                                            json=lambda: {})
-                return super().post(url, json=json, timeout=timeout)
+                return super().post(url, json=json, timeout=timeout, stream=stream)
 
         client = self._client(lambda: FlakySession())
         with patch("time.sleep"):        # skip the real backoff delays
@@ -303,7 +310,7 @@ class TestLocalClientConcurrency(unittest.TestCase):
 
     def test_api_key_never_in_error_text(self):
         class DeadSession(FakeSession):
-            def post(self, url, json=None, timeout=None):
+            def post(self, url, json=None, timeout=None, stream=False):
                 raise RuntimeError("auth failed for Bearer tok-secret")
 
         client = self._client(lambda: DeadSession())
@@ -312,6 +319,109 @@ class TestLocalClientConcurrency(unittest.TestCase):
                 client.generate("hi")
         self.assertNotIn("tok-secret", str(ctx.exception))
         self.assertIn("***", str(ctx.exception))
+
+
+class TestLocalLLMGUISettings(unittest.TestCase):
+
+    def _client_from_gui(self, values):
+        from deep_research_tool.api import get_client
+
+        kwargs = build_gui_config({"topic": "t", "provider": "local", **values})
+        # Use a dummy endpoint and no environment secrets; construction does
+        # not perform any HTTP requests.
+        with patch.dict("os.environ", {}, clear=True), \
+                patch.object(LocalLLMClient, "_initialize_client"):
+            config = create_config(**{k: v for k, v in kwargs.items()
+                                      if k != "topic"})
+            client = get_client(
+                provider="local", api_key="test-token", model="test-model",
+                base_url="http://llm.invalid/v1", backend="openai_compatible",
+                local_timeout=config.api.local_timeout,
+                local_concurrency=config.api.local_concurrency,
+            )
+        return kwargs, client
+
+    def _assert_capacity(self, client, expected):
+        # Check effective admission behavior after GUI -> Config -> factory,
+        # including the implicit default when the GUI leaves a field empty.
+        self.assertIsNotNone(client._local_sem)
+        acquired = 0
+        try:
+            for _ in range(expected):
+                self.assertTrue(client._local_sem.acquire(blocking=False))
+                acquired += 1
+            self.assertFalse(client._local_sem.acquire(blocking=False))
+        finally:
+            for _ in range(acquired):
+                client._local_sem.release()
+
+    def test_empty_settings_use_effective_local_defaults(self):
+        for values in ({}, {"local_timeout": "", "local_concurrency": ""},
+                       {"local_timeout": "  ", "local_concurrency": None}):
+            with self.subTest(values=values):
+                kwargs, client = self._client_from_gui(values)
+                self.assertNotIn("local_timeout", kwargs)
+                self.assertNotIn("local_concurrency", kwargs)
+                self.assertEqual(client.timeout, 600)
+                self._assert_capacity(client, 1)
+
+    def test_explicit_local_settings_reach_client(self):
+        for timeout, concurrency in ((1, 1), (3600, 16), (" 900 ", " 2 ")):
+            with self.subTest(timeout=timeout, concurrency=concurrency):
+                kwargs, client = self._client_from_gui({
+                    "local_timeout": timeout, "local_concurrency": concurrency,
+                })
+                self.assertEqual(kwargs["local_timeout"], int(timeout))
+                self.assertEqual(kwargs["local_concurrency"], int(concurrency))
+                self.assertEqual(client.timeout, int(timeout))
+                self._assert_capacity(client, int(concurrency))
+
+    def test_invalid_local_settings_rejected_before_run(self):
+        for field, maximum in (("local_timeout", 3600), ("local_concurrency", 16)):
+            for invalid in (True, False, 0, -1, maximum + 1, 1.0, 1.5,
+                            "0", "-1", str(maximum + 1), "1.0", "abc", [1]):
+                with self.subTest(field=field, value=invalid):
+                    with self.assertRaises(ValueError):
+                        build_gui_config({"topic": "t", "provider": "local",
+                                          field: invalid})
+
+    def test_factory_does_not_coerce_invalid_local_controls(self):
+        from deep_research_tool.api import get_client
+
+        for controls in ({"local_timeout": True}, {"local_timeout": 0},
+                         {"local_concurrency": True}, {"local_concurrency": 0},
+                         {"local_concurrency": 2.9}):
+            with self.subTest(controls=controls), \
+                    patch.object(LocalLLMClient, "_initialize_client"):
+                with self.assertRaises(ValueError):
+                    get_client(provider="local", api_key="test-token",
+                               model="test-model", base_url="http://llm.invalid/v1",
+                               **controls)
+
+    def test_local_stage_override_keeps_configured_limits(self):
+        from deep_research_tool.main import DeepResearchTool
+
+        with patch.dict("os.environ", {}, clear=True):
+            config = create_config(
+                provider="openai", openai_api_key="test-token",
+                local_base_url="http://llm.invalid/v1",
+                local_timeout=900, local_concurrency=2,
+                stage_llm={"planning": {"provider": "local", "model": "stage-model",
+                                        "backend": "openai_compatible"}},
+            )
+        # Bypass the run constructor: inspect only client creation, without
+        # initializing search, loading documents, or sending model requests.
+        tool = DeepResearchTool.__new__(DeepResearchTool)
+        tool.config = config
+        client = object()
+        with patch("deep_research_tool.main.get_client", return_value=client) as factory:
+            stages = tool._create_stage_llm_clients()
+        self.assertIs(stages["planning"], client)
+        factory.assert_called_once()
+        self.assertEqual(factory.call_args.kwargs["local_timeout"], 900)
+        self.assertEqual(factory.call_args.kwargs["local_concurrency"], 2)
+        self.assertEqual(factory.call_args.kwargs["backend"], "openai_compatible")
+        self.assertEqual(factory.call_args.kwargs["base_url"], "http://llm.invalid/v1")
 
 
 class TestLocalLLMAuthChain(unittest.TestCase):

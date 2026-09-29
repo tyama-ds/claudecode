@@ -72,6 +72,19 @@ def build_gui_config(v: dict) -> dict:
         if (v.get("local_base_url") or "").strip():
             config["local_base_url"] = v["local_base_url"].strip()
         config["local_backend"] = v.get("local_backend") or "ollama"
+        for key, maximum in (("local_timeout", 3600), ("local_concurrency", 16)):
+            raw = v.get(key)
+            if raw is None or (isinstance(raw, str) and not raw.strip()):
+                continue
+            if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+                raise ValueError(f"{key} must be an integer between 1 and {maximum}")
+            try:
+                value = int(raw)
+            except ValueError:
+                raise ValueError(f"{key} must be an integer between 1 and {maximum}") from None
+            if not 1 <= value <= maximum:
+                raise ValueError(f"{key} must be an integer between 1 and {maximum}")
+            config[key] = value
 
     # Target length
     for src_key, dst_key in (("target_pages", "target_pages"),
