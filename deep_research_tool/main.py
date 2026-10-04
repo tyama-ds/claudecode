@@ -324,6 +324,8 @@ class DeepResearchTool:
                     "backend",
                     self.config.api.local_backend.value,
                 )
+                kwargs["local_timeout"] = self.config.api.local_timeout
+                kwargs["local_concurrency"] = self.config.api.local_concurrency
 
             clients[stage] = get_client(**kwargs)
             print(f"[StageLLM] {stage}: {provider} / {spec.get('model') or 'default model'}")
