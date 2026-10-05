@@ -107,8 +107,8 @@ class TestLocalMode:
         assert evidence
         assert evidence[0].access_method == "local"
         # No web access at all
-        r.search.search.assert_not_called()
-        r.search.get_page_content.assert_not_called()
+        r.search._client.search.assert_not_called()
+        r.search._client.get_page_content.assert_not_called()
 
     def test_gap_fill_in_local_mode_stays_local(self, tmp_path):
         llm = Mock()

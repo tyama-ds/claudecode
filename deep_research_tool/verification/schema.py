@@ -80,10 +80,11 @@ def validate_verdict(raw: Any,
 
 
 def validate_extracted_claim(raw: Any) -> Optional[Dict[str, Any]]:
-    """One extracted claim; None on anomaly (the claim is dropped, and
-    the body sentence keeps its verification via the other claims —
-    dropping is safe because extraction is re-runnable, unlike a
-    judgement that silently supports)."""
+    """One extracted claim; None invalidates the extraction chunk.
+
+    A missing claim cannot be verified by another claim in the chunk.
+    Callers must retry the chunk instead of silently dropping the item.
+    """
     if not isinstance(raw, dict):
         return None
     text = raw.get("claim")
@@ -93,6 +94,10 @@ def validate_extracted_claim(raw: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(importance, str):
         importance = "important"
     out: Dict[str, Any] = {"claim": text.strip(), "importance": importance}
+    source_quote = raw.get("source_quote", "")
+    if not isinstance(source_quote, str):
+        return None
+    out["source_quote"] = source_quote
     if "source_numbers" in raw:
         numbers = as_int_list(raw.get("source_numbers"))
         # invalid source_numbers -> the FIELD is unusable (treated as

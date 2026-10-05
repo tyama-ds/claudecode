@@ -1,0 +1,75 @@
+{
+  "slug": "agent_orchestrator",
+  "name": "Agent Orchestrator",
+  "path": "agent_orchestrator/",
+  "summary": "Codex と Claude Code（＋ローカルLLM / API）をタスク上で協調させ、ブラウザでライブ表示するオーケストレータ。実装＋レビュー・討論・審判など7戦略。",
+  "status": "paused",
+  "phase": "v0.1.0 機能追加後、更新なし",
+  "progress": 65,
+  "started": "2026-06-21",
+  "version": "0.1.0",
+  "ports": [
+    8801
+  ],
+  "ci": false,
+  "portal": true,
+  "stack": [
+    "Python 標準ライブラリ",
+    "codex CLI",
+    "claude CLI",
+    "ローカルLLM"
+  ],
+  "milestones": [
+    {
+      "title": "協調戦略・Web UI・日本語ガイド",
+      "state": "done",
+      "date": "2026-06-21"
+    },
+    {
+      "title": "共有 Artifact モード・ワークスペースモード（Phase 1〜2-A）",
+      "state": "done",
+      "date": "2026-06-22"
+    },
+    {
+      "title": "自動ループ（評価→手直し）・組織チーム・Web ツール",
+      "state": "done",
+      "date": "2026-07-06"
+    },
+    {
+      "title": "ローカルLLM の並列数設定",
+      "state": "done",
+      "date": "2026-07-09"
+    },
+    {
+      "title": "CI",
+      "state": "todo"
+    }
+  ],
+  "next": [
+    "実タスクでの戦略ごとの比較",
+    "テストの CI 化"
+  ],
+  "risks": [
+    "外部 CLI（codex / claude）の仕様変更に依存",
+    "既定ポート 8765 が llmlab Studio と重なる（ポータルでは 8801 で起動）"
+  ],
+  "log": [
+    {
+      "date": "2026-07-09",
+      "summary": "ローカルLLM の最大並列リクエスト数を GUI・環境変数で設定可能に"
+    },
+    {
+      "date": "2026-07-06",
+      "summary": "自動ループ、組織チームのメンバー種別、プロキシ対応の Web ツール、browser_get"
+    },
+    {
+      "date": "2026-06-22",
+      "summary": "共有 Artifact モード、ワークスペースモード、設定タブ"
+    },
+    {
+      "date": "2026-06-21",
+      "summary": "初版: Codex × Claude Code の協調と Web UI"
+    }
+  ],
+  "updated": "2026-07-09"
+}

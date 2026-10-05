@@ -14,6 +14,8 @@ import json
 import re
 import logging
 import time
+import unicodedata
+from collections import Counter
 from ...utils.helpers import ResearchWarnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,6 +55,25 @@ def strip_label_prefixes(text: str) -> str:
     return "\n".join(out)
 
 logger = logging.getLogger(__name__)
+
+
+def _protected_prose(text: str, terms=()) -> tuple:
+    """Facts a prose-only edit cannot alter without another evidence check."""
+    normalized = unicodedata.normalize("NFKC", text)
+    citations = tuple(re.findall(r"\[SOURCE\s*:?\s*(\d+)\]", normalized))
+    without_refs = re.sub(r"\[SOURCE\s*:?\s*\d+\]", "", normalized)
+    # Keep number+unit together: swapping 10mg/20kg to 20mg/10kg must fail
+    # even though the document-wide bags of numbers and units are unchanged.
+    quantities = tuple(re.findall(
+        r"[+−-]?\d+(?:[,\.]\d+)*(?:\s*(?:%|％|mg|kg|g|ml|mL|L|mm|cm|km|m|ppm|ppb|mol|USD|EUR|JPY|年|月|日|億|万|兆|円|人|件|倍|ドル))?", without_refs))
+    headings = tuple(re.findall(r"^\s*#{1,6}\s+.*$", normalized, re.MULTILINE))
+    urls = Counter(re.findall(r"https?://[^\s)\]>]+", normalized))
+    known_terms = tuple((term, normalized.count(unicodedata.normalize("NFKC", term)))
+                        for term in sorted(set(terms)) if isinstance(term, str) and term)
+    # Preserve quantity order as well as values: this conservative guard also
+    # rejects quantity swaps between entities. Final verification still checks
+    # the meaning; these anchors alone are not an entailment test.
+    return citations, quantities, headings, urls, known_terms
 
 
 def _section_sort_key(item) -> Tuple:
@@ -380,7 +401,19 @@ class ReportGeneratorV2:
         # Phase 3: Naturalness polish over all chapters
         if self.enable_polish:
             self._report_progress("Polishing chapters for naturalness...", 90, 100)
-            chapters = self._polish_chapters(chapters, context)
+            # Newly written chapters already receive the style guide. Only
+            # flagged chapters need a second full prose pass.
+            style_sections = set()
+            if consistency_report is not None:
+                from .consistency import IssueType
+                for issue in consistency_report.issues:
+                    if issue.issue_type in (IssueType.STYLE, IssueType.TERMINOLOGY, IssueType.DUPLICATION):
+                        style_sections.add(issue.section)
+                        style_sections.update(issue.related_sections)
+            for sid, chapter in chapters.items():
+                if any(_LABEL_PREFIX_RE.match(line.strip()) for line in chapter.content.splitlines()):
+                    style_sections.add(sid)
+            chapters = self._polish_chapters(chapters, context, section_ids=style_sections)
 
         # Calculate totals
         total_word_count = sum(c.word_count for c in chapters.values())
@@ -795,6 +828,7 @@ Output only the revised content (no JSON):"""
         self,
         chapters: Dict[str, ChapterContent],
         context: ReportContext,
+        section_ids=None,
     ) -> Dict[str, ChapterContent]:
         """
         Polish all chapters for naturalness (one LLM call per chapter).
@@ -807,9 +841,12 @@ Output only the revised content (no JSON):"""
         style_instructions = context.get_style_instructions()
         prev_tail = ""
 
-        for section_num in sorted(chapters.keys()):
+        for section_num in sorted(chapters.keys(), key=_section_sort_key):
             chapter = chapters[section_num]
             if not chapter.content or not chapter.content.strip():
+                continue
+            if section_ids is not None and section_num not in section_ids:
+                prev_tail = chapter.content[-300:]
                 continue
 
             if self.language == "ja":
@@ -855,7 +892,9 @@ Output only the polished body (no preamble, no JSON, no code block):"""
                 polished = response.content.strip()
 
                 original_len = len(chapter.content)
-                if polished and 0.6 * original_len <= len(polished) <= 1.5 * original_len:
+                known_terms = list(chapter.terms_used) + list(context.glossary.keys())
+                facts_preserved = _protected_prose(chapter.content, known_terms) == _protected_prose(polished, known_terms)
+                if polished and facts_preserved and 0.6 * original_len <= len(polished) <= 1.5 * original_len:
                     polished = strip_label_prefixes(polished)
                     chapter.content = polished
                     chapter.word_count = len(polished)
@@ -864,11 +903,11 @@ Output only the polished body (no preamble, no JSON, no code block):"""
                                       chapter.content)
                 else:
                     print(f"[ReportGeneratorV2] Polish rejected for {section_num} "
-                          f"(length {len(polished)} vs original {original_len})")
+                          f"(facts preserved={facts_preserved}, length {len(polished)} vs original {original_len})")
                     ResearchWarnings.get_instance().add(
                         ResearchWarnings.LOW,
                         "ReportGeneratorV2",
-                        f"第{section_num}章の推敲結果が長さ検査で棄却され、"
+                        f"第{section_num}章の推敲結果が事実・引用または長さの検査で棄却され、"
                         f"下書きのまま出力されています。",
                     )
             except Exception as e:

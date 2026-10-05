@@ -1,0 +1,66 @@
+{
+  "slug": "multi_agent_discussion",
+  "name": "Multi-Agent Discussion",
+  "path": "multi_agent_discussion/",
+  "summary": "モデレーター・参加者・評価者のエージェントが1つの主題を議論するフレームワーク。deep_research_tool と連携する多段パイプラインつき。",
+  "status": "paused",
+  "phase": "Web検索できる参加者エージェントを追加後、更新なし",
+  "progress": 70,
+  "started": "2026-02-04",
+  "ports": [],
+  "ci": false,
+  "portal": false,
+  "stack": [
+    "Python",
+    "OpenAI / Anthropic / Gemini / Ollama / Grok",
+    "Rich"
+  ],
+  "milestones": [
+    {
+      "title": "マルチエージェント議論・マルチプロバイダー",
+      "state": "done",
+      "date": "2026-02-04"
+    },
+    {
+      "title": "deep_research_tool 連携オーケストレーター",
+      "state": "done",
+      "date": "2026-02-14"
+    },
+    {
+      "title": "Web 検索する参加者エージェント",
+      "state": "done",
+      "date": "2026-02-19"
+    },
+    {
+      "title": "GUI",
+      "state": "todo"
+    }
+  ],
+  "next": [
+    "継続するかどうかの判断（Agent Orchestrator と役割が近い）"
+  ],
+  "risks": [
+    "7か月以上更新がない"
+  ],
+  "log": [
+    {
+      "date": "2026-02-19",
+      "summary": "Web 検索機能を持つ ResearchParticipantAgent を追加",
+      "ref": "#48"
+    },
+    {
+      "date": "2026-02-16",
+      "summary": "GPT-5 mini に対応",
+      "ref": "#39"
+    },
+    {
+      "date": "2026-02-14",
+      "summary": "README と API リファレンス"
+    },
+    {
+      "date": "2026-02-04",
+      "summary": "初版"
+    }
+  ],
+  "updated": "2026-02-19"
+}

@@ -624,8 +624,10 @@ class TestSchemaAnomalies(unittest.TestCase):
         body = "## 1. 分析\n\n本文の主張は999件である。" + "説明。" * 60
         verdict = verifier.verify_report(
             {"1": body}, [ev], critical_questions=["何件あるか"])
-        # no exception escaped; the surviving claim failed closed
-        self.assertGreaterEqual(verdict.metrics.uncertain_count, 1)
+        # No exception escaped; a malformed claim invalidates its whole
+        # chunk, rather than silently discarding unverified body ranges.
+        self.assertGreaterEqual(verdict.metrics.chunks_failed, 1)
+        self.assertTrue(verdict.metrics.verification_failed)
         self.assertLess(verdict.metrics.claim_support_score, 1.0)
         # the anomalous coverage entries fail closed to unanswered
         self.assertLess(verdict.metrics.critical_question_coverage, 1.0)

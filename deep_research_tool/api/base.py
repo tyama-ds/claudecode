@@ -3,6 +3,7 @@ Base class for LLM API clients.
 """
 
 import threading
+from contextlib import contextmanager
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Callable
@@ -211,10 +212,15 @@ class BaseLLMClient(ABC):
         # Optional run-local TokenUsageStats (per-job isolation)
         self.token_stats = None
 
+    @contextmanager
     def _leaf_permit(self):
         """Composed run+process permit around one leaf API call."""
         from ..utils.concurrency import maybe_permit
-        return maybe_permit(self.concurrency_limiter)
+        check = getattr(self, 'cancel_check', lambda: None)
+        check()
+        with maybe_permit(self.concurrency_limiter):
+            check()
+            yield
 
     def _record_usage(self, token_usage) -> None:
         """Record usage into run-local (if attached) + global stats."""

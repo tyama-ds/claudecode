@@ -8,6 +8,10 @@ import csv
 import io
 import random
 import time
+import threading
+import socket
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import warnings
 from typing import List, Optional
 from urllib.parse import urlparse
@@ -20,10 +24,14 @@ from .base import BaseSearchClient, SearchResult, PageContent
 
 # PDF extraction support (optional)
 try:
-    from PyPDF2 import PdfReader
+    from pypdf import PdfReader
     PDF_SUPPORT = True
 except ImportError:
-    PDF_SUPPORT = False
+    try:
+        from PyPDF2 import PdfReader
+        PDF_SUPPORT = True
+    except ImportError:
+        PDF_SUPPORT = False
 
 # DOCX extraction support (optional)
 try:
@@ -49,6 +57,8 @@ except ImportError:
 
 class DuckDuckGoSearch(BaseSearchClient):
     """DuckDuckGo search client using ddgs or duckduckgo-search library."""
+
+    supports_concurrent_search = True
 
     def __init__(
         self,
@@ -107,6 +117,10 @@ class DuckDuckGoSearch(BaseSearchClient):
         self._using_new_package = False
         self._session = None
         self._last_fetch = {}  # domain -> last fetch monotonic time
+        self._thread_clients = threading.local()
+        self._clients_lock = threading.Lock()
+        self._sessions = []
+        self._owner_thread = threading.get_ident()
 
     # --- WAF / anti-bot mitigation --------------------------------------
 
@@ -140,55 +154,48 @@ class DuckDuckGoSearch(BaseSearchClient):
     def _build_session(self) -> "requests.Session":
         """Session with browser headers, proxy, and backoff retry adapter."""
         from requests.adapters import HTTPAdapter
-        try:
-            from urllib3.util.retry import Retry
-        except ImportError:  # very old urllib3
-            from requests.packages.urllib3.util.retry import Retry
-
         s = requests.Session()
         s.headers.update(self._BROWSER_HEADERS)
         if self.proxies:
             s.proxies.update(self.proxies)
         s.verify = self.verify_ssl
 
-        # Retry generously on WAF/rate-limit *status* responses (429/5xx,
-        # honouring Retry-After) but fail fast on connection errors so a dead
-        # or blocked host doesn't drag the sequential crawl (connect=1).
-        retry = Retry(
-            total=3,
-            connect=1,
-            read=2,
-            status=3,
-            backoff_factor=0.5,  # 0s, 0.5s, 1s, 2s between attempts
-            status_forcelist=list(self._RETRY_STATUS),
-            allowed_methods=frozenset(["GET", "HEAD"]),
-            respect_retry_after_header=True,
-            raise_on_status=False,
-        )
-        adapter = HTTPAdapter(max_retries=retry)
+        # Retry in _fetch, where the remaining per-request time is known.
+        # Hidden urllib3 retry sleeps could exceed that budget.
+        adapter = HTTPAdapter(max_retries=0, pool_connections=16, pool_maxsize=16)
         s.mount("http://", adapter)
         s.mount("https://", adapter)
         return s
 
     def _get_session(self) -> "requests.Session":
-        if self._session is None:
-            self._session = self._build_session()
-        return self._session
+        session = getattr(self._thread_clients, "session", None)
+        if session is None:
+            if threading.get_ident() == self._owner_thread and self._session is not None:
+                session = self._session
+            else:
+                session = self._build_session()
+                with self._clients_lock:
+                    self._sessions.append(session)
+            self._thread_clients.session = session
+            if threading.get_ident() == self._owner_thread:
+                self._session = session
+        return session
 
-    def _polite_wait(self, url: str) -> None:
-        """Sleep so same-domain requests aren't fired back-to-back."""
+    def _polite_wait(self, url: str, deadline=None) -> None:
+        """Reserve a domain slot atomically, then sleep without holding a lock."""
         if not self.per_domain_delay:
             return
-        domain = urlparse(url).netloc.lower()
-        last = self._last_fetch.get(domain)
-        now = time.monotonic()
-        if last is not None:
-            wait = random.uniform(self.per_domain_delay * 0.5,
-                                  self.per_domain_delay * 1.5)
-            elapsed = now - last
-            if elapsed < wait:
-                time.sleep(wait - elapsed)
-        self._last_fetch[domain] = time.monotonic()
+        domain = (urlparse(url).hostname or "").lower()
+        with self._clients_lock:
+            now = time.monotonic()
+            previous = self._last_fetch.get(domain)
+            slot = now if previous is None else max(now, previous + random.uniform(
+                self.per_domain_delay * 0.5, self.per_domain_delay * 1.5))
+            if deadline is not None and slot >= deadline:
+                raise TimeoutError("page fetch budget exhausted during domain wait")
+            self._last_fetch[domain] = slot
+        if slot > now:
+            time.sleep(slot - now)
 
     def _is_waf_blocked(self, response) -> bool:
         """Detect a soft WAF/anti-bot block (challenge page or block status)."""
@@ -201,31 +208,124 @@ class DuckDuckGoSearch(BaseSearchClient):
                 return any(m in body for m in self._WAF_MARKERS)
         return False
 
-    def _fetch(self, url: str, headers: dict):
-        """WAF-aware GET: polite delay, session+retry, one re-fetch on block."""
-        if not self.waf_mitigation:
-            with self._leaf_permit():
-                return requests.get(
-                    url, headers=headers, timeout=self.timeout,
-                    allow_redirects=True, proxies=self.proxies, verify=self.verify_ssl,
-                )
+    def _fetch(self, url: str, headers: dict, timeout=None):
+        """Bound socket waits and all retry/backoff attempts by one time budget."""
+        budget = float(self.timeout if timeout is None else timeout)
+        if budget <= 0:
+            raise ValueError("fetch timeout must be positive")
+        deadline = time.monotonic() + budget
 
-        session = self._get_session()
-        self._polite_wait(url)
-        with self._leaf_permit():
-            response = session.get(
-                url, headers=headers, timeout=self.timeout, allow_redirects=True,
-            )
-        # One re-fetch on a soft block: some WAFs pass a client on the second
-        # hit once the connection/cookies are established.
-        if self._is_waf_blocked(response):
-            time.sleep(random.uniform(1.5, 3.0))
-            with self._leaf_permit():
-                response = session.get(
-                    url, headers=headers, timeout=self.timeout,
-                    allow_redirects=True,
-                )
-        return response
+        def remaining():
+            value = deadline - time.monotonic()
+            if value <= 0:
+                raise TimeoutError("page fetch time budget exhausted")
+            return value
+
+        def pause(seconds):
+            if seconds >= remaining():
+                raise TimeoutError("retry delay exceeds page fetch time budget")
+            if seconds > 0:
+                time.sleep(seconds)
+
+        session = self._get_session() if self.waf_mitigation else None
+        soft_retried = False
+        attempts = 4 if self.waf_mitigation else 1
+        for attempt in range(attempts):
+            if self.waf_mitigation:
+                self._polite_wait(url, deadline=deadline)
+            try:
+                with self._leaf_permit(timeout=remaining()):
+                    from urllib3.util import Timeout
+                    socket_timeout = Timeout(total=remaining(), connect=min(10.0, remaining()), read=remaining())
+                    if session is None:
+                        response = requests.get(url, headers=headers, timeout=socket_timeout,
+                            allow_redirects=True, proxies=self.proxies, verify=self.verify_ssl, stream=True)
+                    else:
+                        response = session.get(url, headers=headers, timeout=socket_timeout, allow_redirects=True, stream=True)
+                    self._read_with_deadline(response, remaining)
+                remaining()
+            except (requests.ConnectionError, requests.Timeout):
+                if attempt + 1 >= min(attempts, 2):
+                    raise
+                pause(0.5 * (2 ** attempt))
+                continue
+            if not self.waf_mitigation:
+                return response
+            if response.status_code in self._RETRY_STATUS and attempt + 1 < attempts:
+                delay = 0.5 * (2 ** attempt)
+                retry_after = response.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        delay = max(delay, float(retry_after))
+                    except ValueError:
+                        try:
+                            retry_date = parsedate_to_datetime(retry_after)
+                            if retry_date.tzinfo is None:
+                                retry_date = retry_date.replace(tzinfo=timezone.utc)
+                            delay = max(delay, (retry_date - datetime.now(timezone.utc)).total_seconds())
+                        except (ValueError, TypeError, OverflowError):
+                            pass
+                response.close()
+                pause(delay)
+                continue
+            if self._is_waf_blocked(response) and not soft_retried and attempt + 1 < attempts:
+                soft_retried = True
+                response.close()
+                pause(random.uniform(1.5, 3.0))
+                continue
+            return response
+        raise TimeoutError("page fetch attempts exhausted")
+
+    @staticmethod
+    def _read_with_deadline(response, remaining):
+        """Consume a response while a deadline can interrupt a trickling body.
+
+        requests' read timeout is an inactivity timeout, not a body deadline.
+        Shutdown only this response's socket on expiry; never leave a worker
+        downloading after the caller has declared a timeout.
+        """
+        if not isinstance(response, requests.Response):
+            return  # injected transport doubles already provide their body
+        raw = response.raw
+        connection = getattr(raw, "_connection", None)
+        response_socket = getattr(connection, "sock", None)
+        if not isinstance(response_socket, socket.socket):
+            fp = getattr(getattr(raw, "_fp", None), "fp", None)
+            response_socket = getattr(getattr(fp, "raw", None), "_sock", None)
+        expired = threading.Event()
+
+        def interrupt():
+            expired.set()
+            if isinstance(response_socket, socket.socket):
+                try:
+                    response_socket.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+        timer = threading.Timer(remaining(), interrupt)
+        timer.daemon = True
+        timer.start()
+        pieces = []
+        try:
+            read = getattr(raw, "read1", raw.read)
+            while True:
+                remaining()
+                piece = read(65536, decode_content=True)
+                if expired.is_set():
+                    raise TimeoutError("page body receive deadline exceeded")
+                if not piece:
+                    break
+                pieces.append(piece)
+            remaining()
+            response._content = b"".join(pieces)
+            response._content_consumed = True
+        except Exception as error:
+            response.close()
+            if expired.is_set():
+                raise TimeoutError("page body receive deadline exceeded") from error
+            raise
+        finally:
+            timer.cancel()
 
     def _get_ddgs_class(self):
         """Get the DDGS class from either ddgs or duckduckgo_search package."""
@@ -258,7 +358,9 @@ class DuckDuckGoSearch(BaseSearchClient):
 
     def _get_ddgs(self, force_new: bool = False):
         """Get or create DuckDuckGo search instance."""
-        if self._ddgs is None or force_new:
+        owner = threading.get_ident() == self._owner_thread
+        ddgs = self._ddgs if owner else getattr(self._thread_clients, "ddgs", None)
+        if ddgs is None or force_new:
             DDGS = self._get_ddgs_class()
 
             # Prepare proxy URL
@@ -274,21 +376,24 @@ class DuckDuckGoSearch(BaseSearchClient):
                 # Different versions support different parameters
                 try:
                     if proxy_url:
-                        self._ddgs = DDGS(proxy=proxy_url, timeout=self.timeout)
+                        ddgs = DDGS(proxy=proxy_url, timeout=self.timeout)
                     else:
-                        self._ddgs = DDGS(timeout=self.timeout)
+                        ddgs = DDGS(timeout=self.timeout)
                 except TypeError:
                     # Older versions might not support timeout parameter
                     try:
                         if proxy_url:
-                            self._ddgs = DDGS(proxy=proxy_url)
+                            ddgs = DDGS(proxy=proxy_url)
                         else:
-                            self._ddgs = DDGS()
+                            ddgs = DDGS()
                     except Exception as e:
                         print(f"Warning: Failed to initialize DDGS with proxy: {e}")
-                        self._ddgs = DDGS()
+                        ddgs = DDGS()
 
-        return self._ddgs
+        self._thread_clients.ddgs = ddgs
+        if owner:
+            self._ddgs = ddgs
+        return ddgs
 
     def search(
         self,
@@ -385,8 +490,8 @@ class DuckDuckGoSearch(BaseSearchClient):
                         max_results=max_results,
                     )
 
-                # Convert generator/list to list
-                results_list = list(results) if results else []
+                    # Iterating a lazy result can perform network I/O too.
+                    results_list = list(results) if results else []
 
                 if not results_list and attempt < retry_count:
                     print(f"DuckDuckGo search returned empty results, retrying... (attempt {attempt + 1})")
@@ -415,7 +520,9 @@ class DuckDuckGoSearch(BaseSearchClient):
 
                 if attempt < retry_count:
                     # Reset the DDGS instance for next attempt
-                    self._ddgs = None
+                    self._thread_clients.ddgs = None
+                    if threading.get_ident() == self._owner_thread:
+                        self._ddgs = None
                     time.sleep(1 * (attempt + 1))  # Exponential backoff
                     continue
 
@@ -544,7 +651,7 @@ class DuckDuckGoSearch(BaseSearchClient):
         }
 
         try:
-            response = self._fetch(url, headers)
+            response = self._fetch(url, headers, timeout=kwargs.get("timeout"))
 
             # A soft WAF/anti-bot block that survived the re-fetch: surface it
             # clearly instead of feeding a challenge page into the pipeline.
@@ -601,6 +708,10 @@ class DuckDuckGoSearch(BaseSearchClient):
             if soup.title:
                 title = soup.title.string or ""
 
+            # Preserve publication metadata before scripts/header are removed.
+            from ..evidence.source_metadata import extract_source_metadata
+            source_metadata = extract_source_metadata(url, metadata=self._extract_metadata(soup), html=response.text)
+
             # Remove script and style elements
             for element in soup(["script", "style", "nav", "footer", "header", "aside"]):
                 element.decompose()
@@ -618,6 +729,7 @@ class DuckDuckGoSearch(BaseSearchClient):
 
             # Extract metadata
             metadata = self._extract_metadata(soup)
+            metadata.update(source_metadata)
 
             return PageContent(
                 url=url,
@@ -853,21 +965,18 @@ class DuckDuckGoSearch(BaseSearchClient):
             if doc.core_properties.title:
                 title = doc.core_properties.title
 
-            # Extract text from paragraphs
+            from docx.text.paragraph import Paragraph
+            from docx.table import Table
+            from docx.oxml.ns import qn
             text_parts = []
-            for para in doc.paragraphs:
-                if para.text.strip():
-                    text_parts.append(para.text)
-
-            # Extract text from tables
-            for table in doc.tables:
-                for row in table.rows:
-                    row_text = []
-                    for cell in row.cells:
-                        if cell.text.strip():
-                            row_text.append(cell.text.strip())
-                    if row_text:
-                        text_parts.append(" | ".join(row_text))
+            for block in doc.element.body:
+                if block.tag == qn("w:p"):
+                    paragraph = Paragraph(block, doc)
+                    if paragraph.text.strip():
+                        text_parts.append(paragraph.text)
+                elif block.tag == qn("w:tbl"):
+                    for row in Table(block, doc).rows:
+                        text_parts.append(" | ".join(cell.text.strip() for cell in row.cells))
 
             text_content = "\n\n".join(text_parts)
             text_content = self._clean_text(text_content)
@@ -1172,5 +1281,11 @@ class DuckDuckGoSearch(BaseSearchClient):
         return metadata
 
     def close(self):
-        """Clean up resources."""
+        """Release the sessions after all research workers have finished."""
+        with self._clients_lock:
+            sessions, self._sessions = self._sessions, []
+        for session in sessions:
+            session.close()
+        self._session = None
         self._ddgs = None
+        self._thread_clients = threading.local()

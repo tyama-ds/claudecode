@@ -635,7 +635,8 @@ class TestRunnerAdaptiveIntegration(unittest.TestCase):
         def extract(prompt):
             return j({"claims": [{"claim": self.CLAIM,
                                   "importance": "critical",
-                                  "source_numbers": [1]}]})
+                                  "source_numbers": [2] if
+                                  f"{self.CLAIM} [SOURCE 2]" in prompt else [1]}]})
 
         def judge(prompt):
             ids = judge_ids(prompt)

@@ -1,0 +1,52 @@
+{
+  "slug": "stock-tracker",
+  "name": "StockLens",
+  "path": "stock-tracker/",
+  "summary": "日経225・ETF・米国主要株の株価推移、関連情報の収集・整理、簡易財務分析ができる HTML/JS アプリ（ビルド・サーバー不要）。",
+  "status": "paused",
+  "phase": "J-Quants 連携後、更新なし",
+  "progress": 55,
+  "started": "2026-07-05",
+  "ports": [],
+  "ci": false,
+  "portal": false,
+  "stack": [
+    "HTML/JS",
+    "J-Quants API"
+  ],
+  "milestones": [
+    {
+      "title": "アプリの骨格・市場データ",
+      "state": "done",
+      "date": "2026-07-05"
+    },
+    {
+      "title": "ファクター分析タブ",
+      "state": "done",
+      "date": "2026-07-05"
+    },
+    {
+      "title": "J-Quants API 連携（有料プラン自動判定）",
+      "state": "done",
+      "date": "2026-07-05"
+    },
+    {
+      "title": "データの定期更新",
+      "state": "todo"
+    }
+  ],
+  "next": [
+    "収集データの更新方法を決める"
+  ],
+  "risks": [
+    "同梱データが 2026-07 時点で古くなる",
+    "テストがない"
+  ],
+  "log": [
+    {
+      "date": "2026-07-05",
+      "summary": "初版、ファクター分析、J-Quants API 連携"
+    }
+  ],
+  "updated": "2026-07-05"
+}
