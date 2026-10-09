@@ -50,7 +50,11 @@ class LiveReportSink:
         pass
 
     def on_finalized(self, chapters: Dict[str, str],
-                     references: List[str]) -> None:
+                     references: List[str], verification=None) -> None:
+        """``verification`` is the run's status axes dict
+        ({process, verification, quality, decision, artifact_check}) so
+        a sink can label the final body honestly: "verified" only when
+        verification was actually performed and the quality gate passed."""
         pass
 
     def on_status(self, message: str) -> None:
@@ -87,8 +91,9 @@ class CompositeSink(LiveReportSink):
     def on_figure(self, section_id, image_path, caption=""):
         self._each("on_figure", section_id, image_path, caption=caption)
 
-    def on_finalized(self, chapters, references):
-        self._each("on_finalized", chapters, references)
+    def on_finalized(self, chapters, references, verification=None):
+        self._each("on_finalized", chapters, references,
+                   verification=verification)
 
     def on_status(self, message):
         self._each("on_status", message)
@@ -111,6 +116,7 @@ class WebUILiveSink(LiveReportSink):
         self._data: Dict[str, Any] = {
             "title": "", "toc": [], "sections": {},
             "finalized": False, "references": [], "rev": 0,
+            "verification": {},
         }
 
     def snapshot(self) -> Dict[str, Any]:
@@ -123,6 +129,7 @@ class WebUILiveSink(LiveReportSink):
                              for k, v in self._data["sections"].items()},
                 "finalized": self._data["finalized"],
                 "references": list(self._data["references"]),
+                "verification": dict(self._data.get("verification") or {}),
                 "rev": self._data["rev"],
             }
 
@@ -151,7 +158,7 @@ class WebUILiveSink(LiveReportSink):
                 {"path": str(image_path), "caption": caption})
             self._bump()
 
-    def on_finalized(self, chapters, references):
+    def on_finalized(self, chapters, references, verification=None):
         with self._lock:
             for sid, text in chapters.items():
                 entry = self._data["sections"].setdefault(
@@ -159,6 +166,9 @@ class WebUILiveSink(LiveReportSink):
                 entry.update({"text": text, "draft": False})
             self._data["finalized"] = True
             self._data["references"] = list(references)
+            # honest labeling: the UI shows "検証済み" ONLY when
+            # verification.verification == "performed"
+            self._data["verification"] = dict(verification or {})
             self._bump()
 
 
@@ -375,7 +385,7 @@ class WordComSink(LiveReportSink):
             w.add_picture(str(image_path), caption)
         self._put(_do)
 
-    def on_finalized(self, chapters, references):
+    def on_finalized(self, chapters, references, verification=None):
         def _do(w):
             for sid, text in chapters.items():
                 w.replace_section(sid, _plain_paragraphs(text))

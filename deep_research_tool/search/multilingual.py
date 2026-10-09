@@ -8,7 +8,7 @@ result aggregation, and deduplication.
 import hashlib
 import re
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from ..utils.concurrency import ContextThreadPoolExecutor as ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Callable, Any, Tuple
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode

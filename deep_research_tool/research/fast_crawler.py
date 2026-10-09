@@ -13,7 +13,7 @@ import time
 from collections import deque
 from queue import Queue, Empty, Full
 from threading import Event
-from concurrent.futures import ThreadPoolExecutor
+from ..utils.concurrency import ContextThreadPoolExecutor as ThreadPoolExecutor
 from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import List, Dict, Any, Optional, Callable

@@ -67,6 +67,7 @@ from ..report.finalization import (
     decide_section_action,
 )
 from ..report.length_planner import _jaccard_bigram
+from ..utils.concurrency import ContextThreadPoolExecutor
 
 # Section text is processed in chunks of this size so that long chapters
 # are fully covered without overloading a single prompt
@@ -276,7 +277,7 @@ class ClaimVerifier:
             return [fn(item) for item in items]
         import concurrent.futures
         workers = min(self._workers, len(items))
-        with concurrent.futures.ThreadPoolExecutor(
+        with ContextThreadPoolExecutor(
                 max_workers=workers) as ex:
             return list(ex.map(fn, items))
 
@@ -988,6 +989,11 @@ Do not include opinions or generic statements. JSON only."""
     # -- batched judging --------------------------------------------------
 
     def _judge_batch(self, batch: List[Dict]) -> Dict[str, Dict]:
+        from ..utils.concurrency import track_activity
+        with track_activity("verify"):
+            return self._judge_batch_impl(batch)
+
+    def _judge_batch_impl(self, batch: List[Dict]) -> Dict[str, Dict]:
         """Judge several claims in ONE LLM request.
 
         Structured JSON response; entries that are missing or malformed
@@ -1049,6 +1055,12 @@ Do not include opinions or generic statements. JSON only."""
 
     def _judge_claim_validated(self, claim: Claim,
                                chunks: List[EvidenceChunk]) -> Dict:
+        from ..utils.concurrency import track_activity
+        with track_activity("verify"):
+            return self._judge_claim_validated_impl(claim, chunks)
+
+    def _judge_claim_validated_impl(self, claim: Claim,
+                                    chunks: List[EvidenceChunk]) -> Dict:
         """Judge ONE claim with strict schema validation.
 
         Bounded retry on schema anomalies AND transport errors; after
