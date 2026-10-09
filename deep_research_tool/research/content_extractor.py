@@ -181,6 +181,22 @@ class ContentExtractor:
         chunk_label: str = "",
     ) -> Optional[Dict[str, Any]]:
         """Extract relevant information from a single chunk of content."""
+        from ..utils.concurrency import track_activity
+        with track_activity("extract"):
+            return self._extract_single_chunk_impl(
+                chunk_text, source_url, source_title, section_context,
+                research_query, lang_instruction, chunk_label)
+
+    def _extract_single_chunk_impl(
+        self,
+        chunk_text: str,
+        source_url: str,
+        source_title: str,
+        section_context: str,
+        research_query: str,
+        lang_instruction: str,
+        chunk_label: str = "",
+    ) -> Optional[Dict[str, Any]]:
         prompt = f"""Source URL: {source_url}
 Source Title: {source_title}
 {chunk_label}

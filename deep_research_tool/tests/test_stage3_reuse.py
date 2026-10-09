@@ -87,6 +87,34 @@ class TestFetchCache:
         assert cache.get_extraction(k1)["extracted"]["processed_content"] == "p"
         assert cache.get_extraction(k3) is None
 
+    def test_concurrent_writers_of_one_key_never_corrupt_it(self, tmp_path):
+        """Parallel extraction of identical page text stores the SAME key
+        from several workers at once; every reader afterwards must get a
+        complete entry (a shared temp file used to publish truncated JSON)."""
+        import threading
+        cache = FetchCache(tmp_path / "c")
+        key = cache.extraction_key("本文" * 100, "1. 章", "q", "m")
+        payload = {"processed_content": "抜粋。" * 2000, "key_points": ["a"] * 50,
+                   "quotes": [], "relevance_score": 0.8, "extraction_notes": ""}
+        errors = []
+
+        def writer():
+            try:
+                for _ in range(30):
+                    cache.put_extraction(key, payload)
+                    hit = cache.get_extraction(key)
+                    assert hit is not None and hit["extracted"] == payload
+            except Exception as e:          # noqa: BLE001
+                errors.append(e)
+        threads = [threading.Thread(target=writer) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors, errors[:1]
+        assert cache.get_extraction(key)["extracted"] == payload
+        assert not list((tmp_path / "c" / "extractions").glob("*.tmp"))
+
     def test_disabled_cache_is_inert(self, tmp_path):
         cache = FetchCache(tmp_path / "c", enabled=False)
         cache.put_page("u", "t")

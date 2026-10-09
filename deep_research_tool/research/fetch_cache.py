@@ -26,6 +26,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -81,13 +82,20 @@ class FetchCache:
     def _write(self, path: Path, data: Dict[str, Any]) -> None:
         if not self.enabled:
             return
+        # a temp name unique to THIS writer: two workers storing the same
+        # key at once (identical page text for two URLs) must never share
+        # a temp file, or one os.replace publishes the other's half-written
+        # JSON (which later reads back as a miss)
+        tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            tmp = path.with_name(path.name + ".tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False),
                            encoding="utf-8")
             os.replace(tmp, path)
         except Exception:
-            pass                        # a cache write failure is never fatal
+            try:
+                tmp.unlink()
+            except OSError:
+                pass                    # a cache write failure is never fatal
 
     def _fresh(self, entry: Dict[str, Any]) -> bool:
         if self.max_age_seconds <= 0:

@@ -589,6 +589,11 @@ body.fx-off button.primary::before, body.fx-off .mode-card.sel::after, body.fx-o
         <input type="number" id="set_local_timeout" min="1" max="3600" placeholder="600">
         <label>同時リクエスト上限（空欄=1。小規模サーバーは1推奨）</label>
         <input type="number" id="set_local_concurrency" min="1" max="16" placeholder="1">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
+          <button type="button" class="secondary" id="llmParallelTestBtn">⚡ 並列処理テスト（短い要求を同時送信）</button>
+          <span class="hint" style="margin:0">上の URL・モデル・同時リクエスト上限の値で、ローカルLLMにだけ送ります。</span>
+        </div>
+        <div id="llmParallelTestResult" class="hint" aria-live="polite" style="margin-top:6px"></div>
         <p class="hint">生成途中の応答も受信します。タイムアウトは最初の応答待ちと、途中でデータが来なくなった時間に適用されます。LM Studioの場合はOpenAI互換を選び、サーバーURLに http://127.0.0.1:1234/v1 を指定してください。</p>
         <p class="hint">ロールルーティングはサーバーURLが設定されている場合のみ有効です。URLが外部サービスへ自動設定されることはありません。</p>
       </div>
@@ -2143,6 +2148,7 @@ const STAGE_LABELS = {
   verification: '検証', report: 'レポート生成', figures: '図表生成',
   finalization: '最終確定', deep_think: 'DeepThink', fermi: 'Fermi推定',
 };
+const ACTIVITY_LABELS = {llm: 'LLM', fetch: '取得', search: '検索', extract: '抽出', verify: '検証'};
 const COUNTER_LABELS = {
   api_calls: 'LLM API呼び出し', llm_calls: 'LLM呼び出し',
   cache_page_hits: 'ページ再利用（ディスクキャッシュ）', cache_page_misses: 'ページ新規取得',
@@ -2175,6 +2181,25 @@ function renderTimings(t) {
     ${counters.length ? `<label style="margin-top:8px">📊 実測のカウンタ（API呼び出し・再利用）</label>
     <div class="exec-summary" style="margin-top:4px">${counters.join('')}</div>` : ''}
     <p class="hint">短縮率や残り時間の推定は表示しません（計測した値のみ）。</p>`;
+}
+
+function renderConcurrency(perf) {
+  const cc = perf && perf.llm_concurrency;
+  if (!cc || !cc.configured) return '';
+  const act = cc.activity || {};
+  const llm = act.llm || {};
+  const cap = cc.configured.llm;
+  const capLabel = cap === null || cap === undefined ? '上限なし' : String(cap);
+  const serialized = cc.provider === 'local' && cap > 1 && (llm.total || 0) >= 10 && (llm.peak || 0) <= 1;
+  const rows = [
+    `<span>LLM 同時実行の最大: <b>${llm.peak || 0}</b>（設定 ${escapeHtml(capLabel)}${cc.provider ? '・' + escapeHtml(cc.provider) : ''}）</span>`,
+    `<span>LLM 呼び出し: <b>${llm.total || 0}</b> 回</span>`,
+    ...['fetch', 'extract', 'verify'].map(k => `<span>${ACTIVITY_LABELS[k]}の同時実行の最大: <b>${(act[k] || {}).peak || 0}</b>（${(act[k] || {}).total || 0} 回）</span>`),
+    `<span>実行枠の最大使用: <b>${perf.max_concurrency_observed !== undefined ? perf.max_concurrency_observed : (cc.run_permits ? cc.run_permits.peak : '—')}</b> / ${cc.run_permits ? cc.run_permits.limit : '—'}</span>`,
+  ];
+  return `<label style="margin-top:10px">🔀 並列の実測（設定値と比較）</label>
+    <div class="exec-summary" style="margin-top:4px">${rows.join('')}</div>
+    ${serialized ? '<div class="warn-row"><b>注意:</b> 同時リクエスト上限は ' + escapeHtml(capLabel) + ' ですが、LLM は常に 1 件ずつ処理されました。サーバー側が並列処理していない可能性があります（Ollama: OLLAMA_NUM_PARALLEL、llama.cpp: -np、vLLM: --max-num-seqs）。</div>' : ''}`;
 }
 
 function renderTokenUsage(u) {
@@ -2227,6 +2252,7 @@ function showResults(result) {
     ${result.regenerated_from ? `<p class="hint">保存済みの調査結果から再出力しました（元データ: ${result.regenerated_from === 'final_body' ? '検証済みの最終本文' : '章本文（未検証・草稿）'}、検索・LLM呼び出しなし）</p>` : ''}
     ${renderResumePlan(result.resume_plan)}
     ${renderTimings(result.timings)}
+    ${renderConcurrency(result.performance)}
     ${renderTokenUsage(result.token_usage)}
     <label style="margin-top:10px">💾 保存済みの成果物（実際に書き込まれたファイルのみ）</label>
     <div class="exec-summary" style="margin-top:4px">${savedRows.join('') || '<span>保存済みの成果物はありません</span>'}</div>`;
@@ -2798,6 +2824,15 @@ function renderExecSummary(status) {
   const saved = status.saved_artifacts || (status.result && status.result.saved_artifacts) || {};
   const keys = Object.keys(saved);
   rows.push(['保存済み', keys.length ? keys.map(k => ARTIFACT_LABELS[k] || k).join('・') : 'まだありません']);
+  const cc = status.concurrency || (status.result && status.result.performance && status.result.performance.llm_concurrency);
+  if (cc && cc.configured) {
+    const llm = (cc.activity && cc.activity.llm) || {};
+    const cap = cc.configured.llm;
+    rows.push(['LLM 同時実行', `設定 ${cap === null || cap === undefined ? '上限なし' : cap} / 現在 ${llm.active || 0} / 最大 ${llm.peak || 0}`]);
+    const act = cc.activity || {};
+    const part = ['fetch', 'extract', 'verify'].map(k => `${ACTIVITY_LABELS[k]} ${(act[k] || {}).active || 0}`).join('・');
+    rows.push(['並列の稼働', `${part}（枠 ${cc.run_permits ? cc.run_permits.active : 0}/${cc.run_permits ? cc.run_permits.limit : '?'}）`]);
+  }
   let stop = '—';
   if (status.state === 'cancelled') stop = '中止済み（保存済みの成果物のみ表示）';
   else if (status.cancel_requested) stop = '停止要求済み（次の安全な地点で停止）';
@@ -3024,6 +3059,32 @@ function applyParamsToForm(params, query) {
   $('verifyCustomPane').style.display = radioValue('verification_profile') === 'custom' ? 'block' : 'none';
   renderPresetEffects(); applyModeVisibility(); updateSummaryStrip();
 }
+
+// ==================== ローカルLLM 並列処理テスト（⚙ 設定） ====================
+$('llmParallelTestBtn').addEventListener('click', async () => {
+  const out = $('llmParallelTestResult');
+  const p = settingsParams();
+  if (!p.local_base_url) { out.textContent = 'ローカルLLMのサーバーURLを入力してください。'; return; }
+  const concurrency = parseInt($('set_local_concurrency').value, 10) || 1;
+  const count = Math.max(2, Math.min(8, concurrency));
+  $('llmParallelTestBtn').disabled = true;
+  out.textContent = `${count} 件を同時に送信しています（同時リクエスト上限 ${concurrency}）…`;
+  try {
+    const res = await fetch('/api/llm-parallel-test', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({local_base_url: p.local_base_url, local_api_key: p.local_api_key, local_backend: p.local_backend,
+        local_timeout: p.local_timeout, http_proxy: p.http_proxy, https_proxy: p.https_proxy, verify_ssl: p.verify_ssl,
+        model: $('model') ? $('model').value.trim() : '', count, concurrency})});
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || 'failed');
+    out.innerHTML = `<b>${escapeHtml(d.verdict)}</b>`
+      + (d.baseline_seconds !== undefined ? `<br>1 件単独 ${d.baseline_seconds} 秒 → ${d.sent} 件同時で ${d.wall_seconds} 秒（実効 ${d.effective_concurrency} 件同時、クライアントが同時に送った最大 ${d.client_inflight_peak} 件、成功 ${d.succeeded} 件）。` : '')
+      + (d.errors && d.errors.length ? `<br>エラー: ${escapeHtml(d.errors[0])}` : '');
+  } catch (e) {
+    out.textContent = 'テストできませんでした: ' + e.message;
+  } finally {
+    $('llmParallelTestBtn').disabled = false;
+  }
+});
 
 // ==================== フェルミ推定 ====================
 let fermiJobId = null;

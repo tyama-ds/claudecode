@@ -417,6 +417,9 @@ class ResearchJob:
         # written so far (checkpoints) — the execution panel shows these
         # while the run is still going, never a guessed "saved"
         self.artifacts_source = None
+        # callable returning configured vs measured parallelism
+        # (tool.concurrency_snapshot) for the execution panel
+        self.concurrency_source = None
         # Plan review state (state == "plan_review")
         self.plan: Optional[Dict[str, Any]] = None
         self.plan_review_deadline: Optional[float] = None
@@ -430,6 +433,15 @@ class ResearchJob:
         try:
             progress = source()
             return progress.snapshot() if progress is not None else None
+        except Exception:
+            return None
+
+    def live_concurrency(self) -> Optional[Dict[str, Any]]:
+        source = self.concurrency_source
+        if source is None:
+            return None
+        try:
+            return source()
         except Exception:
             return None
 
@@ -574,6 +586,7 @@ class ResearchJob:
                 "plan": self.plan,
                 "params_summary": self.params_summary,
                 "saved_artifacts": self.live_saved_artifacts(),
+                "concurrency": self.live_concurrency(),
             }
             if self.state == "plan_review":
                 data["plan_review_remaining"] = (
@@ -941,6 +954,7 @@ class JobManager:
                 lambda: getattr(tool, "verification_progress", None))
             job.run_cancel = tool.request_cancel
             job.artifacts_source = tool.current_saved_artifacts
+            job.concurrency_source = tool.concurrency_snapshot
             job.update("調査を開始します", 2)
 
             documents = expand_document_paths(params.get("local_documents"))
@@ -1035,6 +1049,9 @@ class JobManager:
                 "output_dir": params.get("output_dir"),
                 "timings": result.get("timings"),
                 "resume_plan": result.get("resume_plan"),
+                # measured performance (stage seconds, token usage,
+                # configured vs observed concurrency) — numbers only
+                "performance": result.get("performance"),
             }
             job.progress = 100.0
             if result.get("verification_cancelled"):
@@ -1297,7 +1314,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                "/api/cancel-verification",
                                "/api/cancel-run", "/api/precheck",
                                "/api/resume", "/api/regenerate",
-                               "/api/history/forget", "/api/fermi"):
+                               "/api/history/forget", "/api/fermi",
+                               "/api/llm-parallel-test"):
             self._send_json({"error": "not found"}, 404)
             return
 
@@ -1315,6 +1333,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
             # with the browser's local files, which go through /api/upload)
             self._send_json({"files": precheck_documents(
                 params.get("paths") or [])})
+            return
+
+        if parsed.path == "/api/llm-parallel-test":
+            # LOCAL server only (never a paid API): send N short requests
+            # at once and report how many the server really ran together
+            self._send_json(*llm_parallel_test(params))
             return
 
         if parsed.path == "/api/fermi":
@@ -1472,6 +1496,103 @@ class WebUIHandler(BaseHTTPRequestHandler):
 
         self._send_json({"job_id": job.job_id, "state": job.state,
                          "queue_position": job.queue_position}, 202)
+
+
+def llm_parallel_test(params: Dict[str, Any]):
+    """Probe a LOCAL LLM server's real parallelism.
+
+    Builds the same LocalLLMClient the research run would use, sends
+    ``count`` tiny prompts simultaneously with ``concurrency`` as the
+    client cap, records each request's start/end and derives the maximum
+    number of requests the SERVER had in flight at the same moment.
+    Returns (payload, http_status). Refuses anything but a local server.
+    """
+    base_url = (params.get("local_base_url") or "").strip()
+    if not base_url:
+        return ({"error": "ローカルLLMのサーバーURLを設定してください",
+                 "field": "set_local_url"}, 400)
+    try:
+        count = max(1, min(8, int(params.get("count", 4))))
+        concurrency = max(1, min(16, int(params.get("concurrency") or 1)))
+    except (TypeError, ValueError):
+        return ({"error": "count / concurrency は整数で指定してください"}, 400)
+    try:
+        timeout = float(params.get("local_timeout") or 60)
+    except (TypeError, ValueError):
+        timeout = 60.0
+    timeout = max(5.0, min(timeout, 600.0))
+    try:
+        from ..api import get_client
+        client = get_client(
+            provider="local", api_key=params.get("local_api_key") or None,
+            model=params.get("model") or None, base_url=base_url,
+            backend=params.get("local_backend") or None,
+            local_timeout=timeout, local_concurrency=concurrency,
+            http_proxy=params.get("http_proxy") or None,
+            https_proxy=params.get("https_proxy") or None,
+            verify_ssl=params.get("verify_ssl", True) is not False,
+        )
+        client.max_tokens = 16                      # tiny generations
+    except Exception as e:
+        return ({"error": f"クライアントを作成できません: {e}"}, 400)
+
+    from ..utils.concurrency import (ContextThreadPoolExecutor,
+                                     bind_activity_gauge)
+    prompt = "「1」とだけ答えてください。"
+    errors = []
+
+    def one(_i):
+        try:
+            client.generate(prompt, system_prompt="短く答える。")
+            return True
+        except Exception as e:
+            errors.append(str(e)[:200])
+            return False
+
+    # 1) one request alone = the server's single-request time
+    t0 = time.monotonic()
+    baseline_ok = one(0)
+    baseline = time.monotonic() - t0
+    if not baseline_ok:
+        return ({"sent": 1, "succeeded": 0, "errors": errors[:3],
+                 "verdict": "応答がありません（URL・モデル・サーバーの起動を確認してください）"},
+                200)
+    # 2) ``count`` requests at once. The gauge counts requests that are
+    #    really in flight on the client (after its own cap), so
+    #    client_inflight_peak shows whether the CLIENT allowed them out;
+    #    the wall time against the baseline shows whether the SERVER ran
+    #    them together.
+    gauge = bind_activity_gauge()
+    t0 = time.monotonic()
+    with ContextThreadPoolExecutor(max_workers=count) as ex:
+        results = list(ex.map(one, range(count)))
+    wall = time.monotonic() - t0
+    succeeded = sum(1 for r in results if r)
+    client_peak = (gauge.snapshot().get("llm") or {}).get("peak", 0)
+    effective = count * baseline / wall if wall > 0 else 0.0
+    effective = max(1.0, min(float(count), effective))
+    if count <= 1:
+        verdict = "1 件では判定できません（同時リクエスト上限を 2 以上にしてください）"
+    elif client_peak <= 1:
+        verdict = ("クライアント側で 1 件ずつ送信しています（⚙ 設定の同時リクエスト上限を "
+                   "上げてください）")
+    elif effective <= 1.3:
+        verdict = ("サーバーが直列処理しています（クライアントは同時に送りましたが、"
+                   "同時に処理されたのは実質 1 件。サーバー側の並列設定を確認: "
+                   "Ollama OLLAMA_NUM_PARALLEL / llama.cpp -np / vLLM）")
+    elif effective >= 0.8 * count:
+        verdict = f"並列処理できています（実効 {effective:.1f} 件同時）"
+    else:
+        verdict = f"一部並列（実効 {effective:.1f} 件同時）"
+    return ({
+        "sent": count, "client_concurrency": concurrency,
+        "succeeded": succeeded, "errors": errors[:3],
+        "baseline_seconds": round(baseline, 2),
+        "wall_seconds": round(wall, 2),
+        "client_inflight_peak": client_peak,
+        "effective_concurrency": round(effective, 1),
+        "verdict": verdict,
+    }, 200)
 
 
 def run_server(host: str = "127.0.0.1", port: int = 8765,

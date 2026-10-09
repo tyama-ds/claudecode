@@ -560,6 +560,65 @@ class DeepResearchTool:
                 "quality": quality, "decision": decision or "",
                 "artifact_check": semantic_artifact_check or "skipped"}
 
+    def concurrency_snapshot(self) -> Dict[str, Any]:
+        """Configured vs MEASURED parallelism of the current run.
+
+        configured.llm: the client-side cap on simultaneous LLM requests
+        (local client ``max_concurrency``; cloud providers have no
+        client cap, so the run-wide ``parallel_max_workers`` applies).
+        activity: per-stage in-flight counts (active / peak / total) from
+        the run's ActivityGauge; run_permits: the shared LLM+HTTP permits.
+        """
+        client = getattr(self, "llm_client", None)
+        provider = None
+        try:
+            provider = self.config.api.provider.value
+        except Exception:
+            pass
+        local_cap = getattr(client, "max_concurrency", None)
+        workers = getattr(getattr(self.config, "research", None),
+                          "parallel_max_workers", None)
+        if provider == "local":
+            llm_cap = local_cap if local_cap is not None else workers
+        else:
+            llm_cap = workers
+        gauge = getattr(self, "activity_gauge", None)
+        limits = getattr(self, "run_limits", None)
+        return {
+            "provider": provider,
+            "configured": {
+                "llm": llm_cap,
+                "local_concurrency": local_cap,
+                "parallel_max_workers": workers,
+            },
+            "activity": gauge.snapshot() if gauge is not None else {},
+            "run_permits": {
+                "active": limits.run_limiter.active if limits else 0,
+                "peak": limits.run_peak if limits else 0,
+                "limit": limits.parallel_max_workers if limits else workers,
+            },
+        }
+
+    def _warn_if_llm_serialized(self, snapshot: Dict[str, Any]) -> None:
+        """A local server that never served two requests at once while
+        the client was allowed to send several is worth a warning: the
+        parallel setting is not taking effect server-side."""
+        try:
+            if snapshot.get("provider") != "local":
+                return
+            cap = snapshot["configured"].get("llm") or 1
+            llm = (snapshot.get("activity") or {}).get("llm") or {}
+            if cap > 1 and llm.get("total", 0) >= 10 and llm.get("peak", 0) <= 1:
+                from .utils.helpers import ResearchWarnings
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.MEDIUM, "LLM",
+                    f"ローカルLLMの同時リクエスト上限は {cap} ですが、この実行で"
+                    f"同時に処理された要求は最大 1 件でした（{llm.get('total')} 回）。"
+                    "サーバー側が並列処理していない可能性があります（Ollama: "
+                    "OLLAMA_NUM_PARALLEL、llama.cpp: -np、vLLM: --max-num-seqs を確認）。")
+        except Exception:
+            pass
+
     def current_saved_artifacts(self) -> Dict[str, str]:
         """Artifacts the researcher has ACTUALLY written so far (checkpoint
         files that exist on disk). Empty until the first checkpoint."""
@@ -684,6 +743,10 @@ class DeepResearchTool:
         self.stage_timings = StageTimings()
         run_limits = RunLimits(self.config.research.parallel_max_workers)
         self.run_limits = run_limits
+        # measured in-flight counts (llm / fetch / extract / verify) for
+        # the UI's 設定 vs 実測 display; bound to this run's context
+        from .utils.concurrency import bind_activity_gauge
+        self.activity_gauge = bind_activity_gauge()
         run_token_stats = TokenUsageStats()
         self.run_token_stats = run_token_stats
         for _client in [self.llm_client, *self.stage_llm_clients.values()]:
@@ -1345,6 +1408,8 @@ class DeepResearchTool:
             performance["research_details"] = self.researcher.performance_snapshot()
         performance["token_usage"] = run_token_stats.to_dict()
         performance["max_concurrency_observed"] = run_limits.run_peak
+        performance["llm_concurrency"] = self.concurrency_snapshot()
+        self._warn_if_llm_serialized(performance["llm_concurrency"])
         for name, cache in (
             ("pages", getattr(self.search_client, "_page_cache", None)),
             ("extractions", getattr(getattr(self.researcher, "content_extractor", None), "extraction_cache", None)),
