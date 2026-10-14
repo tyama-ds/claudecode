@@ -519,6 +519,38 @@ body.fx-off header h1 { color: #fff; background: none; -webkit-text-fill-color: 
 body.fx-off .pct { color: var(--text); background: none; -webkit-text-fill-color: var(--text); }
 body.fx-off button.primary { background: linear-gradient(120deg, var(--accent), var(--accent2)); }
 body.fx-off button.primary::before, body.fx-off .mode-card.sel::after, body.fx-off .log::before, body.fx-off .log .caret { display: none; }
+
+/* ==================== header artwork + activity panel ==================== */
+.hero-art { flex-shrink: 0; width: 420px; max-width: 36vw; height: 120px; margin: -10px 4px -10px 0; opacity: .95; }
+.hero-art svg { display: block; width: 100%; height: auto; overflow: visible; }
+.hg-sweep { transform-origin: 70px 60px; animation: hgSweep 4.2s linear infinite; }
+.hg-blip { animation: hgBlip 2.1s ease-in-out infinite; transform-origin: center; }
+.hg-b2 { animation-delay: .7s; } .hg-b3 { animation-delay: 1.4s; }
+.hg-flow path, .hg-flow2 { animation: hgDash 1.1s linear infinite; }
+.hg-pulse { transform-origin: 262px 60px; animation: hgPulse 1.8s ease-in-out infinite; }
+.hg-docs rect { animation: hgFloat 3.4s ease-in-out infinite; }
+.hg-docs rect:nth-of-type(2) { animation-delay: 1.1s; } .hg-docs rect:nth-of-type(3) { animation-delay: 2.2s; }
+@keyframes hgSweep { to { transform: rotate(360deg); } }
+@keyframes hgBlip { 0%, 60%, 100% { opacity: .15; } 20% { opacity: 1; } }
+@keyframes hgDash { to { stroke-dashoffset: -10; } }
+@keyframes hgPulse { 0%, 100% { transform: scale(1); opacity: .9; } 50% { transform: scale(1.18); opacity: 1; } }
+@keyframes hgFloat { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
+@media (max-width: 980px) { .hero-art { display: none; } }
+.activity-card { margin-top: 12px; border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px 10px; background: var(--card); }
+.act-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.act-title { font-weight: 700; font-size: 13px; }
+.act-stage { font-size: 12px; font-weight: 700; color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 2px 10px; }
+#flowCanvas { display: block; width: 100%; height: 150px; margin-top: 6px; }
+.act-now { font-size: 13px; margin-top: 4px; padding: 8px 10px; border-radius: 8px; background: var(--accent-soft); line-height: 1.6; }
+.act-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 10px 16px; margin-top: 10px; align-items: end; }
+@media (max-width: 760px) { .act-grid { grid-template-columns: 1fr; } }
+.act-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.act-chip { font-size: 11.5px; border: 1px solid var(--border); border-radius: 8px; padding: 4px 8px; color: var(--muted); min-width: 0; }
+.act-chip b { color: var(--text); font-variant-numeric: tabular-nums; }
+.act-chip.on { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+.act-spark-label { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+#llmSpark { display: block; width: 100%; height: 52px; }
+body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-off .hg-flow2, body.fx-off .hg-pulse, body.fx-off .hg-docs rect { animation: none !important; }
 </style>
 </head>
 <body>
@@ -528,6 +560,69 @@ body.fx-off button.primary::before, body.fx-off .mode-card.sel::after, body.fx-o
   <div style="flex:1">
     <h1>Deep Research Tool <span class="version" id="appVersion"></span></h1>
     <p id="tagline">調査テーマを入力するだけで、Web調査からレポート生成まで自動実行（最大3件まで同時実行できます）</p>
+  </div>
+  <div class="hero-art" aria-hidden="true">
+    <svg viewBox="0 0 420 120" width="420" height="120" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="hgSweep" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" stop-color="#69cbd0" stop-opacity="0"/><stop offset="1" stop-color="#69cbd0" stop-opacity=".55"/>
+        </linearGradient>
+        <radialGradient id="hgCore" cx=".5" cy=".5" r=".5">
+          <stop offset="0" stop-color="#bff3f5"/><stop offset=".55" stop-color="#2fa8b1"/><stop offset="1" stop-color="#147d87" stop-opacity=".15"/>
+        </radialGradient>
+        <linearGradient id="hgPaper" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#ffffff" stop-opacity=".95"/><stop offset="1" stop-color="#d7eef0" stop-opacity=".9"/>
+        </linearGradient>
+      </defs>
+      <!-- background knowledge graph -->
+      <g class="hg-net" stroke="#96dde1" stroke-opacity=".28" stroke-width="1" fill="none">
+        <path d="M22 18 L60 8 L104 22 L150 12 L188 28 L230 10 L268 24 L312 8 L352 22 L398 10"/>
+        <path d="M60 8 L72 30 M150 12 L140 32 M230 10 L246 30 M312 8 L300 30 M398 10 L380 30"/>
+        <path d="M30 104 L72 112 L118 100 L160 110 L204 98 L250 112 L296 100 L340 110 L392 100"/>
+      </g>
+      <g class="hg-netdots" fill="#96dde1">
+        <circle cx="60" cy="8" r="1.8"/><circle cx="150" cy="12" r="1.8"/><circle cx="230" cy="10" r="1.8"/><circle cx="312" cy="8" r="1.8"/><circle cx="398" cy="10" r="1.8"/>
+        <circle cx="72" cy="112" r="1.8"/><circle cx="160" cy="110" r="1.8"/><circle cx="250" cy="112" r="1.8"/><circle cx="340" cy="110" r="1.8"/>
+      </g>
+      <!-- radar: searching the web -->
+      <g class="hg-radar" fill="none" stroke="#96dde1">
+        <circle cx="70" cy="60" r="46" stroke-opacity=".35"/>
+        <circle cx="70" cy="60" r="31" stroke-opacity=".45"/>
+        <circle cx="70" cy="60" r="16" stroke-opacity=".6"/>
+        <path d="M70 14 V106 M24 60 H116" stroke-opacity=".25"/>
+        <g class="hg-sweep"><path d="M70 60 L116 60 A46 46 0 0 0 102.5 27.5 Z" fill="url(#hgSweep)" stroke="none"/><line x1="70" y1="60" x2="116" y2="60" stroke="#bff3f5" stroke-opacity=".9"/></g>
+        <circle class="hg-blip hg-b1" cx="92" cy="40" r="3" fill="#bff3f5" stroke="none"/>
+        <circle class="hg-blip hg-b2" cx="48" cy="76" r="2.5" fill="#bff3f5" stroke="none"/>
+        <circle class="hg-blip hg-b3" cx="84" cy="82" r="2" fill="#bff3f5" stroke="none"/>
+        <circle cx="70" cy="60" r="2.5" fill="#bff3f5" stroke="none"/>
+      </g>
+      <!-- documents found → flowing into the core -->
+      <g class="hg-docs" stroke="#102338" stroke-width="1">
+        <rect x="138" y="26" width="22" height="28" rx="3" fill="url(#hgPaper)"/><path d="M142 34 H156 M142 39 H156 M142 44 H152" stroke="#147d87" stroke-opacity=".7"/>
+        <rect x="150" y="46" width="22" height="28" rx="3" fill="url(#hgPaper)"/><path d="M154 54 H168 M154 59 H168 M154 64 H164" stroke="#147d87" stroke-opacity=".7"/>
+        <rect x="136" y="66" width="22" height="28" rx="3" fill="url(#hgPaper)"/><path d="M140 74 H154 M140 79 H154 M140 84 H150" stroke="#147d87" stroke-opacity=".7"/>
+      </g>
+      <g class="hg-flow" fill="none" stroke="#96dde1" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="3 7">
+        <path d="M162 40 C196 40 200 60 232 60"/>
+        <path d="M174 60 C200 60 206 60 232 60"/>
+        <path d="M160 80 C196 80 200 60 232 60"/>
+      </g>
+      <!-- the reasoning core (extract / verify) -->
+      <g class="hg-core">
+        <polygon points="262,32 286,46 286,74 262,88 238,74 238,46" fill="#102338" fill-opacity=".55" stroke="#96dde1" stroke-opacity=".8" stroke-width="1.2"/>
+        <circle class="hg-pulse" cx="262" cy="60" r="13" fill="url(#hgCore)"/>
+        <path d="M255 60 L260 65 L270 54" fill="none" stroke="#102338" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+      </g>
+      <path class="hg-flow hg-flow2" d="M288 60 C310 60 314 60 334 60" fill="none" stroke="#96dde1" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="3 7"/>
+      <!-- the report -->
+      <g class="hg-report" stroke="#102338" stroke-width="1">
+        <rect x="336" y="26" width="52" height="68" rx="5" fill="url(#hgPaper)"/>
+        <path d="M344 40 H380 M344 48 H380 M344 56 H372 M344 70 H380 M344 78 H368" stroke="#147d87" stroke-opacity=".75"/>
+        <rect x="344" y="60" width="36" height="6" rx="1" fill="#69cbd0" fill-opacity=".5" stroke="none"/>
+        <circle cx="386" cy="30" r="9" fill="#2fa8b1" stroke="#bff3f5"/><path d="M381.5 30 L385 33.5 L391 27" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </g>
+      <text x="262" y="113" text-anchor="middle" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="8.5" letter-spacing="2.4" fill="#96dde1" fill-opacity=".85">SEARCH · FETCH · EXTRACT · VERIFY · REPORT</text>
+    </svg>
   </div>
   <button id="fxBtn" class="fx-btn" title="見た目のエフェクト（動作には影響しません）" aria-pressed="true">✨ エフェクト ON</button>
   <button id="settingsBtn" class="settings-btn">⚙ 設定</button>
@@ -1125,6 +1220,21 @@ body.fx-off button.primary::before, body.fx-off .mode-card.sel::after, body.fx-o
       </div>
       <div class="bar-wrap"><div class="bar" id="bar"></div></div>
       <div class="msg" id="currentMsg">待機中...</div>
+      <div class="activity-card" id="activityPanel">
+        <div class="act-head">
+          <span class="act-title">🛰 いま何をしているか</span>
+          <span class="act-stage" id="actStage">待機中</span>
+        </div>
+        <canvas id="flowCanvas" height="150" role="img" aria-label="工程の流れと現在の処理の可視化"></canvas>
+        <div class="act-now" id="actNow" aria-live="polite">調査を開始すると、ここに現在の処理が表示されます。</div>
+        <div class="act-grid">
+          <div class="act-chips" id="actChips"></div>
+          <div class="act-spark">
+            <div class="act-spark-label">LLM 同時実行の推移（直近 90 秒・設定上限を点線で表示）</div>
+            <canvas id="llmSpark" height="52" role="img" aria-label="LLM 同時実行数の推移"></canvas>
+          </div>
+        </div>
+      </div>
       <div class="exec-summary" id="execSummary" aria-live="polite"></div>
 
       <div class="plan-review" id="planReviewPanel" style="display:none">
@@ -1893,6 +2003,7 @@ function render(status) {
   const sec = Math.round((status.elapsed_seconds || 0) % 60);
   $('elapsed').textContent = `経過 ${min}分${sec}秒`;
   renderExecSummary(status);
+  activityViz.update(status);
 
   // run-level cancel button: visible only for jobs still running
   const runCancel = $('runCancelBtn');
@@ -3206,6 +3317,254 @@ function applyHash() {
 }
 window.addEventListener('hashchange', applyHash);
 applyHash();
+
+
+// ==================== いま何をしているか（工程フローの可視化） ====================
+// Everything drawn here comes from measured job status (message, progress,
+// verification snapshot, concurrency activity, live chapter counts). The
+// panel never invents progress: when nothing is in flight it says so.
+const ACT_STAGES = [
+  {key: 'plan',    label: '計画', icon: '📋', desc: '題名・目次・検索クエリを作成しています'},
+  {key: 'search',  label: '検索', icon: '🔎', desc: '検索エンジンに問い合わせて候補 URL を集めています'},
+  {key: 'fetch',   label: '取得', icon: '🌐', desc: '候補ページ・PDF を取得しています（同じ URL は 1 回だけ）'},
+  {key: 'extract', label: '抽出', icon: '✂️', desc: '取得した本文から観点に関係する部分を LLM で抜き出しています'},
+  {key: 'write',   label: '執筆', icon: '✍️', desc: '抜き出した根拠をもとに章の本文を生成しています'},
+  {key: 'synth',   label: '統合', icon: '🧩', desc: '要旨・提言をまとめ、章の間の整合を確認しています'},
+  {key: 'verify',  label: '検証', icon: '🛡', desc: '本文の主張を根拠と照合し、不足があれば追加調査・修正しています'},
+  {key: 'output',  label: '出力', icon: '📄', desc: 'レポートを書き出し、履歴に記録しています'},
+];
+const ACT_INDEX = Object.fromEntries(ACT_STAGES.map((s, i) => [s.key, i]));
+
+const activityViz = (() => {
+  const canvas = $('flowCanvas'), spark = $('llmSpark');
+  const ctx = canvas.getContext('2d'), sctx = spark.getContext('2d');
+  const st = {stage: null, done: false, halted: false, paused: false, act: {}, status: null,
+              particles: [], hist: [], cap: null, raf: null, lastDraw: 0, jobId: null};
+  const edgeRate = () => {
+    const a = st.act, g = (k) => (a[k] || {}).active || 0;
+    const rate = new Array(ACT_STAGES.length - 1).fill(0);
+    if (st.halted || st.done || st.paused) return rate;
+    rate[0] = g('search');                                   // 計画 → 検索
+    rate[1] = g('fetch');                                    // 検索 → 取得
+    rate[2] = g('extract');                                  // 取得 → 抽出
+    rate[3] = st.stage === 'write' ? Math.max(1, g('llm')) : 0;    // 抽出 → 執筆
+    rate[4] = st.stage === 'synth' ? Math.max(1, g('llm')) : 0;    // 執筆 → 統合
+    rate[5] = st.stage === 'verify' ? Math.max(1, g('verify'), g('llm')) : 0;  // 統合 → 検証
+    rate[6] = st.stage === 'output' ? 1 : 0;                 // 検証 → 出力
+    return rate;
+  };
+  const tokens = () => {
+    const cs = getComputedStyle(document.body);
+    const v = (n, d) => (cs.getPropertyValue(n) || d).trim();
+    return {accent: v('--accent', '#147d87'), accent2: v('--accent2', '#106873'), text: v('--text', '#172b40'),
+            muted: v('--muted', '#62758a'), border: v('--border', '#dce4ed'), card: v('--card', '#fff'),
+            soft: v('--accent-soft', '#eaf5f5'), ok: v('--success', '#16734f')};
+  };
+  function layout() {
+    const w = canvas.clientWidth || 600, h = 150, dpr = window.devicePixelRatio || 1;
+    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+      canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const pad = 40, n = ACT_STAGES.length;
+    return {w, h, dpr, y: 72, r: 21, xs: ACT_STAGES.map((_, i) => pad + i * (w - 2 * pad) / (n - 1))};
+  }
+  function spawn(L, dt) {
+    const rate = edgeRate();
+    rate.forEach((r, i) => {
+      if (!r) return;
+      // more in-flight work = denser stream (bounded so the canvas stays readable)
+      const perSec = Math.min(14, 2.2 * r);
+      if (Math.random() < perSec * dt) st.particles.push({e: i, t: 0, v: 0.55 + Math.random() * 0.35, o: (Math.random() - .5) * 10});
+    });
+    if (st.particles.length > 220) st.particles.splice(0, st.particles.length - 220);
+  }
+  function draw(now) {
+    const L = layout(), T = tokens();
+    const dt = st.lastDraw ? Math.min(0.1, (now - st.lastDraw) / 1000) : 0; st.lastDraw = now;
+    const animate = fxOn && !reducedMotion;
+    if (st.done || st.halted || st.paused) st.particles = [];
+    ctx.clearRect(0, 0, L.w, L.h);
+    const cur = st.stage ? ACT_INDEX[st.stage] : -1;
+    // edges
+    ctx.lineWidth = 2; ctx.strokeStyle = T.border;
+    for (let i = 0; i < L.xs.length - 1; i++) {
+      ctx.beginPath(); ctx.moveTo(L.xs[i] + L.r + 4, L.y); ctx.lineTo(L.xs[i + 1] - L.r - 4, L.y); ctx.stroke();
+    }
+    // done segments
+    if (cur > 0 || st.done) {
+      ctx.strokeStyle = T.accent; ctx.globalAlpha = .55;
+      const upto = st.done ? L.xs.length - 1 : cur;
+      for (let i = 0; i < upto; i++) { ctx.beginPath(); ctx.moveTo(L.xs[i] + L.r + 4, L.y); ctx.lineTo(L.xs[i + 1] - L.r - 4, L.y); ctx.stroke(); }
+      ctx.globalAlpha = 1;
+    }
+    // particles
+    if (animate) {
+      spawn(L, dt);
+      st.particles.forEach(p => { p.t += p.v * dt; });
+      st.particles = st.particles.filter(p => p.t < 1);
+      st.particles.forEach(p => {
+        const x0 = L.xs[p.e] + L.r + 4, x1 = L.xs[p.e + 1] - L.r - 4;
+        const x = x0 + (x1 - x0) * p.t, y = L.y + p.o * Math.sin(p.t * Math.PI);
+        ctx.fillStyle = T.accent; ctx.globalAlpha = .25;
+        ctx.beginPath(); ctx.arc(x - 8 * p.v, y, 3, 0, Math.PI * 2); ctx.fill();
+        ctx.globalAlpha = .95; ctx.beginPath(); ctx.arc(x, y, 3.2, 0, Math.PI * 2); ctx.fill();
+      });
+      ctx.globalAlpha = 1;
+    }
+    // nodes
+    const pulse = animate ? 0.5 + 0.5 * Math.sin(now / 320) : 0.5;
+    ACT_STAGES.forEach((s, i) => {
+      const x = L.xs[i], active = i === cur && !st.done, done = st.done || i < cur;
+      const a = st.act[s.key === 'write' || s.key === 'synth' ? 'llm' : s.key] || {};
+      if (active) {                                   // glow ring
+        ctx.beginPath(); ctx.arc(x, L.y, L.r + 6 + pulse * 5, 0, Math.PI * 2);
+        ctx.fillStyle = T.accent; ctx.globalAlpha = 0.10 + 0.12 * pulse; ctx.fill(); ctx.globalAlpha = 1;
+      }
+      ctx.beginPath(); ctx.arc(x, L.y, L.r, 0, Math.PI * 2);
+      ctx.fillStyle = active ? T.soft : T.card; ctx.fill();
+      ctx.lineWidth = active ? 2.5 : 1.5; ctx.strokeStyle = active || done ? T.accent : T.border; ctx.stroke();
+      ctx.font = '17px system-ui, "Segoe UI Emoji", "Apple Color Emoji", sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = T.text; ctx.fillText(s.icon, x, L.y + 1);
+      ctx.font = (active ? '700 ' : '600 ') + '12px system-ui, sans-serif'; ctx.textBaseline = 'alphabetic';
+      ctx.fillStyle = active ? T.accent : (done ? T.text : T.muted); ctx.fillText(s.label, x, L.y + L.r + 18);
+      // live count badge: in-flight for this stage (research stages) or the verify claim progress
+      let badge = '';
+      if (['search', 'fetch', 'extract', 'verify'].includes(s.key) && (a.active || 0) > 0) badge = '×' + a.active;
+      if ((s.key === 'write' || s.key === 'synth') && active && (a.active || 0) > 0) badge = '×' + a.active;
+      if (badge) {
+        ctx.font = '700 11px system-ui, sans-serif'; const bw = ctx.measureText(badge).width + 10;
+        ctx.fillStyle = T.accent; ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(x + L.r - 10, L.y - L.r - 12, bw, 16, 8); else ctx.rect(x + L.r - 10, L.y - L.r - 12, bw, 16);
+        ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.fillText(badge, x + L.r - 10 + bw / 2, L.y - L.r);
+      }
+      // cumulative count under the label (measured totals)
+      const total = (st.act[s.key] || {}).total;
+      if (total !== undefined && ['search', 'fetch', 'extract', 'verify'].includes(s.key)) {
+        ctx.font = '11px system-ui, sans-serif'; ctx.fillStyle = T.muted; ctx.fillText(`計 ${total}`, x, L.y + L.r + 33);
+      }
+      if (done && !active) {                          // check mark on finished stages
+        ctx.fillStyle = T.ok; ctx.beginPath(); ctx.arc(x + L.r - 4, L.y - L.r + 4, 6, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.6; ctx.beginPath(); ctx.moveTo(x + L.r - 7, L.y - L.r + 4); ctx.lineTo(x + L.r - 5, L.y - L.r + 6.5); ctx.lineTo(x + L.r - 1, L.y - L.r + 1.5); ctx.stroke();
+      }
+    });
+    // verification ring: claims judged / total around the 検証 node
+    const v = st.status && st.status.verification;
+    if (v && v.claims_total) {
+      const i = ACT_INDEX.verify, frac = Math.min(1, v.claims_done / v.claims_total);
+      ctx.beginPath(); ctx.arc(L.xs[i], L.y, L.r + 4, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+      ctx.strokeStyle = T.accent2; ctx.lineWidth = 3; ctx.stroke();
+    }
+    // status strip (top-left)
+    ctx.textAlign = 'left'; ctx.font = '11px system-ui, sans-serif'; ctx.fillStyle = T.muted;
+    const cap = st.cap === null || st.cap === undefined ? '' : `・LLM 同時上限 ${st.cap}`;
+    ctx.fillText(st.jobId ? `流れる点 = いま処理中の要求（本数に比例）${cap}` : '', 12, 16);
+    drawSpark(T);
+    if (animate && !st.done && !st.halted) st.raf = requestAnimationFrame(draw); else st.raf = null;
+  }
+  function drawSpark(T) {
+    const w = spark.clientWidth || 300, h = 52, dpr = window.devicePixelRatio || 1;
+    if (spark.width !== Math.round(w * dpr) || spark.height !== Math.round(h * dpr)) { spark.width = Math.round(w * dpr); spark.height = Math.round(h * dpr); }
+    sctx.setTransform(dpr, 0, 0, dpr, 0, 0); sctx.clearRect(0, 0, w, h);
+    const now = Date.now(), win = 90000;
+    const pts = st.hist.filter(p => now - p.t <= win);
+    const maxV = Math.max(1, st.cap || 0, ...pts.map(p => p.v));
+    const X = (t) => w - (now - t) / win * w, Y = (v) => h - 6 - (v / maxV) * (h - 22);   // headroom for the label
+    sctx.strokeStyle = T.border; sctx.lineWidth = 1; sctx.beginPath(); sctx.moveTo(0, h - 6.5); sctx.lineTo(w, h - 6.5); sctx.stroke();
+    if (st.cap) { sctx.setLineDash([3, 4]); sctx.strokeStyle = T.muted; sctx.beginPath(); sctx.moveTo(0, Y(st.cap)); sctx.lineTo(w, Y(st.cap)); sctx.stroke(); sctx.setLineDash([]); }
+    if (pts.length > 1) {
+      sctx.beginPath(); pts.forEach((p, i) => { const x = X(p.t), y = Y(p.v); if (i) sctx.lineTo(x, y); else sctx.moveTo(x, y); });
+      sctx.strokeStyle = T.accent; sctx.lineWidth = 2; sctx.lineJoin = 'round'; sctx.stroke();
+      sctx.lineTo(X(pts[pts.length - 1].t), h - 6.5); sctx.lineTo(X(pts[0].t), h - 6.5); sctx.closePath();
+      sctx.fillStyle = T.accent; sctx.globalAlpha = .12; sctx.fill(); sctx.globalAlpha = 1;
+      const last = pts[pts.length - 1];
+      sctx.fillStyle = T.accent; sctx.beginPath(); sctx.arc(X(last.t), Y(last.v), 3, 0, Math.PI * 2); sctx.fill();
+      sctx.font = '11px system-ui, sans-serif'; sctx.textAlign = 'right'; sctx.fillStyle = T.text;
+      sctx.fillText(st.done || st.halted ? `最後 ${last.v}（終了）` : `いま ${last.v}`, w - 2, 11);
+    } else {
+      sctx.font = '11px system-ui, sans-serif'; sctx.fillStyle = T.muted; sctx.textAlign = 'left'; sctx.fillText('データ待ち', 4, 12);
+    }
+    sctx.textAlign = 'left';
+  }
+  function inferStage(status, act) {
+    const g = (k) => (act[k] || {}).active || 0, msg = status.message || '', pct = status.progress || 0;
+    const v = status.verification;
+    if (status.state === 'completed') return 'output';
+    if (status.state === 'queued') return null;
+    if (status.state === 'plan_review') return 'plan';
+    if (v && v.phase && v.phase !== 'idle') return 'verify';
+    if (g('verify')) return 'verify';
+    if (/計画|plan/i.test(msg) && pct <= 12) return 'plan';
+    if (g('extract')) return 'extract';
+    if (g('fetch')) return 'fetch';
+    if (g('search')) return 'search';
+    if (/Generating report|レポートを生成|再出力|rendering/i.test(msg)) return 'output';
+    if (/Synthesizing|統合|要旨|Reviewing all evidence|AutoFigures|図表|DeepThink|フェルミ/i.test(msg)) return 'synth';
+    if (/Researching|Reusing completed section|章/.test(msg)) return g('llm') ? 'write' : 'search';
+    if (pct < 10) return 'plan';
+    if (pct < 85) return g('llm') ? 'write' : 'search';
+    if (pct < 95) return 'synth';
+    return 'output';
+  }
+  function describe(status, act, stage) {
+    const g = (k) => (act[k] || {}).active || 0, tot = (k) => (act[k] || {}).total || 0;
+    const m = /Researching:\s*(\d+(?:\.\d+)*)\.?\s*(.*)/.exec(status.message || '');
+    const sec = m ? `第${m[1]}章「${m[2].trim()}」: ` : '';
+    const v = status.verification;
+    const ls = liveSectionStats.job === status.job_id ? liveSectionStats : null;
+    if (status.state === 'queued') return `実行待ち（${status.queue_position || '?'}番目）。前のジョブが終わると自動で始まります。`;
+    if (status.state === 'plan_review') return '調査計画ができました。承認・修正・中止を選ぶまで待機しています（この間は何も実行しません）。';
+    if (status.state === 'cancelled') return `中止しました。LLM ${tot('llm')} 回・取得 ${tot('fetch')} ページまで実行し、保存済みの成果物だけを残しています。`;
+    if (status.state === 'error') return `エラーで停止しました: ${(status.error || '').slice(0, 80)}`;
+    if (status.state === 'completed') return `完了。LLM 呼び出し ${tot('llm')} 回、取得 ${tot('fetch')} ページ、抽出 ${tot('extract')} 回、検証判定 ${tot('verify')} 回${ls && ls.total ? `、章 ${ls.total}` : ''}。`;
+    switch (stage) {
+      case 'plan': return ACT_STAGES[0].desc + '。';
+      case 'search': return `${sec}${g('search') ? `${g('search')} 件の検索を同時に実行中` : '次の検索を準備中'}（これまで ${tot('search')} 回）。`;
+      case 'fetch': return `${sec}${g('fetch')} ページを同時に取得中（これまで ${tot('fetch')} ページ）。`;
+      case 'extract': return `${sec}${g('extract')} 本の抽出を同時に実行中（LLM ${g('llm')} 件処理中、これまで抽出 ${tot('extract')} 回）。`;
+      case 'write': return `${sec}章の本文を生成中（LLM ${g('llm')} 件処理中）${ls && ls.total ? `。書き上がった章 ${ls.total}` : ''}。`;
+      case 'synth': return `${(status.message || '').replace(/\.{3}$/, '')}（LLM ${g('llm')} 件処理中）。`;
+      case 'verify': return v && v.claims_total
+        ? `${v.phase_label || '検証'}: 主張 ${v.claims_done}/${v.claims_total} を判定（ラウンド ${v.round}/${v.max_rounds}、同時 ${g('verify') || g('llm')} 件、LLM 呼び出し ${v.llm_calls || 0} 回）。`
+        : `最終検証を開始しています（主張の抽出中）。`;
+      case 'output': return `レポートを書き出しています${ls && ls.total ? `（章 ${ls.total}）` : ''}。`;
+    }
+    return status.message || '';
+  }
+  function update(status) {
+    if (status.job_id !== st.jobId) { reset(); st.jobId = status.job_id; }
+    st.status = status;
+    const cc = status.concurrency || (status.result && status.result.performance && status.result.performance.llm_concurrency) || {};
+    st.act = cc.activity || {};
+    st.cap = cc.configured ? cc.configured.llm : null;
+    st.done = status.state === 'completed'; st.halted = status.state === 'error' || status.state === 'cancelled';
+    st.paused = status.state === 'plan_review' || status.state === 'queued';
+    st.stage = inferStage(status, st.act);
+    const llmNow = (st.act.llm || {}).active || 0;
+    if (!st.done && !st.halted) st.hist.push({t: Date.now(), v: llmNow});
+    if (st.hist.length > 400) st.hist.splice(0, st.hist.length - 400);
+    const S = st.stage ? ACT_STAGES[ACT_INDEX[st.stage]] : null;
+    $('actStage').textContent = status.state === 'queued' ? '実行待ち' : status.state === 'completed' ? '完了'
+      : status.state === 'cancelled' ? '中止' : status.state === 'error' ? 'エラー'
+      : status.state === 'plan_review' ? '計画の確認待ち' : (S ? `${S.icon} ${S.label}` : '—');
+    $('actNow').textContent = describe(status, st.act, st.stage);
+    const chips = [['search', '検索'], ['fetch', '取得'], ['extract', '抽出'], ['llm', 'LLM'], ['verify', '検証']].map(([k, l]) => {
+      const a = st.act[k] || {};
+      return `<span class="act-chip ${a.active ? 'on' : ''}">${l} いま <b>${a.active || 0}</b> / 累計 <b>${a.total || 0}</b>${a.peak ? ` / 最大 <b>${a.peak}</b>` : ''}</span>`;
+    });
+    $('actChips').innerHTML = chips.join('');
+    if (!st.raf) st.raf = requestAnimationFrame(draw);
+  }
+  function reset() {
+    if (st.raf) cancelAnimationFrame(st.raf);
+    Object.assign(st, {stage: null, done: false, halted: false, paused: false, act: {}, status: null, particles: [], hist: [], cap: null, raf: null, lastDraw: 0, jobId: null});
+    $('actStage').textContent = '待機中'; $('actNow').textContent = '調査を開始すると、ここに現在の処理が表示されます。'; $('actChips').innerHTML = '';
+    requestAnimationFrame(draw);
+  }
+  window.addEventListener('resize', () => { if (!st.raf) requestAnimationFrame(draw); });
+  return {update, reset, state: st, stages: ACT_STAGES};
+})();
 
 // ==================== キーボード操作・フォーカス ====================
 document.addEventListener('keydown', (e) => {
