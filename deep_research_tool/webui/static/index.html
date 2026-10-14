@@ -484,6 +484,9 @@ button.primary:active:not(:disabled) { transform: translateY(0) scale(.99); }
 }
 @keyframes scan { to { top: 110%; } }
 .log .ln { display: block; }
+.log .gap { display: block; color: #e2b05a; font-style: italic; }
+.log-meta { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 12px; font-size: 11px; color: var(--muted); }
+.log-meta button { font-size: 11px; padding: 2px 8px; }
 .log .ln.new { animation: lineIn .45s ease both; }
 @keyframes lineIn { from { opacity: 0; transform: translateX(-6px); filter: blur(2px); } to { opacity: 1; transform: none; filter: none; } }
 .log .caret { display: inline-block; width: 7px; height: 12px; background: #7f8bd9; vertical-align: -2px; margin-left: 2px;
@@ -1275,7 +1278,8 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
              padding:12px 16px;font-size:13.5px;line-height:1.8"></div>
       </details>
 
-      <div class="log" id="log"></div>
+      <div class="log-meta" id="logMeta"><span id="logMetaText"></span><button type="button" class="secondary" id="logJumpBtn" style="display:none">⤓ 最新へ</button></div>
+      <div class="log" id="log" tabindex="0" aria-label="進捗ログ"></div>
 
       <div class="banner" id="jobBanner"></div>
 
@@ -1315,6 +1319,12 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
 const $ = (id) => document.getElementById(id);
 let logLength = 0;
 let logSeq = -1;
+// client-side log buffer: the server sends only its last 50 entries per poll,
+// so the console keeps what it has seen (capped) and appends only new lines
+const LOG_KEEP = 400;
+let logBuf = [];          // {seq, pct, msg} or {gap: n}
+let logShownSeq = -1;     // highest seq rendered
+let logDropped = 0;       // oldest lines dropped from the buffer
 let selectedJobId = null;
 let lastRenderedJobId = null;
 
@@ -1970,6 +1980,56 @@ async function sendPlanReview(action) {
   }
 }
 
+// Append only the entries this client has not shown yet. If more lines were
+// produced between two polls than the server window holds, say so instead of
+// silently skipping them. Scrolling follows the newest line only while the
+// reader is already at the bottom.
+function appendLogEntries(entries, seq, state) {
+  const logEl = $('log');
+  const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 24 || logShownSeq < 0;
+  const withSeq = entries.filter(e => typeof e.seq === 'number');
+  let fresh;
+  if (withSeq.length === entries.length && entries.length) {
+    fresh = entries.filter(e => e.seq > logShownSeq);
+    const expected = logShownSeq < 0 ? fresh.length : Math.max(0, seq - logShownSeq);
+    if (expected > fresh.length && logShownSeq >= 0) {
+      logBuf.push({gap: expected - fresh.length});
+    }
+  } else {
+    // legacy server without sequence numbers: show its window as-is
+    fresh = entries.map((e, i) => ({seq: i, pct: e.pct, msg: e.msg}));
+    logBuf = []; logShownSeq = -1; logEl.innerHTML = '';
+  }
+  for (const e of fresh) { logBuf.push(e); logShownSeq = Math.max(logShownSeq, e.seq || 0); }
+  if (logBuf.length > LOG_KEEP) {
+    const drop = logBuf.length - LOG_KEEP;
+    logDropped += logBuf.splice(0, drop).filter(e => !e.gap).length;
+    logEl.innerHTML = logBuf.map(renderLogLine).join('');
+  } else {
+    const caret = logEl.querySelector('.caret'); if (caret) caret.remove();
+    const html = fresh.length || logBuf.length && logBuf[logBuf.length - 1].gap
+      ? logBuf.slice(-(fresh.length + (logBuf[logBuf.length - fresh.length - 1] && logBuf[logBuf.length - fresh.length - 1].gap ? 1 : 0))).map(renderLogLine).join('')
+      : '';
+    if (html) logEl.insertAdjacentHTML('beforeend', html);
+  }
+  const live = state === 'running' || state === 'plan_review' || state === 'queued';
+  if (live && !logEl.querySelector('.caret')) logEl.insertAdjacentHTML('beforeend', '<span class="caret"></span>');
+  const shown = logBuf.filter(e => !e.gap).length;
+  const omitted = Math.max(0, seq - shown);
+  $('logMetaText').textContent = `表示 ${shown} 行 / 全 ${seq} 行` + (omitted ? `（先頭 ${omitted} 行は省略）` : '');
+  if (atBottom) { logEl.scrollTop = logEl.scrollHeight; $('logJumpBtn').style.display = 'none'; }
+  else $('logJumpBtn').style.display = fresh.length ? 'inline-block' : $('logJumpBtn').style.display;
+}
+function renderLogLine(e) {
+  if (e.gap) return `<span class="gap">… ${e.gap} 行を取りこぼしました（サーバーは直近 50 行だけを返します）</span>`;
+  return `<span class="ln new"><span class="pct-tag">[${String(e.pct).padStart(5)}%]</span> ${escapeHtml(e.msg)}</span>`;
+}
+$('logJumpBtn').addEventListener('click', () => { $('log').scrollTop = $('log').scrollHeight; $('logJumpBtn').style.display = 'none'; });
+$('log').addEventListener('scroll', () => {
+  const el = $('log');
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 24) $('logJumpBtn').style.display = 'none';
+});
+
 let lastStatus = null;
 const seenStates = {};          // job_id -> last state seen (for the completion burst)
 
@@ -1982,6 +2042,7 @@ function render(status) {
     lastRenderedJobId = status.job_id;
     logLength = -1;
     logSeq = -1;
+    logBuf = []; logShownSeq = -1; logDropped = 0; $('log').innerHTML = ''; $('logMetaText').textContent = '';
     lastPlanJson = null;
     $('jobBanner').className = 'banner';
     $('resultPanel').style.display = 'none';
@@ -2047,14 +2108,7 @@ function render(status) {
   const seq = status.log_seq !== undefined ? status.log_seq
     : (log.length ? log[log.length - 1].seq || log.length : 0);
   if (seq !== logSeq || log.length !== logLength) {
-    // lines that were not shown before slide in (cosmetic only)
-    const firstNew = (logSeq < 0 || seq - logSeq > log.length) ? log.length
-      : Math.max(0, log.length - (seq - logSeq));
-    const live = status.state === 'running' || status.state === 'plan_review' || status.state === 'queued';
-    $('log').innerHTML = log.map((l, i) =>
-      `<span class="ln ${i >= firstNew ? 'new' : ''}"><span class="pct-tag">[${String(l.pct).padStart(5)}%]</span> ${escapeHtml(l.msg)}</span>`
-    ).join('') + (live ? '<span class="caret"></span>' : '');
-    $('log').scrollTop = $('log').scrollHeight;
+    appendLogEntries(log, seq, status.state);
     logLength = log.length;
     logSeq = seq;
   }
