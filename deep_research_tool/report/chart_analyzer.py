@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple
 from enum import Enum
 
+from ..utils.concurrency import ContextThreadPoolExecutor
 from ..evidence.numerical_extractor import (
     NumericalDataStore,
     NumericalDataPoint,
@@ -818,7 +819,7 @@ Answer (finding, or REJECT):"""
         import concurrent.futures
         workers = min(self.max_workers, len(top_recs))
         if workers > 1:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            with ContextThreadPoolExecutor(max_workers=workers) as ex:
                 verdicts = list(ex.map(_judge, top_recs))
         else:
             verdicts = [_judge(rec) for rec in top_recs]

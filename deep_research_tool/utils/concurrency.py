@@ -32,10 +32,13 @@ I/O-bound (LLM/API/HTTP), so ThreadPools are used throughout; nothing is
 moved to a ProcessPool without measured CPU-bound need.
 """
 
+import concurrent.futures
+import contextvars
+import contextvars
 import threading
 import time
 from contextlib import contextmanager
-from typing import Optional
+from typing import Dict, Optional
 
 PARALLEL_MAX_WORKERS_DEFAULT = 8
 PARALLEL_MAX_WORKERS_MIN = 1
@@ -182,6 +185,70 @@ class RunLimits:
         return self.run_limiter.peak
 
 
+class ActivityGauge:
+    """Per-run "how many of X are running right now" counters.
+
+    Names are free-form stage labels ("llm", "fetch", "extract",
+    "verify"). Each tracked block raises the active count of its name
+    on entry and lowers it on exit; the peak is the highest active count
+    seen. The gauge is MEASURED state for the UI (設定値 vs 実測), never
+    a limiter — it blocks nothing.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._active: Dict[str, int] = {}
+        self._peak: Dict[str, int] = {}
+        self._total: Dict[str, int] = {}
+
+    @contextmanager
+    def track(self, name: str):
+        with self._lock:
+            self._active[name] = self._active.get(name, 0) + 1
+            self._total[name] = self._total.get(name, 0) + 1
+            self._peak[name] = max(self._peak.get(name, 0), self._active[name])
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._active[name] -= 1
+
+    def snapshot(self) -> Dict[str, Dict[str, int]]:
+        with self._lock:
+            return {name: {"active": self._active.get(name, 0),
+                           "peak": self._peak.get(name, 0),
+                           "total": self._total.get(name, 0)}
+                    for name in sorted(set(self._active) | set(self._peak))}
+
+
+# the gauge of the CURRENT run: bound per job (contextvars propagate into
+# ContextThreadPoolExecutor workers), so parallel Web UI jobs never mix
+_gauge_var: contextvars.ContextVar = contextvars.ContextVar(
+    "activity_gauge", default=None)
+
+
+def bind_activity_gauge(gauge: Optional[ActivityGauge] = None) -> ActivityGauge:
+    gauge = gauge or ActivityGauge()
+    _gauge_var.set(gauge)
+    return gauge
+
+
+def current_activity_gauge() -> Optional[ActivityGauge]:
+    return _gauge_var.get()
+
+
+@contextmanager
+def track_activity(name: str):
+    """Count one in-flight operation of ``name`` on the run's gauge
+    (no-op when no gauge is bound, e.g. plain library use)."""
+    gauge = _gauge_var.get()
+    if gauge is None:
+        yield
+        return
+    with gauge.track(name):
+        yield
+
+
 @contextmanager
 def maybe_permit(limiter, timeout: Optional[float] = None):
     """Take a permit when a limiter is attached; no-op otherwise.
@@ -194,3 +261,25 @@ def maybe_permit(limiter, timeout: Optional[float] = None):
         return
     with limiter.permit(timeout=timeout):
         yield
+
+
+# --------------------------------------------------------------------------
+# Context-propagating thread pool
+# --------------------------------------------------------------------------
+
+class ContextThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
+    """ThreadPoolExecutor whose workers run each task inside a COPY of the
+    submitter's ``contextvars`` context.
+
+    The stdlib pool (Python <= 3.13) starts tasks with an empty context,
+    so per-run state carried in ContextVars — the job's warning
+    collector, the current run id — would silently fall back to the
+    process-wide default inside every parallel stage. Every pool in this
+    package uses this subclass so a Web UI job's parallel workers
+    (crawl, extraction, figures, verification) still report into THAT
+    job's collector, never into another job's.
+    """
+
+    def submit(self, fn, /, *args, **kwargs):
+        ctx = contextvars.copy_context()
+        return super().submit(ctx.run, fn, *args, **kwargs)

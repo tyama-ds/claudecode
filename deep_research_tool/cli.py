@@ -1295,15 +1295,39 @@ def info():
     "--output-dir", default="./output",
     help="Output directory served for report downloads (default: ./output)"
 )
-def webui(host: str, port: int, output_dir: str):
+@click.option("--open/--no-open", "open_browser", default=False,
+              help="Open the default browser on the UI")
+def webui(host: str, port: int, output_dir: str, open_browser: bool):
     """Launch the browser-based Web UI.
 
     Example:
         deep-research webui
-        deep-research webui --port 8080
+        deep-research webui --port 8080 --open
     """
     from .webui.server import run_server
-    run_server(host=host, port=port, output_dir=output_dir)
+    run_server(host=host, port=port, output_dir=output_dir,
+               open_browser=open_browser)
+
+
+@cli.command()
+@click.option("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
+@click.option("--port", type=int, default=8765, help="Port (default: 8765)")
+@click.option(
+    "--output-dir", default="./output",
+    help="Output directory served for report downloads (default: ./output)"
+)
+@click.option("--fermi", "fermi", is_flag=True, default=False,
+              help="Open the UI on the フェルミ推定 panel")
+def gui(host: str, port: int, output_dir: str, fermi: bool):
+    """Launch the GUI (the HTML/JS Web UI in your browser; no Tkinter).
+
+    Example:
+        deep-research gui
+        deep-research gui --fermi
+    """
+    from .webui.server import run_server
+    run_server(host=host, port=port, output_dir=output_dir,
+               open_browser=True, fragment="fermi" if fermi else "")
 
 
 def main():

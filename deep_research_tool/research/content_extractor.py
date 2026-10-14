@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
+from ..utils.concurrency import ContextThreadPoolExecutor
 from ..utils.helpers import (
     ResearchWarnings,
     extract_json_array_from_response,
@@ -180,6 +181,22 @@ class ContentExtractor:
         chunk_label: str = "",
     ) -> Optional[Dict[str, Any]]:
         """Extract relevant information from a single chunk of content."""
+        from ..utils.concurrency import track_activity
+        with track_activity("extract"):
+            return self._extract_single_chunk_impl(
+                chunk_text, source_url, source_title, section_context,
+                research_query, lang_instruction, chunk_label)
+
+    def _extract_single_chunk_impl(
+        self,
+        chunk_text: str,
+        source_url: str,
+        source_title: str,
+        section_context: str,
+        research_query: str,
+        lang_instruction: str,
+        chunk_label: str = "",
+    ) -> Optional[Dict[str, Any]]:
         prompt = f"""Source URL: {source_url}
 Source Title: {source_title}
 {chunk_label}
@@ -377,7 +394,7 @@ Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
                                         self.CHUNK_WORKERS, len(chunks))
             if workers > 1:
                 import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                with ContextThreadPoolExecutor(max_workers=workers) as ex:
                     # map preserves input order, so merged output is deterministic
                     results = list(ex.map(_work, list(enumerate(chunks))))
             else:
@@ -645,7 +662,7 @@ Key Points: {', '.join(ec.key_points[:3]) if ec.key_points else 'N/A'}
         from ..utils.concurrency import effective_workers
         workers = effective_workers(self.max_parallel_workers, 4, len(outline))
         if workers > 1:
-            from concurrent.futures import ThreadPoolExecutor
+            from ..utils.concurrency import ContextThreadPoolExecutor as ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 detailed_sections = list(executor.map(generate_point, enumerate(outline)))
         else:

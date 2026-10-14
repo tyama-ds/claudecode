@@ -89,9 +89,11 @@ class CachedSearchClient:
         self._page_cache.clear()
 
     def _call(self, stage, operation, *args, **kwargs):
-        if self._timings is None:
-            return operation(*args, **kwargs)
-        return self._timings.call(stage, operation, *args, **kwargs)
+        from ..utils.concurrency import track_activity
+        with track_activity(stage):                 # "search" / "fetch"
+            if self._timings is None:
+                return operation(*args, **kwargs)
+            return self._timings.call(stage, operation, *args, **kwargs)
 
     def search(self, *args, **kwargs):
         return self._call('search', self._client.search, *args, **kwargs)

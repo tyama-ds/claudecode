@@ -215,12 +215,14 @@ class BaseLLMClient(ABC):
     @contextmanager
     def _leaf_permit(self):
         """Composed run+process permit around one leaf API call."""
-        from ..utils.concurrency import maybe_permit
+        from ..utils.concurrency import maybe_permit, track_activity
         check = getattr(self, 'cancel_check', lambda: None)
         check()
         with maybe_permit(self.concurrency_limiter):
             check()
-            yield
+            # measured in-flight LLM requests (the UI shows 設定 vs 実測)
+            with track_activity("llm"):
+                yield
 
     def _record_usage(self, token_usage) -> None:
         """Record usage into run-local (if attached) + global stats."""

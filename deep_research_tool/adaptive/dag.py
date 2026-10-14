@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..utils.concurrency import effective_workers
 from .models import ResearchTask
+from ..utils.concurrency import ContextThreadPoolExecutor
 
 
 class TaskDAG:
@@ -133,7 +134,7 @@ class TaskDAG:
                 task.error = str(e)
                 return task.task_id, None, False
 
-        with concurrent.futures.ThreadPoolExecutor(
+        with ContextThreadPoolExecutor(
                 max_workers=workers) as pool:
             in_flight: Dict[concurrent.futures.Future, str] = {}
             with lock:

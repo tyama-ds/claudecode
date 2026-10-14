@@ -172,6 +172,9 @@ class LocalLLMClient(BaseLLMClient):
             raise ValueError("Local LLM concurrency must be a positive integer")
         self._local_sem = (threading.BoundedSemaphore(max_concurrency)
                            if max_concurrency is not None else None)
+        # configured per-client cap (None = no client-side cap); shown in
+        # the UI next to the measured in-flight count
+        self.max_concurrency = max_concurrency
         # requests.Session is NOT documented as thread-safe for concurrent
         # use; parallel workers each get a thread-local Session built with
         # the same proxies/verify/header configuration

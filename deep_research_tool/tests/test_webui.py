@@ -207,10 +207,26 @@ class TestEndpoints:
         assert listing["max_concurrent"] >= 1
         assert any(j["job_id"] == job.job_id for j in listing["jobs"])
 
-    def test_job_rejected_at_max_concurrent(self, server):
+    def test_job_queued_at_max_concurrent(self, server):
+        # beyond the concurrency cap a job is QUEUED (position visible,
+        # cancellable, parameters kept) instead of being rejected
         manager = server.job_manager
         for i in range(manager.MAX_CONCURRENT):
             job = ResearchJob(f"job-{i+1}", f"q{i+1}")   # state=running
             manager.jobs[job.job_id] = job
         status, data = post(server, "/api/research", {"query": "one too many"})
-        assert status == 409
+        assert status == 202
+        assert data["state"] == "queued"
+        assert data["queue_position"] == 1
+        status, body = get(server, "/api/jobs")
+        listing = json.loads(body)
+        assert listing["queued"] == 1
+        queued = [j for j in listing["jobs"] if j["job_id"] == data["job_id"]][0]
+        assert queued["state"] == "queued"
+        # the queued job's parameters were retained (secrets never echoed)
+        assert queued["params_summary"]["query"] == "one too many"
+        # cancelling while queued removes it without starting anything
+        status, resp = post(server, "/api/cancel-run", {"job_id": data["job_id"]})
+        assert status == 200 and resp["state"] == "cancelled"
+        status, body = get(server, "/api/jobs")
+        assert json.loads(body)["queued"] == 0

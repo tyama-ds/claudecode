@@ -1,14 +1,10 @@
 """
-Provisional GUI for Fermi estimation (フェルミ推定 仮GUI).
+Legacy Tkinter GUI for Fermi estimation (DEPRECATED).
 
-A minimal Tkinter interface for running Fermi estimations with the
-FermiEstimator. Intended as a provisional tool; the main research GUI
-lives in gui.py.
-
-Usage:
-    python -m deep_research_tool.fermi_gui
-    or
-    from deep_research_tool import launch_fermi_gui; launch_fermi_gui()
+The supported Fermi GUI is the 🧮 フェルミ推定 panel of the HTML/JS Web UI:
+``deep-research gui --fermi`` or ``deep_research_tool.launch_fermi_gui()``
+(no Tkinter needed). This module remains only for environments that
+still have Tk and explicitly run ``python -m deep_research_tool.fermi_gui``.
 """
 
 import threading
@@ -119,6 +115,12 @@ class FermiEstimatorGUI:
         self.run_button.config(state=tk.DISABLED)
         self.status_var.set("推定中... (LLM呼び出し)")
         self.result_text.delete("1.0", tk.END)
+        # the displayed result and the savable result must always be the
+        # SAME estimate: drop the previous one and disable saving until
+        # this run succeeds (a failure never leaves the old result savable)
+        self.last_estimate = None
+        self.save_docx_button.config(state=tk.DISABLED)
+        self.save_pdf_button.config(state=tk.DISABLED)
 
         thread = threading.Thread(target=self._run_estimation, args=(question,), daemon=True)
         thread.start()
@@ -159,6 +161,10 @@ class FermiEstimatorGUI:
         self.result_text.insert("1.0", f"エラー: {message}\n")
         self.status_var.set("エラー")
         self.run_button.config(state=tk.NORMAL)
+        # nothing valid to save after a failure
+        self.last_estimate = None
+        self.save_docx_button.config(state=tk.DISABLED)
+        self.save_pdf_button.config(state=tk.DISABLED)
         messagebox.showerror("推定エラー", message)
 
     def _on_save_docx(self):
