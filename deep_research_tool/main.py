@@ -11,7 +11,7 @@ import re
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Callable
+from typing import Optional, List, Dict, Any, Callable, Tuple
 
 from .utils.helpers import ResearchWarnings, ensure_utf8_output
 from .config import Config, LLMProvider, SearchMethod, ReportFormat, ReportGeneratorVersion
@@ -291,13 +291,63 @@ class DeepResearchTool:
 
         return get_client(**kwargs)
 
+    # Web UI wording for the delegated roles / stages (error prefixes,
+    # progress log, execution panel)
+    ROLE_LABELS = {"verification": "最終本文の検証（クレーム抽出・判定）",
+                   "revision": "検証後の本文修正"}
+    STAGE_LABELS = {"planning": "計画", "crawling": "クロール判断",
+                    "evaluation": "評価・採点", "writing": "文章作成"}
+
+    def _delegated_local_model(self) -> Optional[str]:
+        """Model name for a role-delegated local client: the configured
+        local_model (⚙設定 / --local-model / run_research(local_model=));
+        when it is still the dataclass default and the backend is not
+        Ollama, None so the backend's own default applies (the default
+        tag is an Ollama tag)."""
+        from dataclasses import fields as _fields
+        from .config import APIConfig
+        api = self.config.api
+        default = next(f.default for f in _fields(APIConfig)
+                       if f.name == "local_model")
+        model = api.local_model
+        backend = getattr(api.local_backend, "value", api.local_backend)
+        if model == default and backend != "ollama":
+            return None
+        return model or None
+
     def _create_stage_llm_clients(self) -> dict:
         """
-        Create per-stage LLM clients from config.api.stage_overrides.
+        Create per-stage LLM clients from config.api.stage_overrides and
+        the role-delegated local clients from research.local_llm_role.
 
         Stages without an override are absent from the returned dict and
-        fall back to the default client.
+        fall back to the default client. A local server used while the
+        main provider is something else is wrapped in DelegatedLLMClient:
+        errors name the role and the setting that caused the local call,
+        the server is checked once before the run starts, and after the
+        first failure the role falls back to the main client (recorded,
+        ``research.local_llm_fallback``).
+
+        Role routing (verify / draft / all) fills ``self.role_llm_clients``
+        ("verification" / "revision") and is consumed ONLY by the
+        finalization runner: the research-stage extraction / synthesis
+        clients are never replaced by it (they used to be, which made an
+        "all OpenAI" run depend on the local server for every page).
+        An explicit stage override for 'evaluation' / 'writing' still
+        wins there.
         """
+        from .api.delegation import DelegatedLLMClient
+        main_provider = self.config.api.provider
+        main_client = getattr(self, "llm_client", None)
+        fallback_enabled = bool(getattr(self.config.research,
+                                        "local_llm_fallback", True))
+
+        def _delegate(client, role_label, setting_label):
+            return DelegatedLLMClient(
+                client, fallback=main_client, role_label=role_label,
+                setting_label=setting_label,
+                fallback_enabled=fallback_enabled)
+
         clients = {}
         for stage, spec in (self.config.api.stage_overrides or {}).items():
             provider = spec.get("provider", self.config.api.provider.value)
@@ -327,24 +377,31 @@ class DeepResearchTool:
                 kwargs["local_timeout"] = self.config.api.local_timeout
                 kwargs["local_concurrency"] = self.config.api.local_concurrency
 
-            clients[stage] = get_client(**kwargs)
+            client = get_client(**kwargs)
+            if provider == "local" and main_provider != LLMProvider.LOCAL:
+                label = self.STAGE_LABELS.get(stage, stage)
+                client = _delegate(
+                    client, f"工程別: {label}",
+                    f"工程別のAI切り替え → {label} = ローカル")
+            clients[stage] = client
             print(f"[StageLLM] {stage}: {provider} / {spec.get('model') or 'default model'}")
 
         # --- Local LLM role routing (feature flag, default off) -------
-        # local_llm_role routes the verification and/or draft stages to
-        # the user's OWN local server. The base_url must have been set
+        # local_llm_role delegates the FINALIZATION roles (claim
+        # verification and/or the post-verification rewrite) to the
+        # user's OWN local server. The base_url must have been set
         # explicitly (config or LOCAL_LLM_BASE_URL) — this code never
         # invents an endpoint, and the client only ever talks to it as
         # the result of the user starting a run.
+        self.role_llm_clients = {}
         role = getattr(self.config.research, "local_llm_role", "off")
-        if role and role != "off" and \
-                self.config.api.provider != LLMProvider.LOCAL:
+        if role and role != "off" and main_provider != LLMProvider.LOCAL:
             base_url = self.config.api.local_base_url
             if base_url:
                 local_kwargs = {
                     "provider": "local",
                     "api_key": self.config.api.local_api_key,   # optional
-                    "model": None,
+                    "model": self._delegated_local_model(),
                     "http_proxy": self.config.proxy.http_proxy,
                     "https_proxy": self.config.proxy.https_proxy,
                     "verify_ssl": self.config.proxy.verify_ssl,
@@ -359,20 +416,123 @@ class DeepResearchTool:
                     print(f"[RoleLLM] local client unavailable: {e}")
                     local_client = None
                 if local_client is not None:
-                    routed = {"verify": ("evaluation",),
-                              "draft": ("writing",),
-                              "all": ("evaluation", "writing")}[role]
-                    for stage in routed:
-                        # explicit stage_overrides always win over the flag
-                        clients.setdefault(stage, local_client)
+                    routed = {"verify": ("verification",),
+                              "draft": ("revision",),
+                              "all": ("verification", "revision")}[role]
+                    for key in routed:
+                        self.role_llm_clients[key] = _delegate(
+                            local_client, self.ROLE_LABELS[key],
+                            f"⚙設定 → ロールルーティング = {role}")
                     masked = "(api key set)" if \
                         self.config.api.local_api_key else "(no api key)"
                     print(f"[RoleLLM] local_llm_role={role}: "
-                          f"{', '.join(routed)} -> {base_url} {masked}")
+                          f"{', '.join(routed)} -> {base_url} "
+                          f"(model {getattr(local_client, 'model', None)}) "
+                          f"{masked}; research-stage clients stay on "
+                          f"{main_provider.value}; fallback="
+                          f"{'on' if fallback_enabled else 'off'}")
             else:
                 print("[RoleLLM] local_llm_role is set but no "
                       "local_base_url is configured — routing skipped")
         return clients
+
+    def _finalization_llms(self):
+        """(eval_llm, writing_llm) for the finalization runner: an explicit
+        stage override wins, then the role-delegated local client, then
+        None (= the main client)."""
+        stages = getattr(self, "stage_llm_clients", None) or {}
+        roles = getattr(self, "role_llm_clients", None) or {}
+        return (stages.get("evaluation") or roles.get("verification"),
+                stages.get("writing") or roles.get("revision"))
+
+    def _delegated_clients(self) -> List[Tuple[str, Any]]:
+        """Every DelegatedLLMClient of this run: [(key, client)] with key
+        'role:<verification|revision>' or 'stage:<stage>'."""
+        from .api.delegation import DelegatedLLMClient
+        out: List[Tuple[str, Any]] = []
+        for key, client in (getattr(self, "role_llm_clients", None) or {}).items():
+            if isinstance(client, DelegatedLLMClient):
+                out.append((f"role:{key}", client))
+        for stage, client in (getattr(self, "stage_llm_clients", None) or {}).items():
+            if isinstance(client, DelegatedLLMClient):
+                out.append((f"stage:{stage}", client))
+        return out
+
+    def llm_routing_snapshot(self) -> Dict[str, Any]:
+        """Which provider serves which stage / role in this run: the
+        default client, explicit stage overrides and the delegated local
+        roles with their preflight / fallback state. Never contains
+        secrets; shown by the Web UI and stored in performance_<id>.json."""
+        import os
+        from .api.delegation import DelegatedLLMClient, provider_name
+        api = self.config.api
+
+        def _describe(client):
+            if isinstance(client, DelegatedLLMClient):
+                return client.describe()
+            return {"provider": provider_name(client),
+                    "model": getattr(client, "model", None),
+                    "base_url": getattr(client, "base_url", None)}
+
+        stages = {s: _describe(c) for s, c in
+                  (getattr(self, "stage_llm_clients", None) or {}).items()}
+        roles = {k: _describe(c) for k, c in
+                 (getattr(self, "role_llm_clients", None) or {}).items()}
+        delegated = [d for d in [*stages.values(), *roles.values()]
+                     if d.get("setting")]
+        env_url = os.getenv("LOCAL_LLM_BASE_URL")
+        url_source = None
+        if api.local_base_url:
+            url_source = ("env:LOCAL_LLM_BASE_URL"
+                          if env_url and api.local_base_url == env_url
+                          else "settings")
+        try:
+            default_model = api.get_active_model()
+        except Exception:
+            default_model = None
+        return {
+            "default": {"provider": api.provider.value, "model": default_model},
+            "stages": stages,
+            "roles": roles,
+            "local_llm_role": getattr(self.config.research, "local_llm_role", "off"),
+            "local_base_url": api.local_base_url,
+            "local_url_source": url_source,
+            "fallback_enabled": bool(getattr(self.config.research,
+                                             "local_llm_fallback", True)),
+            "delegated": bool(delegated),
+            "tripped": any(d.get("tripped") for d in delegated),
+        }
+
+    def _announce_and_preflight_delegation(self, progress_callback=None) -> None:
+        """Say which roles / stages go to a local server (the Web UI log
+        shows it) and check that server ONCE before any research starts.
+        Raises DelegatedLLMUnavailable: a run never begins against a
+        dead or misconfigured delegated server."""
+        delegated = self._delegated_clients()
+        if not delegated:
+            return
+
+        def _say(msg):
+            print(f"[RoleLLM] {msg}")
+            if progress_callback:
+                progress_callback(msg, 1)
+
+        for _key, client in delegated:
+            d = client.describe()
+            _say(f"ローカルLLMへ委譲: {d['role']} → {d['base_url']}"
+                 f"（モデル {d['model'] or '既定'}、{d['setting']}、"
+                 f"失敗時は{'メインのプロバイダで続行' if d['fallback_enabled'] else 'エラー停止'}）")
+        results: Dict[int, Dict[str, Any]] = {}
+        for _key, client in delegated:
+            shared = results.get(id(client.delegate))
+            if shared is not None:
+                client.preflight_result = dict(shared)
+                continue
+            d = client.describe()
+            _say(f"ローカルLLMの疎通確認中: {d['base_url']}")
+            result = client.preflight()
+            results[id(client.delegate)] = result
+            _say(f"ローカルLLMの疎通確認 OK（{result['seconds']} 秒）")
 
     def _create_search_client(self):
         """Create search client based on configuration."""
@@ -749,7 +909,9 @@ class DeepResearchTool:
         self.activity_gauge = bind_activity_gauge()
         run_token_stats = TokenUsageStats()
         self.run_token_stats = run_token_stats
-        for _client in [self.llm_client, *self.stage_llm_clients.values()]:
+        role_clients = list((getattr(self, "role_llm_clients", None) or {}).values())
+        for _client in [self.llm_client, *self.stage_llm_clients.values(),
+                        *role_clients]:
             try:
                 _client.concurrency_limiter = run_limits
                 _client.token_stats = run_token_stats
@@ -761,6 +923,12 @@ class DeepResearchTool:
             self.search_client.cancel_check = _cancel_checkpoint
         except Exception:
             pass
+
+        # --- delegated local LLM (ロールルーティング / 工程別=ローカル) ---
+        # announce it in the progress log and check the server ONCE now,
+        # so a dead local server is reported before the research starts
+        # instead of hours later
+        self._announce_and_preflight_delegation(progress_callback)
 
         # Log informational note when both enhanced_synthesis and V2 two_phase are active
         if (self.config.research.use_enhanced_synthesis
@@ -1410,6 +1578,8 @@ class DeepResearchTool:
         performance["max_concurrency_observed"] = run_limits.run_peak
         performance["llm_concurrency"] = self.concurrency_snapshot()
         self._warn_if_llm_serialized(performance["llm_concurrency"])
+        # which provider served which role (delegation, preflight, fallback)
+        performance["llm_routing"] = self.llm_routing_snapshot()
         for name, cache in (
             ("pages", getattr(self.search_client, "_page_cache", None)),
             ("extractions", getattr(getattr(self.researcher, "content_extractor", None), "extraction_cache", None)),
@@ -1439,6 +1609,7 @@ class DeepResearchTool:
             "fermi_estimation_results": fermi_results,
             "performance": performance,
             "performance_json": str(performance_path),
+            "llm_routing": performance["llm_routing"],
             "token_usage": run_token_stats.to_dict(),
             "max_concurrency_observed": run_limits.run_peak,
             "semantic_manifest_hash_at_freeze": semantic_freeze_hash,
@@ -2017,6 +2188,8 @@ class DeepResearchTool:
                                    requirements="", progress_callback=None,
                                    chapter_citation_callback=None):
         from .report.finalization_runner import FinalizationRunner
+        # explicit stage override > role-delegated local client > main
+        eval_llm, writing_llm = self._finalization_llms()
         return FinalizationRunner(
             evidence_locker=evidence_locker,
             session_contents=session.section_contents,
@@ -2025,8 +2198,8 @@ class DeepResearchTool:
             requirements=requirements,
             language=self.config.research.language,
             llm_client=self.llm_client,
-            eval_llm=self.stage_llm_clients.get("evaluation"),
-            writing_llm=self.stage_llm_clients.get("writing"),
+            eval_llm=eval_llm,
+            writing_llm=writing_llm,
             search_client=self.search_client,
             report_config=self.config.report,
             research_config=self.config.research,

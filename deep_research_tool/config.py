@@ -626,12 +626,25 @@ class ResearchConfig:
 
     # --- Local LLM role routing (feature flag, default OFF) ---
     # off:    the selected provider handles everything (current behavior)
-    # verify: the Local LLM handles VERIFICATION calls (claim judging)
-    # draft:  the Local LLM handles DRAFT/EDIT calls (section rewrites)
+    # verify: the Local LLM handles the FINAL-BODY VERIFICATION calls
+    #         (claim extraction + judging in the finalization runner)
+    # draft:  the Local LLM handles the POST-VERIFICATION REWRITE calls
+    #         (sentence patches / section edits in the finalization runner)
     # all:    the Local LLM handles both roles
-    # Requires local_base_url to be configured explicitly by the user;
-    # the tool never auto-points this at an external service.
+    # The research-stage clients (page extraction, source evaluation,
+    # section synthesis, executive summary) are NEVER replaced by this
+    # flag; use an explicit stage override for that.
+    # Requires local_base_url to be configured explicitly by the user
+    # (config, Web UI, or the LOCAL_LLM_BASE_URL environment variable);
+    # the tool never auto-points this at an external service. The server
+    # is checked once before the run starts.
     local_llm_role: str = "off"
+    # When a delegated local call fails (connection refused, inactivity
+    # timeout, server error), continue that role on the MAIN provider for
+    # the rest of the run (recorded as a HIGH warning and in the result)
+    # instead of aborting the whole run. False = stop with an error that
+    # names the role and the setting.
+    local_llm_fallback: bool = True
 
 
 @dataclass
@@ -898,6 +911,8 @@ def create_config(
     local_backend: str = "ollama",
     local_timeout: Optional[int] = None,
     local_concurrency: Optional[int] = None,
+    local_model: Optional[str] = None,
+    local_llm_fallback: bool = True,
     # LLM sampling knobs (GUI "Temperature" / "Max Tokens"); None = default
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
@@ -1289,6 +1304,11 @@ def create_config(
         stage_overrides=dict(stage_llm) if stage_llm else {},
     )
 
+    # model name on the local server for delegated roles / local stage
+    # overrides; for provider='local' the main ``model`` below still wins
+    if local_model:
+        api_config.local_model = local_model
+
     if model:
         if provider == "openai":
             api_config.openai_model = model
@@ -1370,6 +1390,7 @@ def create_config(
         max_stall_rounds=max_stall_rounds,
         audit_log_enabled=audit_log_enabled,
         local_llm_role=local_llm_role,
+        local_llm_fallback=bool(local_llm_fallback),
     )
 
     report_config = ReportConfig(

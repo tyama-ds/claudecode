@@ -329,6 +329,7 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--error)
 .banner { display:none; margin-top: 12px; padding: 12px 14px; border-radius: 10px; font-size: 13px; }
 .banner.error { background: var(--error-soft); color: var(--error); display: block; white-space: pre-wrap; }
 .banner.success { background: var(--success-soft); color: var(--success); display: block; font-weight: 700; }
+.banner.notice { background: var(--accent-soft); color: var(--text); border: 1px solid var(--accent); display: block; }
 .idle-hint { color: var(--muted); text-align: center; padding: 50px 12px 42px; font-size: 13px; }
 .idle-icon { display: grid; place-items: center; width: 72px; height: 72px; border-radius: 22px;
   background: var(--accent-soft); color: var(--accent); margin: 0 auto 20px; }
@@ -676,13 +677,16 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
           <option value="vllm">vLLM</option>
         </select>
         <p class="hint">URLに /v1 を含めた場合は自動的にOpenAI互換として扱われます。</p>
+        <label>モデル名（委譲時・工程別=ローカルで使用。空欄=バックエンド既定）</label>
+        <input type="text" id="set_local_model" placeholder="gpt-oss-20b / llama3.1:8b / LM Studio のモデル識別子">
         <label>ロールルーティング（メインが他プロバイダの場合にローカルLLMへ委譲する処理）</label>
         <select id="set_local_role">
           <option value="off">オフ（従来どおりメインのプロバイダのみ）</option>
-          <option value="verify">verify: 検証（クレーム判定）をローカルLLMで実行</option>
-          <option value="draft">draft: 本文の書き直しをローカルLLMで実行</option>
-          <option value="all">all: 検証と書き直しの両方をローカルLLMで実行</option>
+          <option value="verify">verify: 最終本文の検証（クレーム抽出・判定）だけをローカルLLMで実行</option>
+          <option value="draft">draft: 検証後の本文修正だけをローカルLLMで実行</option>
+          <option value="all">all: 最終本文の検証と修正の両方をローカルLLMで実行</option>
         </select>
+        <label class="check"><input type="checkbox" id="set_local_fallback" checked> 委譲先のローカルLLMが失敗したら、その処理はメインのプロバイダで続行する（オフ=エラーで停止）</label>
         <label>応答データが途切れた場合のタイムアウト（秒、空欄=600秒）</label>
         <input type="number" id="set_local_timeout" min="1" max="3600" placeholder="600">
         <label>同時リクエスト上限（空欄=1。小規模サーバーは1推奨）</label>
@@ -693,7 +697,7 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
         </div>
         <div id="llmParallelTestResult" class="hint" aria-live="polite" style="margin-top:6px"></div>
         <p class="hint">生成途中の応答も受信します。タイムアウトは最初の応答待ちと、途中でデータが来なくなった時間に適用されます。LM Studioの場合はOpenAI互換を選び、サーバーURLに http://127.0.0.1:1234/v1 を指定してください。</p>
-        <p class="hint">ロールルーティングはサーバーURLが設定されている場合のみ有効です。URLが外部サービスへ自動設定されることはありません。</p>
+        <p class="hint">ロールルーティングはサーバーURL（この画面、または環境変数 LOCAL_LLM_BASE_URL）がある場合に有効です。調査中のページ抽出・章の合成には使いません。委譲が有効なときは開始前に疎通確認を行い、調査フォームと実行パネルに割り当てを表示します。URLが外部サービスへ自動設定されることはありません。</p>
       </div>
 
       <div class="prov-block">
@@ -1144,6 +1148,7 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
     <!-- 5. 計画を確認して開始（常に見える位置） -->
     <div class="start-box" id="startBox">
       <div class="summary-strip" id="summaryStrip" aria-live="polite"></div>
+      <div class="banner" id="delegationNotice" aria-live="polite"></div>
       <div style="display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin-top:8px">
         <label class="check" style="margin:0"><input type="checkbox" id="plan_review" checked> 開始前に計画（目次・検索クエリ）を確認する</label>
         <select id="plan_review_mode" aria-label="計画確認の待ち方" style="width:auto">
@@ -1337,6 +1342,7 @@ const SETTINGS_FIELDS = {
   set_anthropic_url: 'anthropic_base_url',
   set_local_url: 'local_base_url',
   set_local_backend: 'local_backend',
+  set_local_model: 'local_model',
   set_local_role: 'local_llm_role',
   set_local_timeout: 'local_timeout',
   set_local_concurrency: 'local_concurrency',
@@ -1399,6 +1405,7 @@ function migrateLegacySecrets(saved) {
 // Boolean feature toggles (機能 tab): element id -> create_config param
 const FEATURE_FIELDS = {
   set_verify_ssl: 'verify_ssl',
+  set_local_fallback: 'local_llm_fallback',
   feat_deep_think: 'deep_think',
   feat_fermi: 'fermi_estimation',
   feat_verification: 'enable_verification',
@@ -1552,7 +1559,7 @@ document.querySelectorAll('.lang-chip input').forEach(cb =>
 
 $('settingsBtn').addEventListener('click', () => { $('settingsModal').style.display = 'flex'; });
 $('settingsCloseBtn').addEventListener('click', () => { $('settingsModal').style.display = 'none'; });
-$('settingsSaveBtn').addEventListener('click', () => { saveSettings(); $('settingsModal').style.display = 'none'; });
+$('settingsSaveBtn').addEventListener('click', () => { saveSettings(); $('settingsModal').style.display = 'none'; renderDelegationNotice(); });
 $('settingsModal').addEventListener('click', (e) => {
   if (e.target === $('settingsModal')) $('settingsModal').style.display = 'none';
 });
@@ -2418,6 +2425,7 @@ function showResults(result) {
     ${renderResumePlan(result.resume_plan)}
     ${renderTimings(result.timings)}
     ${renderConcurrency(result.performance)}
+    ${renderRouting(result.llm_routing || (result.performance && result.performance.llm_routing))}
     ${renderTokenUsage(result.token_usage)}
     <label style="margin-top:10px">💾 保存済みの成果物（実際に書き込まれたファイルのみ）</label>
     <div class="exec-summary" style="margin-top:4px">${savedRows.join('') || '<span>保存済みの成果物はありません</span>'}</div>`;
@@ -2802,6 +2810,64 @@ const LABELS = {
   output_format: {markdown: 'Markdown', docx: 'Word', pdf: 'PDF', html: 'HTML'},
 };
 
+// ==================== ローカルLLMへの委譲（ロールルーティング / 工程別=ローカル）の表示 ====================
+const DELEGATION_ROLE_LABELS = {verify: '最終本文の検証', draft: '検証後の本文修正', all: '最終本文の検証と修正'};
+const STAGE_FORM_LABELS = {planning: '計画', crawling: 'クロール判断', evaluation: '評価・採点', writing: '文章作成'};
+
+function delegationItems() {
+  // what the NEXT run would delegate, from the live form + ⚙設定 values
+  const provider = $('provider').value;
+  const items = [];
+  if (provider === 'local') return items;
+  const role = $('set_local_role').value;
+  const url = ($('set_local_url').value || '').trim();
+  if (role && role !== 'off') {
+    items.push(`${DELEGATION_ROLE_LABELS[role] || role} → ローカルLLM（⚙設定 → ロールルーティング = ${role}${url ? '、' + url : '、URL 未設定: 環境変数 LOCAL_LLM_BASE_URL がなければ開始時に設定エラー'}）`);
+  }
+  document.querySelectorAll('.stage-provider').forEach(sel => {
+    if (sel.value === 'local') items.push(`${STAGE_FORM_LABELS[sel.dataset.stage] || sel.dataset.stage} → ローカルLLM（工程別のAI切り替え${url ? '、' + url : ''}）`);
+  });
+  return items;
+}
+
+function renderDelegationNotice() {
+  const el = $('delegationNotice');
+  if (!el) return;
+  const items = delegationItems();
+  if (!items.length) { el.className = 'banner'; el.textContent = ''; return; }
+  const fb = $('set_local_fallback') ? $('set_local_fallback').checked : true;
+  el.className = 'banner notice';
+  el.innerHTML = `<b>⚠ ローカルLLMへの委譲が有効です。</b> ${items.map(escapeHtml).join(' ／ ')}。開始前に疎通確認を行い、失敗時は${fb ? 'メインのプロバイダで続行します' : 'エラーで停止します'}。不要なら ⚙設定 → ローカルLLM → ロールルーティングを「オフ」（工程別は「既定」）にしてください。`;
+}
+
+function describeDelegation(d) {
+  // server-side snapshot of one delegated role / stage (DelegatedLLMClient.describe)
+  let state = '';
+  if (d.tripped) state = `（障害のためメイン ${d.fallback_provider || ''} へ切替・ローカル ${d.local_calls || 0} 回 / 代替 ${d.fallback_calls || 0} 回）`;
+  else if (d.preflight && d.preflight.ok) state = `（疎通OK ${d.preflight.seconds}s・${d.local_calls || 0} 回）`;
+  else if (d.preflight && d.preflight.ok === false) state = '（疎通NG）';
+  return `${d.role} → ローカル ${d.base_url || ''}${d.model ? ' / ' + d.model : ''}${state}`;
+}
+
+function routingItems(rt) {
+  const items = [];
+  Object.values(rt.roles || {}).forEach(d => items.push(describeDelegation(d)));
+  Object.entries(rt.stages || {}).forEach(([st, d]) => items.push(
+    d.setting ? describeDelegation(d) : `${STAGE_FORM_LABELS[st] || st} → ${d.provider}${d.model ? '/' + d.model : ''}`));
+  return items;
+}
+
+function renderRouting(rt) {
+  // results overview: which provider served which role, and any switch-over
+  if (!rt || !rt.default) return '';
+  const def = `${rt.default.provider}${rt.default.model ? '/' + rt.default.model : ''}`;
+  const items = routingItems(rt);
+  if (!items.length) return `<div class="hint" style="margin-top:8px">AI の割り当て: 既定 ${escapeHtml(def)}（委譲なし）</div>`;
+  return `<label style="margin-top:10px">🧭 AI の割り当て（委譲・切替の記録）</label>
+    <div class="exec-summary" style="margin-top:4px"><span>既定: <b>${escapeHtml(def)}</b></span>${items.map(s => `<span>${escapeHtml(s)}</span>`).join('')}</div>
+    ${rt.tripped ? '<div class="warn-row"><b>注意:</b> 委譲先のローカルLLMが失敗したため、途中からメインのプロバイダで続行しました。要確認事項の警告を確認してください。</div>' : ''}`;
+}
+
 function updateSummaryStrip() {
   const source = radioValue('source_mode');
   const d = DELIVERABLE_PRESETS[radioValue('deliverable')];
@@ -2827,7 +2893,7 @@ function updateSummaryStrip() {
 }
 
 // any change in the form refreshes the visible summary
-$('formCard').addEventListener('change', () => { applyModeVisibility(); updateSummaryStrip(); });
+$('formCard').addEventListener('change', () => { applyModeVisibility(); updateSummaryStrip(); renderDelegationNotice(); });
 $('formCard').addEventListener('input', (e) => {
   if (e.target && /^(iterations|max_iterations|local_documents|query)$/.test(e.target.id)) updateSummaryStrip();
 });
@@ -2998,6 +3064,12 @@ function renderExecSummary(status) {
     const part = ['fetch', 'extract', 'verify'].map(k => `${ACTIVITY_LABELS[k]} ${(act[k] || {}).active || 0}`).join('・');
     rows.push(['並列の稼働', `${part}（枠 ${cc.run_permits ? cc.run_permits.active : 0}/${cc.run_permits ? cc.run_permits.limit : '?'}）`]);
   }
+  const rt = status.llm_routing || (status.result && status.result.llm_routing);
+  if (rt && rt.default) {
+    const def = `${rt.default.provider}${rt.default.model ? '/' + rt.default.model : ''}`;
+    const items = routingItems(rt);
+    rows.push(['AI の割り当て', items.length ? `既定 ${def} ・ ${items.join(' ・ ')}` : `既定 ${def}（委譲なし）`]);
+  }
   let stop = '—';
   if (status.state === 'cancelled') stop = '中止済み（保存済みの成果物のみ表示）';
   else if (status.cancel_requested) stop = '停止要求済み（次の安全な地点で停止）';
@@ -3156,7 +3228,7 @@ function applySnapshot(s) {
     if (inp) inp.value = spec.model || '';
   });
   $('verifyCustomPane').style.display = radioValue('verification_profile') === 'custom' ? 'block' : 'none';
-  renderPresetEffects(); applyModeVisibility(); updateSummaryStrip();
+  renderPresetEffects(); applyModeVisibility(); updateSummaryStrip(); renderDelegationNotice();
 }
 
 function loadFormPresets() {
@@ -3222,7 +3294,7 @@ function applyParamsToForm(params, query) {
     document.querySelector(`.stage-model[data-stage=${st}]`).value = spec.model || '';
   });
   $('verifyCustomPane').style.display = radioValue('verification_profile') === 'custom' ? 'block' : 'none';
-  renderPresetEffects(); applyModeVisibility(); updateSummaryStrip();
+  renderPresetEffects(); applyModeVisibility(); updateSummaryStrip(); renderDelegationNotice();
 }
 
 // ==================== ローカルLLM 並列処理テスト（⚙ 設定） ====================
@@ -3640,6 +3712,7 @@ $('query').addEventListener('keydown', (e) => {
 renderPresetEffects();
 applyModeVisibility();
 updateSummaryStrip();
+renderDelegationNotice();
 renderDocList();
 loadHistory();
 

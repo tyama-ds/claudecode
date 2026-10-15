@@ -104,6 +104,8 @@ _CONFIG_PARAM_MAP = {
     "max_stall_rounds": "max_stall_rounds",
     "audit_log_enabled": "audit_log_enabled",
     "local_llm_role": "local_llm_role",
+    "local_llm_fallback": "local_llm_fallback",
+    "local_model": "local_model",
     "local_timeout": "local_timeout",
     "local_concurrency": "local_concurrency",
     # reuse / freshness
@@ -420,6 +422,9 @@ class ResearchJob:
         # callable returning configured vs measured parallelism
         # (tool.concurrency_snapshot) for the execution panel
         self.concurrency_source = None
+        # callable returning which provider serves which stage / role
+        # (tool.llm_routing_snapshot): delegation, preflight, fallback
+        self.routing_source = None
         # Plan review state (state == "plan_review")
         self.plan: Optional[Dict[str, Any]] = None
         self.plan_review_deadline: Optional[float] = None
@@ -438,6 +443,15 @@ class ResearchJob:
 
     def live_concurrency(self) -> Optional[Dict[str, Any]]:
         source = self.concurrency_source
+        if source is None:
+            return None
+        try:
+            return source()
+        except Exception:
+            return None
+
+    def live_routing(self) -> Optional[Dict[str, Any]]:
+        source = self.routing_source
         if source is None:
             return None
         try:
@@ -587,6 +601,7 @@ class ResearchJob:
                 "params_summary": self.params_summary,
                 "saved_artifacts": self.live_saved_artifacts(),
                 "concurrency": self.live_concurrency(),
+                "llm_routing": self.live_routing(),
             }
             if self.state == "plan_review":
                 data["plan_review_remaining"] = (
@@ -955,6 +970,7 @@ class JobManager:
             job.run_cancel = tool.request_cancel
             job.artifacts_source = tool.current_saved_artifacts
             job.concurrency_source = tool.concurrency_snapshot
+            job.routing_source = tool.llm_routing_snapshot
             job.update("調査を開始します", 2)
 
             documents = expand_document_paths(params.get("local_documents"))
@@ -1052,6 +1068,8 @@ class JobManager:
                 # measured performance (stage seconds, token usage,
                 # configured vs observed concurrency) — numbers only
                 "performance": result.get("performance"),
+                # which provider served which role (delegation / fallback)
+                "llm_routing": result.get("llm_routing"),
             }
             job.progress = 100.0
             if result.get("verification_cancelled"):
