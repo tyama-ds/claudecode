@@ -439,6 +439,18 @@ def cli():
     default=None,
     help="Max simultaneous requests per local LLM client (default: 1)"
 )
+@click.option(
+    "--local-model",
+    default=None,
+    help="Model name on the local LLM server used by --local-llm-role "
+         "delegation (default: the backend's default model)"
+)
+@click.option(
+    "--local-llm-fallback/--no-local-llm-fallback",
+    default=True,
+    help="When a delegated local LLM call fails, continue that role on the "
+         "main provider (default) instead of aborting the run"
+)
 def research(
     query: str,
     provider: str,
@@ -501,6 +513,8 @@ def research(
     local_backend: str,
     local_timeout: Optional[int],
     local_concurrency: Optional[int],
+    local_model: Optional[str],
+    local_llm_fallback: bool,
     anthropic_key: Optional[str],
 ):
     """
@@ -524,6 +538,8 @@ def research(
         local_backend=local_backend,
         local_timeout=local_timeout,
         local_concurrency=local_concurrency,
+        local_model=local_model,
+        local_llm_fallback=local_llm_fallback,
         model=model,
         search_method=search,
         research_iterations=iterations,

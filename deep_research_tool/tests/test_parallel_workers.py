@@ -416,7 +416,9 @@ class TestLocalLLMGUISettings(unittest.TestCase):
         client = object()
         with patch("deep_research_tool.main.get_client", return_value=client) as factory:
             stages = tool._create_stage_llm_clients()
-        self.assertIs(stages["planning"], client)
+        # a local stage inside an OpenAI run is wrapped (error prefix,
+        # preflight, recorded fallback); the configured client is inside
+        self.assertIs(stages["planning"].delegate, client)
         factory.assert_called_once()
         self.assertEqual(factory.call_args.kwargs["local_timeout"], 900)
         self.assertEqual(factory.call_args.kwargs["local_concurrency"], 2)

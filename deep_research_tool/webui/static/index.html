@@ -329,6 +329,7 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--error)
 .banner { display:none; margin-top: 12px; padding: 12px 14px; border-radius: 10px; font-size: 13px; }
 .banner.error { background: var(--error-soft); color: var(--error); display: block; white-space: pre-wrap; }
 .banner.success { background: var(--success-soft); color: var(--success); display: block; font-weight: 700; }
+.banner.notice { background: var(--accent-soft); color: var(--text); border: 1px solid var(--accent); display: block; }
 .idle-hint { color: var(--muted); text-align: center; padding: 50px 12px 42px; font-size: 13px; }
 .idle-icon { display: grid; place-items: center; width: 72px; height: 72px; border-radius: 22px;
   background: var(--accent-soft); color: var(--accent); margin: 0 auto 20px; }
@@ -484,6 +485,9 @@ button.primary:active:not(:disabled) { transform: translateY(0) scale(.99); }
 }
 @keyframes scan { to { top: 110%; } }
 .log .ln { display: block; }
+.log .gap { display: block; color: #e2b05a; font-style: italic; }
+.log-meta { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 12px; font-size: 11px; color: var(--muted); }
+.log-meta button { font-size: 11px; padding: 2px 8px; }
 .log .ln.new { animation: lineIn .45s ease both; }
 @keyframes lineIn { from { opacity: 0; transform: translateX(-6px); filter: blur(2px); } to { opacity: 1; transform: none; filter: none; } }
 .log .caret { display: inline-block; width: 7px; height: 12px; background: #7f8bd9; vertical-align: -2px; margin-left: 2px;
@@ -673,13 +677,16 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
           <option value="vllm">vLLM</option>
         </select>
         <p class="hint">URLに /v1 を含めた場合は自動的にOpenAI互換として扱われます。</p>
+        <label>モデル名（委譲時・工程別=ローカルで使用。空欄=バックエンド既定）</label>
+        <input type="text" id="set_local_model" placeholder="gpt-oss-20b / llama3.1:8b / LM Studio のモデル識別子">
         <label>ロールルーティング（メインが他プロバイダの場合にローカルLLMへ委譲する処理）</label>
         <select id="set_local_role">
           <option value="off">オフ（従来どおりメインのプロバイダのみ）</option>
-          <option value="verify">verify: 検証（クレーム判定）をローカルLLMで実行</option>
-          <option value="draft">draft: 本文の書き直しをローカルLLMで実行</option>
-          <option value="all">all: 検証と書き直しの両方をローカルLLMで実行</option>
+          <option value="verify">verify: 最終本文の検証（クレーム抽出・判定）だけをローカルLLMで実行</option>
+          <option value="draft">draft: 検証後の本文修正だけをローカルLLMで実行</option>
+          <option value="all">all: 最終本文の検証と修正の両方をローカルLLMで実行</option>
         </select>
+        <label class="check"><input type="checkbox" id="set_local_fallback" checked> 委譲先のローカルLLMが失敗したら、その処理はメインのプロバイダで続行する（オフ=エラーで停止）</label>
         <label>応答データが途切れた場合のタイムアウト（秒、空欄=600秒）</label>
         <input type="number" id="set_local_timeout" min="1" max="3600" placeholder="600">
         <label>同時リクエスト上限（空欄=1。小規模サーバーは1推奨）</label>
@@ -690,7 +697,7 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
         </div>
         <div id="llmParallelTestResult" class="hint" aria-live="polite" style="margin-top:6px"></div>
         <p class="hint">生成途中の応答も受信します。タイムアウトは最初の応答待ちと、途中でデータが来なくなった時間に適用されます。LM Studioの場合はOpenAI互換を選び、サーバーURLに http://127.0.0.1:1234/v1 を指定してください。</p>
-        <p class="hint">ロールルーティングはサーバーURLが設定されている場合のみ有効です。URLが外部サービスへ自動設定されることはありません。</p>
+        <p class="hint">ロールルーティングはサーバーURL（この画面、または環境変数 LOCAL_LLM_BASE_URL）がある場合に有効です。調査中のページ抽出・章の合成には使いません。委譲が有効なときは開始前に疎通確認を行い、調査フォームと実行パネルに割り当てを表示します。URLが外部サービスへ自動設定されることはありません。</p>
       </div>
 
       <div class="prov-block">
@@ -1141,6 +1148,7 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
     <!-- 5. 計画を確認して開始（常に見える位置） -->
     <div class="start-box" id="startBox">
       <div class="summary-strip" id="summaryStrip" aria-live="polite"></div>
+      <div class="banner" id="delegationNotice" aria-live="polite"></div>
       <div style="display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin-top:8px">
         <label class="check" style="margin:0"><input type="checkbox" id="plan_review" checked> 開始前に計画（目次・検索クエリ）を確認する</label>
         <select id="plan_review_mode" aria-label="計画確認の待ち方" style="width:auto">
@@ -1275,7 +1283,8 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
              padding:12px 16px;font-size:13.5px;line-height:1.8"></div>
       </details>
 
-      <div class="log" id="log"></div>
+      <div class="log-meta" id="logMeta"><span id="logMetaText"></span><button type="button" class="secondary" id="logJumpBtn" style="display:none">⤓ 最新へ</button></div>
+      <div class="log" id="log" tabindex="0" aria-label="進捗ログ"></div>
 
       <div class="banner" id="jobBanner"></div>
 
@@ -1315,6 +1324,12 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
 const $ = (id) => document.getElementById(id);
 let logLength = 0;
 let logSeq = -1;
+// client-side log buffer: the server sends only its last 50 entries per poll,
+// so the console keeps what it has seen (capped) and appends only new lines
+const LOG_KEEP = 400;
+let logBuf = [];          // {seq, pct, msg} or {gap: n}
+let logShownSeq = -1;     // highest seq rendered
+let logDropped = 0;       // oldest lines dropped from the buffer
 let selectedJobId = null;
 let lastRenderedJobId = null;
 
@@ -1327,6 +1342,7 @@ const SETTINGS_FIELDS = {
   set_anthropic_url: 'anthropic_base_url',
   set_local_url: 'local_base_url',
   set_local_backend: 'local_backend',
+  set_local_model: 'local_model',
   set_local_role: 'local_llm_role',
   set_local_timeout: 'local_timeout',
   set_local_concurrency: 'local_concurrency',
@@ -1389,6 +1405,7 @@ function migrateLegacySecrets(saved) {
 // Boolean feature toggles (機能 tab): element id -> create_config param
 const FEATURE_FIELDS = {
   set_verify_ssl: 'verify_ssl',
+  set_local_fallback: 'local_llm_fallback',
   feat_deep_think: 'deep_think',
   feat_fermi: 'fermi_estimation',
   feat_verification: 'enable_verification',
@@ -1541,10 +1558,13 @@ document.querySelectorAll('.lang-chip input').forEach(cb =>
   cb.addEventListener('change', syncLangUI));
 
 $('settingsBtn').addEventListener('click', () => { $('settingsModal').style.display = 'flex'; });
-$('settingsCloseBtn').addEventListener('click', () => { $('settingsModal').style.display = 'none'; });
-$('settingsSaveBtn').addEventListener('click', () => { saveSettings(); $('settingsModal').style.display = 'none'; });
+// a run uses the modal's CURRENT values even when they were not saved,
+// so the delegation notice follows every change / close of the modal
+$('settingsCloseBtn').addEventListener('click', () => { $('settingsModal').style.display = 'none'; renderDelegationNotice(); });
+$('settingsSaveBtn').addEventListener('click', () => { saveSettings(); $('settingsModal').style.display = 'none'; renderDelegationNotice(); });
+$('settingsModal').addEventListener('change', () => renderDelegationNotice());
 $('settingsModal').addEventListener('click', (e) => {
-  if (e.target === $('settingsModal')) $('settingsModal').style.display = 'none';
+  if (e.target === $('settingsModal')) { $('settingsModal').style.display = 'none'; renderDelegationNotice(); }
 });
 loadSettings();
 
@@ -1970,6 +1990,61 @@ async function sendPlanReview(action) {
   }
 }
 
+// Append only the entries this client has not shown yet. If more lines were
+// produced between two polls than the server window holds, say so instead of
+// silently skipping them. Scrolling follows the newest line only while the
+// reader is already at the bottom.
+function appendLogEntries(entries, seq, state) {
+  const logEl = $('log');
+  const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 24 || logShownSeq < 0;
+  const withSeq = entries.filter(e => typeof e.seq === 'number');
+  let fresh;
+  const added = [];            // entries appended by THIS poll (gap marker + fresh lines)
+  if (withSeq.length === entries.length && entries.length) {
+    fresh = entries.filter(e => e.seq > logShownSeq);
+    const expected = logShownSeq < 0 ? fresh.length : Math.max(0, seq - logShownSeq);
+    if (expected > fresh.length && logShownSeq >= 0) {
+      const gap = {gap: expected - fresh.length};
+      logBuf.push(gap); added.push(gap);
+    }
+  } else {
+    // legacy server without sequence numbers: show its window as-is
+    fresh = entries.map((e, i) => ({seq: i, pct: e.pct, msg: e.msg}));
+    logBuf = []; logShownSeq = -1; logEl.innerHTML = '';
+  }
+  for (const e of fresh) { logBuf.push(e); added.push(e); logShownSeq = Math.max(logShownSeq, e.seq || 0); }
+  const caret = logEl.querySelector('.caret'); if (caret) caret.remove();
+  if (logBuf.length > LOG_KEEP) {
+    // the console nodes map 1:1 to logBuf entries: drop the oldest nodes
+    // instead of rebuilding (and re-animating) all 400 lines on every
+    // poll, and keep the reader's position when they scrolled up
+    const drop = logBuf.length - LOG_KEEP;
+    logDropped += logBuf.splice(0, drop).filter(e => !e.gap).length;
+    const fromDom = Math.min(drop, logEl.children.length);
+    let removedH = 0;
+    for (let i = 0; i < fromDom; i++) { const n = logEl.firstElementChild; removedH += n.getBoundingClientRect().height; n.remove(); }
+    if (drop > fromDom) added.splice(0, drop - fromDom);
+    if (!atBottom) logEl.scrollTop = Math.max(0, logEl.scrollTop - removedH);
+  }
+  if (added.length) logEl.insertAdjacentHTML('beforeend', added.map(renderLogLine).join(''));
+  const live = state === 'running' || state === 'plan_review' || state === 'queued';
+  if (live && !logEl.querySelector('.caret')) logEl.insertAdjacentHTML('beforeend', '<span class="caret"></span>');
+  const shown = logBuf.filter(e => !e.gap).length;
+  const omitted = Math.max(0, seq - shown);
+  $('logMetaText').textContent = `表示 ${shown} 行 / 全 ${seq} 行` + (omitted ? `（先頭 ${omitted} 行は省略）` : '');
+  if (atBottom) { logEl.scrollTop = logEl.scrollHeight; $('logJumpBtn').style.display = 'none'; }
+  else $('logJumpBtn').style.display = fresh.length ? 'inline-block' : $('logJumpBtn').style.display;
+}
+function renderLogLine(e) {
+  if (e.gap) return `<span class="gap">… ${e.gap} 行を取りこぼしました（サーバーは直近 50 行だけを返します）</span>`;
+  return `<span class="ln new"><span class="pct-tag">[${String(e.pct).padStart(5)}%]</span> ${escapeHtml(e.msg)}</span>`;
+}
+$('logJumpBtn').addEventListener('click', () => { $('log').scrollTop = $('log').scrollHeight; $('logJumpBtn').style.display = 'none'; });
+$('log').addEventListener('scroll', () => {
+  const el = $('log');
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 24) $('logJumpBtn').style.display = 'none';
+});
+
 let lastStatus = null;
 const seenStates = {};          // job_id -> last state seen (for the completion burst)
 
@@ -1982,6 +2057,7 @@ function render(status) {
     lastRenderedJobId = status.job_id;
     logLength = -1;
     logSeq = -1;
+    logBuf = []; logShownSeq = -1; logDropped = 0; $('log').innerHTML = ''; $('logMetaText').textContent = '';
     lastPlanJson = null;
     $('jobBanner').className = 'banner';
     $('resultPanel').style.display = 'none';
@@ -2047,14 +2123,7 @@ function render(status) {
   const seq = status.log_seq !== undefined ? status.log_seq
     : (log.length ? log[log.length - 1].seq || log.length : 0);
   if (seq !== logSeq || log.length !== logLength) {
-    // lines that were not shown before slide in (cosmetic only)
-    const firstNew = (logSeq < 0 || seq - logSeq > log.length) ? log.length
-      : Math.max(0, log.length - (seq - logSeq));
-    const live = status.state === 'running' || status.state === 'plan_review' || status.state === 'queued';
-    $('log').innerHTML = log.map((l, i) =>
-      `<span class="ln ${i >= firstNew ? 'new' : ''}"><span class="pct-tag">[${String(l.pct).padStart(5)}%]</span> ${escapeHtml(l.msg)}</span>`
-    ).join('') + (live ? '<span class="caret"></span>' : '');
-    $('log').scrollTop = $('log').scrollHeight;
+    appendLogEntries(log, seq, status.state);
     logLength = log.length;
     logSeq = seq;
   }
@@ -2364,6 +2433,7 @@ function showResults(result) {
     ${renderResumePlan(result.resume_plan)}
     ${renderTimings(result.timings)}
     ${renderConcurrency(result.performance)}
+    ${renderRouting(result.llm_routing || (result.performance && result.performance.llm_routing))}
     ${renderTokenUsage(result.token_usage)}
     <label style="margin-top:10px">💾 保存済みの成果物（実際に書き込まれたファイルのみ）</label>
     <div class="exec-summary" style="margin-top:4px">${savedRows.join('') || '<span>保存済みの成果物はありません</span>'}</div>`;
@@ -2748,6 +2818,64 @@ const LABELS = {
   output_format: {markdown: 'Markdown', docx: 'Word', pdf: 'PDF', html: 'HTML'},
 };
 
+// ==================== ローカルLLMへの委譲（ロールルーティング / 工程別=ローカル）の表示 ====================
+const DELEGATION_ROLE_LABELS = {verify: '最終本文の検証', draft: '検証後の本文修正', all: '最終本文の検証と修正'};
+const STAGE_FORM_LABELS = {planning: '計画', crawling: 'クロール判断', evaluation: '評価・採点', writing: '文章作成'};
+
+function delegationItems() {
+  // what the NEXT run would delegate, from the live form + ⚙設定 values
+  const provider = $('provider').value;
+  const items = [];
+  if (provider === 'local') return items;
+  const role = $('set_local_role').value;
+  const url = ($('set_local_url').value || '').trim();
+  if (role && role !== 'off') {
+    items.push(`${DELEGATION_ROLE_LABELS[role] || role} → ローカルLLM（⚙設定 → ロールルーティング = ${role}${url ? '、' + url : '、URL 未設定: 環境変数 LOCAL_LLM_BASE_URL がなければ開始時に設定エラー'}）`);
+  }
+  document.querySelectorAll('.stage-provider').forEach(sel => {
+    if (sel.value === 'local') items.push(`${STAGE_FORM_LABELS[sel.dataset.stage] || sel.dataset.stage} → ローカルLLM（工程別のAI切り替え${url ? '、' + url : ''}）`);
+  });
+  return items;
+}
+
+function renderDelegationNotice() {
+  const el = $('delegationNotice');
+  if (!el) return;
+  const items = delegationItems();
+  if (!items.length) { el.className = 'banner'; el.textContent = ''; return; }
+  const fb = $('set_local_fallback') ? $('set_local_fallback').checked : true;
+  el.className = 'banner notice';
+  el.innerHTML = `<b>⚠ ローカルLLMへの委譲が有効です。</b> ${items.map(escapeHtml).join(' ／ ')}。開始前に疎通確認を行い、失敗時は${fb ? 'メインのプロバイダで続行します' : 'エラーで停止します'}。不要なら ⚙設定 → ローカルLLM → ロールルーティングを「オフ」（工程別は「既定」）にしてください。`;
+}
+
+function describeDelegation(d) {
+  // server-side snapshot of one delegated role / stage (DelegatedLLMClient.describe)
+  let state = '';
+  if (d.tripped) state = `（障害のためメイン ${d.fallback_provider || ''} へ切替・ローカル ${d.local_calls || 0} 回 / 代替 ${d.fallback_calls || 0} 回）`;
+  else if (d.preflight && d.preflight.ok) state = `（疎通OK ${d.preflight.seconds}s・${d.local_calls || 0} 回）`;
+  else if (d.preflight && d.preflight.ok === false) state = '（疎通NG）';
+  return `${d.role} → ローカル ${d.base_url || ''}${d.model ? ' / ' + d.model : ''}${state}`;
+}
+
+function routingItems(rt) {
+  const items = [];
+  Object.values(rt.roles || {}).forEach(d => items.push(describeDelegation(d)));
+  Object.entries(rt.stages || {}).forEach(([st, d]) => items.push(
+    d.setting ? describeDelegation(d) : `${STAGE_FORM_LABELS[st] || st} → ${d.provider}${d.model ? '/' + d.model : ''}`));
+  return items;
+}
+
+function renderRouting(rt) {
+  // results overview: which provider served which role, and any switch-over
+  if (!rt || !rt.default) return '';
+  const def = `${rt.default.provider}${rt.default.model ? '/' + rt.default.model : ''}`;
+  const items = routingItems(rt);
+  if (!items.length) return `<div class="hint" style="margin-top:8px">AI の割り当て: 既定 ${escapeHtml(def)}（委譲なし）</div>`;
+  return `<label style="margin-top:10px">🧭 AI の割り当て（委譲・切替の記録）</label>
+    <div class="exec-summary" style="margin-top:4px"><span>既定: <b>${escapeHtml(def)}</b></span>${items.map(s => `<span>${escapeHtml(s)}</span>`).join('')}</div>
+    ${rt.tripped ? '<div class="warn-row"><b>注意:</b> 委譲先のローカルLLMが失敗したため、途中からメインのプロバイダで続行しました。要確認事項の警告を確認してください。</div>' : ''}`;
+}
+
 function updateSummaryStrip() {
   const source = radioValue('source_mode');
   const d = DELIVERABLE_PRESETS[radioValue('deliverable')];
@@ -2773,7 +2901,7 @@ function updateSummaryStrip() {
 }
 
 // any change in the form refreshes the visible summary
-$('formCard').addEventListener('change', () => { applyModeVisibility(); updateSummaryStrip(); });
+$('formCard').addEventListener('change', () => { applyModeVisibility(); updateSummaryStrip(); renderDelegationNotice(); });
 $('formCard').addEventListener('input', (e) => {
   if (e.target && /^(iterations|max_iterations|local_documents|query)$/.test(e.target.id)) updateSummaryStrip();
 });
@@ -2944,6 +3072,12 @@ function renderExecSummary(status) {
     const part = ['fetch', 'extract', 'verify'].map(k => `${ACTIVITY_LABELS[k]} ${(act[k] || {}).active || 0}`).join('・');
     rows.push(['並列の稼働', `${part}（枠 ${cc.run_permits ? cc.run_permits.active : 0}/${cc.run_permits ? cc.run_permits.limit : '?'}）`]);
   }
+  const rt = status.llm_routing || (status.result && status.result.llm_routing);
+  if (rt && rt.default) {
+    const def = `${rt.default.provider}${rt.default.model ? '/' + rt.default.model : ''}`;
+    const items = routingItems(rt);
+    rows.push(['AI の割り当て', items.length ? `既定 ${def} ・ ${items.join(' ・ ')}` : `既定 ${def}（委譲なし）`]);
+  }
   let stop = '—';
   if (status.state === 'cancelled') stop = '中止済み（保存済みの成果物のみ表示）';
   else if (status.cancel_requested) stop = '停止要求済み（次の安全な地点で停止）';
@@ -3102,7 +3236,7 @@ function applySnapshot(s) {
     if (inp) inp.value = spec.model || '';
   });
   $('verifyCustomPane').style.display = radioValue('verification_profile') === 'custom' ? 'block' : 'none';
-  renderPresetEffects(); applyModeVisibility(); updateSummaryStrip();
+  renderPresetEffects(); applyModeVisibility(); updateSummaryStrip(); renderDelegationNotice();
 }
 
 function loadFormPresets() {
@@ -3168,7 +3302,7 @@ function applyParamsToForm(params, query) {
     document.querySelector(`.stage-model[data-stage=${st}]`).value = spec.model || '';
   });
   $('verifyCustomPane').style.display = radioValue('verification_profile') === 'custom' ? 'block' : 'none';
-  renderPresetEffects(); applyModeVisibility(); updateSummaryStrip();
+  renderPresetEffects(); applyModeVisibility(); updateSummaryStrip(); renderDelegationNotice();
 }
 
 // ==================== ローカルLLM 並列処理テスト（⚙ 設定） ====================
@@ -3184,7 +3318,8 @@ $('llmParallelTestBtn').addEventListener('click', async () => {
     const res = await fetch('/api/llm-parallel-test', {method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({local_base_url: p.local_base_url, local_api_key: p.local_api_key, local_backend: p.local_backend,
         local_timeout: p.local_timeout, http_proxy: p.http_proxy, https_proxy: p.https_proxy, verify_ssl: p.verify_ssl,
-        model: $('model') ? $('model').value.trim() : '', count, concurrency})});
+        // ⚙設定 モデル名 first; the form's model only when the main provider IS the local server
+        model: p.local_model || ($('provider').value === 'local' && $('model') ? $('model').value.trim() : ''), count, concurrency})});
     const d = await res.json();
     if (!res.ok) throw new Error(d.error || 'failed');
     out.innerHTML = `<b>${escapeHtml(d.verdict)}</b>`
@@ -3586,6 +3721,7 @@ $('query').addEventListener('keydown', (e) => {
 renderPresetEffects();
 applyModeVisibility();
 updateSummaryStrip();
+renderDelegationNotice();
 renderDocList();
 loadHistory();
 
