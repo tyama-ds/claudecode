@@ -131,7 +131,7 @@ button:focus-visible, a:focus-visible, summary:focus-visible,
 .lang-chip:has(input:checked) { border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 10%, var(--bg)); font-weight: 700; }
 .lang-chip .native { color: var(--muted); font-size: 11px; font-weight: 400; }
-.job-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.job-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
 .job-tab { border: 1.5px solid var(--line); border-radius: 10px; padding: 7px 12px;
   font-size: 12px; cursor: pointer; background: var(--bg); max-width: 240px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -263,7 +263,7 @@ button.danger { background: var(--error-soft); color: var(--error); border: 1px 
 button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--error) 15%, var(--card)); border-color: var(--error); }
 
 /* ---- progress panel ---- */
-.stepper { display: flex; align-items: center; margin: 6px 0 18px; }
+.stepper { display: flex; align-items: center; margin: 0 0 10px; }
 .step { display: flex; flex-direction: column; align-items: center; flex: 1; position: relative; }
 .step .dot {
   width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center;
@@ -301,9 +301,22 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--error)
   animation: stripes 1s linear infinite;
 }
 @keyframes stripes { to { background-position: 30px 0; } }
-.pct-row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; align-items: baseline; margin: 8px 0 6px; }
-.pct { font-size: 30px; font-weight: 700; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+.pct-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin: 0 0 4px; }
+.pct { font-size: 26px; font-weight: 700; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
 .elapsed { font-size: 12px; color: var(--muted); }
+/* the two bars sit right under the stepper: no empty band above them */
+.bar-row { margin-top: 2px; }
+.bar-row.stage { margin-top: 8px; }
+.bar-name { font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: .08em; min-width: 2.4em; }
+.stage-name { font-size: 15px; font-weight: 700; }
+.stage-pct { font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--accent2); }
+.stage-range { font-size: 11px; color: var(--muted); }
+.bar-wrap.thin { height: 6px; }
+.bar.stage { background: linear-gradient(90deg, #5bb3b9, var(--accent2)); }
+.bar.stage.moving { background-image:
+    linear-gradient(135deg, rgba(255,255,255,.25) 25%, transparent 25%,
+      transparent 50%, rgba(255,255,255,.25) 50%, rgba(255,255,255,.25) 75%, transparent 75%),
+    linear-gradient(90deg, #5bb3b9, var(--accent2)); }
 .msg {
   margin-top: 10px; padding: 10px 14px; background: var(--accent-soft);
   border-radius: 10px; font-size: 13px; min-height: 20px;
@@ -1224,12 +1237,25 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
         <div class="step" data-step="3"><div class="dot">📄</div><div class="lbl">レポート生成</div></div>
       </div>
 
-      <div class="pct-row">
-        <span class="pct" id="pctLabel">0%</span>
-        <span class="elapsed" id="elapsed"></span>
-        <button id="runCancelBtn" class="danger" style="display:none;margin-left:auto">⏹ 調査を中止</button>
+      <!-- two bars: the whole run, and the current stage inside it -->
+      <div class="bar-row overall">
+        <div class="pct-row">
+          <span class="bar-name">全体</span>
+          <span class="pct" id="pctLabel">0%</span>
+          <span class="elapsed" id="elapsed"></span>
+          <button id="runCancelBtn" class="danger" style="display:none;margin-left:auto">⏹ 調査を中止</button>
+        </div>
+        <div class="bar-wrap"><div class="bar" id="bar"></div></div>
       </div>
-      <div class="bar-wrap"><div class="bar" id="bar"></div></div>
+      <div class="bar-row stage" id="stageRow">
+        <div class="pct-row">
+          <span class="bar-name">工程</span>
+          <span class="stage-name" id="stageName">—</span>
+          <span class="stage-pct" id="stagePct"></span>
+          <span class="stage-range" id="stageRange"></span>
+        </div>
+        <div class="bar-wrap thin"><div class="bar stage" id="stageBar"></div></div>
+      </div>
       <div class="msg" id="currentMsg">待機中...</div>
       <div class="activity-card" id="activityPanel">
         <div class="act-head">
@@ -1925,6 +1951,32 @@ function renderTabs(jobs) {
   });
 }
 
+// ---- the stage bar: how far the CURRENT stage is, inside its slice of the
+// overall bar (the server names the stage and its [start, end]) ----
+let lastStageShown = {job: null, label: '—', pct: 0, range: ''};
+function renderStageBar(status, pct) {
+  const st = status.stage;
+  const live = status.state === 'running' || status.state === 'plan_review';
+  if (st && typeof st.start === 'number' && typeof st.end === 'number' && st.end > st.start) {
+    const sp = Math.max(0, Math.min(100, (pct - st.start) / (st.end - st.start) * 100));
+    lastStageShown = {job: status.job_id, label: st.label || st.key, pct: sp,
+      range: `全体の ${Math.round(st.start)}〜${Math.round(st.end)}%`};
+  } else if (status.state === 'completed') {
+    lastStageShown = {job: status.job_id, label: '完了', pct: 100, range: ''};
+  } else if (status.state === 'plan_review') {
+    lastStageShown = {job: status.job_id, label: '計画のレビュー待ち', pct: lastStageShown.job === status.job_id ? lastStageShown.pct : 0, range: ''};
+  } else if (lastStageShown.job !== status.job_id) {
+    // a finished job from history: the server keeps no stage — show the outcome
+    lastStageShown = {job: status.job_id, label: status.state === 'cancelled' ? '中止' : status.state === 'error' ? '停止' : '—', pct: 0, range: ''};
+  }
+  const s = lastStageShown;
+  $('stageName').textContent = s.label;
+  $('stagePct').textContent = s.label === '—' ? '' : Math.round(s.pct) + '%';
+  $('stageRange').textContent = s.range;
+  $('stageBar').style.width = s.pct + '%';
+  $('stageBar').classList.toggle('moving', live);
+}
+
 function stepIndex(pct) {
   if (pct < 10) return 0;
   if (pct < 85) return 1;
@@ -2070,6 +2122,7 @@ function render(status) {
     logBuf = []; logShownSeq = -1; logDropped = 0; $('log').innerHTML = ''; $('logMetaText').textContent = '';
     lastPlanJson = null;
     lastPlanViewJson = null; $('planViewContent').innerHTML = '';
+    lastStageShown = {job: null, label: '—', pct: 0, range: ''};
     $('jobBanner').className = 'banner';
     $('resultPanel').style.display = 'none';
     vCancelRequested = false;
@@ -2085,6 +2138,7 @@ function render(status) {
   $('bar').style.width = pct + '%';
   $('bar').classList.toggle('moving', status.state === 'running');
   $('pctLabel').textContent = Math.round(pct) + '%';
+  renderStageBar(status, pct);
   $('currentMsg').textContent = status.message || '';
   const min = Math.floor((status.elapsed_seconds || 0) / 60);
   const sec = Math.round((status.elapsed_seconds || 0) % 60);
