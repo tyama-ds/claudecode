@@ -160,8 +160,21 @@ class TestRun:
         rc.min_iterations = 1
         rc.max_iterations = 1
         seen = []
+        activities = []
+
+        def _cb(m, p):
+            seen.append((m, p))
+            a = tool.current_activity()
+            if a and a.get("text"):
+                activities.append(a["text"])
         tool.run(query="炭素繊維の市場調査", requirements="目次は2章構成でよい",
-                 progress_callback=lambda m, p: seen.append((m, p)))
+                 progress_callback=_cb)
+        # the status line names the chapter being researched / written
+        assert any(t.startswith("第1章「") and "検索・取得・抽出" in t for t in activities), activities[:8]
+        # (progress callbacks fire before the verifier starts counting, so the
+        # sampled text is the "preparing" form; the Web UI polls the counters)
+        assert any("最終本文" in t and "検証" in t for t in activities), activities[-8:]
+        assert tool.current_activity()["text"] == "完了"
         values = [p for _, p in seen if p >= 0]
         assert values == sorted(values)                     # monotonic
         assert values[-1] == 100.0 and values.count(100.0) == 1
@@ -189,7 +202,67 @@ class TestRun:
         assert job.to_dict()["plan"]["title"] == "reviewed"
 
 
+class TestActivity:
+
+    def _tool(self, stage, researcher=None, verification=None, sink=None):
+        from deep_research_tool.main import DeepResearchTool
+        tool = DeepResearchTool.__new__(DeepResearchTool)
+        tool.progress_plan = ProgressPlan.for_config(_config(v1=False, verification=True,
+                                                             deep_think=True))
+        tool.progress_plan.enter(stage)
+        tool.researcher = researcher
+        tool.activity_note = ""
+        tool.verification_progress = verification
+        tool.live_sink = sink
+        return tool
+
+    def test_research_phases_name_the_chapter(self):
+        r = SimpleNamespace(current_activity={"phase": "research", "section": "2", "title": "主要メーカー",
+                                              "index": 2, "total": 3, "done": 1})
+        t = self._tool("research", r).current_activity()["text"]
+        assert t == "第2章「主要メーカー」の情報を検索・取得・抽出しています（2/3 章目、完了 1 章）"
+        r.current_activity = dict(r.current_activity, phase="write")
+        assert self._tool("research", r).current_activity()["text"].startswith("第2章「主要メーカー」を執筆しています")
+        r.current_activity = dict(r.current_activity, phase="gapfill", round=1)
+        assert "不足情報を追加調査" in self._tool("research", r).current_activity()["text"]
+        r.current_activity = {"phase": "research", "section": "2.1", "title": "国内", "index": 3, "total": 4, "done": 2}
+        assert self._tool("research", r).current_activity()["text"].startswith("2.1 節「国内」")
+        r.current_activity = {"phase": "summary"}
+        assert self._tool("research", r).current_activity()["text"] == "全章の要旨・結論を作成しています"
+        assert self._tool("research", None).current_activity()["text"] == "調査を準備しています"
+
+    def test_writing_counts_chapters_from_the_live_report(self):
+        items = [SimpleNamespace(section=str(i)) for i in range(1, 4)]
+        plan = SimpleNamespace(table_of_contents=SimpleNamespace(items=items))
+        r = SimpleNamespace(current_activity=None,
+                            get_session=lambda: SimpleNamespace(research_plan=plan))
+        sink = SimpleNamespace(snapshot=lambda: {"sections": {"1": {"text": "a"}, "2": {"text": ""}}})
+        assert self._tool("writing", r, sink=sink).current_activity()["text"] == "第2章を執筆しています（1/3 章完了）"
+        sink3 = SimpleNamespace(snapshot=lambda: {"sections": {k: {"text": "x"} for k in "123"}})
+        assert "全 3 章の執筆が終わり" in self._tool("writing", r, sink=sink3).current_activity()["text"]
+        assert self._tool("writing", r).current_activity()["text"] == "レポートを生成しています"
+
+    def test_verification_and_other_stages(self):
+        vp = SimpleNamespace(snapshot=lambda: {"phase": "judging", "phase_label": "主張の判定",
+                                               "claims_done": 12, "claims_total": 40,
+                                               "round": 1, "max_rounds": 2})
+        t = self._tool("verification", verification=vp).current_activity()["text"]
+        assert t == "最終本文を検証しています: 主張の判定（クレーム 12/40、1/2 周目）"
+        tool = self._tool("deep_think")
+        tool.activity_note = "2/3 章"
+        assert tool.current_activity()["text"] == "DeepThink で各章を推敲しています（2/3 章）"
+        assert self._tool("plan").current_activity()["text"].startswith("調査計画")
+        assert "出力" in self._tool("rendering").current_activity()["text"]
+
+
 class TestWebUI:
+
+    def test_job_status_carries_the_activity_line(self):
+        from deep_research_tool.webui.server import ResearchJob
+        job = ResearchJob("job-a", "q", params={"query": "q"})
+        job.progress_source = lambda: {"overall": 30.0, "stage": {"key": "research", "label": "調査・収集", "step": 1},
+                                       "activity": {"stage": "research", "text": "第1章「市場」を執筆しています"}}
+        assert job.to_dict()["activity"]["text"].startswith("第1章")
 
     def test_job_status_uses_the_live_plan_value_and_names_the_stage(self):
         from deep_research_tool.webui.server import ResearchJob

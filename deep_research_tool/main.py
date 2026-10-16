@@ -769,21 +769,119 @@ class DeepResearchTool:
             },
         }
 
+    def _verification_snapshot(self) -> Optional[Dict[str, Any]]:
+        vp = getattr(self, "verification_progress", None)
+        if vp is None:
+            return None
+        try:
+            return vp.snapshot()
+        except Exception:
+            return None
+
     def progress_snapshot(self) -> Optional[Dict[str, Any]]:
         """Overall progress of the current run: the stage slices decided
-        at start, the current stage, and the live overall value (moved by
-        the verification counters while verifying). None before run()."""
+        at start, the current stage, the live overall value (moved by the
+        verification counters while verifying) and the one-line activity
+        (what is being done right now). None before run()."""
         plan = getattr(self, "progress_plan", None)
         if plan is None:
             return None
-        verification = None
-        vp = getattr(self, "verification_progress", None)
-        if vp is not None:
+        snap = plan.snapshot(self._verification_snapshot())
+        snap["activity"] = self.current_activity()
+        return snap
+
+    def current_activity(self) -> Optional[Dict[str, Any]]:
+        """One line (Japanese) of what the run is doing RIGHT NOW, from the
+        live run state: the chapter being researched / written, DeepThink
+        progress, verification counters … Shown under the progress bars."""
+        plan = getattr(self, "progress_plan", None)
+        if plan is None:
+            return None
+        stage = plan.current
+        researcher = getattr(self, "researcher", None)
+        act = getattr(researcher, "current_activity", None) if researcher is not None else None
+        detail: Dict[str, Any] = {}
+
+        def _sec(a):
+            s = str(a.get("section", ""))
+            name = f"第{s}章" if "." not in s else f"{s} 節"
+            title = a.get("title") or ""
+            return f"{name}「{title}」" if title else name
+
+        if stage == "plan":
+            text = "調査計画（題名・目次・検索クエリ）を作成しています"
+        elif stage == "research":
+            if act:
+                detail = dict(act)
+                counts = ""
+                if act.get("total"):
+                    counts = (f"（{act.get('index')}/{act.get('total')} 章目、"
+                              f"完了 {act.get('done', 0)} 章）")
+                phase = act.get("phase")
+                if phase == "write":
+                    text = f"{_sec(act)}を執筆しています{counts}"
+                elif phase == "gapfill":
+                    text = f"{_sec(act)}の不足情報を追加調査しています（{act.get('round')} 回目）"
+                elif phase == "summary":
+                    text = "全章の要旨・結論を作成しています"
+                else:
+                    text = f"{_sec(act)}の情報を検索・取得・抽出しています{counts}"
+            else:
+                text = "調査を準備しています"
+        elif stage == "deep_think":
+            note = getattr(self, "activity_note", "")
+            text = "DeepThink で各章を推敲しています" + (f"（{note}）" if note else "")
+        elif stage == "evidence_review":
+            text = "収集した根拠を見直して各章を補強しています"
+        elif stage == "fermi":
+            text = "フェルミ推定を実行しています"
+        elif stage == "figures":
+            text = "数値データから図表を生成しています"
+        elif stage == "writing":
+            total = None
             try:
-                verification = vp.snapshot()
+                sess = researcher.get_session() if researcher is not None else None
+                plan_obj = getattr(sess, "research_plan", None) if sess else None
+                total = len(plan_obj.table_of_contents.items) if plan_obj else None
             except Exception:
-                verification = None
-        return plan.snapshot(verification)
+                total = None
+            done = None
+            sink = getattr(self, "live_sink", None)
+            try:
+                snap = sink.snapshot() if sink is not None and hasattr(sink, "snapshot") else None
+                if snap is not None:
+                    done = len([1 for v in (snap.get("sections") or {}).values()
+                                if (v or {}).get("text")])
+            except Exception:
+                done = None
+            if total and done is not None and done < total:
+                text = f"第{done + 1}章を執筆しています（{done}/{total} 章完了）"
+            elif total and done is not None:
+                text = f"全 {total} 章の執筆が終わり、レポートを組み立てています"
+            else:
+                text = "レポートを生成しています"
+        elif stage == "verification":
+            snap = self._verification_snapshot()
+            if snap and snap.get("phase") not in (None, "idle"):
+                label = snap.get("phase_label") or snap.get("phase")
+                parts = []
+                if snap.get("claims_total"):
+                    parts.append(f"クレーム {snap.get('claims_done', 0)}/{snap.get('claims_total')}")
+                if snap.get("max_rounds"):
+                    parts.append(f"{snap.get('round') or 1}/{snap.get('max_rounds')} 周目")
+                text = f"最終本文を検証しています: {label}" + (f"（{'、'.join(parts)}）" if parts else "")
+            else:
+                text = "最終本文の検証を準備しています"
+        elif stage == "rendering":
+            text = "最終文書を出力しています（図表の挿入・形式変換・保存）"
+        elif stage == "done":
+            text = "完了"
+        else:
+            text = ""
+        out: Dict[str, Any] = {"stage": stage, "text": text}
+        if detail:
+            out["detail"] = detail
+        return out
 
     def _warn_if_llm_serialized(self, snapshot: Dict[str, Any]) -> None:
         """A local server that never served two requests at once while
@@ -923,6 +1021,7 @@ class DeepResearchTool:
         # stage-relative ones (None = a note, negative = error marker).
         from .utils.progress import ProgressPlan
         self.progress_plan = ProgressPlan.for_config(self.config)
+        self.activity_note = ""
         raw_progress = progress_callback
         progress_callback = self.progress_plan.callback(raw_progress)
         # reports made AFTER a (possibly cancelled) verification, while the
@@ -3440,6 +3539,7 @@ Output only the text (no JSON, no heading):"""
                 session.section_contents[section_num]["deep_think"] = deep_think_results[section_num]
 
                 completed += 1
+                self.activity_note = f"{completed}/{len(targets)} 章"
                 if progress_callback:
                     progress = completed / len(targets) * 100
                     progress_callback(

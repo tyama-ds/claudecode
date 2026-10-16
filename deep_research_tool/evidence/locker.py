@@ -798,6 +798,28 @@ class EvidenceLocker:
         # Default APA-style citation
         return evidence.citation_text
 
+    def to_export_dict(self, include_sections: bool = True) -> Dict[str, Any]:
+        """The JSON export as a dict (the Web UI's evidence page reads the
+        LIVE locker through this while a run is going)."""
+        data = {
+            "research_id": self.research_id,
+            "exported_at": datetime.now().isoformat(),
+            "total_evidence": len(self._evidence),
+            "evidence": [e.to_dict() for e in self._evidence.values()],
+            # id-only mapping so load_from_json restores section relations
+            # exactly (the "sections" block below is for human readers)
+            "section_evidence": {
+                section: list(eids)
+                for section, eids in self._section_evidence.items()
+            },
+        }
+        if include_sections:
+            data["sections"] = {
+                section: [self._evidence[eid].to_dict() for eid in eids if eid in self._evidence]
+                for section, eids in self._section_evidence.items()
+            }
+        return data
+
     def export_to_json(self, filepath: Path = None) -> Path:
         """
         Export all evidence to JSON file.
@@ -810,22 +832,7 @@ class EvidenceLocker:
         """
         filepath = filepath or self.output_dir / f"evidence_{self.research_id}.json"
 
-        export_data = {
-            "research_id": self.research_id,
-            "exported_at": datetime.now().isoformat(),
-            "total_evidence": len(self._evidence),
-            "evidence": [e.to_dict() for e in self._evidence.values()],
-            "sections": {
-                section: [self._evidence[eid].to_dict() for eid in eids if eid in self._evidence]
-                for section, eids in self._section_evidence.items()
-            },
-            # id-only mapping so load_from_json restores section relations
-            # exactly (the "sections" block above is for human readers)
-            "section_evidence": {
-                section: list(eids)
-                for section, eids in self._section_evidence.items()
-            },
-        }
+        export_data = self.to_export_dict()
 
         # ATOMIC write: a cancel/crash mid-export never leaves a truncated
         # evidence file (readers see the previous or the new complete file)

@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>根拠ロッカー — Deep Research Tool</title>
+<style>
+:root {
+  --bg: #f3f7f9; --card: #ffffff; --text: #172b40; --muted: #62758a; --border: #dce4ed;
+  --accent: #147d87; --accent2: #106873; --accent-soft: #eaf5f5; --on-accent: #ffffff;
+  --success: #16734f; --success-soft: #eaf6ef; --error: #b63843; --error-soft: #fceef0;
+  --radius: 14px; --shadow: 0 2px 4px rgba(23,43,64,.025), 0 10px 30px rgba(23,43,64,.045);
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0d1724; --card: #152336; --text: #e4edf5; --muted: #a3b5c8; --border: #304156;
+    --accent: #69cbd0; --accent2: #54b7c0; --accent-soft: #183a45; --on-accent: #102b36;
+    --success: #83d6ad; --success-soft: #193b32; --error: #ff9ca4; --error-soft: #422831;
+    --shadow: 0 2px 4px rgba(0,0,0,.1), 0 10px 30px rgba(0,0,0,.12); }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.6;
+  font-family: "Segoe UI", "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", system-ui, sans-serif; }
+header { background: linear-gradient(110deg, #102338, #193b50); border-bottom: 3px solid #147d87; color: #fff;
+  padding: 18px max(20px, calc((100vw - 1200px) / 2)); display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: baseline; }
+header h1 { font-size: 18px; margin: 0; font-weight: 650; }
+header .q { font-size: 13px; color: #bacbdc; flex: 1; min-width: 200px; }
+header .st { font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 999px; background: rgba(105,203,208,.15); border: 1px solid rgba(105,203,208,.35); }
+main { max-width: 1200px; margin: 0 auto; padding: 16px 16px 48px; display: grid; gap: 12px; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px 16px; }
+.summary { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; font-size: 13px; }
+.summary b { font-size: 20px; font-variant-numeric: tabular-nums; }
+.chip { display: inline-block; font-size: 11.5px; border-radius: 999px; padding: 1px 9px; border: 1px solid var(--border); background: var(--accent-soft); color: var(--text); margin: 0 3px 3px 0; cursor: pointer; }
+.chip[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; align-items: end; }
+label { font-size: 11px; color: var(--muted); font-weight: 600; display: block; margin-bottom: 2px; }
+input, select { width: 100%; font: inherit; font-size: 13px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); color: var(--text); }
+button { font: inherit; font-size: 13px; padding: 7px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); color: var(--text); cursor: pointer; }
+button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
+.row-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.hint { font-size: 11.5px; color: var(--muted); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; font-size: 11px; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--border); cursor: pointer; white-space: nowrap; }
+th[aria-sort="ascending"]::after { content: " ▲"; } th[aria-sort="descending"]::after { content: " ▼"; }
+td { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+tr.item:hover td { background: color-mix(in srgb, var(--accent-soft) 50%, transparent); }
+tr.item { cursor: pointer; }
+td.n { color: var(--muted); font-variant-numeric: tabular-nums; width: 1%; }
+.title a { color: var(--accent2); font-weight: 600; text-decoration: none; }
+.title a:hover { text-decoration: underline; }
+.domain { font-size: 11.5px; color: var(--muted); }
+.badge { display: inline-block; font-size: 11px; border-radius: 999px; padding: 1px 8px; border: 1px solid var(--border); margin: 0 3px 2px 0; white-space: nowrap; }
+.badge.q-authoritative { background: #dcfce7; color: #166534; border-color: #86efac; }
+.badge.q-high { background: #e0f2fe; color: #075985; border-color: #7dd3fc; }
+.badge.q-medium { background: #fef3c7; color: #92400e; border-color: #fcd34d; }
+.badge.q-low { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
+.badge.q-unverified { background: #f1f5f9; color: #475569; }
+.scores { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.excerpt { font-size: 12.5px; color: var(--text); }
+.detail td { background: var(--accent-soft); font-size: 12.5px; }
+.detail dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; }
+.detail dt { color: var(--muted); font-weight: 600; } .detail dd { margin: 0; white-space: pre-wrap; word-break: break-word; }
+.detail pre { white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin: 4px 0 0; font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+.empty { padding: 28px; text-align: center; color: var(--muted); }
+@media (max-width: 720px) { th.opt, td.opt { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>🗂 根拠ロッカー</h1>
+  <span class="q" id="query">…</span>
+  <span class="st" id="state">読み込み中</span>
+</header>
+<main>
+  <section class="card">
+    <div class="summary">
+      <span>収集した根拠 <b id="total">0</b> 件</span>
+      <span id="sourceNote" class="hint"></span>
+      <span class="hint" id="updatedAt"></span>
+      <span style="margin-left:auto" class="row-actions">
+        <label style="display:inline-flex;align-items:center;gap:6px;margin:0;font-size:12px"><input type="checkbox" id="autoRefresh" checked style="width:auto"> 実行中は自動更新（5 秒）</label>
+        <button id="refreshBtn">↻ 更新</button>
+        <a id="jsonLink" style="display:none"><button>JSON</button></a>
+        <a id="csvLink" style="display:none"><button>CSV</button></a>
+      </span>
+    </div>
+    <div id="qualityChips" style="margin-top:8px"></div>
+  </section>
+  <section class="card">
+    <div class="filters">
+      <div><label for="q">検索（タイトル・本文・URL）</label><input id="q" type="search" placeholder="例: 市場規模"></div>
+      <div><label for="section">章</label><select id="section"><option value="">すべて</option></select></div>
+      <div><label for="quality">品質</label><select id="quality"><option value="">すべて</option>
+        <option value="authoritative">authoritative（公的・学術）</option><option value="high">high</option>
+        <option value="medium">medium</option><option value="low">low</option><option value="unverified">unverified</option></select></div>
+      <div><label for="domain">ドメイン</label><select id="domain"><option value="">すべて</option></select></div>
+      <div><label for="stype">種別</label><select id="stype"><option value="">すべて</option></select></div>
+    </div>
+    <p class="hint" id="shown"></p>
+  </section>
+  <section class="card" style="padding:0 0 6px">
+    <table>
+      <thead><tr>
+        <th data-sort="n">#</th>
+        <th data-sort="title">出典</th>
+        <th data-sort="section" class="opt">章</th>
+        <th data-sort="quality">品質 / スコア</th>
+        <th data-sort="accessed" class="opt">取得日時</th>
+        <th>抜粋</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="empty" id="empty" style="display:none">根拠はまだありません。調査が進むとここに追加されます。</div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+const jobId = params.get('job_id') || '';
+let data = null;
+let sort = {key: 'n', dir: 'asc'};
+let qualityFilter = '';
+const open = new Set();
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const domainOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (e) { return ''; } };
+const STATE_JA = {running: '実行中', plan_review: '計画のレビュー待ち', queued: '実行待ち', completed: '完了', error: 'エラー', cancelled: '中止'};
+const QUAL_JA = {authoritative: '公的・学術', high: '高', medium: '中', low: '低', unverified: '未評価'};
+
+function sectionsOf(e) {
+  // every section that cites this item (the locker's section map), plus the item's own reference
+  const ids = new Set();
+  const map = (data && data.section_evidence) || {};
+  Object.entries(map).forEach(([sid, list]) => { if ((list || []).includes(e.id)) ids.add(sid); });
+  if (e.section_reference) ids.add(String(e.section_reference));
+  return [...ids].sort((a, b) => a.localeCompare(b, undefined, {numeric: true}));
+}
+function sectionLabel(sid) { const t = (data && data.section_titles || {})[sid]; return t ? `${sid}. ${t}` : sid; }
+
+async function load() {
+  if (!jobId) { $('state').textContent = 'job_id がありません'; return; }
+  try {
+    const res = await fetch(`/api/evidence?job_id=${encodeURIComponent(jobId)}`);
+    if (!res.ok) { $('state').textContent = res.status === 404 ? '不明なジョブ' : 'エラー'; return; }
+    data = await res.json();
+  } catch (e) { $('state').textContent = '読み込みに失敗'; return; }
+  document.title = `根拠ロッカー — ${data.query || jobId}`;
+  $('query').textContent = data.query || jobId;
+  $('state').textContent = STATE_JA[data.state] || data.state || '';
+  $('total').textContent = data.total || 0;
+  $('sourceNote').textContent = data.source === 'live' ? '（実行中のロッカーを直接表示）' : data.source === 'file' ? '（保存されたエビデンス JSON）' : '';
+  $('updatedAt').textContent = data.exported_at ? `最終更新 ${String(data.exported_at).replace('T', ' ').slice(0, 19)}` : '';
+  for (const [key, el] of [['evidence_json', 'jsonLink'], ['evidence_csv', 'csvLink']]) {
+    const p = (data.files || {})[key];
+    $(el).style.display = p ? 'inline-block' : 'none';
+    if (p) $(el).href = `/api/report-file?path=${encodeURIComponent(p)}&download=1`;
+  }
+  fillSelect('section', [...new Set((data.evidence || []).flatMap(sectionsOf))].sort((a, b) => a.localeCompare(b, undefined, {numeric: true})), sectionLabel);
+  fillSelect('domain', [...new Set((data.evidence || []).map(e => domainOf(e.url)).filter(Boolean))].sort());
+  fillSelect('stype', [...new Set((data.evidence || []).map(e => e.source_type || e.evidence_type).filter(Boolean))].sort());
+  renderQualityChips();
+  render();
+  if ($('autoRefresh').checked && (data.state === 'running' || data.state === 'plan_review' || data.state === 'queued')) setTimeout(load, 5000);
+}
+function fillSelect(id, values, labelFn) {
+  const sel = $(id); const cur = sel.value;
+  sel.innerHTML = '<option value="">すべて</option>' + values.map(v => `<option value="${esc(v)}">${esc(labelFn ? labelFn(v) : v)}</option>`).join('');
+  if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+}
+function renderQualityChips() {
+  const counts = {};
+  (data.evidence || []).forEach(e => { const q = e.quality_category || 'unverified'; counts[q] = (counts[q] || 0) + 1; });
+  const order = ['authoritative', 'high', 'medium', 'low', 'unverified'];
+  $('qualityChips').innerHTML = order.filter(q => counts[q]).map(q =>
+    `<span class="chip" data-q="${q}" aria-pressed="${qualityFilter === q}">${q}（${QUAL_JA[q] || ''}） ${counts[q]}</span>`).join('');
+  $('qualityChips').querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => {
+    qualityFilter = qualityFilter === c.dataset.q ? '' : c.dataset.q; $('quality').value = qualityFilter; renderQualityChips(); render(); }));
+}
+function filtered() {
+  const q = ($('q').value || '').trim().toLowerCase();
+  const sec = $('section').value, qual = $('quality').value, dom = $('domain').value, st = $('stype').value;
+  return (data.evidence || []).map((e, i) => ({e, n: i + 1})).filter(({e}) => {
+    if (sec && !sectionsOf(e).includes(sec)) return false;
+    if (qual && (e.quality_category || 'unverified') !== qual) return false;
+    if (dom && domainOf(e.url) !== dom) return false;
+    if (st && (e.source_type || e.evidence_type) !== st) return false;
+    if (q) {
+      const hay = [e.title, e.url, e.content_excerpt, e.extracted_text, e.citation_text, e.search_query].join(' ').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+}
+const QRANK = {authoritative: 0, high: 1, medium: 2, low: 3, unverified: 4};
+function sorted(list) {
+  const k = sort.key, d = sort.dir === 'asc' ? 1 : -1;
+  const val = ({e, n}) => k === 'n' ? n : k === 'title' ? (e.title || e.url || '') : k === 'section' ? (sectionsOf(e)[0] || '')
+    : k === 'quality' ? (QRANK[e.quality_category] ?? 9) * 1000 - (e.reliability_score || 0) * 100 : k === 'accessed' ? (e.accessed_at || '') : n;
+  return list.slice().sort((a, b) => { const x = val(a), y = val(b); return (typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y), undefined, {numeric: true})) * d; });
+}
+function render() {
+  const list = sorted(filtered());
+  $('shown').textContent = `${list.length} 件を表示（全 ${data.total || 0} 件）`;
+  $('empty').style.display = list.length ? 'none' : 'block';
+  $('rows').innerHTML = list.map(({e, n}) => {
+    const secs = sectionsOf(e);
+    const q = e.quality_category || 'unverified';
+    const excerpt = (e.content_excerpt || e.extracted_text || '').toString();
+    const row = `<tr class="item" data-id="${esc(e.id)}">
+      <td class="n">${n}</td>
+      <td class="title">${e.url ? `<a href="${esc(e.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(e.title || e.url)}</a>` : esc(e.title || '(出典不明)')}
+        <div class="domain">${esc(domainOf(e.url))}${e.publisher ? ' ・ ' + esc(e.publisher) : ''}${e.published_date ? ' ・ ' + esc(e.published_date) : ''}</div></td>
+      <td class="opt">${secs.map(s => `<span class="badge" title="${esc(sectionLabel(s))}">§${esc(s)}</span>`).join('') || '<span class="hint">—</span>'}</td>
+      <td><span class="badge q-${esc(q)}">${esc(q)}</span><div class="scores">信頼 ${fmt(e.reliability_score)} ・ 関連 ${fmt(e.relevance_score)} ・ 重要 ${fmt(e.importance_score)}</div></td>
+      <td class="opt scores">${esc(String(e.accessed_at || '').replace('T', ' ').slice(0, 16))}</td>
+      <td class="excerpt">${esc(excerpt.slice(0, 180))}${excerpt.length > 180 ? '…' : ''}</td></tr>`;
+    if (!open.has(e.id)) return row;
+    return row + `<tr class="detail"><td colspan="6"><dl>
+      <dt>ID</dt><dd>${esc(e.id)}${e.citation_key ? '（' + esc(e.citation_key) + '）' : ''}</dd>
+      <dt>URL</dt><dd>${e.url ? `<a href="${esc(e.url)}" target="_blank" rel="noopener">${esc(e.url)}</a>` : '—'}</dd>
+      <dt>使われた章</dt><dd>${secs.map(sectionLabel).map(esc).join(' / ') || '—'}</dd>
+      <dt>検索クエリ</dt><dd>${esc(e.search_query || '—')}</dd>
+      <dt>取得</dt><dd>${esc(e.accessed_at || '—')}${e.access_method ? '（' + esc(e.access_method) + '）' : ''}</dd>
+      <dt>品質メモ</dt><dd>${esc(e.quality_notes || '—')}</dd>
+      <dt>引用</dt><dd>${esc(e.citation_text || '—')}</dd>
+      <dt>抜粋</dt><dd>${esc(e.content_excerpt || '—')}</dd>
+      <dt>本文</dt><dd>${e.extracted_text ? `<pre>${esc(e.extracted_text)}${e.extracted_text_truncated ? '\n…（先頭 4000 字のみ。全文は JSON を参照）' : ''}</pre>` : '—'}</dd>
+    </dl></td></tr>`;
+  }).join('');
+  $('rows').querySelectorAll('tr.item').forEach(tr => tr.addEventListener('click', () => {
+    const id = tr.dataset.id; if (open.has(id)) open.delete(id); else open.add(id); render(); }));
+}
+const fmt = (v) => (typeof v === 'number' ? v.toFixed(2) : '—');
+['q', 'section', 'quality', 'domain', 'stype'].forEach(id => $(id).addEventListener('input', () => { if (id === 'quality') { qualityFilter = $('quality').value; renderQualityChips(); } render(); }));
+document.querySelectorAll('th[data-sort]').forEach(th => th.addEventListener('click', () => {
+  const k = th.dataset.sort; sort = {key: k, dir: sort.key === k && sort.dir === 'asc' ? 'desc' : 'asc'};
+  document.querySelectorAll('th[data-sort]').forEach(t => t.removeAttribute('aria-sort'));
+  th.setAttribute('aria-sort', sort.dir === 'asc' ? 'ascending' : 'descending'); render(); }));
+$('refreshBtn').addEventListener('click', load);
+$('autoRefresh').addEventListener('change', () => { if ($('autoRefresh').checked) load(); });
+load();
+</script>
+</body>
+</html>

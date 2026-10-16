@@ -369,6 +369,9 @@ class Researcher:
         # 10–85 scale; sub-components (multilingual search, crawlers) report
         # their own 0–100 INSIDE that slice, never on the whole bar
         self._section_slice = (10.0, 0.0)
+        # what the loop is doing right now (section / phase / counts) —
+        # the status line under the Web UI's progress bars
+        self.current_activity: Optional[Dict[str, Any]] = None
         if multilingual_config and multilingual_config.enabled:
             self.multilingual_searcher = MultilingualSearcher(
                 config=multilingual_config,
@@ -718,6 +721,14 @@ class Researcher:
             # no NEW section starts after a cancel was accepted
             self._check_cancel()
 
+            # the status line must already name this section when the
+            # "Researching:" message reaches the UI
+            self.current_activity = {
+                "phase": "research", "section": section.section,
+                "title": section.title, "index": section_idx + 1,
+                "total": total_sections,
+                "done": len(self.session.completed_sections),
+            }
             self._report_progress(
                 f"Researching: {section.section}. {section.title}",
                 section_progress_base
@@ -1247,6 +1258,8 @@ class Researcher:
                 reverse=True,
             )
 
+            if self.current_activity:
+                self.current_activity = dict(self.current_activity, phase="write")
             synthesized = self._synthesize_parts(section, section_content_parts)
 
             # Gap-fill: re-search when high-importance information is thin
@@ -1258,6 +1271,10 @@ class Researcher:
                 print(f"[GapFill] Section {section.section}: insufficient "
                       f"high-importance sources, round {round_num + 1} "
                       f"(gaps: {gaps[:3]})")
+                if self.current_activity:
+                    self.current_activity = dict(self.current_activity,
+                                                 phase="gapfill",
+                                                 round=round_num + 1)
 
                 gathered_summary = "\n".join(
                     f"- {p.source_title}: {p.processed_content[:200]}"
@@ -1846,6 +1863,7 @@ Return JSON:
         """Synthesize all findings into cohesive content."""
         if not self.session:
             return
+        self.current_activity = {"phase": "summary"}
 
         # Create overall summary
         sections_summary = []
