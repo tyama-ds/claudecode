@@ -1558,10 +1558,13 @@ document.querySelectorAll('.lang-chip input').forEach(cb =>
   cb.addEventListener('change', syncLangUI));
 
 $('settingsBtn').addEventListener('click', () => { $('settingsModal').style.display = 'flex'; });
-$('settingsCloseBtn').addEventListener('click', () => { $('settingsModal').style.display = 'none'; });
+// a run uses the modal's CURRENT values even when they were not saved,
+// so the delegation notice follows every change / close of the modal
+$('settingsCloseBtn').addEventListener('click', () => { $('settingsModal').style.display = 'none'; renderDelegationNotice(); });
 $('settingsSaveBtn').addEventListener('click', () => { saveSettings(); $('settingsModal').style.display = 'none'; renderDelegationNotice(); });
+$('settingsModal').addEventListener('change', () => renderDelegationNotice());
 $('settingsModal').addEventListener('click', (e) => {
-  if (e.target === $('settingsModal')) $('settingsModal').style.display = 'none';
+  if (e.target === $('settingsModal')) { $('settingsModal').style.display = 'none'; renderDelegationNotice(); }
 });
 loadSettings();
 
@@ -1996,29 +1999,34 @@ function appendLogEntries(entries, seq, state) {
   const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 24 || logShownSeq < 0;
   const withSeq = entries.filter(e => typeof e.seq === 'number');
   let fresh;
+  const added = [];            // entries appended by THIS poll (gap marker + fresh lines)
   if (withSeq.length === entries.length && entries.length) {
     fresh = entries.filter(e => e.seq > logShownSeq);
     const expected = logShownSeq < 0 ? fresh.length : Math.max(0, seq - logShownSeq);
     if (expected > fresh.length && logShownSeq >= 0) {
-      logBuf.push({gap: expected - fresh.length});
+      const gap = {gap: expected - fresh.length};
+      logBuf.push(gap); added.push(gap);
     }
   } else {
     // legacy server without sequence numbers: show its window as-is
     fresh = entries.map((e, i) => ({seq: i, pct: e.pct, msg: e.msg}));
     logBuf = []; logShownSeq = -1; logEl.innerHTML = '';
   }
-  for (const e of fresh) { logBuf.push(e); logShownSeq = Math.max(logShownSeq, e.seq || 0); }
+  for (const e of fresh) { logBuf.push(e); added.push(e); logShownSeq = Math.max(logShownSeq, e.seq || 0); }
+  const caret = logEl.querySelector('.caret'); if (caret) caret.remove();
   if (logBuf.length > LOG_KEEP) {
+    // the console nodes map 1:1 to logBuf entries: drop the oldest nodes
+    // instead of rebuilding (and re-animating) all 400 lines on every
+    // poll, and keep the reader's position when they scrolled up
     const drop = logBuf.length - LOG_KEEP;
     logDropped += logBuf.splice(0, drop).filter(e => !e.gap).length;
-    logEl.innerHTML = logBuf.map(renderLogLine).join('');
-  } else {
-    const caret = logEl.querySelector('.caret'); if (caret) caret.remove();
-    const html = fresh.length || logBuf.length && logBuf[logBuf.length - 1].gap
-      ? logBuf.slice(-(fresh.length + (logBuf[logBuf.length - fresh.length - 1] && logBuf[logBuf.length - fresh.length - 1].gap ? 1 : 0))).map(renderLogLine).join('')
-      : '';
-    if (html) logEl.insertAdjacentHTML('beforeend', html);
+    const fromDom = Math.min(drop, logEl.children.length);
+    let removedH = 0;
+    for (let i = 0; i < fromDom; i++) { const n = logEl.firstElementChild; removedH += n.getBoundingClientRect().height; n.remove(); }
+    if (drop > fromDom) added.splice(0, drop - fromDom);
+    if (!atBottom) logEl.scrollTop = Math.max(0, logEl.scrollTop - removedH);
   }
+  if (added.length) logEl.insertAdjacentHTML('beforeend', added.map(renderLogLine).join(''));
   const live = state === 'running' || state === 'plan_review' || state === 'queued';
   if (live && !logEl.querySelector('.caret')) logEl.insertAdjacentHTML('beforeend', '<span class="caret"></span>');
   const shown = logBuf.filter(e => !e.gap).length;
@@ -3310,7 +3318,8 @@ $('llmParallelTestBtn').addEventListener('click', async () => {
     const res = await fetch('/api/llm-parallel-test', {method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({local_base_url: p.local_base_url, local_api_key: p.local_api_key, local_backend: p.local_backend,
         local_timeout: p.local_timeout, http_proxy: p.http_proxy, https_proxy: p.https_proxy, verify_ssl: p.verify_ssl,
-        model: $('model') ? $('model').value.trim() : '', count, concurrency})});
+        // ⚙設定 モデル名 first; the form's model only when the main provider IS the local server
+        model: p.local_model || ($('provider').value === 'local' && $('model') ? $('model').value.trim() : ''), count, concurrency})});
     const d = await res.json();
     if (!res.ok) throw new Error(d.error || 'failed');
     out.innerHTML = `<b>${escapeHtml(d.verdict)}</b>`

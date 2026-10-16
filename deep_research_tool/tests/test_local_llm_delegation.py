@@ -95,8 +95,10 @@ class _Local:
 
 
 class _Handler(BaseHTTPRequestHandler):
-    """Loopback OpenAI-compatible server; records request bodies."""
+    """Loopback OpenAI-compatible server; records request bodies.
+    ``first_byte_delay`` emulates a server that cold-loads its model."""
     bodies = []
+    first_byte_delay = 0.0
 
     def log_message(self, *a):
         pass
@@ -108,6 +110,8 @@ class _Handler(BaseHTTPRequestHandler):
             _Handler.bodies.append(json.loads(raw))
         except Exception:
             _Handler.bodies.append({})
+        if _Handler.first_byte_delay:
+            time.sleep(_Handler.first_byte_delay)
         body = json.dumps({"id": "x", "object": "chat.completion", "choices": [
             {"index": 0, "message": {"role": "assistant", "content": "OK"},
              "finish_reason": "stop"}],
@@ -125,7 +129,9 @@ def local_server():
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     _Handler.bodies = []
+    _Handler.first_byte_delay = 0.0
     yield f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+    _Handler.first_byte_delay = 0.0
     httpd.shutdown()
 
 
@@ -215,6 +221,34 @@ class TestRoutingScope:
             _tool(self._config(local_llm_role="verify", local_backend="ollama"))
         assert f.call_args.kwargs["model"] == "llama3.1:8b"
 
+    def test_explicit_local_model_wins_even_when_it_equals_the_default(self):
+        # a user who typed the default tag for an OpenAI-compatible server
+        # gets exactly that, not the backend default
+        cfg = self._config(local_llm_role="verify", local_model="llama3.1:8b")
+        assert cfg.api.local_model_explicit is True
+        with patch("deep_research_tool.main.get_client", side_effect=_fake_factory) as f:
+            _tool(cfg)
+        assert f.call_args.kwargs["model"] == "llama3.1:8b"
+        # provider=local + form model also counts as explicit
+        with patch.dict("os.environ", {}, clear=True):
+            cfg2 = create_config(provider="local", local_base_url="http://llm.invalid/v1",
+                                 model="qwen")
+        assert cfg2.api.local_model == "qwen" and cfg2.api.local_model_explicit
+
+    def test_local_stage_override_uses_the_settings_model_name(self):
+        # per-stage model box > ⚙設定 モデル名 > backend default
+        cfg = self._config(local_model="lmstudio-x",
+                           stage_llm={"planning": {"provider": "local"},
+                                      "writing": {"provider": "local", "model": "w-y"}})
+        with patch("deep_research_tool.main.get_client", side_effect=_fake_factory):
+            tool = _tool(cfg)
+        assert tool.stage_llm_clients["planning"].delegate.model == "lmstudio-x"
+        assert tool.stage_llm_clients["writing"].delegate.model == "w-y"
+        cfg = self._config(stage_llm={"planning": {"provider": "local"}})
+        with patch("deep_research_tool.main.get_client", side_effect=_fake_factory):
+            tool = _tool(cfg)
+        assert tool.stage_llm_clients["planning"].delegate.model is None
+
     def test_local_stage_override_in_a_cloud_run_is_wrapped(self):
         cfg = self._config(stage_llm={"planning": {"provider": "local"}},
                            local_llm_fallback=False)
@@ -291,6 +325,36 @@ class TestDelegatedClient:
         assert main.calls == 0 and not d.tripped
         assert d.describe()["events"][0]["action"] == "raise"
 
+    def test_two_roles_on_one_server_switch_over_together(self):
+        # role=all: one local client, two wrappers — the second role must
+        # not wait for its own failure (another full inactivity timeout)
+        collector = ResearchWarnings.bind()
+        try:
+            local, main = _Local(ok_calls=0), _Main()
+            verify = self._wrap(local, main)
+            revise = DelegatedLLMClient(
+                local, fallback=main, role_label="検証後の本文修正",
+                setting_label="⚙設定 → ロールルーティング = all")
+            verify.generate("a")
+            assert verify.tripped and revise.tripped
+            revise.generate("b")
+            assert local.calls == 1 and main.calls == 2
+            assert revise.local_calls == 0 and revise.fallback_calls == 1
+            assert len(collector.to_dict_list()) == 1      # warned once
+        finally:
+            ResearchWarnings.unbind()
+
+    def test_reset_run_state_rearms_the_local_route(self):
+        local, main = _Local(ok_calls=0), _Main()
+        d = self._wrap(local, main)
+        d.generate("a")
+        assert d.tripped and d.failures == 1
+        d.reset_run_state()
+        assert not d.tripped and d.failures == 0 and d.local_calls == 0
+        assert d.describe()["preflight"] is None
+        local.ok_calls = 10
+        assert d.generate("b").content == "local:ok"      # local again
+
     def test_cancellation_passes_through_untouched(self):
         from deep_research_tool.utils.cancellation import RunCancelled
         local, main = _Local(ok_calls=0, error=RunCancelled("cancelled")), _Main()
@@ -327,6 +391,28 @@ class TestDelegatedClient:
         assert ei.value.base_url == "http://127.0.0.1:9/v1"
         assert d.preflight_result["ok"] is False
         assert client.max_tokens == 8192 and client.timeout == 5.0   # restored
+
+    def test_preflight_waits_the_configured_timeout_for_a_slow_first_byte(self, local_server):
+        # a server that cold-loads its model answers late: the preflight
+        # must honour the user's local_timeout, never a hidden shorter cap
+        from deep_research_tool.api import get_client
+        _Handler.first_byte_delay = 1.5
+        client = get_client(provider="local", api_key="x", model="m",
+                            base_url=local_server, backend="openai_compatible",
+                            local_timeout=5)
+        d = self._wrap(client, _Main())
+        assert d.preflight()["ok"] is True
+        assert client.timeout == 5.0
+        # and when the configured timeout IS exceeded, the message names it
+        _Handler.first_byte_delay = 2.5
+        client2 = get_client(provider="local", api_key="x", model="m",
+                             base_url=local_server, backend="openai_compatible",
+                             local_timeout=1)
+        d2 = self._wrap(client2, _Main())
+        with pytest.raises(DelegatedLLMUnavailable) as ei:
+            d2.preflight()
+        assert "タイムアウト（1 秒）" in str(ei.value)
+        _Handler.first_byte_delay = 0.0
 
     def test_preflight_against_a_live_server_sends_one_tiny_request(self, local_server):
         from deep_research_tool.api import get_client
@@ -374,6 +460,9 @@ class TestRun:
             role_label="最終本文の検証（クレーム抽出・判定）",
             setting_label="⚙設定 → ロールルーティング = verify")}
         msgs = []
+        # a previous run's switch-over must not hide the dead server: the
+        # route is re-armed and re-checked on every run
+        tool.role_llm_clients["verification"]._state.tripped = True
         with pytest.raises(DelegatedLLMUnavailable) as ei:
             tool.run(query="炭素繊維の市場調査", requirements="目次は2章構成でよい",
                      progress_callback=lambda m, p: msgs.append(m))

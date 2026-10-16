@@ -10,8 +10,12 @@ Why a wrapper instead of handing the raw LocalLLMClient around:
 - after the first failure the role falls back to the MAIN client for the
   rest of the run (``fallback_enabled``), so an auxiliary local server
   can never abort a multi-hour run — the switch is recorded and reported;
+  the switch is shared by every role that uses the same server, so a
+  dead server is waited on once, not once per role;
 - ``preflight()`` sends ONE tiny request before the run starts, so a dead
-  or misconfigured local server is reported at start, not hours later.
+  or misconfigured local server is reported at start, not hours later;
+- ``reset_run_state()`` re-arms the local route for the next run of a
+  reused tool instance.
 
 The wrapper only ever talks to the server the user configured; it never
 invents an endpoint.
@@ -36,6 +40,14 @@ class DelegatedLLMUnavailable(RuntimeError):
         self.base_url = base_url
         self.model = model
         self.cause = cause
+
+
+class _ServerState:
+    """Trip state shared by every wrapper of the same local client."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.tripped = False
 
 
 def _is_cancellation(exc: BaseException) -> bool:
@@ -79,7 +91,6 @@ class DelegatedLLMClient:
     """
 
     _FORWARDED = ("concurrency_limiter", "token_stats", "cancel_check")
-    PREFLIGHT_READ_TIMEOUT = 120.0
 
     def __init__(self, local: Any, *, fallback: Any = None,
                  role_label: str, setting_label: str,
@@ -92,7 +103,16 @@ class DelegatedLLMClient:
         self.fallback_enabled = bool(fallback_enabled) and fallback is not None
         self._on_fallback = on_fallback
         self._lock = threading.Lock()
-        self.tripped = False
+        # one trip flag per SERVER: two roles on the same local client
+        # (role=all) switch over together after the first failure
+        state = getattr(local, "_delegation_state", None)
+        if not isinstance(state, _ServerState):
+            state = _ServerState()
+            try:
+                setattr(local, "_delegation_state", state)
+            except Exception:
+                pass
+        self._state = state
         self.failures = 0
         self.local_calls = 0
         self.fallback_calls = 0
@@ -110,6 +130,12 @@ class DelegatedLLMClient:
     @property
     def fallback(self) -> Any:
         return self._fallback
+
+    @property
+    def tripped(self) -> bool:
+        """True once this server failed in this run and the role switched
+        to the main client (shared with every wrapper of the server)."""
+        return self._state.tripped
 
     def __getattr__(self, name: str) -> Any:
         # only reached when normal lookup fails; never recurse on privates
@@ -154,7 +180,7 @@ class DelegatedLLMClient:
                 f"{exc}")
 
     def _call(self, method: str, *args, **kwargs) -> Any:
-        if not self.tripped:
+        if not self._state.tripped:
             with self._lock:
                 self.local_calls += 1
             try:
@@ -170,7 +196,6 @@ class DelegatedLLMClient:
         return getattr(self._fallback, method)(*args, **kwargs)
 
     def _record_failure(self, exc: BaseException) -> None:
-        first = False
         with self._lock:
             self.failures += 1
             self.events.append({
@@ -178,9 +203,12 @@ class DelegatedLLMClient:
                 "error": str(exc)[:300],
                 "action": "fallback" if self.fallback_enabled else "raise",
             })
-            if self.fallback_enabled and not self.tripped:
-                self.tripped = True
-                first = True
+        first = False
+        if self.fallback_enabled:
+            with self._state.lock:
+                if not self._state.tripped:
+                    self._state.tripped = True
+                    first = True
         if first:
             fb = provider_name(self._fallback)
             message = (
@@ -200,23 +228,33 @@ class DelegatedLLMClient:
                 except Exception:
                     pass
 
+    def reset_run_state(self) -> None:
+        """Re-arm the local route for a new run of the same tool instance
+        (the server is checked again by the preflight)."""
+        with self._lock:
+            self.failures = 0
+            self.local_calls = 0
+            self.fallback_calls = 0
+            self.events = []
+            self.preflight_result = None
+        with self._state.lock:
+            self._state.tripped = False
+
     # ------------------------------------------------------------------
     # preflight
     # ------------------------------------------------------------------
     def preflight(self) -> Dict[str, Any]:
-        """One tiny request to the delegated server. Raises
-        DelegatedLLMUnavailable (with the setting that caused the
-        delegation) when it cannot answer."""
+        """One tiny request to the delegated server, with the CONFIGURED
+        timeout (a server that cold-loads its model for minutes is given
+        the time the user set). Raises DelegatedLLMUnavailable (with the
+        setting that caused the delegation) when it cannot answer."""
         local = self._local
         started = time.time()
         saved_tokens = getattr(local, "max_tokens", None)
-        saved_timeout = getattr(local, "timeout", None)
+        timeout = getattr(local, "timeout", None)
         try:
             try:
                 local.max_tokens = 8
-                if isinstance(saved_timeout, (int, float)):
-                    local.timeout = float(min(saved_timeout,
-                                              self.PREFLIGHT_READ_TIMEOUT))
             except Exception:
                 pass
             local.generate("ping", system_prompt="Reply with the single word OK.")
@@ -228,10 +266,15 @@ class DelegatedLLMClient:
                                      "error": str(e)[:300]}
             base_url = str(getattr(local, "base_url", "") or "")
             model = str(getattr(local, "model", "") or "")
+            waited = ""
+            if isinstance(timeout, (int, float)) and "inactivity" in str(e):
+                waited = (f"応答待ちは ⚙設定 → ローカルLLM → タイムアウト"
+                          f"（{timeout:g} 秒）で打ち切りました。")
             message = (
                 f"ローカルLLMへの委譲（{self.role_label}: {self.setting_label}）"
                 f"の疎通確認に失敗しました: {base_url}"
                 f"{'（モデル ' + model + '）' if model else ''} — {str(e)[:200]}。"
+                f"{waited}"
                 "⚙設定 → ローカルLLM のサーバーURL・バックエンド・モデル名を確認するか、"
                 "委譲をやめる場合はロールルーティングを「オフ」"
                 "（工程別のAI切り替えは「既定」）にしてください。"
@@ -244,8 +287,6 @@ class DelegatedLLMClient:
             try:
                 if saved_tokens is not None:
                     local.max_tokens = saved_tokens
-                if saved_timeout is not None:
-                    local.timeout = saved_timeout
             except Exception:
                 pass
         self.preflight_result = {"ok": True,

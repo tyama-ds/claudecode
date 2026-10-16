@@ -307,9 +307,12 @@ class DeepResearchTool:
         from dataclasses import fields as _fields
         from .config import APIConfig
         api = self.config.api
+        model = api.local_model
+        if getattr(api, "local_model_explicit", False):
+            # the user typed it (even if it equals the default tag)
+            return model or None
         default = next(f.default for f in _fields(APIConfig)
                        if f.name == "local_model")
-        model = api.local_model
         backend = getattr(api.local_backend, "value", api.local_backend)
         if model == default and backend != "ollama":
             return None
@@ -370,6 +373,9 @@ class DeepResearchTool:
                 ),
             }
             if provider == "local":
+                # per-stage model box > ⚙設定 モデル名 (--local-model) >
+                # backend default
+                kwargs["model"] = spec.get("model") or self._delegated_local_model()
                 kwargs["backend"] = spec.get(
                     "backend",
                     self.config.api.local_backend.value,
@@ -384,7 +390,8 @@ class DeepResearchTool:
                     client, f"工程別: {label}",
                     f"工程別のAI切り替え → {label} = ローカル")
             clients[stage] = client
-            print(f"[StageLLM] {stage}: {provider} / {spec.get('model') or 'default model'}")
+            print(f"[StageLLM] {stage}: {provider} / "
+                  f"{kwargs.get('model') or 'default model'}")
 
         # --- Local LLM role routing (feature flag, default off) -------
         # local_llm_role delegates the FINALIZATION roles (claim
@@ -517,6 +524,9 @@ class DeepResearchTool:
             if progress_callback:
                 progress_callback(msg, 1)
 
+        # a reused tool instance re-arms the local route for every run
+        for _key, client in delegated:
+            client.reset_run_state()
         for _key, client in delegated:
             d = client.describe()
             _say(f"ローカルLLMへ委譲: {d['role']} → {d['base_url']}"

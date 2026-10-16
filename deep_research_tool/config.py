@@ -205,6 +205,10 @@ class APIConfig:
 
     # Local LLM settings
     local_model: str = "llama3.1:8b"
+    # True when the user set local_model themselves (⚙設定 / --local-model /
+    # run_research(local_model=) / provider=local + model); a delegated
+    # local client then uses it even if it equals the default tag
+    local_model_explicit: bool = False
     local_backend: LocalLLMBackend = LocalLLMBackend.OLLAMA
     local_base_url: Optional[str] = None  # e.g., "http://localhost:11434"
     local_api_key: Optional[str] = None  # Optional auth for local servers
@@ -1308,12 +1312,14 @@ def create_config(
     # overrides; for provider='local' the main ``model`` below still wins
     if local_model:
         api_config.local_model = local_model
+        api_config.local_model_explicit = True
 
     if model:
         if provider == "openai":
             api_config.openai_model = model
         elif provider == "local":
             api_config.local_model = model
+            api_config.local_model_explicit = True
         else:
             api_config.anthropic_model = model
 
