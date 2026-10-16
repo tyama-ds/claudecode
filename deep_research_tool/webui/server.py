@@ -425,6 +425,12 @@ class ResearchJob:
         # callable returning which provider serves which stage / role
         # (tool.llm_routing_snapshot): delegation, preflight, fallback
         self.routing_source = None
+        # callable returning the run's overall progress plan
+        # (tool.progress_snapshot): current stage + live overall value
+        self.progress_source = None
+        # callable returning the research plan (tool.current_plan) so the
+        # table of contents stays viewable after the run started
+        self.plan_source = None
         # Plan review state (state == "plan_review")
         self.plan: Optional[Dict[str, Any]] = None
         self.plan_review_deadline: Optional[float] = None
@@ -453,6 +459,26 @@ class ResearchJob:
     def live_routing(self) -> Optional[Dict[str, Any]]:
         source = self.routing_source
         if source is None:
+            return None
+        try:
+            return source()
+        except Exception:
+            return None
+
+    def live_plan(self) -> Optional[Dict[str, Any]]:
+        """The research plan of a live run (None until it exists)."""
+        source = self.plan_source
+        if source is None:
+            return None
+        try:
+            return source()
+        except Exception:
+            return None
+
+    def live_progress(self) -> Optional[Dict[str, Any]]:
+        """The tool's progress plan snapshot while the run is active."""
+        source = self.progress_source
+        if source is None or self.state not in ("running", "plan_review"):
             return None
         try:
             return source()
@@ -580,12 +606,26 @@ class ResearchJob:
     def to_dict(self) -> Dict[str, Any]:
         with self._lock:
             verification = self.verification_snapshot()
+            # the bar: the last reported value, or the plan's live value
+            # (verification counters) when that is further — never 100
+            # before the job actually finished
+            progress = self.progress
+            stage = None
+            plan = self.live_progress()
+            if plan:
+                try:
+                    progress = max(progress, min(float(plan.get("overall") or 0), 99.5))
+                    self.progress = progress        # never shown lower later
+                except (TypeError, ValueError):
+                    pass
+                stage = plan.get("stage")
             data = {
                 "job_id": self.job_id,
                 "query": self.query,
                 "state": self.state,
                 "verification": verification,
-                "progress": round(self.progress, 1),
+                "progress": round(progress, 1),
+                "stage": stage,
                 "message": self.message,
                 "log": list(self.log)[-50:],
                 "log_seq": self._log_seq,
@@ -597,7 +637,9 @@ class ResearchJob:
                 "queue_position": self.queue_position,
                 "cancel_requested": bool(getattr(self, "cancel_requested",
                                                  False)),
-                "plan": self.plan,
+                # the reviewed plan, or the live one once research started
+                # (viewable throughout the run, not only during review)
+                "plan": self.plan or self.live_plan(),
                 "params_summary": self.params_summary,
                 "saved_artifacts": self.live_saved_artifacts(),
                 "concurrency": self.live_concurrency(),
@@ -971,6 +1013,8 @@ class JobManager:
             job.artifacts_source = tool.current_saved_artifacts
             job.concurrency_source = tool.concurrency_snapshot
             job.routing_source = tool.llm_routing_snapshot
+            job.progress_source = tool.progress_snapshot
+            job.plan_source = tool.current_plan
             job.update("調査を開始します", 2)
 
             documents = expand_document_paths(params.get("local_documents"))
@@ -1070,6 +1114,8 @@ class JobManager:
                 "performance": result.get("performance"),
                 # which provider served which role (delegation / fallback)
                 "llm_routing": result.get("llm_routing"),
+                # the researched table of contents / queries (history too)
+                "plan": result.get("research_plan"),
             }
             job.progress = 100.0
             if result.get("verification_cancelled"):
@@ -1101,6 +1147,7 @@ class JobManager:
                 job.result = {
                     "saved_artifacts": saved,
                     "session_id": getattr(tool, "partial_session_id", None),
+                    "plan": job.live_plan(),
                     "warnings": job_warnings.to_dict_list(),
                     "warning_count": job_warnings.count(),
                     "status": {"process": "cancelled",

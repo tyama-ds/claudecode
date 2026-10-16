@@ -157,6 +157,9 @@ h2 .n {
 label { display: block; font-size: 12px; color: var(--muted); margin: 14px 0 6px; font-weight: 600; }
 .hint { font-size: 11px; color: var(--muted); margin: 4px 0 0; line-height: 1.5; }
 .plan-review { margin-top: 14px; border: 2px solid var(--accent); border-radius: 12px; padding: 14px; }
+.plan-view { margin-top: 12px; border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; }
+.plan-view summary { cursor: pointer; font-weight: 700; }
+.plan-view[open] summary { margin-bottom: 8px; }
 .pr-head { display: flex; justify-content: space-between; align-items: center; }
 .pr-title { font-weight: 700; font-size: 14px; }
 .pr-count { font-size: 13px; font-weight: 700; color: var(--accent); }
@@ -1259,6 +1262,12 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
         </div>
       </div>
 
+      <!-- the plan stays viewable after the run started (and after it finished) -->
+      <details class="plan-view" id="planView" style="display:none">
+        <summary>📑 調査目次（計画）— 開いて参照できます</summary>
+        <div class="pr-plan" id="planViewContent"></div>
+      </details>
+
       <div id="verifyPanel" style="display:none;margin-top:14px;
            border:1px solid var(--border,#ddd);border-radius:10px;
            padding:12px 14px">
@@ -1924,6 +1933,7 @@ function stepIndex(pct) {
 }
 
 let lastPlanJson = null;
+let lastPlanViewJson = null;   // the read-only plan viewer (after start)
 let planBusy = false;
 
 function formatPlan(plan) {
@@ -2059,6 +2069,7 @@ function render(status) {
     logSeq = -1;
     logBuf = []; logShownSeq = -1; logDropped = 0; $('log').innerHTML = ''; $('logMetaText').textContent = '';
     lastPlanJson = null;
+    lastPlanViewJson = null; $('planViewContent').innerHTML = '';
     $('jobBanner').className = 'banner';
     $('resultPanel').style.display = 'none';
     vCancelRequested = false;
@@ -2100,7 +2111,9 @@ function render(status) {
     }
   }
 
-  const active = stepIndex(pct);
+  // the server names the current stage (progress plan); the percentage
+  // thresholds are only a fallback for older servers
+  const active = status.stage && typeof status.stage.step === 'number' ? status.stage.step : stepIndex(pct);
   document.querySelectorAll('.step').forEach((el, i) => {
     el.classList.toggle('done', status.state === 'completed' || i < active);
     el.classList.toggle('active', status.state === 'running' && i === active);
@@ -2112,6 +2125,15 @@ function render(status) {
   } else {
     $('planReviewPanel').style.display = 'none';
     lastPlanJson = null;
+  }
+  // the table of contents stays available once research started
+  const planData = status.state !== 'plan_review' && (status.plan || (status.result && status.result.plan));
+  if (planData && planData.table_of_contents) {
+    const json = JSON.stringify(planData);
+    if (json !== lastPlanViewJson) { lastPlanViewJson = json; $('planViewContent').innerHTML = formatPlan(planData); }
+    $('planView').style.display = 'block';
+  } else {
+    $('planView').style.display = 'none';
   }
 
   renderVerification(status);
@@ -3043,7 +3065,7 @@ function renderReoutputBox(target) {
 const STEP_NAMES = ['計画', '調査・収集', '統合・評価', 'レポート生成'];
 function renderExecSummary(status) {
   const rows = [];
-  let stage = STEP_NAMES[stepIndex(status.progress || 0)];
+  let stage = (status.stage && status.stage.label) || STEP_NAMES[stepIndex(status.progress || 0)];
   if (status.state === 'plan_review') stage = '計画のレビュー待ち';
   else if (status.state === 'queued') stage = `実行待ち（${status.queue_position || '?'}番目）`;
   else if (status.state === 'completed') stage = '完了';
@@ -3630,10 +3652,17 @@ const activityViz = (() => {
     if (status.state === 'plan_review') return 'plan';
     if (v && v.phase && v.phase !== 'idle') return 'verify';
     if (g('verify')) return 'verify';
-    if (/計画|plan/i.test(msg) && pct <= 12) return 'plan';
     if (g('extract')) return 'extract';
     if (g('fetch')) return 'fetch';
     if (g('search')) return 'search';
+    // the server's progress plan names the stage (preferred over guessing from text / percentage)
+    const key = status.stage && status.stage.key;
+    if (key) {
+      const byKey = {plan: 'plan', research: g('llm') ? 'write' : 'search', deep_think: 'synth', evidence_review: 'synth',
+        fermi: 'synth', figures: 'synth', writing: 'write', verification: 'verify', rendering: 'output', done: 'output'};
+      if (byKey[key]) return byKey[key];
+    }
+    if (/計画|plan/i.test(msg) && pct <= 12) return 'plan';
     if (/Generating report|レポートを生成|再出力|rendering/i.test(msg)) return 'output';
     if (/Synthesizing|統合|要旨|Reviewing all evidence|AutoFigures|図表|DeepThink|フェルミ/i.test(msg)) return 'synth';
     if (/Researching|Reusing completed section|章/.test(msg)) return g('llm') ? 'write' : 'search';
