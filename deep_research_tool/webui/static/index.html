@@ -264,7 +264,10 @@ button.danger { background: var(--error-soft); color: var(--error); border: 1px 
 button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--error) 15%, var(--card)); border-color: var(--error); }
 
 /* ---- progress panel ---- */
-.stepper { display: flex; align-items: center; margin: 0 0 10px; }
+.stepper { display: flex; align-items: center; margin: 12px 0 2px; }
+/* the progress sits right under the heading of the results card */
+.results-card h2 { margin-bottom: 10px; padding-bottom: 10px; }
+.results-card .job-tabs { margin-bottom: 6px; }
 .step { display: flex; flex-direction: column; align-items: center; flex: 1; position: relative; }
 .step .dot {
   width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center;
@@ -1233,13 +1236,9 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
     <div class="job-tabs" id="jobTabs" style="display:none"></div>
 
     <div id="progressPanel" style="display:none">
-      <div class="stepper">
-        <div class="step" data-step="0"><div class="dot">📋</div><div class="lbl">計画</div></div>
-        <div class="step" data-step="1"><div class="dot">🌐</div><div class="lbl">調査・収集</div></div>
-        <div class="step" data-step="2"><div class="dot">🧩</div><div class="lbl">統合・評価</div></div>
-        <div class="step" data-step="3"><div class="dot">📄</div><div class="lbl">レポート生成</div></div>
-      </div>
-
+      <!-- the progress comes FIRST, right under the heading: two bars (the
+           whole run, and the current stage inside it), then the status line;
+           the four-step overview follows below them -->
       <!-- two bars: the whole run, and the current stage inside it -->
       <div class="bar-row overall">
         <div class="pct-row">
@@ -1261,6 +1260,12 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
       </div>
       <!-- what is being done right now, in plain words (第N章を執筆しています …) -->
       <div class="status-line" id="statusLine" style="display:none"><span class="status-icon">🧭</span><span id="statusText"></span></div>
+      <div class="stepper">
+        <div class="step" data-step="0"><div class="dot">📋</div><div class="lbl">計画</div></div>
+        <div class="step" data-step="1"><div class="dot">🌐</div><div class="lbl">調査・収集</div></div>
+        <div class="step" data-step="2"><div class="dot">🧩</div><div class="lbl">統合・評価</div></div>
+        <div class="step" data-step="3"><div class="dot">📄</div><div class="lbl">レポート生成</div></div>
+      </div>
       <div class="msg" id="currentMsg">待機中...</div>
       <div class="activity-card" id="activityPanel">
         <div class="act-head">
