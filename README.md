@@ -849,6 +849,17 @@ Web UIの「設定 → 生成AI・プロキシ → ローカルLLM」で、バ�
 
 参考：[LM StudioのChat Completions](https://lmstudio.ai/docs/developer/openai-compat/chat-completions)、[モデル情報・生成統計のAPI](https://lmstudio.ai/docs/developer/rest/endpoints)。
 
+## チャート（仕様 JSON ＋ 固定レンダラ、v1.5.0）
+
+自動図表（`auto_figures`）のチャートは、v1.5.0 から「LLM は仕様だけを書き、数値はデータ層からしか来ない」方式（`deep_research_tool/chartkit/`）で作ります。以前の方式（抽出した数値を総当たりで棒グラフにする）は `chart_engine="legacy"` で残してあります。
+
+1. **データ層（決定的な Python）**: 調査中に抽出した数値を章ごとに整理し、対象・指標・年・単位で束ねた系列にします。同じ系列の値は 1 つの表示単位にそろえ（桁を変えた値は「換算」）、同じ（対象・指標・年）に複数の出典があれば一次資料を優先して 1 つ選びます（平均も合計もしません）。値ごとに確度タグ 公表 / 換算 / 導出 / 推定 / 二次 と出所を付けます。公表＝官公庁・規制当局・証券報告・学術・企業の IR / プレスリリース（`chart_primary_domains` で追加可）。CAGR / 前年比は「導出」。欠損年の補間と全体×部分の「シェア」生成は値の捏造になるため既定オフです（`derived_fill_missing`、`derived_market_shares`）。
+2. **仕様層（LLM、章ごとに 1 回）**: 章の題と目的、データのカタログ（キー・意味・単位・ラベル・確度の種類・出典数。値は渡しません）を受け取り、パネルの JSON だけを返します。形式は bar / hbar / stacked_bar / stacked_hbar / line_xy、強調は 1 系列、二軸なし、caption（出所と確度）と judgment（見るべき点）が必須。上限は章あたり `chart_max_per_section`（既定 6、⚙設定 → 機能）。
+3. **検証層**: 参照の存在、ラベル数と値数、系列数 1〜8、単位の混在、値が 1 つ・全部同じ、などを機械的に検査し、通らないパネルは捨てます（理由はログに出ます）。
+4. **描画層（固定コード）**: 同じパネルから、Markdown / Word / PDF 用に matplotlib の PNG、ブラウザ用に Chart.js 4.4.1 を同梱した単一 HTML（`reports/figures/charts.html`、外部通信なし）を出します。強調 1 系列は青・文脈は灰・負値は赤、公表以外の値は斜線、数値ラベル、題に単位、凡例に「斜線＝換算・導出・推定・二次」、各パネルの下に出所と見るべき点。Web UI では結果の「出力」タブから別タブで開けます。
+
+チャートの内容（系列・値・確度・注記）は図表の意味内容として凍結・照合されるので、描画後に数値が変わることはありません。図表一覧（付録D）と要旨の提言は、既定の V1 レポートでも Markdown / Word / PDF / HTML のすべてに出力されます（v1.5.0 で修正。以前は V1 がこれらを落としていたため、チャートがある実行は成果物検査で止まっていました）。サンプル（ZYN 市場調査の `data.json` / `panels.json`）は `deep_research_tool/chartkit/samples/zyn/` にあり、テストの固定データとして使っています。
+
 ### ローカルLLMへの委譲（ロールルーティング）
 
 メインのプロバイダが OpenAI / Anthropic のまま、**最終本文の検証（クレーム抽出・判定）** と **検証後の本文修正** だけをローカルLLMに任せる機能です。Web UI の「⚙ 設定 → ローカルLLM → ロールルーティング」（verify / draft / all）、CLI の `--local-llm-role`、`run_research(local_llm_role=...)` で指定します。サーバーURL（⚙設定、`--local-base-url`、または環境変数 `LOCAL_LLM_BASE_URL`）が必要です。

@@ -2016,15 +2016,19 @@ class DerivedMetricsCalculator:
         """Initialize with data store."""
         self.store = store
 
-    def calculate_all(self) -> List[NumericalDataPoint]:
-        """Calculate all possible derived metrics."""
+    def calculate_all(self, include_shares: bool = True) -> List[NumericalDataPoint]:
+        """Calculate all possible derived metrics. ``include_shares``: the
+        part/total "market share" points pair every smaller market-size
+        number with every larger one of the same year — fabricated unless
+        the entities really nest, so the chart pipeline leaves it off."""
         derived = []
 
         # Calculate CAGRs for time series
         derived.extend(self.calculate_cagrs())
 
         # Calculate market shares if we have total and parts
-        derived.extend(self.calculate_market_shares())
+        if include_shares:
+            derived.extend(self.calculate_market_shares())
 
         # Calculate growth rates for consecutive years
         derived.extend(self.calculate_yoy_growth())

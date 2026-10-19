@@ -65,6 +65,8 @@ _CONFIG_PARAM_MAP = {
     "live_report_word": "live_report_word",
     "chart_library": "chart_library",
     "auto_figures": "auto_figures",
+    "chart_max_per_section": "chart_max_per_section",
+    "chart_engine": "chart_engine",
     "enable_verification": "enable_verification",
     "plan_review": "plan_review",
     "plan_review_timeout": "plan_review_timeout",
@@ -214,6 +216,7 @@ _PARAM_CONVERTERS = {
     "local_llm_role": _local_llm_role,
     "local_timeout": _int_range(1, 3600),
     "local_concurrency": _int_range(1, 16),
+    "chart_max_per_section": _int_range(1, 12),
     "ai_crawl_max_pages": _int_range(1, 200),
     "ai_crawl_site_depth": _int_range(0, 10),      # 0 = seeds only
     "gap_fill_rounds": _int_range(0, 10),
@@ -1139,6 +1142,8 @@ class JobManager:
                 "llm_routing": result.get("llm_routing"),
                 # the researched table of contents / queries (history too)
                 "plan": result.get("research_plan"),
+                # the offline chart page (Chart.js) of the spec engine
+                "charts_html": result.get("charts_html"),
             }
             job.progress = 100.0
             if result.get("verification_cancelled"):

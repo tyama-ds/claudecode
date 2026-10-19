@@ -271,6 +271,13 @@ class ReportGenerator:
                 for finding in exec_summary["key_findings"]:
                     content_parts.append(f"- {finding}\n")
 
+            # recommendations are frozen with the summary (manifest
+            # extras): they must reach the artifact like the findings
+            if exec_summary.get("recommendations"):
+                content_parts.append("\n### Recommendations\n")
+                for rec in exec_summary["recommendations"]:
+                    content_parts.append(f"- {rec}\n")
+
             content_parts.append("\n---\n")
 
         # Table of Contents
@@ -310,6 +317,13 @@ class ReportGenerator:
                         content_parts.append(self._process_citations(
                             sub_content.get("content", "")
                         ) + "\n")
+
+        # Chapters outside the plan (e.g. the verified figure appendix)
+        for sid, text in self._extra_sections(plan, renumbered_contents):
+            content_parts.append("\n")
+            if not text.lstrip().startswith("#"):
+                content_parts.append(f"## {sid}\n\n")
+            content_parts.append(self._process_citations(text).rstrip() + "\n")
 
         # Verification Summary
         if verification_result:
@@ -449,6 +463,11 @@ class ReportGenerator:
                 for finding in exec_summary["key_findings"]:
                     doc.add_paragraph(finding, style="List Bullet")
 
+            if exec_summary.get("recommendations"):
+                doc.add_heading("Recommendations", level=2)
+                for rec in exec_summary["recommendations"]:
+                    doc.add_paragraph(rec, style="List Bullet")
+
         # Table of Contents placeholder
         if self.include_toc and plan:
             doc.add_heading("Table of Contents", level=1)
@@ -487,6 +506,31 @@ class ReportGenerator:
                         doc.add_paragraph(self._strip_citations(
                             sub_content.get("content", "")
                         ))
+
+        # Chapters outside the plan (e.g. the verified figure appendix)
+        for sid, text in self._extra_sections(plan, renumbered_contents):
+            blocks = self._markdown_blocks(self._strip_citations(text))
+            if not blocks or blocks[0][0] not in ("h2", "h3"):
+                doc.add_heading(sid, level=1)
+            for kind, payload in blocks:
+                if kind == "h2":
+                    doc.add_heading(payload, level=1)
+                elif kind == "h3":
+                    doc.add_heading(payload, level=2)
+                elif kind == "table":
+                    ncols = max(len(r) for r in payload)
+                    t = doc.add_table(rows=len(payload), cols=ncols)
+                    try:
+                        t.style = "Table Grid"
+                    except Exception:
+                        pass
+                    for i, row in enumerate(payload):
+                        for j, cell in enumerate(row):
+                            t.rows[i].cells[j].text = cell
+                elif kind == "bullet":
+                    doc.add_paragraph(payload, style="List Bullet")
+                else:
+                    doc.add_paragraph(payload)
 
         # Verification Summary
         if verification_result:
@@ -645,6 +689,17 @@ class ReportGenerator:
                 exec_summary.get("executive_summary", ""),
                 body_style
             ))
+            for head, key in (("Key Findings", "key_findings"),
+                              ("Recommendations", "recommendations")):
+                if exec_summary.get(key):
+                    story.append(Paragraph(head, heading2_style))
+                    for entry in exec_summary[key]:
+                        safe = str(entry).replace("&", "&amp;").replace(
+                            "<", "&lt;").replace(">", "&gt;")
+                        try:
+                            story.append(Paragraph("• " + safe, body_style))
+                        except Exception:
+                            story.append(Paragraph("• " + safe[:500], body_style))
             story.append(Spacer(1, 20))
 
         # Main Content
@@ -686,6 +741,36 @@ class ReportGenerator:
                             story.append(Paragraph(safe_content[:2000], body_style))
                         except Exception:
                             story.append(Paragraph("Content unavailable", body_style))
+
+        # Chapters outside the plan (e.g. the verified figure appendix)
+        def _esc(s):
+            return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        for sid, text in self._extra_sections(plan, renumbered_contents):
+            blocks = self._markdown_blocks(self._strip_citations(text))
+            if not blocks or blocks[0][0] not in ("h2", "h3"):
+                story.append(Paragraph(_esc(sid), heading1_style))
+            for kind, payload in blocks:
+                try:
+                    if kind == "h2":
+                        story.append(Paragraph(_esc(payload), heading1_style))
+                    elif kind == "h3":
+                        story.append(Paragraph(_esc(payload), heading2_style))
+                    elif kind == "table":
+                        ncols = max(len(r) for r in payload)
+                        rows = [[Paragraph(_esc(c), body_style) for c in r]
+                                + [""] * (ncols - len(r)) for r in payload]
+                        t = Table(rows)
+                        t.setStyle(TableStyle([
+                            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                            ('BACKGROUND', (0, 0), (-1, 0), colors.beige),
+                            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                        ]))
+                        story.append(t)
+                    else:
+                        prefix = "• " if kind == "bullet" else ""
+                        story.append(Paragraph(prefix + _esc(payload), body_style))
+                except Exception:
+                    story.append(Paragraph("Content unavailable", body_style))
 
         # Verification Summary
         if verification_result:
@@ -795,6 +880,32 @@ class ReportGenerator:
                 section_html += "</section>"
                 sections_html.append(section_html)
 
+        # Chapters outside the plan (e.g. the verified figure appendix)
+        import html as _html
+        for sid, text in self._extra_sections(plan, renumbered_contents):
+            blocks = self._markdown_blocks(text)
+            parts = [f'<section id="{self._slugify(sid) or "extra"}">']
+            if not blocks or blocks[0][0] not in ("h2", "h3"):
+                parts.append(f"<h2>{_html.escape(sid)}</h2>")
+            for kind, payload in blocks:
+                if kind == "h2":
+                    parts.append(f"<h2>{_html.escape(payload)}</h2>")
+                elif kind == "h3":
+                    parts.append(f"<h3>{_html.escape(payload)}</h3>")
+                elif kind == "table":
+                    head, *body = payload
+                    parts.append("<table>" + "<tr>" + "".join(
+                        f"<th>{_html.escape(c)}</th>" for c in head) + "</tr>"
+                        + "".join("<tr>" + "".join(
+                            f"<td>{_html.escape(c)}</td>" for c in r) + "</tr>"
+                            for r in body) + "</table>")
+                elif kind == "bullet":
+                    parts.append(f"<ul><li>{self._markdown_to_html(payload)[3:-4]}</li></ul>")
+                else:
+                    parts.append(self._markdown_to_html(payload))
+            parts.append("</section>")
+            sections_html.append("\n".join(parts))
+
         # Executive summary
         exec_summary = renumbered_contents.get("_executive_summary", {})
         exec_html = ""
@@ -802,12 +913,16 @@ class ReportGenerator:
             findings_html = "".join(
                 f"<li>{f}</li>" for f in exec_summary.get("key_findings", [])
             )
+            recs_html = "".join(
+                f"<li>{r}</li>" for r in exec_summary.get("recommendations", [])
+            )
             exec_html = f"""
             <section class="executive-summary">
                 <h2>Executive Summary</h2>
                 <p>{exec_summary.get('executive_summary', '')}</p>
                 <h3>Key Findings</h3>
                 <ul>{findings_html}</ul>
+                {f'<h3>Recommendations</h3><ul>{recs_html}</ul>' if recs_html else ''}
             </section>
             """
 
@@ -1007,6 +1122,75 @@ class ReportGenerator:
             f.write(html_content)
 
         return filepath
+
+    @staticmethod
+    def _extra_sections(plan, contents) -> List[Tuple[str, str]]:
+        """Chapters stored in section_contents that are NOT part of the
+        research plan — e.g. the verified figure appendix (付録D) that the
+        finalization step adds after the body is frozen. They ship after
+        the main body: a frozen chapter that never reaches the artifact
+        fails the artifact content check."""
+        planned = set()
+        if plan is not None:
+            for item in plan.table_of_contents.items:
+                planned.add(str(item.section))
+                for sub in item.subsections:
+                    planned.add(str(sub.section))
+        out = []
+        for sid, data in (contents or {}).items():
+            if str(sid).startswith("_") or str(sid) in planned:
+                continue
+            text = data.get("content", "") if isinstance(data, dict) else ""
+            if text and str(text).strip():
+                out.append((str(sid), str(text)))
+        return out
+
+    @staticmethod
+    def _markdown_blocks(text: str) -> List[Tuple[str, Any]]:
+        """Split simple markdown into blocks for the DOCX/PDF/HTML
+        renderers: ("h2"|"h3", title), ("table", rows), ("bullet", text),
+        ("para", text). Headings written as "## 付録D. 図表一覧" keep
+        their text; table separator rows (|---|) are dropped."""
+        blocks: List[Tuple[str, Any]] = []
+        para: List[str] = []
+        table: List[List[str]] = []
+
+        def flush_para():
+            if para:
+                blocks.append(("para", "\n".join(para).strip()))
+                para.clear()
+
+        def flush_table():
+            if table:
+                blocks.append(("table", [list(r) for r in table]))
+                table.clear()
+
+        for raw in (text or "").splitlines():
+            line = raw.rstrip()
+            s = line.strip()
+            if s.startswith("|") and s.endswith("|") and len(s) > 1:
+                flush_para()
+                cells = [c.strip() for c in s[1:-1].split("|")]
+                if all(re.fullmatch(r":?-{2,}:?", c or "--") for c in cells):
+                    continue                          # separator row
+                table.append(cells)
+                continue
+            flush_table()
+            m = re.match(r"^(#{1,6})\s+(.*)$", s)
+            if m:
+                flush_para()
+                blocks.append(("h3" if len(m.group(1)) >= 3 else "h2",
+                               m.group(2).strip()))
+            elif re.match(r"^[-*•]\s+", s):
+                flush_para()
+                blocks.append(("bullet", re.sub(r"^[-*•]\s+", "", s)))
+            elif not s:
+                flush_para()
+            else:
+                para.append(s)
+        flush_para()
+        flush_table()
+        return blocks
 
     def _slugify(self, text: str) -> str:
         """Convert text to URL-friendly slug."""

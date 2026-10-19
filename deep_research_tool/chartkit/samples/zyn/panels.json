@@ -1,0 +1,96 @@
+[
+  {
+    "id": "us_shipments", "form": "bar",
+    "title": "米国ZYN 四半期出荷 vs 実売ベース推定（百万缶）",
+    "labels_ref": "quarters",
+    "series": [
+      { "name": "出荷", "values_ref": "zyn_us.shipments", "role": "emphasis" },
+      { "name": "実売ベース推定", "values_ref": "zyn_us.offtake_base", "role": "context" }
+    ],
+    "unit": "百万缶", "y_max": 240,
+    "caption": "25Q2・25Q3・26Q2の缶数は公表値からの換算（15個/缶、通年7.94億缶との整合を確認）。26Q1の実売ベースは1Q'25基準1.6億缶×実売+10%からの推定。26Q2の実売ベースはPMI未開示（横ばい〜微増）。",
+    "judgment": "青と灰の差が流通在庫の積み増し・調整分。26Q1の落ち込みはほぼ在庫要因。"
+  },
+  {
+    "id": "offtake_growth", "form": "bar",
+    "title": "ZYN 実売の前年比成長率（%）",
+    "labels_ref": "growth_periods",
+    "series": [ { "name": "前年比", "values_ref": "zyn_us.offtake_growth", "role": "emphasis" } ],
+    "unit": "%", "y_max": 30, "height": 220,
+    "caption": "2025通年・25Q4・26Q1・26Q2はPMI決算（Nielsen推計）。26Q2の「横ばい〜微増」は+1で表示。直近4週はAltria開示値（二次情報経由）。",
+    "judgment": "減速は在庫では説明できず、実需の伸びが止まりつつあることを示す。"
+  },
+  {
+    "id": "us_share", "form": "hbar",
+    "title": "ZYNの米国シェア：2025年通年 → 2026年1Q（%）",
+    "labels_ref": "share_metrics",
+    "series": [
+      { "name": "2025年通年（PMI公表）", "values_ref": "zyn_us.share_fy2025", "role": "emphasis" },
+      { "name": "2026年1Q（Nielsen／NYT報道）", "values_ref": "zyn_us.share_26q1", "role": "context" }
+    ],
+    "unit": "%", "y_max": 100, "height": 210,
+    "caption": "2025年通年はPMI公表、2026年1QはNielsen／NYT報道（二次）。測定条件が同一とは限らない。",
+    "judgment": "数量・金額とも5〜6ポイント低下。"
+  },
+  {
+    "id": "us_composition", "form": "stacked_hbar",
+    "title": "米国ニコチンパウチ市場の構成（概算、%）",
+    "labels_ref": "us_composition_labels",
+    "series": [
+      { "name": "ZYN", "values_ref": "us_composition.zyn", "role": "part" },
+      { "name": "on!", "values_ref": "us_composition.on", "role": "part" },
+      { "name": "その他", "values_ref": "us_composition.other", "role": "part" }
+    ],
+    "unit": "%", "y_max": 100, "height": 80,
+    "caption": "ZYN＝2026年1Q数量シェア（報道）、on!＝2026年2Q小売シェア（Altria開示）、その他は差分（VELO・Rogue・ALP等、個別数値は未公表）。時期が揃っていない概算値。",
+    "judgment": "「その他」約30%の中身（VELO・ALP）が未公表である点が判断の限界。"
+  },
+  {
+    "id": "global_share", "form": "hbar",
+    "title": "世界のニコチンパウチ 企業別金額シェア 2025年（%）",
+    "labels_ref": "global_companies",
+    "series": [ { "name": "金額シェア", "values_ref": "global.value_share_2025", "role": "context" } ],
+    "highlight": ["PMI（ZYN）"],
+    "unit": "%", "y_max": 40, "height": 270,
+    "caption": "Euromonitor（Tobacco Tactics掲載）。「各約3分の1」を33で表示、その他は差分。",
+    "judgment": "米国ではZYNが過半だが、世界ではVELOと並ぶ2強。"
+  },
+  {
+    "id": "global_volume", "form": "bar",
+    "title": "世界のニコチンパウチ小売販売数量（10億個、Euromonitor）",
+    "labels_ref": "global_volume_labels",
+    "series": [ { "name": "販売数量", "values_ref": "global.volume_bn", "role": "context" } ],
+    "highlight": ["うち米国 2024"],
+    "unit": "10億個", "y_max": 28, "height": 220,
+    "caption": "Euromonitor（Tobacco Asia掲載）。2023→2024は+50.5%。2023年の米国内訳は未公表。",
+    "judgment": "2024年の米国比率は約60%（14.0÷23.5）。"
+  },
+  {
+    "id": "market_estimates", "form": "line_xy",
+    "title": "世界市場規模の推計・予測：調査会社別（10億ドル）",
+    "series": [
+      { "name": "Euromonitor", "values_ref": "estimates.euromonitor", "role": "part" },
+      { "name": "IMARC", "values_ref": "estimates.imarc", "role": "part" },
+      { "name": "Grand View Research", "values_ref": "estimates.gvr", "role": "part" },
+      { "name": "Persistence MR", "values_ref": "estimates.persistence", "role": "part" },
+      { "name": "SkyQuest", "values_ref": "estimates.skyquest", "role": "part" },
+      { "name": "Research and Markets", "values_ref": "estimates.rnm", "role": "part" }
+    ],
+    "unit": "10億ドル", "y_max": 55, "height": 300,
+    "caption": "同じ「世界市場」でも現状値（2024〜26年）が約31億〜100億ドル超と3倍以上食い違う。小売額か出荷額か、対象製品範囲の定義が異なる。Euromonitorの2024年値は「100億ドル超」を10で表示。",
+    "judgment": "単一の数字として扱わず、出所と定義を併記して使う。"
+  },
+  {
+    "id": "capacity", "form": "stacked_bar",
+    "title": "米国ZYN：生産能力 vs 出荷（百万缶/年）",
+    "labels_ref": "capacity_labels",
+    "series": [
+      { "name": "出荷（実績・年率換算）", "values_ref": "capacity.shipments", "role": "emphasis" },
+      { "name": "Owensboro（KY）能力", "values_ref": "capacity.owensboro", "role": "context" },
+      { "name": "Aurora（CO）能力", "values_ref": "capacity.aurora", "role": "context2" }
+    ],
+    "unit": "百万缶", "y_max": 1800, "height": 270,
+    "caption": "Owensboro約9億缶は2024年8月のPMI発表（2025年時点の能力）。Auroraは2026年末3億缶・2028年7億缶の計画（報道ベース）。2026年出荷は上期実績×2の機械的換算で、下期の新製品効果は含まない。",
+    "judgment": "2026年末の能力は年率換算出荷の約1.7倍。需要が再加速しなければ稼働率が下がる。"
+  }
+]

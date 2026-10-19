@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deep-research-tool"
-version = "1.4.2"
+version = "1.5.0"
 description = "Automated research tool with AI assistance"
 readme = "README.md"
 license = {text = "MIT"}
@@ -83,6 +83,7 @@ exclude = ["tests*", "examples*"]
 
 [tool.setuptools.package-data]
 "deep_research_tool.webui" = ["static/*.html"]
+"deep_research_tool.chartkit" = ["template.html", "prelude.js", "vendor/*", "samples/*/*.json"]
 
 [tool.black]
 line-length = 100

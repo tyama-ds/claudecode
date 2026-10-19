@@ -1803,6 +1803,9 @@ class DeepResearchTool:
             "report_path": str(active_report_path),
             "report_path_original": str(report_path),
             "figures_report_path": str(figures_report_path) if figures_report_path else None,
+            # the chart page (Chart.js, offline) when the spec engine drew charts
+            "charts_html": (str(self.charts_html_path)
+                            if getattr(self, "charts_html_path", None) else None),
             "evidence_json": str(evidence_json),
             # None stays None (the UI must not offer a file called "None")
             "evidence_csv": str(evidence_csv) if evidence_csv else None,
@@ -3069,7 +3072,9 @@ Output only the text (no JSON, no heading):"""
                 # Step 2: Calculate derived metrics if enabled
                 if self.config.report.derived_metrics and numerical_store:
                     calculator = DerivedMetricsCalculator(numerical_store)
-                    derived = calculator.calculate_all()
+                    derived = calculator.calculate_all(
+                        include_shares=bool(getattr(self.config.report,
+                                                    "derived_market_shares", False)))
                     numerical_store.add_many(derived)
 
                     # Fill missing data if enabled
@@ -3078,8 +3083,10 @@ Output only the text (no JSON, no heading):"""
                             interpolated = calculator.interpolate_missing_years(series)
                             numerical_store.add_many(interpolated)
 
-                # Step 3: Analyze for intelligent charts if enabled
-                if self.config.report.intelligent_charts and numerical_store:
+                # Step 3: Analyze for intelligent charts if enabled (the
+                # legacy store-wide scan; the spec engine replaces it)
+                if self.config.report.intelligent_charts and numerical_store \
+                        and self.config.report.chart_engine != "spec":
                     analyzer = ChartAnalyzer(
                         llm_client=self.llm_client if self.config.report.chart_insights else None,
                         max_workers=min(self.config.report.figure_max_workers,
@@ -3137,8 +3144,25 @@ Output only the text (no JSON, no heading):"""
         )
 
         # Step 5: Generate figures/tables/charts
+        use_spec = (self.config.report.chart_engine == "spec"
+                    and numerical_store is not None)
+        self.charts_html_path = None
         try:
-            if chart_recommendations or demoted_tables:
+            if use_spec:
+                # images / tables as before; charts from the per-chapter
+                # SPEC over the certainty-tagged data layer
+                collection = generator.generate_from_recommendations(
+                    session=session,
+                    evidence_locker=evidence_locker,
+                    recommendations=[],
+                    include_images=self.config.report.auto_figures_include_images,
+                    include_tables=self.config.report.auto_figures_include_tables,
+                    demoted_tables=[],
+                )
+                if self.config.report.auto_figures_include_charts:
+                    collection.charts.extend(self._spec_charts(
+                        session, evidence_locker, numerical_store, figures_dir))
+            elif chart_recommendations or demoted_tables:
                 collection = generator.generate_from_recommendations(
                     session=session,
                     evidence_locker=evidence_locker,
@@ -3316,6 +3340,141 @@ Output only the text (no JSON, no heading):"""
 
         return updated_path
 
+    def _spec_charts(self, session, evidence_locker, store, figures_dir) -> list:
+        """Charts as spec + fixed renderer (chartkit): per chapter, a
+        deterministic catalog of certainty-tagged series is built from the
+        numerical store, ONE LLM call writes a panel spec for that chapter
+        (which series, which form, emphasis, caption, judgment — never a
+        number), the spec is validated against the data, and the fixed
+        renderers draw PNGs (for MD / DOCX / PDF) and one HTML page
+        (Chart.js, for the browser). Returns Figure objects."""
+        import re as _re
+        from .chartkit import (build_section_catalog, build_messages, panel_semantics,
+                               parse_panels, render_html, render_png, validate_panels)
+        from .chartkit.data_layer import DEFAULT_PRIMARY_DOMAINS
+        from .report.figure_table_generator import Figure, FigureType
+        from .utils.concurrency import ContextThreadPoolExecutor
+
+        rc, rp = self.config.research, self.config.report
+        language = rc.language
+        figures_dir = Path(figures_dir)
+        figures_dir.mkdir(parents=True, exist_ok=True)
+        max_panels = max(1, int(getattr(rp, "chart_max_per_section", 6) or 6))
+        primary = tuple(DEFAULT_PRIMARY_DOMAINS) + tuple(getattr(rp, "chart_primary_domains", None) or [])
+        llm = self.stage_llm_clients.get("evaluation", self.llm_client)
+        cancel = getattr(self, "_cancel_checkpoint", lambda: None)
+
+        plan_items = {}
+        try:
+            for it in session.research_plan.table_of_contents.get_flat_sections():
+                plan_items[str(it.section)] = it
+        except Exception:
+            plan_items = {}
+        sections = [(sid, sd) for sid, sd in (session.section_contents or {}).items()
+                    if not str(sid).startswith("_")]
+
+        def _evidence_ids(sid):
+            try:
+                return [e.id for e in evidence_locker.get_section_evidence(sid)]
+            except Exception:
+                return []
+
+        catalogs = {}
+        for sid, sd in sections:
+            cat = build_section_catalog(store.data_points, sid, _evidence_ids(sid),
+                                        primary_domains=primary)
+            if not cat.is_empty():
+                catalogs[sid] = (cat, sd)
+        print(f"[AutoFigures] chart spec: {len(catalogs)}/{len(sections)} chapters have "
+              f"plottable series; up to {max_panels} panels each")
+        if not catalogs:
+            return []
+
+        def _spec_for(sid):
+            cat, sd = catalogs[sid]
+            try:
+                cancel()
+                item = plan_items.get(sid)
+                title = sd.get("title") or (getattr(item, "title", "") if item else "") or sid
+                goal = (getattr(item, "description", "") if item else "") or \
+                    (sd.get("content") or "")[:400]
+                msgs = build_messages(f"{sid}. {title}", goal, cat.catalog_for_prompt(),
+                                      max_panels=max_panels, language=language,
+                                      research_topic=getattr(session, "query", "") or "")
+                resp = llm.generate(msgs["user"], system_prompt=msgs["system"])
+                panels = parse_panels(getattr(resp, "content", "") or "")
+                safe_sid = _re.sub(r"[^0-9a-z]", "_", str(sid).lower())
+                for i, p in enumerate(panels):
+                    pid = _re.sub(r"[^a-z0-9_]", "_", str(p.get("id") or f"p{i + 1}").lower()).strip("_") or f"p{i + 1}"
+                    p["id"] = f"s{safe_sid}_{pid}"
+                valid, rejected = validate_panels(panels, cat.to_data(), max_panels=max_panels)
+                return sid, title, valid, [(p.get("id") if p else None, r) for p, r in rejected], None
+            except Exception as e:            # one chapter never breaks the others
+                if isinstance(e, RunCancelled):
+                    raise
+                return sid, sd.get("title") or sid, [], [], f"{type(e).__name__}: {e}"
+
+        workers = max(1, min(int(rp.figure_max_workers or 1), int(rc.parallel_max_workers or 1)))
+        results = []
+        with ContextThreadPoolExecutor(max_workers=workers) as ex:
+            results = list(ex.map(_spec_for, list(catalogs)))
+
+        figures: list = []
+        page_panels: list = []
+        page_sections: list = []
+        for sid, title, valid, rejected, error in results:
+            cat, _sd = catalogs[sid]
+            try:
+                (figures_dir / f"chart_data_{sid}.json").write_text(
+                    json.dumps(cat.to_data(), ensure_ascii=False, indent=1), encoding="utf-8")
+            except Exception:
+                pass
+            if error:
+                print(f"[AutoFigures] chart spec failed for {sid}: {error}")
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.LOW, "AutoFigures",
+                    f"第{sid}章のチャート設計に失敗しました（{error[:160]}）。この章にチャートはありません。")
+            if rejected:
+                print(f"[AutoFigures] {sid}: {len(rejected)} panel(s) rejected: "
+                      + "; ".join(f"{pid}: {r}" for pid, r in rejected[:4]))
+            ids = []
+            for panel in valid:
+                try:
+                    path = render_png(panel, figures_dir / f"chart_{panel['id']}.png", language=language)
+                except Exception as e:
+                    print(f"[AutoFigures] PNG render failed for {panel.get('id')}: {e}")
+                    continue
+                src = next((s.get("url") for ser in panel.get("series", [])
+                            for s in (ser.get("sources") or []) if s and s.get("url")), None)
+                caption = str(panel.get("caption") or "")
+                judgment = str(panel.get("judgment") or "")
+                figures.append(Figure(
+                    figure_id=panel["id"],
+                    figure_type=FigureType.CHART,
+                    title=str(panel.get("title") or ""),
+                    caption=(caption + ("　見るべき点: " + judgment if judgment else "")).strip(),
+                    source_url=src,
+                    section_id=sid,
+                    image_path=path,
+                    alt_text=f"{panel.get('title', '')}: {judgment}",
+                    chart_data=panel_semantics(panel),
+                ))
+                page_panels.append(panel)
+                ids.append(panel["id"])
+            if ids:
+                page_sections.append({"title": f"{sid}. {title}", "panel_ids": ids})
+        try:
+            page = render_html(page_panels, title=f"{getattr(session, 'query', '') or ''} — チャート",
+                               subtitle="数値はデータ層から。斜線＝換算・導出・推定・二次。各パネルに出所と見るべき点。",
+                               sections=page_sections)
+            html_path = figures_dir / "charts.html"
+            html_path.write_text(page, encoding="utf-8")
+            self.charts_html_path = html_path
+        except Exception as e:
+            print(f"[AutoFigures] charts.html failed: {e}")
+        print(f"[AutoFigures] chart spec: {len(figures)} chart(s) across {len(page_sections)} chapter(s)")
+        return figures
+
     def _extract_numerical_data(
         self,
         session: ResearchSession,
@@ -3432,8 +3591,11 @@ Output only the text (no JSON, no heading):"""
                 for item in candidates:
                     store.add_many(_extract_one(item))
 
-        # Also extract from section contents (may have synthesized data)
-        if session and session.section_contents:
+        # Also extract from section contents (may have synthesized data).
+        # Off by default: the chapter text repeats the evidence numbers
+        # without provenance, so every statistic came back twice
+        if getattr(self.config.report, "numerical_extract_from_sections", False) \
+                and session and session.section_contents:
             for section_id, section_data in session.section_contents.items():
                 if section_id.startswith("_"):
                     continue

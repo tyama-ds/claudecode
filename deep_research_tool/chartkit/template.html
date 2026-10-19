@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+:root { --text-primary:#0b0b0b; --text-secondary:#52514e; --text-muted:#898781; --surface-1:#fcfcfb; --page:#ffffff; --radius:8px; }
+@media (prefers-color-scheme: dark) { :root { --text-primary:#f0efec; --text-secondary:#c3c2b7; --text-muted:#898781; --surface-1:#1a1a19; --page:#141413; } }
+body { margin:0; padding:20px; background:var(--page); color:var(--text-primary); font:14px/1.5 -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", system-ui, sans-serif; }
+h1 { font-size:18px; font-weight:600; margin:0 0 4px; }
+.sub { font-size:12px; color:var(--text-muted); margin:0 0 16px; }
+h2.sec { font-size:15px; font-weight:600; margin:24px 0 8px; color:var(--text-primary); }
+.kg { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:12px; margin:0 0 1.5rem; }
+.kpi { background:var(--surface-1); border-radius:var(--radius); padding:1rem; }
+.kl { font-size:13px; color:var(--text-secondary); margin:0 0 4px; }
+.kv { font-size:24px; font-weight:500; margin:0; color:var(--text-primary); }
+.ks { font-size:12px; color:var(--text-muted); margin:4px 0 0; }
+.panel { background:var(--surface-1); border-radius:var(--radius); padding:14px 16px; margin:0 0 16px; }
+.lb { font-size:14px; font-weight:500; color:var(--text-primary); margin:0 0 8px; }
+.lg { display:flex; flex-wrap:wrap; gap:14px; font-size:12px; color:var(--text-secondary); margin:0 0 8px; }
+.sw { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:4px; vertical-align:-1px; }
+.cap { font-size:12px; color:var(--text-muted); margin:6px 0 0; line-height:1.5; }
+.jd { font-size:13px; color:var(--text-primary); margin:4px 0 0; line-height:1.5; }
+.empty { font-size:13px; color:var(--text-muted); }
+</style>
+</head>
+<body>
+<h1>{{TITLE}}</h1>
+<p class="sub">{{SUBTITLE}}</p>
+<div class="kg">{{KPIS}}</div>
+{{PANELS}}
+<script>{{CHARTJS}}</script>
+<script>const SPEC = {{SPEC}};
+{{PRELUDE}}</script>
+</body>
+</html>

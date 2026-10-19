@@ -848,6 +848,11 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
           <span class="feat-sub">画像・表・数値抽出の同時実行数</span></div>
         <input type="number" id="feat_fig_workers" value="8" min="1" max="16" style="width:80px">
       </div>
+      <div class="feat-row" data-tip="章ごとに AI が設計するチャートの上限枚数です。数値はデータ層（出所・確度タグつき）からだけ取り、AI は「どの系列をどの形式で・何を見るべきか」だけを書きます。描けるパネルが無い章は 0 枚になります。">
+        <div class="feat-info"><span class="feat-name">📊 章あたりのチャート上限</span>
+          <span class="feat-sub">1 パネル＝1 つの問い。既定 6</span></div>
+        <input type="number" id="feat_chart_max" value="6" min="1" max="12" style="width:80px">
+      </div>
      </div><!-- /tabFeatures -->
 
       <label class="check"><input type="checkbox" id="set_persist_keys"> 🔐 APIキーをこの端末に保存する（localStorage・平文）。OFF（既定）ではこのタブを閉じるまでの一時保存（sessionStorage）のみ</label>
@@ -1483,6 +1488,7 @@ function loadSettings() {
     if (saved[key] !== undefined) $(el).checked = !!saved[key];
   }
   if (saved.figure_max_workers) $('feat_fig_workers').value = saved.figure_max_workers;
+  if (saved.chart_max_per_section && $('feat_chart_max')) $('feat_chart_max').value = saved.chart_max_per_section;
   if (saved.deep_think_max_workers) $('feat_dt_workers').value = saved.deep_think_max_workers;
   if (Array.isArray(saved.search_languages)) setSelectedLangs(saved.search_languages);
   if (Array.isArray(saved.search_regions)) setSelectedRegions(saved.search_regions);
@@ -1501,6 +1507,7 @@ function saveSettings() {
     s[key] = $(el).checked;
   }
   s.figure_max_workers = parseInt($('feat_fig_workers').value) || 8;
+  if ($('feat_chart_max')) s.chart_max_per_section = parseInt($('feat_chart_max').value) || 6;
   s.deep_think_max_workers = parseInt($('feat_dt_workers').value) || 4;
   s.search_languages = selectedLangs();
   s.search_regions = selectedRegions();
@@ -1532,6 +1539,7 @@ function settingsParams() {
     }
   }
   p.figure_max_workers = Math.min(16, Math.max(1, parseInt($('feat_fig_workers').value) || 8));
+  if ($('feat_chart_max')) p.chart_max_per_section = Math.min(12, Math.max(1, parseInt($('feat_chart_max').value) || 6));
   p.deep_think_max_workers = Math.min(8, Math.max(1, parseInt($('feat_dt_workers').value) || 4));
   return p;
 }
@@ -2595,6 +2603,7 @@ function showResults(result) {
   if (result.evidence_csv) files.push({label: '🗂 エビデンス (CSV)', path: result.evidence_csv});
   if (result.evidence_json) files.push({label: '🗂 エビデンス (JSON)', path: result.evidence_json});
   if (result.verification_html) files.push({label: '✅ 検証レポート', path: result.verification_html});
+  if (result.charts_html) files.push({label: '📊 チャート（HTML・別タブで開く）', path: result.charts_html});
   for (const [k, p] of Object.entries(saved)) {
     if (!files.some(f => f.path === p) && /\.(md|html|json|csv|docx|pdf)$/i.test(String(p)))
       files.push({label: '💾 ' + (ARTIFACT_LABELS[k] || k), path: p});

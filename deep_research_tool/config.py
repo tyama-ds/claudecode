@@ -727,12 +727,25 @@ class ReportConfig:
 
     # Derived metrics settings
     derived_metrics: bool = True  # Calculate derived metrics (CAGR, growth rates)
-    derived_fill_missing: bool = True  # Fill missing data points (interpolation)
+    # Interpolated years and N×N "market shares" are FABRICATED values (no
+    # source): off by default; CAGR / YoY stay on, tagged 導出 in charts
+    derived_fill_missing: bool = False  # Fill missing data points (interpolation)
+    derived_market_shares: bool = False  # Generate part/total share points
+    # Re-extracting numbers from the LLM-written chapter text duplicates
+    # the evidence numbers without provenance: off by default
+    numerical_extract_from_sections: bool = False
 
     # Intelligent chart analysis settings
     intelligent_charts: bool = True  # Use ChartAnalyzer for smart chart recommendations
     chart_insights: bool = True  # Generate insights for charts
-    chart_max_per_section: int = 3  # Maximum charts per section
+    chart_max_per_section: int = 6  # Maximum charts per section
+    # "spec": the LLM writes a chart SPEC per chapter (which series, which
+    # form, emphasis, caption, judgment) over a deterministic data layer
+    # with certainty tags; fixed renderers draw it (Chart.js HTML page +
+    # matplotlib PNGs). "legacy": the old store-wide ChartAnalyzer scan.
+    chart_engine: str = "spec"
+    # sources whose numbers count as 公表 (primary) in charts; others are 二次
+    chart_primary_domains: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1062,11 +1075,15 @@ def create_config(
     enable_pint: bool = True,
     # Derived metrics parameters
     derived_metrics: bool = True,
-    derived_fill_missing: bool = True,
+    derived_fill_missing: bool = False,
+    derived_market_shares: bool = False,
+    numerical_extract_from_sections: bool = False,
     # Intelligent chart analysis parameters
     intelligent_charts: bool = True,
     chart_insights: bool = True,
-    chart_max_per_section: int = 3,
+    chart_max_per_section: int = 6,
+    chart_engine: str = "spec",
+    chart_primary_domains: Optional[List[str]] = None,
     # Format strictness
     strict_format: bool = False,
     # Fermi estimation parameters
@@ -1437,9 +1454,13 @@ def create_config(
         enable_pint=enable_pint,
         derived_metrics=derived_metrics,
         derived_fill_missing=derived_fill_missing,
+        derived_market_shares=derived_market_shares,
+        numerical_extract_from_sections=numerical_extract_from_sections,
         intelligent_charts=intelligent_charts,
         chart_insights=chart_insights,
         chart_max_per_section=chart_max_per_section,
+        chart_engine=chart_engine,
+        chart_primary_domains=list(chart_primary_domains or []),
     )
 
     proxy_config = ProxyConfig(
