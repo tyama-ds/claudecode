@@ -848,7 +848,10 @@ class DeepResearchTool:
             done = None
             sink = getattr(self, "live_sink", None)
             try:
-                snap = sink.snapshot() if sink is not None and hasattr(sink, "snapshot") else None
+                # run() wraps the caller's sink in a CompositeSink: look
+                # inside it for the one that keeps a snapshot (Web UI)
+                candidates = list(getattr(sink, "sinks", None) or ([sink] if sink is not None else []))
+                snap = next((s.snapshot() for s in candidates if hasattr(s, "snapshot")), None)
                 if snap is not None:
                     done = len([1 for v in (snap.get("sections") or {}).values()
                                 if (v or {}).get("text")])
@@ -904,18 +907,40 @@ class DeepResearchTool:
             pass
 
     def current_plan(self) -> Optional[Dict[str, Any]]:
-        """The research plan (title, table of contents, search queries)
-        of the current run as a dict, once the researcher created or
-        loaded it — the Web UI shows it during AND after the run."""
+        """The research plan as an OUTLINE (title, summary, table of
+        contents with section numbers / titles / descriptions, search
+        queries, key terms) once the researcher created or loaded it —
+        the Web UI shows it during AND after the run. The chapter bodies
+        the researcher stores on the TOC items are deliberately left out:
+        this dict travels in every status poll and in the history ledger."""
         researcher = getattr(self, "researcher", None)
         if researcher is None:
             return None
         try:
             session = researcher.get_session()
             plan = getattr(session, "research_plan", None) if session else None
-            return plan.to_dict() if plan is not None else None
+            if plan is None:
+                return None
+            full = plan.to_dict()
         except Exception:
             return None
+
+        def _item(it):
+            return {
+                "section": it.get("section"), "title": it.get("title"),
+                "description": it.get("description", ""),
+                "status": it.get("status"),
+                "subsections": [_item(s) for s in (it.get("subsections") or [])],
+            }
+        toc = full.get("table_of_contents") or {}
+        return {
+            "title": full.get("title"),
+            "summary": full.get("summary"),
+            "table_of_contents": {"items": [_item(i) for i in (toc.get("items") or [])]},
+            "search_queries": list(full.get("search_queries") or []),
+            "key_terms": list(full.get("key_terms") or []),
+            "created_at": full.get("created_at"),
+        }
 
     def current_saved_artifacts(self) -> Dict[str, str]:
         """Artifacts the researcher has ACTUALLY written so far (checkpoint
@@ -1434,6 +1459,8 @@ class DeepResearchTool:
 
             # Build DOCX directly via python-docx API
             output_dir = self.config.report.output_dir / "reports"
+            self.progress_plan.enter("rendering")
+            quiet_progress("Rendering the final document...", 0)
             report_path = self.stage_timings.call("rendering", generator.generate_and_save,
                 result=result,
                 output_dir=output_dir,
@@ -1596,8 +1623,8 @@ class DeepResearchTool:
         # BEFORE the freeze; no LLM runs here.
         figures_report_path = None
         if figure_collection is not None and version_tag != "v3":
-            if progress_callback:
-                progress_callback("Inserting figures and tables...", 40)
+            # after a (possibly cancelled) verification: never a checkpoint
+            quiet_progress("Inserting figures and tables...", 40)
             try:
                 figures_report_path = self._insert_figures_into_report(
                     report_path=Path(report_path),

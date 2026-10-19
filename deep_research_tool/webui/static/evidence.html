@@ -118,6 +118,8 @@ const params = new URLSearchParams(location.search);
 const jobId = params.get('job_id') || '';
 let data = null;
 let sort = {key: 'n', dir: 'asc'};
+let refreshTimer = null;     // one auto-refresh chain, never several
+let loading = false;
 let qualityFilter = '';
 const open = new Set();
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -135,13 +137,22 @@ function sectionsOf(e) {
 }
 function sectionLabel(sid) { const t = (data && data.section_titles || {})[sid]; return t ? `${sid}. ${t}` : sid; }
 
+function scheduleRefresh() {
+  clearTimeout(refreshTimer); refreshTimer = null;
+  const live = data && ['running', 'plan_review', 'queued'].includes(data.state);
+  if ($('autoRefresh').checked && (live || !data)) refreshTimer = setTimeout(load, 5000);
+}
 async function load() {
   if (!jobId) { $('state').textContent = 'job_id がありません'; return; }
+  if (loading) return;                  // a manual refresh during a fetch: ignore
+  loading = true;
+  clearTimeout(refreshTimer); refreshTimer = null;
   try {
     const res = await fetch(`/api/evidence?job_id=${encodeURIComponent(jobId)}`);
     if (!res.ok) { $('state').textContent = res.status === 404 ? '不明なジョブ' : 'エラー'; return; }
     data = await res.json();
-  } catch (e) { $('state').textContent = '読み込みに失敗'; return; }
+  } catch (e) { $('state').textContent = '読み込みに失敗（再試行します）'; return; }
+  finally { loading = false; scheduleRefresh(); }
   document.title = `根拠ロッカー — ${data.query || jobId}`;
   $('query').textContent = data.query || jobId;
   $('state').textContent = STATE_JA[data.state] || data.state || '';
@@ -158,7 +169,6 @@ async function load() {
   fillSelect('stype', [...new Set((data.evidence || []).map(e => e.source_type || e.evidence_type).filter(Boolean))].sort());
   renderQualityChips();
   render();
-  if ($('autoRefresh').checked && (data.state === 'running' || data.state === 'plan_review' || data.state === 'queued')) setTimeout(load, 5000);
 }
 function fillSelect(id, values, labelFn) {
   const sel = $(id); const cur = sel.value;
@@ -235,7 +245,7 @@ document.querySelectorAll('th[data-sort]').forEach(th => th.addEventListener('cl
   document.querySelectorAll('th[data-sort]').forEach(t => t.removeAttribute('aria-sort'));
   th.setAttribute('aria-sort', sort.dir === 'asc' ? 'ascending' : 'descending'); render(); }));
 $('refreshBtn').addEventListener('click', load);
-$('autoRefresh').addEventListener('change', () => { if ($('autoRefresh').checked) load(); });
+$('autoRefresh').addEventListener('change', () => { if ($('autoRefresh').checked) load(); else { clearTimeout(refreshTimer); refreshTimer = null; } });
 load();
 </script>
 </body>

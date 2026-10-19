@@ -469,9 +469,10 @@ class ResearchJob:
             return None
 
     def live_plan(self) -> Optional[Dict[str, Any]]:
-        """The research plan of a live run (None until it exists)."""
+        """The research plan outline of a LIVE run (None until it exists;
+        finished jobs carry it in their result)."""
         source = self.plan_source
-        if source is None:
+        if source is None or self.state not in ("running", "plan_review"):
             return None
         try:
             return source()
@@ -556,8 +557,18 @@ class ResearchJob:
             })
 
     def finish(self, state: str) -> None:
-        """Enter a TERMINAL state and freeze the elapsed time."""
+        """Enter a TERMINAL state and freeze the elapsed time. The stage
+        the run was in is kept, so a cancelled / failed job still shows
+        where it stopped."""
+        final_stage = None
+        try:
+            snap = self.progress_source() if self.progress_source is not None else None
+            if snap and state != "completed":
+                final_stage = snap.get("stage")
+        except Exception:
+            final_stage = None
         with self._lock:
+            self._final_stage = final_stage
             self.state = state
             if self.finished_at is None:
                 self.finished_at = time.time()
@@ -624,6 +635,8 @@ class ResearchJob:
                     pass
                 stage = plan.get("stage")
                 activity = plan.get("activity")
+            elif self.state in ("cancelled", "error"):
+                stage = getattr(self, "_final_stage", None)
             data = {
                 "job_id": self.job_id,
                 "query": self.query,
@@ -1271,7 +1284,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
             except Exception:
                 data = None
         if data is None:
-            raw = result.get("evidence_json")
+            # a cancelled run keeps its checkpoint under saved_artifacts
+            raw = result.get("evidence_json") or \
+                (result.get("saved_artifacts") or {}).get("evidence_json")
             if not raw and job is not None:
                 raw = (job.live_saved_artifacts() or {}).get("evidence_json")
             path = self._safe_output_path(raw) if raw else None

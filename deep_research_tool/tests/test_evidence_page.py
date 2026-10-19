@@ -28,6 +28,7 @@ def web(tmp_path):
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield httpd, tmp_path
     httpd.shutdown()
+    httpd.server_close()
 
 
 def _get(server, path):
@@ -116,8 +117,51 @@ class TestEvidenceEndpoint:
         assert status == 200 and d["source"] == "file" and d["total"] == 4
         assert d["files"]["evidence_json"] == str(path)
         assert d["section_titles"] == {"1": "T"}
-        # a long full text is capped for the viewer
-        assert all(len(e.get("extracted_text") or "") <= 4000 for e in d["evidence"])
+        # a long full text is capped for the viewer (the file keeps it whole)
+        locker.add_evidence(url="https://example.com/long", title="long",
+                            extracted_text="あ" * 9000, section_reference="2")
+        locker.export_to_json(path)
+        status, d = _get(server, "/api/evidence?job_id=job-done")
+        long_item = next(e for e in d["evidence"] if e["title"] == "long")
+        assert len(long_item["extracted_text"]) == 4000 and long_item["extracted_text_truncated"] is True
+        on_disk = json.loads(Path(path).read_text(encoding="utf-8"))
+        assert any(len(e.get("extracted_text") or "") == 9000 for e in on_disk["evidence"])
+
+    def test_cancelled_history_record_uses_its_checkpoint(self, web):
+        server, tmp = web
+        from deep_research_tool.webui.server import ResearchJob
+        path = _locker(tmp, 2).export_to_json()
+        job = ResearchJob("job-c", "q", params={"query": "q"})
+        job.result = {"saved_artifacts": {"evidence_json": str(path)}, "run_status": "cancelled"}
+        job.finish("cancelled")
+        server.job_manager.jobs["job-c"] = job
+        status, d = _get(server, "/api/evidence?job_id=job-c")
+        assert status == 200 and d["available"] and d["total"] == 2 and d["source"] == "file"
+
+    def test_live_export_is_safe_against_a_concurrent_writer(self, tmp_path):
+        locker = EvidenceLocker(research_id="r2", output_dir=tmp_path)
+        stop = threading.Event()
+        errors = []
+
+        def writer():
+            i = 0
+            while not stop.is_set():
+                locker.add_evidence(url=f"https://example.com/{i}", title=f"t{i}",
+                                    content_excerpt="x" * 200, section_reference=str(i % 3))
+                i += 1
+        t = threading.Thread(target=writer, daemon=True)
+        t.start()
+        try:
+            for _ in range(200):
+                try:
+                    d = locker.to_export_dict(include_sections=False)
+                    assert d["total_evidence"] == len(d["evidence"])
+                except Exception as e:          # "dictionary changed size during iteration"
+                    errors.append(repr(e))
+        finally:
+            stop.set()
+            t.join(timeout=5)
+        assert not errors, errors[:3]
 
     def test_files_outside_the_output_dir_are_never_served(self, web, tmp_path_factory):
         server, tmp = web

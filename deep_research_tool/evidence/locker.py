@@ -6,6 +6,7 @@ import json
 import csv
 import os
 import hashlib
+import threading
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from enum import Enum
@@ -346,8 +347,18 @@ class EvidenceLocker:
         self._evidence: Dict[str, Evidence] = {}
         self._citation_map: Dict[str, str] = {}  # citation_key -> evidence_id
         self._section_evidence: Dict[str, List[str]] = {}  # section -> evidence_ids
+        # the Web UI reads the LIVE locker from its HTTP thread while the
+        # research worker adds evidence: mutations and whole-locker reads
+        # hold this lock (re-entrant: readers call each other)
+        self._lock = threading.RLock()
 
-    def add_evidence(
+    def add_evidence(self, *args, **kwargs) -> Evidence:
+        """Add new evidence to the locker (thread-safe; see
+        _add_evidence_unlocked for the arguments)."""
+        with self._lock:
+            return self._add_evidence_unlocked(*args, **kwargs)
+
+    def _add_evidence_unlocked(
         self,
         url: str,
         title: str,
@@ -475,12 +486,14 @@ class EvidenceLocker:
 
     def get_section_evidence(self, section: str) -> List[Evidence]:
         """Get all evidence for a specific section."""
-        evidence_ids = self._section_evidence.get(section, [])
-        return [self._evidence[eid] for eid in evidence_ids if eid in self._evidence]
+        with self._lock:
+            evidence_ids = list(self._section_evidence.get(section, []))
+            return [self._evidence[eid] for eid in evidence_ids if eid in self._evidence]
 
     def get_all_evidence(self) -> List[Evidence]:
         """Get all evidence items."""
-        return list(self._evidence.values())
+        with self._lock:
+            return list(self._evidence.values())
 
     def get_by_url(self, url: str) -> Optional[Evidence]:
         """Get the first evidence item with this URL."""
@@ -504,14 +517,15 @@ class EvidenceLocker:
         [n] used in the text. Ids not present are ignored; evidence not
         listed keeps its relative order after the listed items.
         """
-        ordered = {}
-        for eid in ordered_ids:
-            if eid in self._evidence and eid not in ordered:
-                ordered[eid] = self._evidence[eid]
-        for eid, evidence in self._evidence.items():
-            if eid not in ordered:
-                ordered[eid] = evidence
-        self._evidence = ordered
+        with self._lock:
+            ordered = {}
+            for eid in ordered_ids:
+                if eid in self._evidence and eid not in ordered:
+                    ordered[eid] = self._evidence[eid]
+            for eid, evidence in self._evidence.items():
+                if eid not in ordered:
+                    ordered[eid] = evidence
+            self._evidence = ordered
 
     def update_reliability(self, evidence_id: str, score: float) -> None:
         """Update reliability score for evidence."""
@@ -801,24 +815,25 @@ class EvidenceLocker:
     def to_export_dict(self, include_sections: bool = True) -> Dict[str, Any]:
         """The JSON export as a dict (the Web UI's evidence page reads the
         LIVE locker through this while a run is going)."""
-        data = {
-            "research_id": self.research_id,
-            "exported_at": datetime.now().isoformat(),
-            "total_evidence": len(self._evidence),
-            "evidence": [e.to_dict() for e in self._evidence.values()],
-            # id-only mapping so load_from_json restores section relations
-            # exactly (the "sections" block below is for human readers)
-            "section_evidence": {
-                section: list(eids)
-                for section, eids in self._section_evidence.items()
-            },
-        }
-        if include_sections:
-            data["sections"] = {
-                section: [self._evidence[eid].to_dict() for eid in eids if eid in self._evidence]
-                for section, eids in self._section_evidence.items()
+        with self._lock:
+            data = {
+                "research_id": self.research_id,
+                "exported_at": datetime.now().isoformat(),
+                "total_evidence": len(self._evidence),
+                "evidence": [e.to_dict() for e in self._evidence.values()],
+                # id-only mapping so load_from_json restores section relations
+                # exactly (the "sections" block below is for human readers)
+                "section_evidence": {
+                    section: list(eids)
+                    for section, eids in self._section_evidence.items()
+                },
             }
-        return data
+            if include_sections:
+                data["sections"] = {
+                    section: [self._evidence[eid].to_dict() for eid in eids if eid in self._evidence]
+                    for section, eids in self._section_evidence.items()
+                }
+            return data
 
     def export_to_json(self, filepath: Path = None) -> Path:
         """

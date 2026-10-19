@@ -9,6 +9,7 @@ The progress bar is ONE overall 0–100 scale:
 No paid API: fake clients only.
 """
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -78,6 +79,10 @@ class TestPlan:
         assert plan.current == "plan"              # still planning
         cb("Researching: 1. 市場規模", 10)
         assert plan.current == "research"          # the first section starts at 10
+        # a crawler's first report of section 1 is exactly 10 too: never
+        # back to planning once research started
+        cb("1: Searching, fetching and evaluating sources...", 10)
+        assert plan.current == "research"
         cb("Research completed!", 100)
         assert seen[-1] == pytest.approx(plan.ranges["research"][1])
         assert seen[-1] < 70                      # NOT the end of the bar
@@ -189,6 +194,11 @@ class TestRun:
         plan = tool.current_plan()
         assert plan and len(plan["table_of_contents"]["items"]) == 2
         assert plan["search_queries"]
+        # an OUTLINE: the chapter bodies the researcher stores on the TOC
+        # items never travel in the status polls / history ledger
+        assert all("content" not in it and "sources" not in it
+                   for it in plan["table_of_contents"]["items"])
+        assert len(json.dumps(plan, ensure_ascii=False)) < 4000
 
     def test_job_status_carries_the_live_plan(self):
         from deep_research_tool.webui.server import ResearchJob

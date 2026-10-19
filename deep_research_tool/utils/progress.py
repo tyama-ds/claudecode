@@ -144,9 +144,10 @@ class ProgressPlan:
             else:
                 p = float(pct)
                 section = str(message).startswith(("Researching", "Reusing completed section"))
-                if "plan" in self.ranges and (p < 10.0 or (p == 10.0 and not section)) \
-                        and self.current in ("plan", "research"):
-                    self.enter("plan")
+                # once research started it never flips back to planning (a
+                # crawler's first report of the first section is exactly 10)
+                if "plan" in self.ranges and self.current == "plan" \
+                        and (p < 10.0 or (p == 10.0 and not section)):
                     value = self.overall(p * 10.0, "plan")
                 else:
                     self.enter("research")
