@@ -769,6 +769,123 @@ class DeepResearchTool:
             },
         }
 
+    def _verification_snapshot(self) -> Optional[Dict[str, Any]]:
+        vp = getattr(self, "verification_progress", None)
+        if vp is None:
+            return None
+        try:
+            return vp.snapshot()
+        except Exception:
+            return None
+
+    def progress_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Overall progress of the current run: the stage slices decided
+        at start, the current stage, the live overall value (moved by the
+        verification counters while verifying) and the one-line activity
+        (what is being done right now). None before run()."""
+        plan = getattr(self, "progress_plan", None)
+        if plan is None:
+            return None
+        snap = plan.snapshot(self._verification_snapshot())
+        snap["activity"] = self.current_activity()
+        return snap
+
+    def current_activity(self) -> Optional[Dict[str, Any]]:
+        """One line (Japanese) of what the run is doing RIGHT NOW, from the
+        live run state: the chapter being researched / written, DeepThink
+        progress, verification counters … Shown under the progress bars."""
+        plan = getattr(self, "progress_plan", None)
+        if plan is None:
+            return None
+        stage = plan.current
+        researcher = getattr(self, "researcher", None)
+        act = getattr(researcher, "current_activity", None) if researcher is not None else None
+        detail: Dict[str, Any] = {}
+
+        def _sec(a):
+            s = str(a.get("section", ""))
+            name = f"第{s}章" if "." not in s else f"{s} 節"
+            title = a.get("title") or ""
+            return f"{name}「{title}」" if title else name
+
+        if stage == "plan":
+            text = "調査計画（題名・目次・検索クエリ）を作成しています"
+        elif stage == "research":
+            if act:
+                detail = dict(act)
+                counts = ""
+                if act.get("total"):
+                    counts = (f"（{act.get('index')}/{act.get('total')} 章目、"
+                              f"完了 {act.get('done', 0)} 章）")
+                phase = act.get("phase")
+                if phase == "write":
+                    text = f"{_sec(act)}を執筆しています{counts}"
+                elif phase == "gapfill":
+                    text = f"{_sec(act)}の不足情報を追加調査しています（{act.get('round')} 回目）"
+                elif phase == "summary":
+                    text = "全章の要旨・結論を作成しています"
+                else:
+                    text = f"{_sec(act)}の情報を検索・取得・抽出しています{counts}"
+            else:
+                text = "調査を準備しています"
+        elif stage == "deep_think":
+            note = getattr(self, "activity_note", "")
+            text = "DeepThink で各章を推敲しています" + (f"（{note}）" if note else "")
+        elif stage == "evidence_review":
+            text = "収集した根拠を見直して各章を補強しています"
+        elif stage == "fermi":
+            text = "フェルミ推定を実行しています"
+        elif stage == "figures":
+            text = "数値データから図表を生成しています"
+        elif stage == "writing":
+            total = None
+            try:
+                sess = researcher.get_session() if researcher is not None else None
+                plan_obj = getattr(sess, "research_plan", None) if sess else None
+                total = len(plan_obj.table_of_contents.items) if plan_obj else None
+            except Exception:
+                total = None
+            done = None
+            sink = getattr(self, "live_sink", None)
+            try:
+                # run() wraps the caller's sink in a CompositeSink: look
+                # inside it for the one that keeps a snapshot (Web UI)
+                candidates = list(getattr(sink, "sinks", None) or ([sink] if sink is not None else []))
+                snap = next((s.snapshot() for s in candidates if hasattr(s, "snapshot")), None)
+                if snap is not None:
+                    done = len([1 for v in (snap.get("sections") or {}).values()
+                                if (v or {}).get("text")])
+            except Exception:
+                done = None
+            if total and done is not None and done < total:
+                text = f"第{done + 1}章を執筆しています（{done}/{total} 章完了）"
+            elif total and done is not None:
+                text = f"全 {total} 章の執筆が終わり、レポートを組み立てています"
+            else:
+                text = "レポートを生成しています"
+        elif stage == "verification":
+            snap = self._verification_snapshot()
+            if snap and snap.get("phase") not in (None, "idle"):
+                label = snap.get("phase_label") or snap.get("phase")
+                parts = []
+                if snap.get("claims_total"):
+                    parts.append(f"クレーム {snap.get('claims_done', 0)}/{snap.get('claims_total')}")
+                if snap.get("max_rounds"):
+                    parts.append(f"{snap.get('round') or 1}/{snap.get('max_rounds')} 周目")
+                text = f"最終本文を検証しています: {label}" + (f"（{'、'.join(parts)}）" if parts else "")
+            else:
+                text = "最終本文の検証を準備しています"
+        elif stage == "rendering":
+            text = "最終文書を出力しています（図表の挿入・形式変換・保存）"
+        elif stage == "done":
+            text = "完了"
+        else:
+            text = ""
+        out: Dict[str, Any] = {"stage": stage, "text": text}
+        if detail:
+            out["detail"] = detail
+        return out
+
     def _warn_if_llm_serialized(self, snapshot: Dict[str, Any]) -> None:
         """A local server that never served two requests at once while
         the client was allowed to send several is worth a warning: the
@@ -788,6 +905,42 @@ class DeepResearchTool:
                     "OLLAMA_NUM_PARALLEL、llama.cpp: -np、vLLM: --max-num-seqs を確認）。")
         except Exception:
             pass
+
+    def current_plan(self) -> Optional[Dict[str, Any]]:
+        """The research plan as an OUTLINE (title, summary, table of
+        contents with section numbers / titles / descriptions, search
+        queries, key terms) once the researcher created or loaded it —
+        the Web UI shows it during AND after the run. The chapter bodies
+        the researcher stores on the TOC items are deliberately left out:
+        this dict travels in every status poll and in the history ledger."""
+        researcher = getattr(self, "researcher", None)
+        if researcher is None:
+            return None
+        try:
+            session = researcher.get_session()
+            plan = getattr(session, "research_plan", None) if session else None
+            if plan is None:
+                return None
+            full = plan.to_dict()
+        except Exception:
+            return None
+
+        def _item(it):
+            return {
+                "section": it.get("section"), "title": it.get("title"),
+                "description": it.get("description", ""),
+                "status": it.get("status"),
+                "subsections": [_item(s) for s in (it.get("subsections") or [])],
+            }
+        toc = full.get("table_of_contents") or {}
+        return {
+            "title": full.get("title"),
+            "summary": full.get("summary"),
+            "table_of_contents": {"items": [_item(i) for i in (toc.get("items") or [])]},
+            "search_queries": list(full.get("search_queries") or []),
+            "key_terms": list(full.get("key_terms") or []),
+            "created_at": full.get("created_at"),
+        }
 
     def current_saved_artifacts(self) -> Dict[str, str]:
         """Artifacts the researcher has ACTUALLY written so far (checkpoint
@@ -884,6 +1037,22 @@ class DeepResearchTool:
             _cancel_checkpoint()
             if _cb:
                 _cb(message, percentage)
+
+        # --- one overall 0–100 bar --------------------------------------
+        # Every stage reports its OWN 0–100; the plan maps it onto that
+        # stage's slice (weights depend on the enabled features), so the
+        # bar reaches 100 only when the run is complete. `raw_progress`
+        # receives overall values; `progress_callback` below takes
+        # stage-relative ones (None = a note, negative = error marker).
+        from .utils.progress import ProgressPlan
+        self.progress_plan = ProgressPlan.for_config(self.config)
+        self.activity_note = ""
+        raw_progress = progress_callback
+        progress_callback = self.progress_plan.callback(raw_progress)
+        # reports made AFTER a (possibly cancelled) verification, while the
+        # partial artifacts are rendered: informational only, never a
+        # cancel checkpoint — a cancelled run must still write its files
+        quiet_progress = self.progress_plan.callback(_user_progress_cb)
 
         # --- measured stage timings (facts only; no speed-up claims) ----
         from .utils.timing import StageTimer
@@ -987,7 +1156,9 @@ class DeepResearchTool:
             max_pages_per_query=self.config.research.max_pages_per_query,
             language=self.config.research.language,
             output_dir=self.config.report.output_dir,
-            progress_callback=progress_callback,
+            # the researcher's 0–10 (plan) / 10–100 (loop) land on the
+            # plan / research slices of the overall bar
+            progress_callback=self.progress_plan.research_callback(raw_progress),
             extended_mode=self.config.research.extended_mode,
             crawl_max_pages=self.config.research.crawl_max_pages,
             crawl_max_depth=self.config.research.crawl_max_depth,
@@ -1103,6 +1274,7 @@ class DeepResearchTool:
         # Apply DeepThink processing if enabled
         deep_think_results = None
         if self.config.deep_think.enabled and self.deep_think_processor:
+            self.progress_plan.enter("deep_think")
             session, deep_think_results = self.stage_timings.call("deep_think", self._apply_deep_think,
                 session=session,
                 evidence_locker=evidence_locker,
@@ -1133,9 +1305,10 @@ class DeepResearchTool:
                      == ReportGeneratorVersion.V1)
 
         if legacy_v1:
+            self.progress_plan.enter("evidence_review")
             if progress_callback:
                 progress_callback(
-                    "Reviewing all evidence for report enhancement...", 88)
+                    "Reviewing all evidence for report enhancement...", 0)
             session = self.stage_timings.call("evidence_enhancement", self._enhance_sections_with_full_evidence,
                 session=session,
                 evidence_locker=evidence_locker,
@@ -1152,9 +1325,10 @@ class DeepResearchTool:
             # pipeline as V2/V3 — in the V1 branch below, after the Fermi
             # section exists, immediately before rendering.
 
-        # Generate report
+        # Generate report (the generator is created here; the writing
+        # stage itself starts later, after Fermi / figures)
         if progress_callback:
-            progress_callback("Generating report...", 95)
+            progress_callback("Preparing report generation...", None)
 
         generator, version_tag = _create_report_generator(
             config=self.config,
@@ -1198,8 +1372,9 @@ class DeepResearchTool:
         fermi_results = None
         fermi_markdown = ""
         if self.config.fermi_estimation.enabled:
+            self.progress_plan.enter("fermi")
             if progress_callback:
-                progress_callback("Running Fermi estimation...", 96)
+                progress_callback("Running Fermi estimation...", 0)
 
             fermi_results, fermi_markdown = self.stage_timings.call("fermi", self._run_fermi_estimation,
                 session=session,
@@ -1216,8 +1391,9 @@ class DeepResearchTool:
         figure_collection = None
         fig_generator = None
         if self.config.report.auto_figures:
+            self.progress_plan.enter("figures")
             if progress_callback:
-                progress_callback("Generating figures and tables...", 94)
+                progress_callback("Generating figures and tables...", 0)
             try:
                 figure_collection, fig_generator = \
                     self.stage_timings.call("figures", self._generate_figure_collection,
@@ -1237,6 +1413,9 @@ class DeepResearchTool:
         semantic_freeze_hash = None
         if version_tag == "v3":
             # V3: DOCX-native generation flow
+            self.progress_plan.enter("writing")
+            if progress_callback:
+                progress_callback("Generating report...", 0)
             result = self.stage_timings.call("writing", generator.generate_report,
                 research_topic=query,
                 research_plan=session.research_plan,
@@ -1250,6 +1429,7 @@ class DeepResearchTool:
                 extra_chapters, extras_flags = self._build_extra_chapters(
                     generator, result, fermi_markdown,
                     figure_collection=figure_collection)
+                self.progress_plan.enter("verification")
                 verification_result, verification_html = \
                     self.stage_timings.call("verification", self._run_finalization_loop,
                         result=result,
@@ -1279,6 +1459,8 @@ class DeepResearchTool:
 
             # Build DOCX directly via python-docx API
             output_dir = self.config.report.output_dir / "reports"
+            self.progress_plan.enter("rendering")
+            quiet_progress("Rendering the final document...", 0)
             report_path = self.stage_timings.call("rendering", generator.generate_and_save,
                 result=result,
                 output_dir=output_dir,
@@ -1293,6 +1475,9 @@ class DeepResearchTool:
 
         elif version_tag == "v2":
             # V2: Use new generation flow
+            self.progress_plan.enter("writing")
+            if progress_callback:
+                progress_callback("Generating report...", 0)
             result = self.stage_timings.call("writing", generator.generate_report,
                 research_topic=query,
                 research_plan=session.research_plan,
@@ -1309,6 +1494,7 @@ class DeepResearchTool:
                 extra_chapters, extras_flags = self._build_extra_chapters(
                     generator, result, fermi_markdown,
                     figure_collection=figure_collection)
+                self.progress_plan.enter("verification")
                 verification_result, verification_html = \
                     self.stage_timings.call("verification", self._run_finalization_loop,
                         result=result,
@@ -1327,6 +1513,8 @@ class DeepResearchTool:
                     figure_collection)
 
             # Generate final document as markdown
+            self.progress_plan.enter("rendering")
+            quiet_progress("Rendering the final document...", 0)
             final_doc = self.stage_timings.call("rendering", generator.generate_final_document,
                 result,
                 include_glossary=(self.config.report.v2_include_glossary
@@ -1373,6 +1561,7 @@ class DeepResearchTool:
                         session.section_contents[last]["content"] = (
                             prev.rstrip() + "\n" + fermi_markdown)
                         fermi_markdown = ""
+                self.progress_plan.enter("verification")
                 verification_result, verification_html = \
                     self.stage_timings.call("verification", self._run_finalization_v1,
                         session=session,
@@ -1400,6 +1589,8 @@ class DeepResearchTool:
             # After finalization the body is FROZEN: the legacy length
             # adjustment must never rewrite a verified body, so the
             # targets are only applied on the unverified path.
+            self.progress_plan.enter("writing")
+            quiet_progress("Generating report...", 0)
             report_path = self.stage_timings.call("writing", generator.generate_report,
                 session=session,
                 evidence_locker=evidence_locker,
@@ -1419,6 +1610,7 @@ class DeepResearchTool:
         # Export evidence AFTER finalization (audit item 13): the exports,
         # references and registry include evidence added by the final
         # research rounds, in the final citation order.
+        self.progress_plan.enter("rendering")
         if self.config.research.save_evidence:
             evidence_format = self.config.research.evidence_format
             if evidence_format in ("json", "both"):
@@ -1431,8 +1623,8 @@ class DeepResearchTool:
         # BEFORE the freeze; no LLM runs here.
         figures_report_path = None
         if figure_collection is not None and version_tag != "v3":
-            if progress_callback:
-                progress_callback("Inserting figures and tables...", 97)
+            # after a (possibly cancelled) verification: never a checkpoint
+            quiet_progress("Inserting figures and tables...", 40)
             try:
                 figures_report_path = self._insert_figures_into_report(
                     report_path=Path(report_path),
@@ -1600,6 +1792,9 @@ class DeepResearchTool:
         import json
         performance_path.write_text(json.dumps(performance, ensure_ascii=False, indent=2), encoding="utf-8")
 
+        # the ONLY 100 of the run: everything is written
+        self.progress_plan.done(_user_progress_cb, "Completed")
+
         # Get token usage statistics
         token_stats = get_token_stats()
 
@@ -1648,6 +1843,8 @@ class DeepResearchTool:
                 **({"report": str(active_report_path)}
                    if active_report_path else {})},
             "resume_plan": getattr(self, "resume_plan", None),
+            # the plan that was researched (table of contents / queries)
+            "research_plan": self.current_plan(),
             "timings": self._collect_timings(run_token_stats),
             "verification_summary": (getattr(self, "finalization_outcome",
                                              None) or {}).get(
@@ -3277,7 +3474,7 @@ Output only the text (no JSON, no heading):"""
             Tuple of (updated session, dict of DeepThink results per section)
         """
         if progress_callback:
-            progress_callback("DeepThink: Processing sections...", 85)
+            progress_callback("DeepThink: Processing sections...", 0)
 
         # Get source texts from evidence locker
         source_texts = {}
@@ -3296,7 +3493,7 @@ Output only the text (no JSON, no heading):"""
         # Handle empty session gracefully
         if not targets:
             if progress_callback:
-                progress_callback("DeepThink: No sections to process", 90)
+                progress_callback("DeepThink: No sections to process", 100)
             return session, deep_think_results
 
         # Sections run CONCURRENTLY: DeepThink was fully sequential
@@ -3369,15 +3566,16 @@ Output only the text (no JSON, no heading):"""
                 session.section_contents[section_num]["deep_think"] = deep_think_results[section_num]
 
                 completed += 1
+                self.activity_note = f"{completed}/{len(targets)} 章"
                 if progress_callback:
-                    progress = 85 + (completed / len(targets) * 5)
+                    progress = completed / len(targets) * 100
                     progress_callback(
                         f"DeepThink: {completed}/{len(targets)} sections done",
                         progress)
 
         if progress_callback:
             avg_confidence = sum(r["confidence"] for r in deep_think_results.values()) / len(deep_think_results) if deep_think_results else 0
-            progress_callback(f"DeepThink: Complete (avg confidence: {avg_confidence:.2f})", 90)
+            progress_callback(f"DeepThink: Complete (avg confidence: {avg_confidence:.2f})", 100)
 
         return session, deep_think_results
 
@@ -3423,7 +3621,7 @@ Output only the text (no JSON, no heading):"""
             f"からの詳述、または調査上の限界として明示されます）。")
         print(f"[Length] {message}")
         if progress_callback:
-            progress_callback(message, 80)
+            progress_callback(message, None)     # a note: no progress change
         ResearchWarnings.get_instance().add(
             ResearchWarnings.LOW, "Length", message)
 

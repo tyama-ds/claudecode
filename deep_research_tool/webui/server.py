@@ -425,6 +425,15 @@ class ResearchJob:
         # callable returning which provider serves which stage / role
         # (tool.llm_routing_snapshot): delegation, preflight, fallback
         self.routing_source = None
+        # callable returning the run's overall progress plan
+        # (tool.progress_snapshot): current stage + live overall value
+        self.progress_source = None
+        # callable returning the research plan (tool.current_plan) so the
+        # table of contents stays viewable after the run started
+        self.plan_source = None
+        # callable returning the LIVE EvidenceLocker of the run (or None)
+        # for the evidence page (/evidence) while the run is going
+        self.evidence_source = None
         # Plan review state (state == "plan_review")
         self.plan: Optional[Dict[str, Any]] = None
         self.plan_review_deadline: Optional[float] = None
@@ -453,6 +462,27 @@ class ResearchJob:
     def live_routing(self) -> Optional[Dict[str, Any]]:
         source = self.routing_source
         if source is None:
+            return None
+        try:
+            return source()
+        except Exception:
+            return None
+
+    def live_plan(self) -> Optional[Dict[str, Any]]:
+        """The research plan outline of a LIVE run (None until it exists;
+        finished jobs carry it in their result)."""
+        source = self.plan_source
+        if source is None or self.state not in ("running", "plan_review"):
+            return None
+        try:
+            return source()
+        except Exception:
+            return None
+
+    def live_progress(self) -> Optional[Dict[str, Any]]:
+        """The tool's progress plan snapshot while the run is active."""
+        source = self.progress_source
+        if source is None or self.state not in ("running", "plan_review"):
             return None
         try:
             return source()
@@ -527,8 +557,18 @@ class ResearchJob:
             })
 
     def finish(self, state: str) -> None:
-        """Enter a TERMINAL state and freeze the elapsed time."""
+        """Enter a TERMINAL state and freeze the elapsed time. The stage
+        the run was in is kept, so a cancelled / failed job still shows
+        where it stopped."""
+        final_stage = None
+        try:
+            snap = self.progress_source() if self.progress_source is not None else None
+            if snap and state != "completed":
+                final_stage = snap.get("stage")
+        except Exception:
+            final_stage = None
         with self._lock:
+            self._final_stage = final_stage
             self.state = state
             if self.finished_at is None:
                 self.finished_at = time.time()
@@ -580,12 +620,32 @@ class ResearchJob:
     def to_dict(self) -> Dict[str, Any]:
         with self._lock:
             verification = self.verification_snapshot()
+            # the bar: the last reported value, or the plan's live value
+            # (verification counters) when that is further — never 100
+            # before the job actually finished
+            progress = self.progress
+            stage = None
+            activity = None
+            plan = self.live_progress()
+            if plan:
+                try:
+                    progress = max(progress, min(float(plan.get("overall") or 0), 99.5))
+                    self.progress = progress        # never shown lower later
+                except (TypeError, ValueError):
+                    pass
+                stage = plan.get("stage")
+                activity = plan.get("activity")
+            elif self.state in ("cancelled", "error"):
+                stage = getattr(self, "_final_stage", None)
             data = {
                 "job_id": self.job_id,
                 "query": self.query,
                 "state": self.state,
                 "verification": verification,
-                "progress": round(self.progress, 1),
+                "progress": round(progress, 1),
+                "stage": stage,
+                # one line of what is being done right now (第N章を執筆 …)
+                "activity": activity,
                 "message": self.message,
                 "log": list(self.log)[-50:],
                 "log_seq": self._log_seq,
@@ -597,7 +657,9 @@ class ResearchJob:
                 "queue_position": self.queue_position,
                 "cancel_requested": bool(getattr(self, "cancel_requested",
                                                  False)),
-                "plan": self.plan,
+                # the reviewed plan, or the live one once research started
+                # (viewable throughout the run, not only during review)
+                "plan": self.plan or self.live_plan(),
                 "params_summary": self.params_summary,
                 "saved_artifacts": self.live_saved_artifacts(),
                 "concurrency": self.live_concurrency(),
@@ -971,6 +1033,11 @@ class JobManager:
             job.artifacts_source = tool.current_saved_artifacts
             job.concurrency_source = tool.concurrency_snapshot
             job.routing_source = tool.llm_routing_snapshot
+            job.progress_source = tool.progress_snapshot
+            job.plan_source = tool.current_plan
+            job.evidence_source = (
+                lambda: (tool.researcher.get_evidence_locker()
+                         if getattr(tool, "researcher", None) is not None else None))
             job.update("調査を開始します", 2)
 
             documents = expand_document_paths(params.get("local_documents"))
@@ -1070,6 +1137,8 @@ class JobManager:
                 "performance": result.get("performance"),
                 # which provider served which role (delegation / fallback)
                 "llm_routing": result.get("llm_routing"),
+                # the researched table of contents / queries (history too)
+                "plan": result.get("research_plan"),
             }
             job.progress = 100.0
             if result.get("verification_cancelled"):
@@ -1101,6 +1170,7 @@ class JobManager:
                 job.result = {
                     "saved_artifacts": saved,
                     "session_id": getattr(tool, "partial_session_id", None),
+                    "plan": job.live_plan(),
                     "warnings": job_warnings.to_dict_list(),
                     "warning_count": job_warnings.count(),
                     "status": {"process": "cancelled",
@@ -1170,6 +1240,108 @@ class WebUIHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):  # quiet default logging
         pass
+
+    # ------------------------------------------------------------------
+    # evidence locker viewer
+    # ------------------------------------------------------------------
+    _EVIDENCE_TEXT_CAP = 4000
+
+    def _serve_evidence(self, job_id: str) -> None:
+        """GET /api/evidence?job_id=… — the job's evidence locker: the LIVE
+        locker while the run is going (newer than any checkpoint file),
+        otherwise the evidence JSON the run wrote (also for history
+        records from before a restart). Never a file outside the output
+        directory."""
+        manager: JobManager = self.server.job_manager
+        job = manager.get(job_id) if job_id else None
+        record = None
+        if job is None:
+            for r in manager.history():
+                if r.get("job_id") == job_id:
+                    record = r
+                    break
+            if record is None:
+                self._send_json({"error": "unknown job"}, 404)
+                return
+        state = job.state if job is not None else record.get("state")
+        query_text = job.query if job is not None else record.get("query", "")
+        result = (job.result if job is not None else record.get("result")) or {}
+        plan = None
+        if job is not None:
+            plan = job.plan or job.live_plan() or result.get("plan")
+        else:
+            plan = result.get("plan")
+
+        data = None
+        source = None
+        if job is not None and job.evidence_source is not None \
+                and job.state in ("running", "plan_review"):
+            try:
+                locker = job.evidence_source()
+                if locker is not None:
+                    data = locker.to_export_dict(include_sections=False)
+                    source = "live"
+            except Exception:
+                data = None
+        if data is None:
+            # a cancelled run keeps its checkpoint under saved_artifacts
+            raw = result.get("evidence_json") or \
+                (result.get("saved_artifacts") or {}).get("evidence_json")
+            if not raw and job is not None:
+                raw = (job.live_saved_artifacts() or {}).get("evidence_json")
+            path = self._safe_output_path(raw) if raw else None
+            if path is not None:
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    data.pop("sections", None)
+                    source = "file"
+                except Exception:
+                    data = None
+        if data is None:
+            self._send_json({"available": False, "job_id": job_id,
+                             "query": query_text, "state": state,
+                             "evidence": [], "section_evidence": {},
+                             "section_titles": {}, "total": 0})
+            return
+
+        # the viewer shows the excerpt and a capped full text
+        items = []
+        for e in data.get("evidence") or []:
+            if not isinstance(e, dict):
+                continue
+            item = dict(e)
+            text = item.get("extracted_text") or ""
+            if len(text) > self._EVIDENCE_TEXT_CAP:
+                item["extracted_text"] = text[:self._EVIDENCE_TEXT_CAP]
+                item["extracted_text_truncated"] = True
+            items.append(item)
+        titles = {}
+        try:
+            for it in ((plan or {}).get("table_of_contents") or {}).get("items") or []:
+                titles[str(it.get("section"))] = it.get("title", "")
+                for sub in it.get("subsections") or []:
+                    titles[str(sub.get("section"))] = sub.get("title", "")
+        except Exception:
+            titles = {}
+        files = {}
+        for key in ("evidence_json", "evidence_csv"):
+            raw = result.get(key)
+            if raw and self._safe_output_path(raw) is not None:
+                files[key] = raw
+        self._send_json({
+            "available": True,
+            "job_id": job_id,
+            "query": query_text,
+            "state": state,
+            "source": source,
+            "research_id": data.get("research_id"),
+            "exported_at": data.get("exported_at"),
+            "total": len(items),
+            "evidence": items,
+            "section_evidence": data.get("section_evidence") or {},
+            "section_titles": titles,
+            "files": files,
+        })
 
     def _history_record(self, manager, params):
         """Resolve a resume/regenerate target to a ledger record with
@@ -1249,6 +1421,16 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 self._send_file(index, "text/html; charset=utf-8")
             else:
                 self._send_json({"error": "index.html not found"}, 500)
+        elif route in ("/evidence", "/evidence.html"):
+            # the evidence locker viewer (opened in its own browser tab)
+            page = STATIC_DIR / "evidence.html"
+            if page.is_file():
+                self._send_file(page, "text/html; charset=utf-8")
+            else:
+                self._send_json({"error": "evidence.html not found"}, 500)
+        elif route == "/api/evidence":
+            query = parse_qs(parsed.query)
+            self._serve_evidence((query.get("job_id") or [""])[0])
         elif route == "/api/version":
             self._send_json({"version": __version__})
         elif route == "/api/jobs":

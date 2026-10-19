@@ -355,7 +355,9 @@ class FinalizationRunner:
         limitations, over_hard_max, ordered_evidence_ids, html_path.
         """
         if self.progress_callback:
-            self.progress_callback("Verifying final report body...", 96)
+            # stage-relative: the run's ProgressPlan places it on the
+            # verification slice; live counters move the bar from there
+            self.progress_callback("Verifying final report body...", 0)
 
         self._register_sections(chapters)
         self._plan_lengths()

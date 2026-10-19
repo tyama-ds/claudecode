@@ -365,12 +365,19 @@ class Researcher:
         # Multilingual search settings
         self.multilingual_config = multilingual_config
         self.multilingual_searcher: Optional[MultilingualSearcher] = None
+        # (base, span) of the section being researched on the researcher's
+        # 10–85 scale; sub-components (multilingual search, crawlers) report
+        # their own 0–100 INSIDE that slice, never on the whole bar
+        self._section_slice = (10.0, 0.0)
+        # what the loop is doing right now (section / phase / counts) —
+        # the status line under the Web UI's progress bars
+        self.current_activity: Optional[Dict[str, Any]] = None
         if multilingual_config and multilingual_config.enabled:
             self.multilingual_searcher = MultilingualSearcher(
                 config=multilingual_config,
                 search_client=self.search,
                 llm_client=llm_client,
-                progress_callback=progress_callback,
+                progress_callback=self._sub_progress,
                 max_parallel_workers=parallel_max_workers,
             )
             if multilingual_config.search_regions:
@@ -486,6 +493,17 @@ class Researcher:
         if self.progress_callback:
             self.progress_callback(message, percentage)
         print(f"[{percentage:.1f}%] {message}")
+
+    def _sub_progress(self, message: str, percentage: float) -> None:
+        """A sub-component's own 0–100 (e.g. the multilingual search's
+        "Translating queries…" … "complete" = 100) mapped into the first
+        part of the current section's slice."""
+        base, span = self._section_slice
+        if percentage is None or percentage < 0:
+            self._report_progress(message, base)
+            return
+        frac = max(0.0, min(100.0, float(percentage))) / 100.0
+        self._report_progress(message, base + frac * span * 0.6)
 
     def conduct_research(
         self,
@@ -686,6 +704,7 @@ class Researcher:
 
         for section_idx, section in enumerate(sections):
             section_progress_base = 10 + (section_idx / total_sections) * 70
+            self._section_slice = (section_progress_base, 70 / total_sections)
 
             # resume: sections that already finished are reused verbatim
             if section.section in self._resume_skip:
@@ -702,6 +721,14 @@ class Researcher:
             # no NEW section starts after a cancel was accepted
             self._check_cancel()
 
+            # the status line must already name this section when the
+            # "Researching:" message reaches the UI
+            self.current_activity = {
+                "phase": "research", "section": section.section,
+                "title": section.title, "index": section_idx + 1,
+                "total": total_sections,
+                "done": len(self.session.completed_sections),
+            }
             self._report_progress(
                 f"Researching: {section.section}. {section.title}",
                 section_progress_base
@@ -796,9 +823,12 @@ class Researcher:
 
         # Progress callback for fast crawler
         def fast_progress(msg: str, current: int, total: int):
+            # inside this section's slice (never into the next section's)
+            span = 70 / total_sections
             self._report_progress(
                 f"{section.section}: {msg}",
-                10 + (section_idx / total_sections) * 70 + (current / total) * 10
+                10 + (section_idx / total_sections) * 70
+                + (current / max(total, 1)) * span * 0.8
             )
 
         # Get queries for this section
@@ -892,9 +922,11 @@ class Researcher:
         section_content_parts: List[ExtractedContent] = list(extra_parts or [])
 
         def ai_progress(msg: str, current: int, total: int):
+            span = 70 / total_sections
             self._report_progress(
                 f"{section.section}: {msg}",
-                10 + (section_idx / total_sections) * 70 + (current / max(total, 1)) * 10
+                10 + (section_idx / total_sections) * 70
+                + (current / max(total, 1)) * span * 0.8
             )
 
         queries = available_queries[:self.max_queries_per_iteration]
@@ -1226,6 +1258,8 @@ class Researcher:
                 reverse=True,
             )
 
+            if self.current_activity:
+                self.current_activity = dict(self.current_activity, phase="write")
             synthesized = self._synthesize_parts(section, section_content_parts)
 
             # Gap-fill: re-search when high-importance information is thin
@@ -1237,6 +1271,10 @@ class Researcher:
                 print(f"[GapFill] Section {section.section}: insufficient "
                       f"high-importance sources, round {round_num + 1} "
                       f"(gaps: {gaps[:3]})")
+                if self.current_activity:
+                    self.current_activity = dict(self.current_activity,
+                                                 phase="gapfill",
+                                                 round=round_num + 1)
 
                 gathered_summary = "\n".join(
                     f"- {p.source_title}: {p.processed_content[:200]}"
@@ -1747,9 +1785,10 @@ Return JSON:
         if not self.site_crawler:
             return {"crawl_results": [], "suggested_queries": []}
 
+        # a note inside the current section (-1 would read as an error)
         self._report_progress(
             f"Extended mode: Crawling sites for {section.section}",
-            -1
+            self._section_slice[0]
         )
 
         # Extract keywords from section
@@ -1824,6 +1863,7 @@ Return JSON:
         """Synthesize all findings into cohesive content."""
         if not self.session:
             return
+        self.current_activity = {"phase": "summary"}
 
         # Create overall summary
         sections_summary = []
