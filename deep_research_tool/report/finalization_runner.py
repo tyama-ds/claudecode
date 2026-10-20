@@ -79,6 +79,9 @@ class FinalizationRunner:
         progress_callback: Optional[Callable] = None,
         chapter_citation_callback: Optional[Callable] = None,
         verification_progress=None,
+        cache_path=None,
+        draft_path=None,
+        resume: bool = False,
     ):
         """
         Args:
@@ -119,6 +122,21 @@ class FinalizationRunner:
             self.verification_settings = VerificationSettings()
         self.verification_cache = VerificationCache(
             enabled=self.verification_settings.cache_enabled)
+        # --- resume support: judgements and the edited body on disk ---
+        # cache_path: content-addressed judgements, saved after every
+        #   verify pass (and on the way out), reloaded on resume;
+        # draft_path: the body after every accepted edit; a resumed loop
+        #   starts from it instead of the pre-verification text
+        self.cache_path = Path(cache_path) if cache_path else None
+        self.draft_path = Path(draft_path) if draft_path else None
+        self.resume = bool(resume)
+        self.resumed_from_draft = False
+        self.cache_entries_loaded = 0
+        if self.resume and self.cache_path is not None:
+            self.cache_entries_loaded = self.verification_cache.load(self.cache_path)
+            if self.cache_entries_loaded:
+                print(f"[Finalize] resumed verification cache: "
+                      f"{self.cache_entries_loaded} judgement(s)")
         self.verification_progress = (verification_progress
                                       or VerificationProgress())
         # Post-verification edits (rewrite / compress / hedge, and the
@@ -383,6 +401,22 @@ class FinalizationRunner:
             sections=sorted(chapters), questions=len(critical_questions))
 
         current = dict(chapters)   # the shared, mutating body
+        # a resumed loop continues from the body it had edited so far
+        if self.resume and self.draft_path is not None and self.draft_path.is_file():
+            try:
+                import json as _json
+                draft = _json.loads(self.draft_path.read_text(encoding="utf-8"))
+                drafted = {k: v for k, v in (draft.get("chapters") or {}).items()
+                           if k in current and isinstance(v, str) and v.strip()}
+            except Exception as e:
+                print(f"[Finalize] body draft unreadable, starting over: {e}")
+                drafted = {}
+            if drafted:
+                current.update(drafted)
+                self.resumed_from_draft = True
+                print(f"[Finalize] resumed the edited body from the draft "
+                      f"({len(drafted)} section(s))")
+                self.audit.event("resumed_from_draft", sections=sorted(drafted))
 
         from ..verification.runtime import stable_hash
         last_verify = {"fingerprint": None, "verdict": None}
@@ -447,6 +481,7 @@ class FinalizationRunner:
             last_verify["fingerprint"] = fp
             last_verify["verdict"] = verdict
             self._after_verify(verdict)
+            self._persist_cache()
             return verdict
 
         def research_fn(issues, queries):
@@ -472,6 +507,7 @@ class FinalizationRunner:
             language=self.language,
             progress=self.verification_progress,
             edit_workers=self.edit_workers,
+            on_body_change=self._persist_draft,
         )
 
         import time as _time
@@ -498,6 +534,18 @@ class FinalizationRunner:
             outcome = self._interrupted_outcome(
                 controller, current, last_verify["verdict"], "timeout")
             self.verification_progress.set_phase("error", "timeout")
+        finally:
+            # whatever ended the loop (done, cancel, timeout, a crash):
+            # the judgements made so far are on disk for a resume
+            self._persist_cache()
+        outcome["resumed_from_draft"] = self.resumed_from_draft
+        outcome["cache_entries_loaded"] = self.cache_entries_loaded
+        # the loop ended normally: the frozen body replaces the draft
+        if self.draft_path is not None and self.draft_path.is_file():
+            try:
+                self.draft_path.unlink()
+            except Exception:
+                pass
 
         outcome["verification_summary"] = self._build_summary(
             outcome, started)
@@ -562,6 +610,34 @@ class FinalizationRunner:
             html_path = None
         outcome["html_path"] = html_path
         return outcome
+
+    # ------------------------------------------------------------------
+    # resume persistence
+    # ------------------------------------------------------------------
+
+    def _persist_cache(self) -> None:
+        if self.cache_path is None or not self.verification_cache.dirty:
+            return
+        self.verification_cache.save(self.cache_path)
+
+    def _persist_draft(self, chapters: Dict[str, str]) -> None:
+        """The body after an accepted edit (raw [SOURCE N] form)."""
+        if self.draft_path is None:
+            return
+        import json as _json
+        import os as _os
+        from datetime import datetime as _dt
+        try:
+            self.draft_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.draft_path.with_name(self.draft_path.name + ".tmp")
+            tmp.write_text(_json.dumps({
+                "session_id": self.session_id,
+                "saved_at": _dt.now().isoformat(),
+                "chapters": dict(chapters),
+            }, ensure_ascii=False), encoding="utf-8")
+            _os.replace(tmp, self.draft_path)
+        except Exception as e:
+            print(f"[Finalize] body draft save failed: {e}")
 
     # ------------------------------------------------------------------
     # interruption / summary

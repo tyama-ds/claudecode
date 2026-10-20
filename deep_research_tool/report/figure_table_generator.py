@@ -79,7 +79,28 @@ class Figure:
             "alt_text": self.alt_text,
             "width": self.width,
             "height": self.height,
+            "chart_data": self.chart_data,
         }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Figure":
+        """Rebuild a figure from figures_tables.json (image bytes are not
+        stored: the file at image_path is read back when inserted)."""
+        try:
+            ftype = FigureType(data.get("figure_type") or "image")
+        except ValueError:
+            ftype = FigureType.IMAGE
+        path = data.get("image_path")
+        return cls(
+            figure_id=str(data.get("figure_id") or ""), figure_type=ftype,
+            title=str(data.get("title") or ""), caption=str(data.get("caption") or ""),
+            source_url=data.get("source_url"), source_title=data.get("source_title"),
+            section_id=str(data.get("section_id") or ""),
+            image_path=Path(path) if path else None, image_data=None,
+            alt_text=str(data.get("alt_text") or ""),
+            width=data.get("width"), height=data.get("height"),
+            chart_data=data.get("chart_data"),
+        )
 
 
 @dataclass
@@ -111,6 +132,18 @@ class TableData:
             "unit": self.unit,
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "TableData":
+        return cls(
+            table_id=str(data.get("table_id") or ""), title=str(data.get("title") or ""),
+            caption=str(data.get("caption") or ""),
+            headers=[str(h) for h in (data.get("headers") or [])],
+            rows=[list(r) for r in (data.get("rows") or [])],
+            source_url=data.get("source_url"), source_title=data.get("source_title"),
+            section_id=str(data.get("section_id") or ""),
+            data_type=str(data.get("data_type") or "general"), unit=data.get("unit"),
+        )
+
 
 @dataclass
 class FigureTableCollection:
@@ -130,6 +163,16 @@ class FigureTableCollection:
     def get_charts_for_section(self, section_id: str) -> List[Figure]:
         """Get all charts for a section."""
         return [c for c in self.charts if c.section_id == section_id]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "FigureTableCollection":
+        """The collection saved as figures_tables.json (a resumed run
+        reuses the generated figures instead of regenerating them)."""
+        return cls(
+            figures=[Figure.from_dict(d) for d in (data.get("figures") or [])],
+            tables=[TableData.from_dict(d) for d in (data.get("tables") or [])],
+            charts=[Figure.from_dict(d) for d in (data.get("charts") or [])],
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""

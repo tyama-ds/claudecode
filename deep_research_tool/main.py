@@ -1147,6 +1147,7 @@ class DeepResearchTool:
                 _client.concurrency_limiter = run_limits
                 _client.token_stats = run_token_stats
                 _client.cancel_check = _cancel_checkpoint
+                self._wire_retry(_client)
             except Exception:
                 pass
         try:
@@ -1296,6 +1297,21 @@ class DeepResearchTool:
         if research_search is not None:
             self.search_client = research_search
 
+        # --- stage checkpoints (resume after a crash / disconnect) ------
+        # run_state_<id>.json records every stage that completed and its
+        # artifacts; a resumed run skips those stages. The research loop
+        # keeps its own per-section checkpoints (handled above).
+        from .utils.run_state import RunState
+        state_path = (Path(self.config.report.output_dir)
+                      / f"run_state_{session.session_id}.json")
+        self._resuming = bool(resume_from)
+        self.run_state = RunState.load(state_path) if resume_from else RunState(state_path)
+        if not self.run_state.done("research"):
+            self.run_state.mark(
+                "research",
+                session=(getattr(session, "saved_artifacts", {}) or {}).get("session"),
+                evidence_json=(getattr(session, "saved_artifacts", {}) or {}).get("evidence_json"))
+
         # --- live report sinks (Web UI preview and/or Word COM) ---
         # Everything emitted before on_finalized is a watermarked DRAFT;
         # the verified final body replaces it at freeze.
@@ -1329,11 +1345,16 @@ class DeepResearchTool:
         deep_think_results = None
         if self.config.deep_think.enabled and self.deep_think_processor:
             self.progress_plan.enter("deep_think")
-            session, deep_think_results = self.stage_timings.call("deep_think", self._apply_deep_think,
-                session=session,
-                evidence_locker=evidence_locker,
-                progress_callback=progress_callback,
-            )
+            if self._skip_stage("deep_think", progress_callback):
+                deep_think_results = self._load_stage_json("deep_think")
+            else:
+                session, deep_think_results = self.stage_timings.call("deep_think", self._apply_deep_think,
+                    session=session,
+                    evidence_locker=evidence_locker,
+                    progress_callback=progress_callback,
+                )
+                self._mark_stage("deep_think",
+                                 deep_think=self._save_stage_json("deep_think", deep_think_results))
 
         # Evidence export happens AFTER report finalization (further below)
         # so that evidence added by the final research rounds is included
@@ -1360,14 +1381,18 @@ class DeepResearchTool:
 
         if legacy_v1:
             self.progress_plan.enter("evidence_review")
-            if progress_callback:
-                progress_callback(
-                    "Reviewing all evidence for report enhancement...", 0)
-            session = self.stage_timings.call("evidence_enhancement", self._enhance_sections_with_full_evidence,
-                session=session,
-                evidence_locker=evidence_locker,
-                query=query,
-            )
+            if self._skip_stage("evidence_review", progress_callback):
+                pass        # the reviewed sections are in the saved session
+            else:
+                if progress_callback:
+                    progress_callback(
+                        "Reviewing all evidence for report enhancement...", 0)
+                session = self.stage_timings.call("evidence_enhancement", self._enhance_sections_with_full_evidence,
+                    session=session,
+                    evidence_locker=evidence_locker,
+                    query=query,
+                )
+                self._mark_stage("evidence_review")
             # live report: V1 section drafts become visible here
             if live_sink is not None:
                 for _sid, _sdata in session.section_contents.items():
@@ -1427,15 +1452,23 @@ class DeepResearchTool:
         fermi_markdown = ""
         if self.config.fermi_estimation.enabled:
             self.progress_plan.enter("fermi")
-            if progress_callback:
-                progress_callback("Running Fermi estimation...", 0)
+            saved_fermi = (self._load_stage_json("fermi")
+                           if self._skip_stage("fermi", progress_callback) else None)
+            if isinstance(saved_fermi, dict):
+                fermi_results = saved_fermi.get("results")
+                fermi_markdown = saved_fermi.get("markdown") or ""
+            else:
+                if progress_callback:
+                    progress_callback("Running Fermi estimation...", 0)
 
-            fermi_results, fermi_markdown = self.stage_timings.call("fermi", self._run_fermi_estimation,
-                session=session,
-                evidence_locker=evidence_locker,
-                query=query,
-                pre_deep_think_content=_pre_deep_think_content,
-            )
+                fermi_results, fermi_markdown = self.stage_timings.call("fermi", self._run_fermi_estimation,
+                    session=session,
+                    evidence_locker=evidence_locker,
+                    query=query,
+                    pre_deep_think_content=_pre_deep_think_content,
+                )
+                self._mark_stage("fermi", fermi=self._save_stage_json(
+                    "fermi", {"results": fermi_results, "markdown": fermi_markdown}))
 
         # --- ALL semantic figure work happens BEFORE finalization -------
         # Chart data, titles, captions and table cells are generated (and
@@ -1446,22 +1479,40 @@ class DeepResearchTool:
         fig_generator = None
         if self.config.report.auto_figures:
             self.progress_plan.enter("figures")
-            if progress_callback:
-                progress_callback("Generating figures and tables...", 0)
-            try:
-                figure_collection, fig_generator = \
-                    self.stage_timings.call("figures", self._generate_figure_collection,
-                        session=session, evidence_locker=evidence_locker)
-            except Exception as e:
-                print(f"[AutoFigures] Failed with error: {e}. "
-                      f"Continuing without figures.")
-                ResearchWarnings.get_instance().add(
-                    ResearchWarnings.MEDIUM, "AutoFigures",
-                    f"Figure/table generation failed entirely. Report will "
-                    f"not contain auto-generated figures or tables. "
-                    f"Error: {e}",
-                )
-                figure_collection, fig_generator = None, None
+            figures_dir = Path(self.config.report.output_dir) / "reports" / "figures"
+            collection_path = figures_dir / "figures_tables.json"
+            if self._skip_stage("figures", progress_callback,
+                                require=self.run_state.artifact("figures") if self.run_state else None):
+                figure_collection, fig_generator = self._restore_figures(
+                    Path(self.run_state.artifact("figures")))
+            else:
+                if progress_callback:
+                    progress_callback("Generating figures and tables...", 0)
+                try:
+                    figure_collection, fig_generator = \
+                        self.stage_timings.call("figures", self._generate_figure_collection,
+                            session=session, evidence_locker=evidence_locker)
+                except Exception as e:
+                    print(f"[AutoFigures] Failed with error: {e}. "
+                          f"Continuing without figures.")
+                    ResearchWarnings.get_instance().add(
+                        ResearchWarnings.MEDIUM, "AutoFigures",
+                        f"Figure/table generation failed entirely. Report will "
+                        f"not contain auto-generated figures or tables. "
+                        f"Error: {e}",
+                    )
+                    figure_collection, fig_generator = None, None
+                # the generated collection on disk: a resumed run reuses
+                # the rendered PNGs / tables instead of regenerating them
+                if figure_collection is not None and fig_generator is not None:
+                    try:
+                        figures_dir.mkdir(parents=True, exist_ok=True)
+                        fig_generator.export_collection(figure_collection, collection_path)
+                        self._mark_stage("figures", figures=collection_path)
+                    except Exception as e:
+                        print(f"[AutoFigures] collection export failed: {e}")
+                else:
+                    self._mark_stage("figures")
 
         extras_flags = {}
         semantic_freeze_hash = None
@@ -1484,19 +1535,28 @@ class DeepResearchTool:
                     generator, result, fermi_markdown,
                     figure_collection=figure_collection)
                 self.progress_plan.enter("verification")
-                verification_result, verification_html = \
-                    self.stage_timings.call("verification", self._run_finalization_loop,
-                        result=result,
-                        session=session,
-                        evidence_locker=evidence_locker,
-                        query=query,
-                        requirements=requirements,
-                        progress_callback=progress_callback,
-                        extra_chapters=extra_chapters,
-                        render_only=extras_flags.get("figures_key"),
-                    )
-                if extras_flags.get("fermi"):
-                    fermi_markdown = ""    # already in the verified body
+                if self._skip_stage("verification", progress_callback) and \
+                        self._restore_finalization(session, result):
+                    verification_result = None
+                    verification_html = self._restored_verification_html
+                    fermi_markdown = ""        # the frozen body already has it
+                else:
+                    verification_result, verification_html = \
+                        self.stage_timings.call("verification", self._run_finalization_loop,
+                            result=result,
+                            session=session,
+                            evidence_locker=evidence_locker,
+                            query=query,
+                            requirements=requirements,
+                            progress_callback=progress_callback,
+                            extra_chapters=extra_chapters,
+                            render_only=extras_flags.get("figures_key"),
+                        )
+                    if extras_flags.get("fermi"):
+                        fermi_markdown = ""    # already in the verified body
+                    self._mark_stage("verification", final_body=self._save_final_body(
+                        session, self.finalization_outcome, self.config.report.output_dir),
+                        verification_html=verification_html)
                 semantic_freeze_hash = self._freeze_semantics(
                     {sid: ch.content for sid, ch in result.chapters.items()},
                     figure_collection)
@@ -1549,19 +1609,28 @@ class DeepResearchTool:
                     generator, result, fermi_markdown,
                     figure_collection=figure_collection)
                 self.progress_plan.enter("verification")
-                verification_result, verification_html = \
-                    self.stage_timings.call("verification", self._run_finalization_loop,
-                        result=result,
-                        session=session,
-                        evidence_locker=evidence_locker,
-                        query=query,
-                        requirements=requirements,
-                        progress_callback=progress_callback,
-                        extra_chapters=extra_chapters,
-                        render_only=extras_flags.get("figures_key"),
-                    )
-                if extras_flags.get("fermi"):
-                    fermi_markdown = ""    # already in the verified body
+                if self._skip_stage("verification", progress_callback) and \
+                        self._restore_finalization(session, result):
+                    verification_result = None
+                    verification_html = self._restored_verification_html
+                    fermi_markdown = ""        # the frozen body already has it
+                else:
+                    verification_result, verification_html = \
+                        self.stage_timings.call("verification", self._run_finalization_loop,
+                            result=result,
+                            session=session,
+                            evidence_locker=evidence_locker,
+                            query=query,
+                            requirements=requirements,
+                            progress_callback=progress_callback,
+                            extra_chapters=extra_chapters,
+                            render_only=extras_flags.get("figures_key"),
+                        )
+                    if extras_flags.get("fermi"):
+                        fermi_markdown = ""    # already in the verified body
+                    self._mark_stage("verification", final_body=self._save_final_body(
+                        session, self.finalization_outcome, self.config.report.output_dir),
+                        verification_html=verification_html)
                 semantic_freeze_hash = self._freeze_semantics(
                     {sid: ch.content for sid, ch in result.chapters.items()},
                     figure_collection)
@@ -1616,15 +1685,23 @@ class DeepResearchTool:
                             prev.rstrip() + "\n" + fermi_markdown)
                         fermi_markdown = ""
                 self.progress_plan.enter("verification")
-                verification_result, verification_html = \
-                    self.stage_timings.call("verification", self._run_finalization_v1,
-                        session=session,
-                        evidence_locker=evidence_locker,
-                        query=query,
-                        requirements=requirements,
-                        progress_callback=progress_callback,
-                        figure_collection=figure_collection,
-                    )
+                if self._skip_stage("verification", progress_callback) and \
+                        self._restore_finalization(session, None):
+                    verification_result = None
+                    verification_html = self._restored_verification_html
+                else:
+                    verification_result, verification_html = \
+                        self.stage_timings.call("verification", self._run_finalization_v1,
+                            session=session,
+                            evidence_locker=evidence_locker,
+                            query=query,
+                            requirements=requirements,
+                            progress_callback=progress_callback,
+                            figure_collection=figure_collection,
+                        )
+                    self._mark_stage("verification", final_body=self._save_final_body(
+                        session, self.finalization_outcome, self.config.report.output_dir),
+                        verification_html=verification_html)
                 finalized = True
                 # V1 stores the executive summary / key findings OUTSIDE
                 # the chapter map — they are semantic content the reader
@@ -1764,6 +1841,7 @@ class DeepResearchTool:
         # Persist the FINAL VERIFIED body as its own artifact: later
         # re-outputs (summary / other formats) start from the frozen
         # text, never from the pre-finalization session JSON
+        self._mark_stage("rendering", report=active_report_path)
         final_body_path = None
         if getattr(self, "finalization_outcome", None):
             final_body_path = self._save_final_body(
@@ -1899,7 +1977,7 @@ class DeepResearchTool:
                    if final_body_path else {}),
                 **({"report": str(active_report_path)}
                    if active_report_path else {})},
-            "resume_plan": getattr(self, "resume_plan", None),
+            "resume_plan": self._resume_plan_for_result(),
             # the plan that was researched (table of contents / queries)
             "research_plan": self.current_plan(),
             "timings": self._collect_timings(run_token_stats),
@@ -1990,8 +2068,11 @@ class DeepResearchTool:
                 _client.concurrency_limiter = run_limits
                 _client.token_stats = run_token_stats
                 _client.cancel_check = _cancel_checkpoint
+                self._wire_retry(_client)
             except Exception:
                 pass
+        self._resuming = False
+        self.run_state = None
         try:
             self.search_client.concurrency_limiter = run_limits
         except Exception:
@@ -2858,6 +2939,12 @@ class DeepResearchTool:
             chapter_citation_callback=chapter_citation_callback,
             verification_progress=getattr(self, "verification_progress",
                                           None),
+            # resume support: judgements + the edited body on disk
+            cache_path=(Path(self.config.report.output_dir)
+                        / f"verification_cache_{session.session_id}.json"),
+            draft_path=(Path(self.config.report.output_dir)
+                        / f"final_body_draft_{session.session_id}.json"),
+            resume=bool(getattr(self, "_resuming", False)),
         )
 
     def _warn_on_finalization_outcome(self, outcome) -> None:
@@ -3139,6 +3226,190 @@ class DeepResearchTool:
             return int(getattr(rc, "parallel_max_workers", 8) or 8)
         except Exception:
             return 8
+
+    # ------------------------------------------------------------------
+    # stage checkpoints / resume helpers
+    # ------------------------------------------------------------------
+
+    def _wire_retry(self, client) -> None:
+        """Transient-error retry settings from config.api onto a client
+        (DelegatedLLMClient forwards them to its local client)."""
+        api = getattr(self.config, "api", None)
+        try:
+            client.retry_attempts = int(getattr(api, "llm_retry_attempts", 3))
+            client.retry_backoff_seconds = float(
+                getattr(api, "llm_retry_backoff_seconds", 2.0))
+        except Exception:
+            pass
+
+    def _skip_stage(self, stage: str, progress_callback=None,
+                    require: Optional[str] = None) -> bool:
+        """True when this is a resumed run and the stage completed in an
+        earlier attempt (and its required artifact still exists)."""
+        state = getattr(self, "run_state", None)
+        if not getattr(self, "_resuming", False) or state is None or not state.done(stage):
+            return False
+        if require and not Path(require).is_file():
+            return False
+        if stage not in state.resumed_from:
+            state.resumed_from.append(stage)
+        label = {"deep_think": "DeepThink", "evidence_review": "根拠の見直し",
+                 "fermi": "フェルミ推定", "figures": "図表生成",
+                 "verification": "検証"}.get(stage, stage)
+        print(f"[Resume] {stage}: completed in an earlier attempt, skipped")
+        if progress_callback:
+            try:
+                progress_callback(f"再開: {label}は前回完了しているため省略します", None)
+            except Exception:
+                pass
+        return True
+
+    def _mark_stage(self, stage: str, **artifacts) -> None:
+        """Record a completed stage; the researcher's atomic checkpoint
+        persists the session (bodies touched by the stage) alongside."""
+        state = getattr(self, "run_state", None)
+        if state is None:
+            return
+        checkpoint = getattr(getattr(self, "researcher", None), "_checkpoint", None)
+        if callable(checkpoint) and stage in ("deep_think", "evidence_review"):
+            try:
+                checkpoint(f"{stage}_done", f"{stage} completed")
+            except Exception as e:
+                print(f"[Resume] checkpoint after {stage} failed: {e}")
+        state.mark(stage, **artifacts)
+
+    def _stage_json_path(self, name: str) -> Path:
+        sid = ""
+        try:
+            sid = self.researcher.get_session().session_id
+        except Exception:
+            pass
+        return Path(self.config.report.output_dir) / f"{name}_{sid or 'run'}.json"
+
+    def _save_stage_json(self, name: str, payload) -> Optional[Path]:
+        path = self._stage_json_path(name)
+        try:
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, default=str),
+                           encoding="utf-8")
+            os.replace(tmp, path)
+            return path
+        except Exception as e:
+            print(f"[Resume] could not save {name}: {e}")
+            return None
+
+    def _load_stage_json(self, name: str):
+        state = getattr(self, "run_state", None)
+        path = Path(state.artifact(name)) if state and state.artifact(name) \
+            else self._stage_json_path(name)
+        try:
+            return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+        except Exception as e:
+            print(f"[Resume] could not load {name}: {e}")
+            return None
+
+    def _restore_figures(self, collection_path: Path):
+        """The figure collection of an earlier attempt + a generator for
+        the deterministic insertion (no LLM, no network)."""
+        from .report.figure_table_generator import FigureTableCollection
+        try:
+            data = json.loads(collection_path.read_text(encoding="utf-8"))
+            collection = FigureTableCollection.from_dict(data)
+        except Exception as e:
+            print(f"[Resume] figure collection unreadable ({e}); figures skipped")
+            return None, None
+        # charts rendered by the spec engine: the chart page link
+        charts_html = collection_path.parent / "charts.html"
+        if charts_html.is_file():
+            self.charts_html_path = charts_html
+        figures_dir = collection_path.parent
+        generator = FigureTableGenerator(
+            llm_client=self.llm_client,
+            output_dir=figures_dir,
+            language=self.config.research.language,
+            max_images_per_section=self.config.report.auto_figures_max_images,
+            proxies=self.config.proxy.get_proxies_dict(),
+            verify_ssl=self.config.proxy.verify_ssl,
+            chart_library=self.config.report.chart_library,
+            max_workers=min(self.config.report.figure_max_workers,
+                            self.config.research.parallel_max_workers),
+            concurrency_limiter=getattr(self, "run_limits", None),
+        )
+        print(f"[Resume] figures: {len(collection.figures)} figure(s), "
+              f"{len(collection.tables)} table(s), {len(collection.charts)} chart(s) reused")
+        return collection, generator
+
+    def _restore_finalization(self, session, result=None) -> bool:
+        """A verification that COMPLETED in an earlier attempt: its frozen
+        chapters (final_body_<id>.json) become the body again — no LLM
+        call. False when the file is missing, in which case the caller
+        verifies normally."""
+        state = getattr(self, "run_state", None)
+        sid = session.session_id
+        out = Path(self.config.report.output_dir)
+        path = Path(state.artifact("final_body")) if state and state.artifact("final_body") \
+            else out / f"final_body_{sid}.json"
+        if not path.is_file():
+            if state is not None and "verification" in state.resumed_from:
+                state.resumed_from.remove("verification")
+            return False
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[Resume] final body unreadable ({e}); verifying again")
+            if state is not None and "verification" in state.resumed_from:
+                state.resumed_from.remove("verification")
+            return False
+        chapters = {str(k): str(v) for k, v in (data.get("chapters") or {}).items()}
+        raw = {str(k): str(v) for k, v in (data.get("raw_chapters") or {}).items()}
+        if not chapters:
+            if state is not None and "verification" in state.resumed_from:
+                state.resumed_from.remove("verification")
+            return False
+        html = out / f"verification_{sid}.html"
+        self._restored_verification_html = html if html.is_file() else None
+        self.finalization_outcome = {
+            "chapters": chapters, "raw_chapters": raw or dict(chapters),
+            "verdict": None, "decision": data.get("decision") or "accept",
+            "history": [], "limitations": [],
+            "ordered_evidence_ids": list(data.get("ordered_evidence_ids") or []),
+            "html_path": self._restored_verification_html,
+            "verification_summary": None, "restored": True,
+        }
+        exec_key = "要旨" if self.config.research.language == "ja" else "Executive Summary"
+        if result is not None:            # V2 / V3 chapter form
+            for cid, text in chapters.items():
+                if cid in result.chapters:
+                    result.chapters[cid].content = text
+                    result.chapters[cid].word_count = len(text)
+                else:
+                    result.chapters[cid] = self._make_extra_chapter(cid, text)
+        else:                             # V1: the session sections
+            for cid, text in chapters.items():
+                if cid in session.section_contents:
+                    session.section_contents[cid]["content"] = text
+                elif cid != exec_key:
+                    session.section_contents[cid] = {
+                        "title": cid, "content": text,
+                        "sources": [], "extracted_content": []}
+        print(f"[Resume] verification: frozen body of the earlier attempt "
+              f"reused ({len(chapters)} chapter(s), decision={self.finalization_outcome['decision']})")
+        return True
+
+    def _resume_plan_for_result(self) -> Optional[Dict[str, Any]]:
+        """What a resumed run reused: sections (from the researcher), the
+        stages skipped as completed, cached judgements, the edited body."""
+        plan = dict(getattr(self, "resume_plan", None) or {})
+        state = getattr(self, "run_state", None)
+        runner = getattr(self, "finalization_runner", None)
+        if state is not None and state.resumed_from:
+            plan["stages_skipped"] = list(state.resumed_from)
+        if runner is not None:
+            if getattr(runner, "cache_entries_loaded", 0):
+                plan["verification_cache_entries"] = int(runner.cache_entries_loaded)
+            if getattr(runner, "resumed_from_draft", False):
+                plan["resumed_from_draft"] = True
+        return plan or None
 
     def _enhance_sections_with_full_evidence(
         self,

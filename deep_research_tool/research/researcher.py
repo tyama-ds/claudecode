@@ -2134,6 +2134,18 @@ Return as JSON:
                 raise
             finally:
                 self._resume_skip = set()
+        else:
+            # the research loop had finished before the run died: every
+            # section is reused verbatim (the breakdown says so instead
+            # of showing 0 reused / 0 processed)
+            sections = []
+            if self.session.research_plan is not None:
+                sections = self.session.research_plan.table_of_contents \
+                    .get_flat_sections()
+            self.resume_plan = {
+                "reused": [s.section for s in sections],
+                "to_process": [],
+            }
 
         return self.session
 

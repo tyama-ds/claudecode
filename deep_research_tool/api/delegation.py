@@ -90,7 +90,8 @@ class DelegatedLLMClient:
     ``cancel_check``) is forwarded to it as well.
     """
 
-    _FORWARDED = ("concurrency_limiter", "token_stats", "cancel_check")
+    _FORWARDED = ("concurrency_limiter", "token_stats", "cancel_check",
+                  "retry_attempts", "retry_backoff_seconds")
 
     def __init__(self, local: Any, *, fallback: Any = None,
                  role_label: str, setting_label: str,

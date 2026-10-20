@@ -218,6 +218,12 @@ class APIConfig:
     local_timeout: Optional[int] = None
     local_concurrency: Optional[int] = None
 
+    # Transient network failures (dropped connection, timeout) of an LLM
+    # request are retried with exponential backoff instead of ending the
+    # run: attempts after the first try (0 = no retry) and the base delay
+    llm_retry_attempts: int = 3
+    llm_retry_backoff_seconds: float = 2.0
+
     # API parameters
     temperature: float = 0.7
     max_tokens: int = 4096
@@ -936,6 +942,8 @@ def create_config(
     local_concurrency: Optional[int] = None,
     local_model: Optional[str] = None,
     local_llm_fallback: bool = True,
+    llm_retry_attempts: int = 3,
+    llm_retry_backoff_seconds: float = 2.0,
     # LLM sampling knobs (GUI "Temperature" / "Max Tokens"); None = default
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
@@ -1331,6 +1339,8 @@ def create_config(
         local_backend=LocalLLMBackend(local_backend),
         local_timeout=local_timeout,
         local_concurrency=local_concurrency,
+        llm_retry_attempts=max(0, min(10, int(llm_retry_attempts or 0))),
+        llm_retry_backoff_seconds=max(0.0, float(llm_retry_backoff_seconds or 0.0)),
         **({"temperature": float(temperature)} if temperature is not None else {}),
         **({"max_tokens": int(max_tokens)} if max_tokens is not None else {}),
         stage_overrides=dict(stage_llm) if stage_llm else {},

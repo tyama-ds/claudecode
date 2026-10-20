@@ -111,6 +111,7 @@ _CONFIG_PARAM_MAP = {
     "local_model": "local_model",
     "local_timeout": "local_timeout",
     "local_concurrency": "local_concurrency",
+    "llm_retry_attempts": "llm_retry_attempts",
     # reuse / freshness
     "cache_reuse": "cache_reuse",
     "refresh_fetched": "refresh_fetched",
@@ -218,6 +219,7 @@ _PARAM_CONVERTERS = {
     "local_llm_role": _local_llm_role,
     "local_timeout": _int_range(1, 3600),
     "local_concurrency": _int_range(1, 16),
+    "llm_retry_attempts": _int_range(0, 10),
     "chart_max_per_section": _int_range(1, 12),
     "ai_crawl_max_pages": _int_range(1, 200),
     "ai_crawl_site_depth": _int_range(0, 10),      # 0 = seeds only
@@ -1224,8 +1226,39 @@ class JobManager:
                     job.update("中止しました（保存済みの成果物はありません）", -1)
             else:
                 job.error = f"{e}\n{traceback.format_exc(limit=3)}"
+                # what the run had saved before it died (section
+                # checkpoints, stage state, verification cache / draft):
+                # the history row can offer 中断箇所から再開 for it
+                saved: Dict[str, str] = {}
+                session_id = None
+                if tool is not None:
+                    try:
+                        saved = dict(getattr(tool, "partial_artifacts", {}) or {}) \
+                            or dict(tool.current_saved_artifacts() or {})
+                        sess = (tool.researcher.get_session()
+                                if getattr(tool, "researcher", None) is not None else None)
+                        session_id = getattr(sess, "session_id", None) or \
+                            getattr(tool, "partial_session_id", None)
+                    except Exception:
+                        pass
+                job.result = {
+                    "saved_artifacts": saved,
+                    "session_id": session_id,
+                    "plan": job.live_plan(),
+                    "warnings": job_warnings.to_dict_list(),
+                    "warning_count": job_warnings.count(),
+                    "status": {"process": "error", "verification": "unknown",
+                               "quality": "unverified"},
+                    "run_status": "error",
+                    "error": str(e)[:500],
+                    "output_dir": params.get("output_dir"),
+                }
                 job.finish("error")
-                job.update(f"エラー: {e}", -1)
+                if saved:
+                    job.update(f"エラー: {e}（保存済み: {', '.join(sorted(saved))}。"
+                               f"履歴から再開できます）", -1)
+                else:
+                    job.update(f"エラー: {e}", -1)
         finally:
             ResearchWarnings.end_run()
             ResearchWarnings.unbind()

@@ -2630,10 +2630,17 @@ function renderTokenUsage(u) {
 function renderResumePlan(rp) {
   if (!rp) return '';
   const reused = rp.reused || [], todo = rp.to_process || [];
+  const skipped = rp.stages_skipped || [];
+  const STAGE_JA = {research: '調査', deep_think: 'DeepThink', evidence_review: '根拠の見直し', fermi: 'フェルミ推定',
+                    figures: '図表生成', writing: 'レポート生成', verification: '検証', rendering: '出力'};
+  const cache = rp.verification_cache_entries || 0;
   return `<label style="margin-top:10px">🔁 再開の内訳</label>
     <div class="exec-summary" style="margin-top:4px">
       <span>再利用した章（再調査なし）: <b>${reused.length}</b>${reused.length ? ' — ' + escapeHtml(reused.join(', ')) : ''}</span>
       <span>再実行した章: <b>${todo.length}</b>${todo.length ? ' — ' + escapeHtml(todo.join(', ')) : ''}</span>
+      ${skipped.length ? `<span>完了済みとして省略した工程: <b>${skipped.length}</b> — ${escapeHtml(skipped.map(s => STAGE_JA[s] || s).join('・'))}</span>` : ''}
+      ${cache ? `<span>再利用した検証の判定: <b>${cache}</b> 件</span>` : ''}
+      ${rp.resumed_from_draft ? '<span>検証の途中まで修正した本文から再開しました</span>' : ''}
     </div>`;
 }
 
@@ -3358,7 +3365,9 @@ function renderHistory(records) {
     const saved = res.saved_artifacts || {};
     const axes = res.status || {};
     const ps = r.params_summary || {};
-    const canResume = !!saved.session && ['cancelled', 'error', 'interrupted'].includes(r.state);
+    // any run that did not complete can be resumed when a session was saved
+    // (the server also finds the newest session_*.json in the job folder)
+    const canResume = (!!saved.session || !!r.output_dir) && ['cancelled', 'error', 'interrupted'].includes(r.state);
     const canReout = !!saved.session;
     return `<div class="hist-row" data-job="${escapeHtml(r.job_id)}">
       <div class="q">${escapeHtml(r.query || '(無題)')}</div>

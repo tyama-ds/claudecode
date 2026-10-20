@@ -211,7 +211,9 @@ class OpenAIClient(BaseLLMClient):
             # The OpenAI SDK client is thread-safe and retries 429/5xx
             # internally with exponential backoff + jitter.
             with self._leaf_permit():
-                response = self._client.chat.completions.create(**api_params)
+                response = self._call_with_retry(
+                    lambda: self._client.chat.completions.create(**api_params),
+                    label="OpenAI request")
 
             # Extract response - handle missing/empty choices
             if not response.choices:

@@ -224,6 +224,51 @@ class BaseLLMClient(ABC):
             with track_activity("llm"):
                 yield
 
+    # --- transient network failures ----------------------------------------
+    # The SDKs retry 429/5xx themselves; a dropped connection or a timeout
+    # surfaces as an exception that used to end the whole run. These are
+    # retried with backoff (run-scoped settings from config.api), the
+    # cancel check honoured between attempts.
+    retry_attempts: int = 3
+    retry_backoff_seconds: float = 2.0
+    _TRANSIENT_NAMES = (
+        "APIConnectionError", "APITimeoutError", "ConnectionError",
+        "ConnectTimeout", "ReadTimeout", "Timeout", "ChunkedEncodingError",
+        "RemoteProtocolError", "ReadError", "WriteError", "ConnectError",
+        "ServerDisconnectedError", "IncompleteRead", "RemoteDisconnected",
+    )
+
+    @classmethod
+    def is_transient_error(cls, exc: BaseException) -> bool:
+        """A network-level failure worth retrying (never an auth, quota,
+        validation or server-side refusal)."""
+        for klass in type(exc).__mro__:
+            if klass.__name__ in cls._TRANSIENT_NAMES:
+                return True
+        return isinstance(exc, (ConnectionError, TimeoutError))
+
+    def _call_with_retry(self, fn, *, label: str = "LLM request"):
+        """fn() with bounded retries on transient network errors."""
+        import random
+        import time as _time
+        attempts = max(0, int(getattr(self, "retry_attempts", 3) or 0))
+        backoff = float(getattr(self, "retry_backoff_seconds", 2.0) or 0.0)
+        check = getattr(self, "cancel_check", lambda: None)
+        last: Optional[BaseException] = None
+        for attempt in range(attempts + 1):
+            try:
+                return fn()
+            except Exception as e:                       # noqa: BLE001
+                if not BaseLLMClient.is_transient_error(e) or attempt >= attempts:
+                    raise
+                last = e
+                delay = backoff * (2 ** attempt) + random.uniform(0, 0.5)
+                print(f"[LLM] {label} failed ({type(e).__name__}); "
+                      f"retry {attempt + 1}/{attempts} in {delay:.1f}s")
+                _time.sleep(delay)
+                check()                                  # a cancel ends the wait
+        raise last  # pragma: no cover (loop always returns or raises)
+
     def _record_usage(self, token_usage) -> None:
         """Record usage into run-local (if attached) + global stats."""
         record_usage(self, token_usage)

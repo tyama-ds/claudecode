@@ -571,8 +571,13 @@ class FinalizationController:
         language: str = "ja",
         progress=None,
         edit_workers: int = 1,
+        on_body_change: Callable = None,
     ):
         self.verify_fn = verify_fn
+        # called with the chapters after EVERY accepted body change (edits,
+        # the limitations append): the runner persists a draft so a run
+        # that dies mid-loop resumes from the edited body
+        self.on_body_change = on_body_change
         # sections are edited concurrently (rewrite / compress / hedge)
         # when > 1; results are always APPLIED in section order
         self.edit_workers = max(1, int(edit_workers or 1))
@@ -597,6 +602,14 @@ class FinalizationController:
     def _checkpoint(self) -> None:
         if self.progress is not None:
             self.progress.checkpoint()
+
+    def _body_changed(self, chapters: Dict[str, str]) -> None:
+        if self.on_body_change is None:
+            return
+        try:
+            self.on_body_change(chapters)
+        except Exception as e:            # persistence never breaks the loop
+            print(f"[Finalize] body draft callback failed: {e}")
 
     def _map_edits(self, fn: Callable, sections: List[str],
                    issues_for: Callable) -> List[tuple]:
@@ -666,6 +679,7 @@ class FinalizationController:
                   f"invalid citations in LLM output")
             return False
         chapters[section_id] = new_text
+        self._body_changed(chapters)
         return True
 
     def _append_limitations(self, chapters: Dict[str, str],
@@ -786,6 +800,8 @@ class FinalizationController:
                     "The verification loop budget was exhausted; some "
                     "points remain unresolved.")
         appended = self._append_limitations(chapters, verdict)
+        if appended:
+            self._body_changed(chapters)
 
         # Citation machine check over the final body (defense in depth;
         # the re-verification below also validates via the registry)
