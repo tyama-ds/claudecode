@@ -250,6 +250,29 @@ class LocalLLMClient(BaseLLMClient):
     _RETRY_STATUSES = {429, 502, 503, 504}
     _MAX_RETRIES = 3
 
+    @staticmethod
+    def _connection_never_established(exc) -> bool:
+        """True when the TCP connection was refused / could not be made
+        (urllib3 NewConnectionError, ConnectionRefusedError) anywhere in
+        the exception chain — the request never reached the server."""
+        seen = set()
+        stack = [exc]
+        while stack:
+            e = stack.pop()
+            if e is None or id(e) in seen:
+                continue
+            seen.add(id(e))
+            if isinstance(e, ConnectionRefusedError) or \
+                    type(e).__name__ in ("NewConnectionError", "ConnectionRefusedError"):
+                return True
+            text = str(e)
+            if "NewConnectionError" in text or "Connection refused" in text:
+                return True
+            stack.append(getattr(e, "__cause__", None))
+            stack.append(getattr(e, "__context__", None))
+            stack.extend(a for a in getattr(e, "args", ()) if isinstance(a, BaseException))
+        return False
+
     def _post_with_retry(self, url: str, payload: dict):
         """Consume one completion while holding its inference permits.
 
@@ -295,6 +318,19 @@ class LocalLLMClient(BaseLLMClient):
                     "The server may still be generating; request was not retried. "
                     "Check model load/queue status or increase local_timeout. "
                     f"Details: {self._sanitize_error(e)}") from e
+            except requests.ConnectionError as e:
+                # Only a connection that was NEVER established (refused /
+                # no route: urllib3 NewConnectionError, e.g. the local
+                # server is restarting) is retried — the server never saw
+                # the request, so nothing can be duplicated. A drop after
+                # the connect (reset / disconnect, with or without a
+                # response) is ambiguous and is not retried.
+                if response is None and self._connection_never_established(e):
+                    last_error = e
+                else:
+                    raise RuntimeError(
+                        "Local LLM request or response failed; request was not retried. "
+                        f"Details: {self._sanitize_error(e)}") from e
             except requests.RequestException as e:
                 raise RuntimeError(
                     "Local LLM request or response failed; request was not retried. "

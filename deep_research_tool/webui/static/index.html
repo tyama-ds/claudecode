@@ -848,6 +848,11 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
           <span class="feat-sub">画像・表・数値抽出の同時実行数</span></div>
         <input type="number" id="feat_fig_workers" value="8" min="1" max="16" style="width:80px">
       </div>
+      <div class="feat-row" data-tip="章ごとに AI が設計するチャートの上限枚数です。数値はデータ層（出所・確度タグつき）からだけ取り、AI は「どの系列をどの形式で・何を見るべきか」だけを書きます。描けるパネルが無い章は 0 枚になります。">
+        <div class="feat-info"><span class="feat-name">📊 章あたりのチャート上限</span>
+          <span class="feat-sub">1 パネル＝1 つの問い。既定 6</span></div>
+        <input type="number" id="feat_chart_max" value="6" min="1" max="12" style="width:80px">
+      </div>
      </div><!-- /tabFeatures -->
 
       <label class="check"><input type="checkbox" id="set_persist_keys"> 🔐 APIキーをこの端末に保存する（localStorage・平文）。OFF（既定）ではこのタブを閉じるまでの一時保存（sessionStorage）のみ</label>
@@ -861,6 +866,26 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
   <!-- ==================== 設定フォーム ==================== -->
   <section class="card" id="formCard">
     <h2><span class="n">1</span>新規調査</h2>
+
+    <!-- 0. 実行モード -->
+    <label id="runModeLabel">実行モード</label>
+    <div class="mode-cards mode-cards-3" id="runModes" role="radiogroup" aria-labelledby="runModeLabel">
+      <label class="mode-card sel"><input type="radio" name="run_mode" value="research_verify" checked>
+        <span class="t">検証入り調査</span><span class="d">　調査→執筆→根拠との照合と修正（既定）</span></label>
+      <label class="mode-card"><input type="radio" name="run_mode" value="research_only">
+        <span class="t">調査のみ</span><span class="d">　検証を行わず、未検証のまま出力（速い）</span></label>
+      <label class="mode-card"><input type="radio" name="run_mode" value="verify_only">
+        <span class="t">検証のみ</span><span class="d">　既存のレポートを根拠と照合・修正（調査は行わない）</span></label>
+    </div>
+    <div id="verifyOnlyBox" style="display:none;margin-top:8px;border:1px solid var(--border);border-radius:10px;padding:10px 12px">
+      <label for="verifyHistorySelect">検証する調査（履歴から選ぶ）</label>
+      <select id="verifyHistorySelect"><option value="">— 保存済みの調査を選択 —</option></select>
+      <label for="verifyReportFile">または レポートファイルをアップロード（md / txt / docx）</label>
+      <input type="file" id="verifyReportFile" accept=".md,.markdown,.txt,.docx">
+      <label for="verifyEvidenceFile">根拠 JSON（任意。このツールが出力した evidence_*.json）</label>
+      <input type="file" id="verifyEvidenceFile" accept=".json">
+      <p class="hint">外部レポートは見出しごとに章として読み込みます。根拠が無い主張は Web を検索して根拠を集めてから判定し、修正した本文・検証レポートを出力します。LLM・検索・検証の設定は下の項目をそのまま使います（調査テーマは任意。空欄ならレポートの題名を使います）。</p>
+    </div>
 
     <!-- 1. 何を調べるか -->
     <label for="query">調査テーマ <span style="color:var(--error)">*</span></label>
@@ -964,6 +989,8 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
                 </div>
                 <label>⚙ 全体の並列ワーカー数（1〜16。LLM・通信の同時実行数の上限。DeepThink・図表などの個別ワーカー数はこの範囲内で機能タブから調整）</label>
                 <input type="number" id="parallel_max_workers" value="8" min="1" max="16" step="1" style="width:100px">
+                <label for="research_section_workers">章の並列調査数（1〜8。複数の章を同時に調査・執筆。1 で従来どおり章を順番に処理。AIクロールとブラウザ検索では常に 1）</label>
+                <input type="number" id="research_section_workers" value="2" min="1" max="8" step="1" style="width:100px">
                 <div class="grid2">
                   <div data-crawl="aicrawl ai_crawl_selenium"><label for="ai_crawl_max_pages">最大取得ページ数 / 章</label><input type="number" id="ai_crawl_max_pages" value="15" min="3" max="50"></div>
                   <div data-crawl="aicrawl ai_crawl_selenium"><label for="ai_crawl_site_depth">サイト内の探索階層</label><input type="number" id="ai_crawl_site_depth" value="2" min="0" max="5"></div>
@@ -1483,6 +1510,7 @@ function loadSettings() {
     if (saved[key] !== undefined) $(el).checked = !!saved[key];
   }
   if (saved.figure_max_workers) $('feat_fig_workers').value = saved.figure_max_workers;
+  if (saved.chart_max_per_section && $('feat_chart_max')) $('feat_chart_max').value = saved.chart_max_per_section;
   if (saved.deep_think_max_workers) $('feat_dt_workers').value = saved.deep_think_max_workers;
   if (Array.isArray(saved.search_languages)) setSelectedLangs(saved.search_languages);
   if (Array.isArray(saved.search_regions)) setSelectedRegions(saved.search_regions);
@@ -1501,6 +1529,7 @@ function saveSettings() {
     s[key] = $(el).checked;
   }
   s.figure_max_workers = parseInt($('feat_fig_workers').value) || 8;
+  if ($('feat_chart_max')) s.chart_max_per_section = parseInt($('feat_chart_max').value) || 6;
   s.deep_think_max_workers = parseInt($('feat_dt_workers').value) || 4;
   s.search_languages = selectedLangs();
   s.search_regions = selectedRegions();
@@ -1532,6 +1561,7 @@ function settingsParams() {
     }
   }
   p.figure_max_workers = Math.min(16, Math.max(1, parseInt($('feat_fig_workers').value) || 8));
+  if ($('feat_chart_max')) p.chart_max_per_section = Math.min(12, Math.max(1, parseInt($('feat_chart_max').value) || 6));
   p.deep_think_max_workers = Math.min(8, Math.max(1, parseInt($('feat_dt_workers').value) || 4));
   return p;
 }
@@ -1620,6 +1650,13 @@ $('settingsModal').addEventListener('click', (e) => {
   if (e.target === $('settingsModal')) { $('settingsModal').style.display = 'none'; renderDelegationNotice(); }
 });
 loadSettings();
+// a saved 機能 → 検証 OFF is the run mode 調査のみ: the cards decide at run
+// time, so they must show the saved choice (and not silently verify)
+if ($('feat_verification') && !$('feat_verification').checked && radioValue('run_mode') !== 'verify_only') {
+  setRadio('run_mode', 'research_only');
+  syncModeCards('run_mode');
+  applyModeVisibility();
+}
 
 // mode card selection highlight (per radio group). The radios themselves
 // stay keyboard-operable (arrow keys / Space); the card is just the visual.
@@ -1644,6 +1681,9 @@ document.querySelectorAll('.mode-card input').forEach(input => {
     syncModeCards(input.name);
     if (input.name === 'deliverable') applyDeliverablePreset(input.value);
     if (input.name === 'research_preset') applyResearchPreset(input.value);
+    // the 機能 tab switch mirrors the run mode (research only = verification off)
+    if (input.name === 'run_mode' && $('feat_verification'))
+      $('feat_verification').checked = input.value !== 'research_only';
     applyModeVisibility();
     updateSummaryStrip();
   });
@@ -1797,7 +1837,14 @@ function collectWorkerParam() {
   const v = parseInt(raw, 10);
   if (v < 1 || v > 16)
     throw new Error('全体の並列ワーカー数は1〜16で入力してください');
-  return {parallel_max_workers: v};
+  const out = {parallel_max_workers: v};
+  const sec = ($('research_section_workers').value || '').trim();
+  if (sec !== '') {
+    if (!/^[0-9]+$/.test(sec) || parseInt(sec, 10) < 1 || parseInt(sec, 10) > 8)
+      throw new Error('章の並列調査数は1〜8の整数で入力してください');
+    out.research_section_workers = parseInt(sec, 10);
+  }
+  return out;
 }
 
 const ITERATION_FIELDS = {
@@ -1858,7 +1905,11 @@ function collectParams() {
     // provider credentials / endpoints / proxy from the ⚙ settings modal:
     // all providers' keys are sent so per-stage overrides can mix providers
     ...settingsParams(),
+    run_mode: radioValue('run_mode') || 'research_verify',
   };
+  // the form's run mode is authoritative over the 機能 tab switch:
+  // 調査のみ = no verification; the other two modes verify
+  params.enable_verification = params.run_mode !== 'research_only';
   if ($('search_region').value && $('search_region').value !== 'wt-wt')
     params.search_region = $('search_region').value;
   if (params.iterations !== undefined && params.max_iterations !== undefined
@@ -1900,6 +1951,10 @@ async function startResearch() {
     return;
   }
   $('formError').className = 'banner';
+  if (params.run_mode === 'verify_only') {
+    await startVerifyOnly(params);
+    return;
+  }
   if (!params.query) {
     $('formError').className = 'banner error';
     $('formError').textContent = '調査テーマを入力してください';
@@ -1941,6 +1996,85 @@ async function startResearch() {
   } finally {
     $('startBtn').disabled = false;  // parallel runs allowed (server caps them)
   }
+}
+
+// the 機能 tab switch and the run-mode cards stay in sync both ways
+if ($('feat_verification')) {
+  $('feat_verification').addEventListener('change', e => {
+    if (radioValue('run_mode') === 'verify_only') return;
+    setRadio('run_mode', e.target.checked ? 'research_verify' : 'research_only');
+    syncModeCards('run_mode');
+    applyModeVisibility();
+    updateSummaryStrip();
+  });
+}
+
+// ==================== 検証のみ（既存レポートの検証） ====================
+async function uploadForVerify(file) {
+  const fd = new FormData();
+  fd.append('files', file, file.name);
+  const res = await fetch('/api/upload', {method: 'POST', body: fd});
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'upload failed');
+  const entry = (data.files || [])[0];
+  if (!entry || !entry.path) throw new Error('アップロードしたファイルのパスを取得できませんでした');
+  return entry.path;
+}
+
+async function startVerifyOnly(params) {
+  const jobId = $('verifyHistorySelect').value;
+  const reportFile = $('verifyReportFile').files[0];
+  const evidenceFile = $('verifyEvidenceFile').files[0];
+  if (!jobId && !reportFile) {
+    $('formError').className = 'banner error';
+    $('formError').textContent = '検証のみ: 履歴から調査を選ぶか、レポートファイルを指定してください';
+    return;
+  }
+  $('startBtn').disabled = true;
+  try {
+    const body = {...params};
+    delete body.local_documents;
+    if (jobId) {
+      body.job_id = jobId;
+    } else {
+      $('formError').textContent = 'レポートをアップロードしています…';
+      body.report_path = await uploadForVerify(reportFile);
+      if (evidenceFile) body.evidence_path = await uploadForVerify(evidenceFile);
+    }
+    const res = await fetch('/api/verify', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)});
+    const data = await res.json();
+    if (!res.ok) {
+      const err = new Error(data.error || 'failed');
+      if (data.field) err.field = data.field;
+      throw err;
+    }
+    selectedJobId = data.job_id;
+    $('formError').className = 'banner';
+    $('formError').textContent = data.state === 'queued' ? '実行待ちに入りました' : '';
+    await pollJobs();
+    loadHistory();
+    $('progressPanel').scrollIntoView({behavior: 'smooth', block: 'start'});
+  } catch (e) {
+    $('formError').className = 'banner error';
+    $('formError').textContent = '検証を開始できませんでした: ' + e.message;
+  } finally {
+    $('startBtn').disabled = false;
+  }
+}
+
+function renderVerifyHistoryOptions(records) {
+  const sel = $('verifyHistorySelect');
+  const current = sel.value;
+  const opts = ['<option value="">— 保存済みの調査を選択 —</option>'];
+  (records || []).forEach(r => {
+    const saved = (r.result || {}).saved_artifacts || {};
+    if (!saved.session) return;
+    const kind = (r.result || {}).kind === 'verify' ? '（検証のみ）' : '';
+    opts.push(`<option value="${escapeHtml(r.job_id)}">${escapeHtml((r.query || '(無題)').slice(0, 60))}${kind} ・ ${fmtDate(r.started_at || r.created_at)}</option>`);
+  });
+  sel.innerHTML = opts.join('');
+  if ([...sel.options].some(o => o.value === current)) sel.value = current;
 }
 
 const STATE_ICON = {queued: '⏳', running: '🔄', plan_review: '📋', completed: '✅',
@@ -2276,7 +2410,8 @@ function render(status) {
 function statusBadges(axes, result) {
   const b = [];
   const proc = axes.process || (result.run_status === 'cancelled' ? 'cancelled' : 'completed');
-  b.push(`<span class="badge ${proc === 'completed' ? 'ok' : 'bad'}">処理: ${proc === 'completed' ? '終了' : '中止'}</span>`);
+  const procLabel = proc === 'completed' ? '終了' : (proc === 'error' ? 'エラーで中断' : '中止');
+  b.push(`<span class="badge ${proc === 'completed' ? 'ok' : 'bad'}">処理: ${procLabel}</span>`);
   const ver = axes.verification || 'unknown';
   const verLabel = {performed: '検証: 実施済み', skipped: '検証: 未実施（無効）', cancelled: '検証: 中止',
                     timeout: '検証: タイムアウト', failed: '検証: 実行不能', unknown: '検証: 不明'}[ver] || ver;
@@ -2290,6 +2425,11 @@ function statusBadges(axes, result) {
   return b.join('');
 }
 function outcomeHeadline(axes, result) {
+  const resumable = !!((result.saved_artifacts || {}).session);
+  if (result.run_status === 'error' || axes.process === 'error')
+    return 'エラーで中断しました' + (resumable ? '（保存済みの成果物から「中断箇所から再開」できます）' : '');
+  if (result.run_status === 'cancelled' || axes.process === 'cancelled')
+    return '中止しました' + (resumable ? '（保存済みの成果物から「中断箇所から再開」できます）' : '');
   if ((result.run_status && result.run_status !== 'completed') || axes.quality === 'failed')
     return '成果物検査に失敗しました（要確認）';
   if (axes.verification === 'performed' && axes.quality === 'passed') return '検証済み・品質基準を達成して完了しました';
@@ -2503,10 +2643,17 @@ function renderTokenUsage(u) {
 function renderResumePlan(rp) {
   if (!rp) return '';
   const reused = rp.reused || [], todo = rp.to_process || [];
+  const skipped = rp.stages_skipped || [];
+  const STAGE_JA = {research: '調査', deep_think: 'DeepThink', evidence_review: '根拠の見直し', fermi: 'フェルミ推定',
+                    figures: '図表生成', writing: 'レポート生成', verification: '検証', rendering: '出力'};
+  const cache = rp.verification_cache_entries || 0;
   return `<label style="margin-top:10px">🔁 再開の内訳</label>
     <div class="exec-summary" style="margin-top:4px">
       <span>再利用した章（再調査なし）: <b>${reused.length}</b>${reused.length ? ' — ' + escapeHtml(reused.join(', ')) : ''}</span>
       <span>再実行した章: <b>${todo.length}</b>${todo.length ? ' — ' + escapeHtml(todo.join(', ')) : ''}</span>
+      ${skipped.length ? `<span>完了済みとして省略した工程: <b>${skipped.length}</b> — ${escapeHtml(skipped.map(s => STAGE_JA[s] || s).join('・'))}</span>` : ''}
+      ${cache ? `<span>再利用した検証の判定: <b>${cache}</b> 件</span>` : ''}
+      ${rp.resumed_from_draft ? '<span>検証の途中まで修正した本文から再開しました</span>' : ''}
     </div>`;
 }
 
@@ -2540,6 +2687,7 @@ function showResults(result) {
     <div style="font-weight:700;margin-bottom:4px">${escapeHtml(outcomeHeadline(axes, result))}</div>
     <div>${statusBadges(axes, result)}</div>
     ${result.regenerated_from ? `<p class="hint">保存済みの調査結果から再出力しました（元データ: ${result.regenerated_from === 'final_body' ? '検証済みの最終本文' : '章本文（未検証・草稿）'}、検索・LLM呼び出しなし）</p>` : ''}
+    ${result.kind === 'verify' && result.verify_source ? `<p class="hint">検証のみ: ${result.verify_source.mode === 'session' ? '保存済みの調査' : '外部レポート'}の本文 ${result.verify_source.chapters} 章を、根拠 ${result.verify_source.evidence_items} 件（開始時）と照合しました（調査ループなし）</p>` : ''}
     ${renderResumePlan(result.resume_plan)}
     ${renderTimings(result.timings)}
     ${renderConcurrency(result.performance)}
@@ -2595,6 +2743,7 @@ function showResults(result) {
   if (result.evidence_csv) files.push({label: '🗂 エビデンス (CSV)', path: result.evidence_csv});
   if (result.evidence_json) files.push({label: '🗂 エビデンス (JSON)', path: result.evidence_json});
   if (result.verification_html) files.push({label: '✅ 検証レポート', path: result.verification_html});
+  if (result.charts_html) files.push({label: '📊 チャート（HTML・別タブで開く）', path: result.charts_html});
   for (const [k, p] of Object.entries(saved)) {
     if (!files.some(f => f.path === p) && /\.(md|html|json|csv|docx|pdf)$/i.test(String(p)))
       files.push({label: '💾 ' + (ARTIFACT_LABELS[k] || k), path: p});
@@ -2900,6 +3049,10 @@ function renderPresetEffects() {
 
 // show only the advanced items that matter for the chosen modes
 function applyModeVisibility() {
+  const runMode = radioValue('run_mode') || 'research_verify';
+  $('verifyOnlyBox').style.display = runMode === 'verify_only' ? 'block' : 'none';
+  $('startBtn').textContent = runMode === 'verify_only' ? '🔍 検証を開始' :
+    (runMode === 'research_only' ? '🚀 調査を開始（検証なし）' : '🚀 調査を開始');
   const source = radioValue('source_mode');
   const needsDocs = source === 'local' || source === 'hybrid';
   $('localDocsBox').style.display = needsDocs ? 'block' : 'none';
@@ -3177,7 +3330,14 @@ function renderExecSummary(status) {
   if (cc && cc.configured) {
     const llm = (cc.activity && cc.activity.llm) || {};
     const cap = cc.configured.llm;
-    rows.push(['LLM 同時実行', `設定 ${cap === null || cap === undefined ? '上限なし' : cap} / 現在 ${llm.active || 0} / 最大 ${llm.peak || 0}`]);
+    const fmtCap = c => (c === null || c === undefined) ? '上限なし' : c;
+    let capText = `設定 ${fmtCap(cap)}`;
+    const vcap = cc.configured.verification_llm, rcap = cc.configured.revision_llm;
+    if (vcap !== undefined && rcap !== undefined && (vcap !== cap || rcap !== cap)) {
+      // the delegated / stage-override local client binds these stages at its own cap
+      capText += `（検証 ${fmtCap(vcap)}・修正 ${fmtCap(rcap)}）`;
+    }
+    rows.push(['LLM 同時実行', `${capText} / 現在 ${llm.active || 0} / 最大 ${llm.peak || 0}`]);
     const act = cc.activity || {};
     const part = ['fetch', 'extract', 'verify'].map(k => `${ACTIVITY_LABELS[k]} ${(act[k] || {}).active || 0}`).join('・');
     rows.push(['並列の稼働', `${part}（枠 ${cc.run_permits ? cc.run_permits.active : 0}/${cc.run_permits ? cc.run_permits.limit : '?'}）`]);
@@ -3218,6 +3378,8 @@ function renderHistory(records) {
     const saved = res.saved_artifacts || {};
     const axes = res.status || {};
     const ps = r.params_summary || {};
+    // any run that did not complete can be resumed when a session was saved
+    // (the server also finds the newest session_*.json in the job folder)
     const canResume = !!saved.session && ['cancelled', 'error', 'interrupted'].includes(r.state);
     const canReout = !!saved.session;
     return `<div class="hist-row" data-job="${escapeHtml(r.job_id)}">
@@ -3229,6 +3391,7 @@ function renderHistory(records) {
         <button type="button" class="secondary" data-act="dup">条件を複製</button>
         ${canResume ? '<button type="button" class="secondary" data-act="resume">中断箇所から再開</button>' : ''}
         ${canReout ? '<button type="button" class="secondary" data-act="reout">再出力</button>' : ''}
+        ${canReout ? '<button type="button" class="secondary" data-act="verify">検証のみ再実行</button>' : ''}
         ${(res.evidence_json || (res.saved_artifacts || {}).evidence_json) ? '<button type="button" class="secondary" data-act="evidence">根拠を開く</button>' : ''}
         ${res.report_path ? `<a class="secondary" style="font-size:11.5px;padding:4px 9px;border:1.5px solid var(--border);border-radius:10px;text-decoration:none" href="/api/report-file?path=${encodeURIComponent(res.report_path)}" target="_blank">レポートを開く</a>` : ''}
         ${['running', 'queued', 'plan_review'].includes(r.state) ? '' : '<button type="button" class="secondary" data-act="forget">履歴から削除</button>'}
@@ -3261,6 +3424,28 @@ async function historyAction(act, row) {
     await fetch('/api/history/forget', {method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({job_id: jobId})});
     loadHistory();
+    return;
+  }
+  if (act === 'verify') {
+    // verify ONLY this saved research again with the CURRENT form's LLM /
+    // verification settings (no research loop)
+    msg.textContent = '検証のみのジョブを開始しています…';
+    let params = {};
+    try { params = collectParams(); } catch (e) { msg.textContent = '設定エラー: ' + e.message; return; }
+    delete params.query; delete params.local_documents;
+    params.enable_verification = true;
+    try {
+      const res = await fetch('/api/verify', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({...params, job_id: jobId})});
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'failed');
+      msg.textContent = '検証のみを開始しました（保存済みの本文と根拠を使用。不足する根拠は Web で補います）';
+      selectedJobId = data.job_id;
+      pollJobs();
+      $('progressPanel').scrollIntoView({behavior: 'smooth', block: 'start'});
+    } catch (e) {
+      msg.textContent = '検証を開始できません: ' + e.message;
+    }
     return;
   }
   if (act === 'resume') {
@@ -3311,6 +3496,7 @@ async function loadHistory() {
     const data = await res.json();
     historyCache = data.history || [];
     renderHistory(historyCache);
+    renderVerifyHistoryOptions(historyCache);
   } catch (e) { /* server briefly unavailable */ }
 }
 setInterval(loadHistory, 10000);
@@ -3319,7 +3505,7 @@ setInterval(loadHistory, 10000);
 const FORM_PRESETS_KEY = 'drt_form_presets';
 const FORM_TEXT_IDS = ['requirements', 'language', 'output_format', 'iterations', 'max_iterations',
   'ai_crawl_max_pages', 'ai_crawl_site_depth', 'gap_fill_rounds', 'max_pages_per_query',
-  'parallel_max_workers', 'browser', 'driver_path', 'per_domain_delay', 'report_version',
+  'parallel_max_workers', 'research_section_workers', 'browser', 'driver_path', 'per_domain_delay', 'report_version',
   'v2_writing_style', 'chart_library', 'length_mode', 'preferred_body_chars', 'hard_min_body_chars',
   'hard_max_body_chars', 'length_tolerance', 'provider', 'model', 'plan_review_mode',
   'temperature', 'max_tokens', 'max_results', 'target_pages', 'search_region',
@@ -3327,7 +3513,7 @@ const FORM_TEXT_IDS = ['requirements', 'language', 'output_format', 'iterations'
 const FORM_CHECK_IDS = ['cache_reuse', 'refresh_fetched', 'waf_mitigation', 'auto_figures',
   'v2_enable_polish', 'live_report_word', 'plan_review', 'verification_cache_enabled',
   'include_toc', 'include_citations', 'include_images'];
-const FORM_RADIOS = ['source_mode', 'deliverable', 'research_preset', 'crawl_mode', 'verification_profile'];
+const FORM_RADIOS = ['run_mode', 'source_mode', 'deliverable', 'research_preset', 'crawl_mode', 'verification_profile'];
 
 function formSnapshot() {
   const s = {text: {}, check: {}, radio: {}, stages: {}};
@@ -3345,6 +3531,9 @@ function applySnapshot(s) {
   Object.entries(s.text || {}).forEach(([id, v]) => { if ($(id)) $(id).value = v; });
   Object.entries(s.check || {}).forEach(([id, v]) => { if ($(id)) $(id).checked = !!v; });
   Object.entries(s.radio || {}).forEach(([n, v]) => setRadio(n, v));
+  // the 機能 tab switch mirrors a restored run mode
+  if ($('feat_verification') && s.radio && s.radio.run_mode)
+    $('feat_verification').checked = s.radio.run_mode !== 'research_only';
   Object.entries(s.stages || {}).forEach(([st, spec]) => {
     const sel = document.querySelector(`.stage-provider[data-stage=${st}]`);
     const inp = document.querySelector(`.stage-model[data-stage=${st}]`);

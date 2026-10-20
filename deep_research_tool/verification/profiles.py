@@ -55,6 +55,9 @@ class VerificationSettings:
     # verified in every profile — fast mode never skips them)
     minor_claim_sample_rate: float = 1.0
     timeout_seconds: int = 0            # 0 = no timeout
+    # True when the user set batch_size explicitly: the verifier then
+    # never shrinks batches to fill idle workers
+    batch_size_explicit: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -183,6 +186,7 @@ def resolve_verification_settings(
             raise ValueError(f"unknown verification setting: {key}")
         checked = _check_bounds(key, value, integer=key in integer_fields)
         setattr(settings, key, checked)
+    settings.batch_size_explicit = (overrides or {}).get("batch_size") is not None
 
     if profile == "strict":
         # strict NEVER weakens acceptance criteria or skips claims

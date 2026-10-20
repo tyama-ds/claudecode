@@ -191,6 +191,22 @@ class Claim:
     source_end: Optional[int] = None
 
 
+def auto_batch_size(n_batchable: int, batch_size: int, workers: int,
+                    explicit: bool = False) -> int:
+    """Judge-batch size that keeps the workers busy.
+
+    The batch COUNT is the parallelism ceiling: with the preset size (10)
+    a report with <= 10 judgeable claims was ONE LLM call at a time while
+    7 workers idled. Unless the user set the size explicitly, shrink it so
+    every worker gets a batch (never below 2 claims per call, never above
+    the configured size)."""
+    size = max(1, int(batch_size or 1))
+    if explicit or n_batchable <= 1 or workers <= 1:
+        return size
+    per_worker = -(-n_batchable // max(1, workers))
+    return max(2, min(size, per_worker))
+
+
 class ClaimVerifier:
     """Full-text, claim-level verification against the evidence locker."""
 
@@ -883,7 +899,9 @@ Do not include opinions or generic statements. JSON only."""
             batchable.append(item)
 
         # ---- batched, parallel judging ---------------------------------
-        size = self._batch_size
+        size = auto_batch_size(
+            len(batchable), self._batch_size, self._workers,
+            explicit=bool(getattr(self.settings, "batch_size_explicit", False)))
         batches = [batchable[i:i + size]
                    for i in range(0, len(batchable), size)]
 

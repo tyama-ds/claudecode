@@ -368,9 +368,20 @@ def figure_semantics_markdown(collection, language: str = "ja",
             labels = chart_data.get("labels") or []
             values = chart_data.get("values") or []
             pairs = [f"{l}={v}" for l, v in zip(labels, values)]
-            for name, series in (chart_data.get("series") or {}).items():
-                pairs.extend(f"{name}:{l}={v}"
-                             for l, v in zip(labels, series))
+            series_map = chart_data.get("series") or {}
+            if isinstance(series_map, list):      # [{name, values}] shape
+                series_map = {str(s.get("name", i)): s.get("values") or []
+                              for i, s in enumerate(series_map) if isinstance(s, dict)}
+            for name, series in series_map.items():
+                if labels:
+                    pairs.extend(f"{name}:{l}={v}"
+                                 for l, v in zip(labels, series))
+                else:                              # line_xy: points carry their x
+                    pairs.extend(f"{name}:{v}" for v in series)
+            judgment = str(chart_data.get("judgment") or "")
+            if judgment and judgment not in (item["caption"] or ""):
+                lines.append(("見るべき点: " if language == "ja" else "Judgment: ")
+                             + judgment)
             if pairs:
                 head = "データ" if language == "ja" else "Data"
                 lines.append(f"{head}: " + "; ".join(pairs))

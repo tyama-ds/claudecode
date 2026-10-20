@@ -499,9 +499,10 @@ class EvidenceLocker:
         """Get the first evidence item with this URL."""
         if not url:
             return None
-        for evidence in self._evidence.values():
-            if evidence.url == url:
-                return evidence
+        with self._lock:
+            for evidence in self._evidence.values():
+                if evidence.url == url:
+                    return evidence
         return None
 
     def has_url(self, url: str) -> bool:
@@ -557,13 +558,14 @@ class EvidenceLocker:
             Number of evidence items updated
         """
         updated = 0
-        for evidence in self._evidence.values():
-            if evidence.url != url:
-                continue
-            if section and evidence.section_reference != section:
-                continue
-            evidence.importance_score = max(0, min(1, score))
-            updated += 1
+        with self._lock:        # section workers insert concurrently
+            for evidence in self._evidence.values():
+                if evidence.url != url:
+                    continue
+                if section and evidence.section_reference != section:
+                    continue
+                evidence.importance_score = max(0, min(1, score))
+                updated += 1
         return updated
 
     def get_evidence_by_importance(

@@ -1,0 +1,114 @@
+{
+  "_meta": {
+    "generated": "2026-10-19",
+    "unit_note": "缶数は 15 パウチ/缶で換算。10億=B。",
+    "basis_tags": ["公表", "換算", "導出", "推定", "二次"]
+  },
+  "quarters": ["25Q1", "25Q2", "25Q3", "25Q4", "26Q1", "26Q2"],
+  "zyn_us.shipments": {
+    "unit": "百万缶",
+    "values": [202, 190, 206, 196, 155, 193],
+    "basis": ["公表", "換算", "導出", "公表", "公表", "換算"],
+    "source": "PMI 決算資料。25Q1=Tobacco Insider 引用（PMI Q1 2025）、25Q4=PMI Q4 2025、26Q1=PMI Q1 2026（2.3B パウチ=1.55億缶）、26Q2=PMI Q2 2026 8-K（2.9B パウチ）",
+    "note": "25Q2 = 2.9B÷1.018÷15 ≈ 190、25Q3 = 794−(202+190+196) = 206、26Q2 = 2.9B÷15 ≈ 193。通年 794 と整合"
+  },
+  "zyn_us.offtake_base": {
+    "unit": "百万缶",
+    "values": [160, 180, 205, 200, 175, null],
+    "basis": ["推定", "推定", "推定", "推定", "推定", null],
+    "source": "PMI Q4 2025 決算説明会（実売に整合する出荷ベースの PMI 推定、通年 740〜750）。26Q1 は 160×1.10 の本書推定。26Q2 は PMI 未開示（横ばい〜微増）"
+  },
+  "growth_periods": ["2025通年", "25Q4", "26Q1", "26Q2", "直近4週"],
+  "zyn_us.offtake_growth": {
+    "unit": "%",
+    "values": [25, 23, 10, 1, -1],
+    "basis": ["公表", "公表", "公表", "推定", "二次"],
+    "source": "PMI 決算（Nielsen 推計）。26Q2 は「横ばい〜微増」を +1 で代表。直近4週は Altria 開示値（Tobacco Insider 経由、約 −1%）"
+  },
+  "share_metrics": ["数量シェア", "金額シェア"],
+  "zyn_us.share_fy2025": {
+    "unit": "%",
+    "values": [61.5, 67.2],
+    "basis": ["公表", "公表"],
+    "source": "PMI Q4 2025 決算スライド（Investing.com 掲載）"
+  },
+  "zyn_us.share_26q1": {
+    "unit": "%",
+    "values": [56, 61],
+    "basis": ["二次", "二次"],
+    "source": "Nielsen データを引用した NYT 分析（thesnusoutlet 経由）。概数"
+  },
+  "us_composition_labels": ["米国市場"],
+  "us_composition.zyn": { "unit": "%", "values": [56], "basis": ["二次"], "source": "26Q1 数量シェア（上記）" },
+  "us_composition.on": { "unit": "%", "values": [14.4], "basis": ["二次"], "source": "Altria 開示の 26Q2 小売シェア（Tobacco Insider 経由）" },
+  "us_composition.other": { "unit": "%", "values": [29.6], "basis": ["導出"], "source": "100−56−14.4。VELO・Rogue・ALP 等の個別値は未公表" },
+  "global_companies": ["PMI（ZYN）", "BAT（VELO）", "Altria（on!）", "Swisher（Rogue）", "その他"],
+  "global.value_share_2025": {
+    "unit": "%",
+    "values": [33, 33, 10, 4, 20],
+    "basis": ["二次", "二次", "二次", "二次", "導出"],
+    "source": "Euromonitor 2025 金額ベース（Tobacco Tactics 掲載）。「各約3分の1」を 33 で表示、その他は差分"
+  },
+  "global_volume_labels": ["世界 2023", "世界 2024", "うち米国 2024"],
+  "global.volume_bn": {
+    "unit": "10億個",
+    "values": [15.6, 23.5, 14.0],
+    "basis": ["二次", "二次", "二次"],
+    "source": "Euromonitor 小売販売数量（Tobacco Asia 掲載）: 15.592 / 23.462（+50.5%）/ 13.96"
+  },
+  "estimates.euromonitor": {
+    "unit": "10億ドル",
+    "values": [{ "x": 2024, "y": 10 }, { "x": 2027, "y": 15 }, { "x": 2028, "y": 25 }],
+    "basis": ["二次", "二次", "二次"],
+    "source": "Euromonitor（Tobacco Tactics 掲載）。2024 は「100億ドル超」を 10 で表示"
+  },
+  "estimates.imarc": {
+    "unit": "10億ドル",
+    "values": [{ "x": 2024, "y": 3.2 }, { "x": 2033, "y": 28.16 }],
+    "basis": ["二次", "二次"],
+    "source": "IMARC Group（CAGR 27.39%）"
+  },
+  "estimates.gvr": {
+    "unit": "10億ドル",
+    "values": [{ "x": 2025, "y": 6.9 }, { "x": 2026, "y": 9.0 }, { "x": 2033, "y": 42.4 }],
+    "basis": ["二次", "二次", "二次"],
+    "source": "Grand View Research（CAGR 24.7%）"
+  },
+  "estimates.persistence": {
+    "unit": "10億ドル",
+    "values": [{ "x": 2026, "y": 9.5 }, { "x": 2033, "y": 44.79 }],
+    "basis": ["二次", "二次"],
+    "source": "Persistence Market Research（CAGR 24.8%）"
+  },
+  "estimates.skyquest": {
+    "unit": "10億ドル",
+    "values": [{ "x": 2024, "y": 3.13 }, { "x": 2025, "y": 4.27 }, { "x": 2033, "y": 50.82 }],
+    "basis": ["二次", "二次", "二次"],
+    "source": "SkyQuest（CAGR 36.3%）"
+  },
+  "estimates.rnm": {
+    "unit": "10億ドル",
+    "values": [{ "x": 2025, "y": 6.37 }],
+    "basis": ["二次"],
+    "source": "Research and Markets（Tobacco Asia 掲載）"
+  },
+  "capacity_labels": ["2025 出荷実績", "2026 出荷 年率換算", "生産能力 2025", "生産能力 2026年末", "生産能力 2028"],
+  "capacity.shipments": {
+    "unit": "百万缶",
+    "values": [794, 696, null, null, null],
+    "basis": ["公表", "導出", null, null, null],
+    "source": "794 = PMI FY2025 公表。696 = (155+193)×2（上期実績の年率換算、下期の新製品効果を含まない）"
+  },
+  "capacity.owensboro": {
+    "unit": "百万缶",
+    "values": [null, null, 900, 900, 900],
+    "basis": [null, null, "公表", "公表", "公表"],
+    "source": "PMI 2024-08 発表: ケンタッキー州 Owensboro 工場の拡張で 2025 年に約 9 億缶の能力"
+  },
+  "capacity.aurora": {
+    "unit": "百万缶",
+    "values": [null, null, null, 300, 700],
+    "basis": [null, null, null, "二次", "二次"],
+    "source": "コロラド州 Aurora 新工場（6 億ドル、2026-02 稼働）: 2026 年末 3 億缶、2028 年 7 億缶の計画（報道ベース）"
+  }
+}

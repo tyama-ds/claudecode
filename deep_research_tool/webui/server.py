@@ -49,6 +49,7 @@ _CONFIG_PARAM_MAP = {
     "verify_ssl": "verify_ssl",
     "iterations": "research_iterations",
     "parallel_max_workers": "parallel_max_workers",
+    "research_section_workers": "research_section_workers",
     "output_format": "output_format",
     "output_dir": "output_dir",
     "language": "language",
@@ -65,6 +66,8 @@ _CONFIG_PARAM_MAP = {
     "live_report_word": "live_report_word",
     "chart_library": "chart_library",
     "auto_figures": "auto_figures",
+    "chart_max_per_section": "chart_max_per_section",
+    "chart_engine": "chart_engine",
     "enable_verification": "enable_verification",
     "plan_review": "plan_review",
     "plan_review_timeout": "plan_review_timeout",
@@ -108,6 +111,7 @@ _CONFIG_PARAM_MAP = {
     "local_model": "local_model",
     "local_timeout": "local_timeout",
     "local_concurrency": "local_concurrency",
+    "llm_retry_attempts": "llm_retry_attempts",
     # reuse / freshness
     "cache_reuse": "cache_reuse",
     "refresh_fetched": "refresh_fetched",
@@ -204,6 +208,7 @@ def _int_range(lo, hi):
 
 _PARAM_CONVERTERS = {
     "parallel_max_workers": _strict_workers,
+    "research_section_workers": _int_range(1, 8),
     "verification_profile": _profile,
     "verification_max_workers": _int_range(1, 16),
     "verification_batch_size": _int_range(1, 32),
@@ -214,6 +219,8 @@ _PARAM_CONVERTERS = {
     "local_llm_role": _local_llm_role,
     "local_timeout": _int_range(1, 3600),
     "local_concurrency": _int_range(1, 16),
+    "llm_retry_attempts": _int_range(0, 10),
+    "chart_max_per_section": _int_range(1, 12),
     "ai_crawl_max_pages": _int_range(1, 200),
     "ai_crawl_site_depth": _int_range(0, 10),      # 0 = seeds only
     "gap_fill_rounds": _int_range(0, 10),
@@ -975,6 +982,67 @@ class JobManager:
         job.finish("completed")
         job.update("フェルミ推定が完了しました（推定値は検証していません）", 100)
 
+    @staticmethod
+    def _finish_from_result(job: ResearchJob, params: Dict[str, Any],
+                            result: Dict[str, Any], job_warnings) -> None:
+        """Store a finished run's (research or verify-only) result on the
+        job and set its final state / message."""
+        job.result = {
+            "kind": result.get("kind") or "research",
+            "report_path": result.get("report_path"),
+            "evidence_json": result.get("evidence_json"),
+            "evidence_csv": result.get("evidence_csv"),
+            "verification_html": result.get("verification_html"),
+            "session_id": result.get("session_id"),
+            "token_usage": result.get("token_usage"),
+            # this job's OWN warnings (context-bound collector)
+            "warnings": job_warnings.to_dict_list(),
+            "warning_count": job_warnings.count(),
+            "verification_summary": result.get("verification_summary"),
+            # process / verification / quality — three separate facts
+            "status": result.get("status") or {},
+            "run_status": result.get("run_status", "completed"),
+            # artifacts that were ACTUALLY written (checkpoints)
+            "saved_artifacts": result.get("saved_artifacts") or {},
+            "semantic_artifact_check": result.get("semantic_artifact_check"),
+            "output_dir": params.get("output_dir"),
+            "timings": result.get("timings"),
+            "resume_plan": result.get("resume_plan"),
+            # measured performance (stage seconds, token usage,
+            # configured vs observed concurrency) — numbers only
+            "performance": result.get("performance"),
+            # which provider served which role (delegation / fallback)
+            "llm_routing": result.get("llm_routing"),
+            # the researched table of contents / queries (history too)
+            "plan": result.get("research_plan"),
+            # the offline chart page (Chart.js) of the spec engine
+            "charts_html": result.get("charts_html"),
+            # verify-only: where the body and the evidence came from
+            "verify_source": result.get("verify_source"),
+        }
+        job.progress = 100.0
+        if result.get("verification_cancelled"):
+            job.finish("cancelled")
+            job.update("検証をキャンセルしました（保存済みの成果物のみ"
+                       "表示しています）", 100)
+        elif result.get("run_status", "completed") != "completed":
+            # semantic mismatch etc.: never a normal completion
+            job.error = (f"run_status={result['run_status']}: "
+                         f"成果物検査に失敗したため正常完了ではありません")
+            job.finish("error")
+            job.update(f"検査失敗（{result['run_status']}）", -1)
+        else:
+            job.finish("completed")
+            axes = job.result.get("status") or {}
+            prefix = "検証のみ: " if job.result["kind"] == "verify" else ""
+            if axes.get("verification") == "performed" and \
+                    axes.get("quality") == "passed":
+                job.update(f"{prefix}完了しました（検証済み・品質基準達成）", 100)
+            elif axes.get("verification") == "performed":
+                job.update(f"{prefix}完了しました（検証済み・要確認事項あり）", 100)
+            else:
+                job.update(f"{prefix}処理が完了しました（未検証）", 100)
+
     def _run(self, job: ResearchJob, params: Dict[str, Any]) -> None:
         from ..utils.helpers import ResearchWarnings
         # PER-JOB warning collector bound to this thread's context; every
@@ -1021,6 +1089,9 @@ class JobManager:
                 self._run_fermi(job, params, job_warnings)
                 return
 
+            if params.get("verify"):
+                params = dict(params)
+                params["enable_verification"] = True
             config = create_config(**build_config_kwargs(params))
             job.update("設定を構築しました。ツールを初期化中...", 1)
 
@@ -1038,6 +1109,22 @@ class JobManager:
             job.evidence_source = (
                 lambda: (tool.researcher.get_evidence_locker()
                          if getattr(tool, "researcher", None) is not None else None))
+            if params.get("verify"):
+                # verify-only: no research loop; the body comes from the
+                # saved session or the uploaded report
+                spec = params["verify"]
+                job.update("検証のみ: 対象を読み込んでいます", 2)
+                result = tool.verify_report(
+                    session_path=spec.get("session_path"),
+                    report_path=spec.get("report_path"),
+                    evidence_path=spec.get("evidence_path"),
+                    query=spec.get("query", ""),
+                    requirements=params.get("requirements", ""),
+                    progress_callback=job.update,
+                )
+                self._finish_from_result(job, params, result, job_warnings)
+                return
+
             job.update("調査を開始します", 2)
 
             documents = expand_document_paths(params.get("local_documents"))
@@ -1112,55 +1199,7 @@ class JobManager:
                 resume_from=params.get("resume_from"),
             )
 
-            job.result = {
-                "report_path": result.get("report_path"),
-                "evidence_json": result.get("evidence_json"),
-                "evidence_csv": result.get("evidence_csv"),
-                "verification_html": result.get("verification_html"),
-                "session_id": result.get("session_id"),
-                "token_usage": result.get("token_usage"),
-                # this job's OWN warnings (context-bound collector)
-                "warnings": job_warnings.to_dict_list(),
-                "warning_count": job_warnings.count(),
-                "verification_summary": result.get("verification_summary"),
-                # process / verification / quality — three separate facts
-                "status": result.get("status") or {},
-                "run_status": result.get("run_status", "completed"),
-                # artifacts that were ACTUALLY written (checkpoints)
-                "saved_artifacts": result.get("saved_artifacts") or {},
-                "semantic_artifact_check": result.get("semantic_artifact_check"),
-                "output_dir": params.get("output_dir"),
-                "timings": result.get("timings"),
-                "resume_plan": result.get("resume_plan"),
-                # measured performance (stage seconds, token usage,
-                # configured vs observed concurrency) — numbers only
-                "performance": result.get("performance"),
-                # which provider served which role (delegation / fallback)
-                "llm_routing": result.get("llm_routing"),
-                # the researched table of contents / queries (history too)
-                "plan": result.get("research_plan"),
-            }
-            job.progress = 100.0
-            if result.get("verification_cancelled"):
-                job.finish("cancelled")
-                job.update("検証をキャンセルしました（保存済みの成果物のみ"
-                           "表示しています）", 100)
-            elif result.get("run_status", "completed") != "completed":
-                # semantic mismatch etc.: never a normal completion
-                job.error = (f"run_status={result['run_status']}: "
-                             f"成果物検査に失敗したため正常完了ではありません")
-                job.finish("error")
-                job.update(f"検査失敗（{result['run_status']}）", -1)
-            else:
-                job.finish("completed")
-                axes = job.result.get("status") or {}
-                if axes.get("verification") == "performed" and \
-                        axes.get("quality") == "passed":
-                    job.update("完了しました（検証済み・品質基準達成）", 100)
-                elif axes.get("verification") == "performed":
-                    job.update("完了しました（検証済み・要確認事項あり）", 100)
-                else:
-                    job.update("処理が完了しました（未検証）", 100)
+            self._finish_from_result(job, params, result, job_warnings)
         except Exception as e:
             from ..utils.cancellation import RunCancelled
             if isinstance(e, RunCancelled):
@@ -1187,8 +1226,42 @@ class JobManager:
                     job.update("中止しました（保存済みの成果物はありません）", -1)
             else:
                 job.error = f"{e}\n{traceback.format_exc(limit=3)}"
+                # what the run had saved before it died (section
+                # checkpoints, stage state, verification cache / draft):
+                # the history row can offer 中断箇所から再開 for it
+                saved: Dict[str, str] = {}
+                session_id = None
+                if tool is not None:
+                    try:
+                        saved = dict(getattr(tool, "partial_artifacts", {}) or {})
+                        if not saved and not params.get("verify"):
+                            # (a verify-only job loaded ANOTHER job's
+                            # session: its artifacts are not this job's)
+                            saved = dict(tool.current_saved_artifacts() or {})
+                        sess = (tool.researcher.get_session()
+                                if getattr(tool, "researcher", None) is not None else None)
+                        session_id = getattr(sess, "session_id", None) or \
+                            getattr(tool, "partial_session_id", None)
+                    except Exception:
+                        pass
+                job.result = {
+                    "saved_artifacts": saved,
+                    "session_id": session_id,
+                    "plan": job.live_plan(),
+                    "warnings": job_warnings.to_dict_list(),
+                    "warning_count": job_warnings.count(),
+                    "status": {"process": "error", "verification": "unknown",
+                               "quality": "unverified"},
+                    "run_status": "error",
+                    "error": str(e)[:500],
+                    "output_dir": params.get("output_dir"),
+                }
                 job.finish("error")
-                job.update(f"エラー: {e}", -1)
+                if saved:
+                    job.update(f"エラー: {e}（保存済み: {', '.join(sorted(saved))}。"
+                               f"履歴から再開できます）", -1)
+                else:
+                    job.update(f"エラー: {e}", -1)
         finally:
             ResearchWarnings.end_run()
             ResearchWarnings.unbind()
@@ -1514,6 +1587,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                "/api/cancel-verification",
                                "/api/cancel-run", "/api/precheck",
                                "/api/resume", "/api/regenerate",
+                               "/api/verify",
                                "/api/history/forget", "/api/fermi",
                                "/api/llm-parallel-test"):
             self._send_json({"error": "not found"}, 404)
@@ -1576,6 +1650,74 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/history/forget":
             ok = manager.forget(params.get("job_id") or "")
             self._send_json({"ok": ok}, 200 if ok else 404)
+            return
+
+        if parsed.path == "/api/verify":
+            # VERIFY ONLY: a saved research (job_id / session_path) or an
+            # uploaded report file goes through the finalization loop;
+            # no research loop, no chapter writing
+            spec: Dict[str, Any] = {}
+            rec = None
+            if params.get("job_id") or params.get("session_path"):
+                rec = self._history_record(manager, params)
+                session_path = (rec or {}).get("session_path")
+                if not session_path or not Path(session_path).is_file():
+                    self._send_json({"error": "saved session not found — "
+                                              "nothing to verify",
+                                     "field": "verify_source"}, 404)
+                    return
+                spec["session_path"] = session_path
+            elif params.get("report_path"):
+                safe = self._safe_output_path(params["report_path"])
+                if safe is None:
+                    self._send_json({"error": "report file not found (upload it "
+                                              "first; server paths must be under "
+                                              "the output directory)",
+                                     "field": "verify_source"}, 400)
+                    return
+                if safe.suffix.lower() not in (".md", ".markdown", ".txt", ".text", ".docx"):
+                    self._send_json({"error": f"unsupported report format: {safe.suffix} "
+                                              "(md / txt / docx)",
+                                     "field": "verify_source"}, 400)
+                    return
+                spec["report_path"] = str(safe)
+            else:
+                self._send_json({"error": "job_id, session_path or report_path is required",
+                                 "field": "verify_source"}, 400)
+                return
+            if params.get("evidence_path"):
+                safe_ev = self._safe_output_path(params["evidence_path"])
+                if safe_ev is None:
+                    self._send_json({"error": "evidence JSON not found",
+                                     "field": "verify_source"}, 400)
+                    return
+                spec["evidence_path"] = str(safe_ev)
+            job_params = {k: v for k, v in params.items()
+                          if k not in ("job_id", "session_path", "report_path",
+                                       "evidence_path", "resume_from", "regenerate",
+                                       "fermi", "verify")}
+            label = (rec or {}).get("query") if rec else Path(spec["report_path"]).name
+            user_query = (params.get("query") or "").strip()
+            # the job's display label; verify_report gets the USER's topic
+            # (empty = the saved session's query / the report title), never
+            # the label — it would seed the evidence searches
+            spec["query"] = user_query
+            job_params["query"] = user_query or f"検証のみ: {label or '保存済みの調査'}"
+            job_params["enable_verification"] = True
+            job_params["verify"] = spec
+            # same validation as /api/research: a bad value is a 400 with
+            # the field, not a job that fails after it was recorded
+            try:
+                build_config_kwargs(job_params)
+            except FieldError as e:
+                self._send_json({"error": f"invalid parameter: {e}",
+                                 "field": e.field}, 400)
+                return
+            except ValueError as e:
+                self._send_json({"error": f"invalid parameter: {e}"}, 400)
+                return
+            job = manager.start(job_params)
+            self._send_json({"job_id": job.job_id, "state": job.state}, 202)
             return
 
         if parsed.path in ("/api/resume", "/api/regenerate"):

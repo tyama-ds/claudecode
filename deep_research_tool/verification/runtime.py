@@ -78,6 +78,8 @@ class VerificationCache:
         self._lock = threading.Lock()
         self.hits = 0
         self.misses = 0
+        self.dirty = False          # unsaved entries since the last save()
+        self.loaded = 0             # entries restored by load()
 
     def get(self, key: str):
         if not self.enabled:
@@ -94,6 +96,61 @@ class VerificationCache:
             return
         with self._lock:
             self._store[key] = value
+            self.dirty = True
+
+    # --- persistence (resume after a crash / disconnect) ---------------
+    # Keys are content-addressed (claim text, evidence chunk text, model,
+    # prompt version), so entries replay safely across processes: a run
+    # that died in verification re-verifies only what it never judged.
+    def save(self, path) -> bool:
+        """Write the store atomically; False when nothing was written."""
+        if not self.enabled:
+            return False
+        import json
+        import os
+        from pathlib import Path
+        p = Path(path)
+        try:
+            with self._lock:
+                payload = json.dumps(self._store, ensure_ascii=False, default=str)
+                self.dirty = False
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_name(p.name + ".tmp")
+            tmp.write_text(payload, encoding="utf-8")
+            os.replace(tmp, p)
+            return True
+        except Exception as e:
+            print(f"[VerificationCache] save failed: {e}")
+            return False
+
+    def load(self, path) -> int:
+        """Merge a saved store; returns the number of entries loaded."""
+        if not self.enabled:
+            return 0
+        import json
+        from pathlib import Path
+        p = Path(path)
+        if not p.is_file():
+            return 0
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[VerificationCache] load failed: {e}")
+            return 0
+        if not isinstance(data, dict):
+            return 0
+        with self._lock:
+            for k, v in data.items():
+                self._store.setdefault(str(k), v)
+            self.loaded = len(data)
+        return len(data)
+
+    @property
+    def size(self) -> int:
+        # (deliberately not __len__: callers write `cache or
+        # VerificationCache(...)`, and an EMPTY cache must stay truthy)
+        with self._lock:
+            return len(self._store)
 
     @property
     def hit_rate(self) -> float:

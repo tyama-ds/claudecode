@@ -218,6 +218,12 @@ class APIConfig:
     local_timeout: Optional[int] = None
     local_concurrency: Optional[int] = None
 
+    # Transient network failures (dropped connection, timeout) of an LLM
+    # request are retried with exponential backoff instead of ending the
+    # run: attempts after the first try (0 = no retry) and the base delay
+    llm_retry_attempts: int = 3
+    llm_retry_backoff_seconds: float = 2.0
+
     # API parameters
     temperature: float = 0.7
     max_tokens: int = 4096
@@ -513,6 +519,12 @@ class ResearchConfig:
     # min(parallel_max_workers, stage_cap, task_count), and a shared
     # ConcurrencyLimiter enforces the run-wide and process-wide totals.
     parallel_max_workers: int = 8
+    # Sections (chapters) researched CONCURRENTLY in the research loop
+    # (each section keeps its own inner search/fetch/extract pools and is
+    # checkpointed as it completes). 1 = the classic sequential loop;
+    # bounded by parallel_max_workers and the section count. AI-crawl
+    # modes and serial (Selenium) search clients always run one at a time.
+    research_section_workers: int = 2
 
     # Research loop settings
     min_iterations: int = 3
@@ -727,12 +739,25 @@ class ReportConfig:
 
     # Derived metrics settings
     derived_metrics: bool = True  # Calculate derived metrics (CAGR, growth rates)
-    derived_fill_missing: bool = True  # Fill missing data points (interpolation)
+    # Interpolated years and N×N "market shares" are FABRICATED values (no
+    # source): off by default; CAGR / YoY stay on, tagged 導出 in charts
+    derived_fill_missing: bool = False  # Fill missing data points (interpolation)
+    derived_market_shares: bool = False  # Generate part/total share points
+    # Re-extracting numbers from the LLM-written chapter text duplicates
+    # the evidence numbers without provenance: off by default
+    numerical_extract_from_sections: bool = False
 
     # Intelligent chart analysis settings
     intelligent_charts: bool = True  # Use ChartAnalyzer for smart chart recommendations
     chart_insights: bool = True  # Generate insights for charts
-    chart_max_per_section: int = 3  # Maximum charts per section
+    chart_max_per_section: int = 6  # Maximum charts per section
+    # "spec": the LLM writes a chart SPEC per chapter (which series, which
+    # form, emphasis, caption, judgment) over a deterministic data layer
+    # with certainty tags; fixed renderers draw it (Chart.js HTML page +
+    # matplotlib PNGs). "legacy": the old store-wide ChartAnalyzer scan.
+    chart_engine: str = "spec"
+    # sources whose numbers count as 公表 (primary) in charts; others are 二次
+    chart_primary_domains: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -917,6 +942,8 @@ def create_config(
     local_concurrency: Optional[int] = None,
     local_model: Optional[str] = None,
     local_llm_fallback: bool = True,
+    llm_retry_attempts: int = 3,
+    llm_retry_backoff_seconds: float = 2.0,
     # LLM sampling knobs (GUI "Temperature" / "Max Tokens"); None = default
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
@@ -933,6 +960,7 @@ def create_config(
     waf_mitigation: bool = True,
     per_domain_delay: float = 1.0,
     parallel_max_workers: int = 8,
+    research_section_workers: int = 2,
     research_iterations: int = 3,
     output_format: str = "markdown",
     output_dir: str = "./output",
@@ -1062,11 +1090,15 @@ def create_config(
     enable_pint: bool = True,
     # Derived metrics parameters
     derived_metrics: bool = True,
-    derived_fill_missing: bool = True,
+    derived_fill_missing: bool = False,
+    derived_market_shares: bool = False,
+    numerical_extract_from_sections: bool = False,
     # Intelligent chart analysis parameters
     intelligent_charts: bool = True,
     chart_insights: bool = True,
-    chart_max_per_section: int = 3,
+    chart_max_per_section: int = 6,
+    chart_engine: str = "spec",
+    chart_primary_domains: Optional[List[str]] = None,
     # Format strictness
     strict_format: bool = False,
     # Fermi estimation parameters
@@ -1125,6 +1157,10 @@ def create_config(
             network operations per research run (default 8, allowed 1..16,
             hard cap 16). Stage caps stay as ceilings; invalid values
             (bool, float, 0, negative, >16, non-numeric) raise ValueError
+        research_section_workers: Sections researched concurrently in
+            the research loop (default 2, allowed 1..8; 1 = sequential).
+            Bounded by parallel_max_workers; AI-crawl modes and serial
+            search clients stay sequential
         research_iterations: Number of research iterations
         output_format: Report format ('docx', 'pdf', or 'markdown')
         output_dir: Output directory path
@@ -1303,6 +1339,8 @@ def create_config(
         local_backend=LocalLLMBackend(local_backend),
         local_timeout=local_timeout,
         local_concurrency=local_concurrency,
+        llm_retry_attempts=llm_retry_attempts,          # validated below
+        llm_retry_backoff_seconds=llm_retry_backoff_seconds,
         **({"temperature": float(temperature)} if temperature is not None else {}),
         **({"max_tokens": int(max_tokens)} if max_tokens is not None else {}),
         stage_overrides=dict(stage_llm) if stage_llm else {},
@@ -1340,9 +1378,26 @@ def create_config(
     # rejected with a clear error — NEVER silently clamped.
     from .utils.concurrency import validate_parallel_max_workers
     parallel_max_workers = validate_parallel_max_workers(parallel_max_workers)
+    if isinstance(research_section_workers, bool) or \
+            not isinstance(research_section_workers, int) or \
+            not 1 <= research_section_workers <= 8:
+        raise ValueError("research_section_workers must be an integer "
+                         f"between 1 and 8 (got {research_section_workers!r})")
+    if isinstance(llm_retry_attempts, bool) or \
+            not isinstance(llm_retry_attempts, int) or \
+            not 0 <= llm_retry_attempts <= 10:
+        raise ValueError("llm_retry_attempts must be an integer between 0 and 10 "
+                         f"(got {llm_retry_attempts!r})")
+    if isinstance(llm_retry_backoff_seconds, bool) or \
+            not isinstance(llm_retry_backoff_seconds, (int, float)) or \
+            not 0.0 <= float(llm_retry_backoff_seconds) < float("inf"):
+        raise ValueError("llm_retry_backoff_seconds must be a non-negative number "
+                         f"(got {llm_retry_backoff_seconds!r})")
+    api_config.llm_retry_backoff_seconds = float(llm_retry_backoff_seconds)
 
     research_config = ResearchConfig(
         parallel_max_workers=parallel_max_workers,
+        research_section_workers=research_section_workers,
         min_iterations=research_iterations,
         max_iterations=kwargs.get("max_iterations", research_iterations + 5),
         max_queries_per_iteration=max_queries_per_iteration,
@@ -1437,9 +1492,13 @@ def create_config(
         enable_pint=enable_pint,
         derived_metrics=derived_metrics,
         derived_fill_missing=derived_fill_missing,
+        derived_market_shares=derived_market_shares,
+        numerical_extract_from_sections=numerical_extract_from_sections,
         intelligent_charts=intelligent_charts,
         chart_insights=chart_insights,
         chart_max_per_section=chart_max_per_section,
+        chart_engine=chart_engine,
+        chart_primary_domains=list(chart_primary_domains or []),
     )
 
     proxy_config = ProxyConfig(

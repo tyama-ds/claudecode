@@ -224,6 +224,69 @@ class BaseLLMClient(ABC):
             with track_activity("llm"):
                 yield
 
+    # --- transient failures ------------------------------------------------
+    # One retry policy for the hosted providers: the SDK clients are
+    # created with max_retries=0 (their own 2 retries used to multiply
+    # ours), and connection errors, timeouts, rate limits (429) and
+    # server errors (5xx) are retried HERE with backoff (run-scoped
+    # settings from config.api), the cancel check honoured around the
+    # wait, the concurrency permit released while waiting.
+    retry_attempts: int = 3
+    retry_backoff_seconds: float = 2.0
+    _TRANSIENT_NAMES = (
+        "APIConnectionError", "APITimeoutError", "ConnectionError",
+        "ConnectTimeout", "ReadTimeout", "Timeout", "ChunkedEncodingError",
+        "RemoteProtocolError", "ReadError", "WriteError", "ConnectError",
+        "ServerDisconnectedError", "IncompleteRead", "RemoteDisconnected",
+        "RateLimitError", "InternalServerError", "ServiceUnavailableError",
+    )
+    _TRANSIENT_STATUS = (408, 409, 429)
+
+    @classmethod
+    def is_transient_error(cls, exc: BaseException) -> bool:
+        """A failure worth retrying: network-level, a rate limit or a
+        server-side 5xx — never an auth, validation or quota refusal
+        (4xx other than 408/409/429)."""
+        status = getattr(exc, "status_code", None)
+        if isinstance(status, int) and not isinstance(status, bool):
+            return status in cls._TRANSIENT_STATUS or status >= 500
+        for klass in type(exc).__mro__:
+            if klass.__name__ in cls._TRANSIENT_NAMES:
+                return True
+        return isinstance(exc, (ConnectionError, TimeoutError))
+
+    def _leaf_call(self, fn, *, label: str = "LLM request"):
+        """fn() under one leaf concurrency permit, retried on transient
+        errors; the permit is taken per attempt so a backoff wait never
+        holds a slot other workers (or other jobs) could use."""
+        def attempt():
+            with self._leaf_permit():
+                return fn()
+        return self._call_with_retry(attempt, label=label)
+
+    def _call_with_retry(self, fn, *, label: str = "LLM request"):
+        """fn() with bounded retries on transient network errors."""
+        import random
+        import time as _time
+        attempts = max(0, int(getattr(self, "retry_attempts", 3) or 0))
+        backoff = float(getattr(self, "retry_backoff_seconds", 2.0) or 0.0)
+        check = getattr(self, "cancel_check", lambda: None)
+        last: Optional[BaseException] = None
+        for attempt in range(attempts + 1):
+            try:
+                return fn()
+            except Exception as e:                       # noqa: BLE001
+                if not BaseLLMClient.is_transient_error(e) or attempt >= attempts:
+                    raise
+                last = e
+                check()                                  # no wait after a cancel
+                delay = backoff * (2 ** attempt) + random.uniform(0, 0.5)
+                print(f"[LLM] {label} failed ({type(e).__name__}); "
+                      f"retry {attempt + 1}/{attempts} in {delay:.1f}s")
+                _time.sleep(delay)
+                check()                                  # a cancel ends the wait
+        raise last  # pragma: no cover (loop always returns or raises)
+
     def _record_usage(self, token_usage) -> None:
         """Record usage into run-local (if attached) + global stats."""
         record_usage(self, token_usage)

@@ -1,0 +1,424 @@
+"""
+Data layer: the numerical data store of a run → per-section catalog of
+labelled series with a certainty tag and sources on every value.
+
+Deterministic Python only (no LLM). This is where the old pipeline went
+wrong: it plotted whatever string keys each page-level extraction
+happened to emit, mixed scales (billion / million / raw) in one series,
+and let code-fabricated values (N×N "market shares", interpolated years)
+in as if they were data. Here:
+
+- entity / metric names are canonicalised before grouping;
+- every value is re-expressed in ONE display scale per series, and a
+  value that had to be re-scaled is tagged 換算;
+- for one (entity, metric, year, unit) the best-sourced point wins and
+  the others are kept as alternatives (never averaged, never summed);
+- derived values (CAGR / YoY) are 導出, interpolated ones 推定, values from
+  a primary source (public statistics, regulators, company IR / press
+  releases) 公表, everything else 二次.
+
+The output has the shape of the handoff's ``data.json``: label arrays plus
+series objects ``{unit, values, basis, source, note}`` referenced by key.
+"""
+
+from __future__ import annotations
+
+import re
+import unicodedata
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import urlparse
+
+BASIS_PUBLISHED = "公表"
+BASIS_CONVERTED = "換算"
+BASIS_DERIVED = "導出"
+BASIS_ESTIMATED = "推定"
+BASIS_SECONDARY = "二次"
+BASIS_TAGS = (BASIS_PUBLISHED, BASIS_CONVERTED, BASIS_DERIVED,
+              BASIS_ESTIMATED, BASIS_SECONDARY)
+
+# Sources whose numbers count as 公表 (primary): public statistics,
+# regulators, securities filings, academia, and company IR / press pages.
+DEFAULT_PRIMARY_DOMAINS: Tuple[str, ...] = (
+    ".go.jp", ".gov", ".gov.uk", ".gc.ca", ".gov.au", "europa.eu",
+    ".ac.jp", ".edu", "oecd.org", "worldbank.org", "imf.org", "un.org",
+    "who.int", "e-stat.go.jp", "sec.gov", "edinet-fsa.go.jp",
+    "prtimes.jp", "jpx.co.jp",
+)
+PRIMARY_PATH_HINTS: Tuple[str, ...] = (
+    "/ir/", "/investor", "/investors", "/press-release", "/press_release",
+    "/pressrelease", "/news-release", "/newsroom", "/earnings", "/results",
+    "/annual-report", "/financial",
+)
+
+# scale words inside a unit string → (factor, canonical scale label)
+_SCALES: Tuple[Tuple[str, float, str], ...] = (
+    ("兆", 1e12, "兆"),
+    ("trillion", 1e12, "兆"),
+    ("十億", 1e9, "10億"),
+    ("10億", 1e9, "10億"),
+    ("billion", 1e9, "10億"),
+    ("bn", 1e9, "10億"),
+    ("億", 1e8, "億"),
+    ("百万", 1e6, "百万"),
+    ("million", 1e6, "百万"),
+    ("mn", 1e6, "百万"),
+    ("thousand", 1e3, "千"),
+    ("千", 1e3, "千"),
+    ("万", 1e4, "万"),
+)
+_SCALE_LABEL_FACTOR = {"兆": 1e12, "10億": 1e9, "億": 1e8, "百万": 1e6,
+                       "万": 1e4, "千": 1e3, "": 1.0}
+_CURRENCY_WORDS = {
+    "usd": "ドル", "us$": "ドル", "$": "ドル", "dollar": "ドル", "dollars": "ドル",
+    "ドル": "ドル", "米ドル": "ドル", "jpy": "円", "yen": "円", "円": "円", "¥": "円",
+    "eur": "ユーロ", "euro": "ユーロ", "€": "ユーロ", "ユーロ": "ユーロ",
+    "gbp": "ポンド", "£": "ポンド", "cny": "元", "rmb": "元", "元": "元",
+}
+
+
+def canon(text: Optional[str]) -> str:
+    """Canonical form for grouping: NFKC, lower, no quotes/brackets,
+    single spaces, trailing 'market'/'市場' particles kept (they carry
+    meaning) but English articles dropped."""
+    s = unicodedata.normalize("NFKC", str(text or "")).lower().strip()
+    s = re.sub(r"[\"'“”‘’()（）\[\]【】]", "", s)
+    s = re.sub(r"^(the|a|an)\s+", "", s)
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def parse_unit(unit: Optional[str]) -> Tuple[str, float, str]:
+    """Split a unit string into (base unit, scale factor, scale label).
+
+    'billion USD' → ('ドル', 1e9, '10億'); '百万缶' → ('缶', 1e6, '百万');
+    '%' → ('%', 1, ''); 'GPa' → ('GPa', 1, '') (SI prefixes are part of the
+    unit, not a presentation scale).
+    """
+    raw = unicodedata.normalize("NFKC", str(unit or "")).strip()
+    low = raw.lower()
+    factor, label, hit = 1.0, "", ""
+    for word, f, lab in _SCALES:
+        # longest match first is guaranteed by the table order
+        if word in low:
+            factor, label, hit = f, lab, word
+            break
+    base = low.replace(hit, "", 1).strip() if hit else low
+    base = base.strip(" -_/・")
+    base = _CURRENCY_WORDS.get(base, base)
+    if base in ("％", "percent", "pct", "パーセント"):
+        base = "%"
+    return base, factor, label
+
+
+def classify_source_basis(url: Optional[str],
+                          primary_domains: Sequence[str] = DEFAULT_PRIMARY_DOMAINS) -> str:
+    """公表 for a primary source, 二次 for everything else (no URL = 二次)."""
+    if not url:
+        return BASIS_SECONDARY
+    try:
+        parsed = urlparse(url if "://" in url else "http://" + url)
+    except Exception:
+        return BASIS_SECONDARY
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower()
+    for dom in primary_domains:
+        d = dom.lower().lstrip(".")
+        # label boundary: "oecd.org" matches "www.oecd.org", not "notoecd.org"
+        if host == d or host.endswith("." + d):
+            return BASIS_PUBLISHED
+    if any(h in path for h in PRIMARY_PATH_HINTS):
+        return BASIS_PUBLISHED
+    return BASIS_SECONDARY
+
+
+@dataclass
+class Series:
+    key: str
+    kind: str                       # "time" | "comparison"
+    labels_ref: str
+    name: str
+    metric: str
+    base_unit: str
+    unit: str                       # display unit incl. scale, e.g. 10億ドル
+    scale_factor: float
+    values: List[Optional[float]]
+    basis: List[Optional[str]]
+    sources: List[Dict[str, Any]]   # per value index: {url, title, evidence_id, raw_text, alternatives}
+    entity: str = ""
+    year: Optional[int] = None
+    note: str = ""
+
+    @property
+    def n_points(self) -> int:
+        return sum(1 for v in self.values if v is not None)
+
+    def source_summary(self) -> str:
+        titles = []
+        for s in self.sources:
+            if not s:
+                continue
+            t = s.get("title") or s.get("url") or ""
+            if t and t not in titles:
+                titles.append(t)
+        return "、".join(titles[:3]) + ("…" if len(titles) > 3 else "")
+
+    def to_data(self) -> Dict[str, Any]:
+        return {
+            "unit": self.unit,
+            "labels_ref": self.labels_ref,     # the label array these values belong to
+            "values": list(self.values),
+            "basis": list(self.basis),
+            "source": self.source_summary(),
+            "note": self.note,
+            "sources": [dict(s) if s else None for s in self.sources],
+        }
+
+
+@dataclass
+class SectionCatalog:
+    section_id: str
+    labels: Dict[str, List[str]] = field(default_factory=dict)
+    series: Dict[str, Series] = field(default_factory=dict)
+    dropped: List[str] = field(default_factory=list)      # why points were left out
+
+    def is_empty(self) -> bool:
+        return not self.series
+
+    def to_data(self) -> Dict[str, Any]:
+        """The handoff's data.json shape: label arrays + series objects."""
+        data: Dict[str, Any] = {"_meta": {"section": self.section_id,
+                                          "basis_tags": list(BASIS_TAGS)}}
+        data.update({k: list(v) for k, v in self.labels.items()})
+        data.update({k: s.to_data() for k, s in self.series.items()})
+        return data
+
+    def catalog_for_prompt(self, max_items: int = 40) -> List[Dict[str, Any]]:
+        """What the LLM sees: keys, meaning, unit, labels, certainty kinds,
+        source count — never the values."""
+        items = []
+        ordered = sorted(self.series.values(),
+                         key=lambda s: (-s.n_points, s.kind, s.key))
+        for s in ordered[:max_items]:
+            kinds = sorted({b for b in s.basis if b})
+            items.append({
+                "values_ref": s.key,
+                "labels_ref": s.labels_ref,
+                "kind": "時系列" if s.kind == "time" else "比較",
+                "name": s.name,
+                "metric": s.metric,
+                "unit": s.unit,
+                "labels": list(self.labels.get(s.labels_ref, [])),
+                "points": s.n_points,
+                "basis": kinds,
+                "sources": len({(x or {}).get("url") for x in s.sources if x}),
+            })
+        return items
+
+
+# ----------------------------------------------------------------------
+# building
+# ----------------------------------------------------------------------
+
+def _point_basis(dp, primary_domains) -> str:
+    raw_text = str(getattr(dp, "raw_text", "") or "")
+    if getattr(dp, "is_derived", False):
+        if raw_text.lower().startswith("interpolated"):
+            return BASIS_ESTIMATED
+        return BASIS_DERIVED
+    return classify_source_basis(getattr(dp, "source_url", ""), primary_domains)
+
+
+_BASIS_RANK = {BASIS_PUBLISHED: 0, BASIS_SECONDARY: 1, BASIS_CONVERTED: 1,
+               BASIS_DERIVED: 2, BASIS_ESTIMATED: 3}
+
+
+def _year_of(dp) -> Optional[int]:
+    y = getattr(dp, "year", None)
+    if y is None:
+        return None
+    try:
+        m = re.search(r"(19|20)\d{2}", str(y))
+        return int(m.group(0)) if m else None
+    except Exception:
+        return None
+
+
+def _time_label(dp) -> Optional[str]:
+    y = _year_of(dp)
+    if y is None:
+        return None
+    q = str(getattr(dp, "quarter", "") or "").upper().strip()
+    return f"{y}{q}" if q and q.startswith("Q") else str(y)
+
+
+def _pick_display_scale(points: List[Tuple[float, str]]) -> str:
+    """The scale most values were reported in; ties → the larger scale."""
+    counts: Dict[str, int] = {}
+    for _v, label in points:
+        counts[label] = counts.get(label, 0) + 1
+    if not counts:
+        return ""
+    return sorted(counts.items(),
+                  key=lambda kv: (-kv[1], -_SCALE_LABEL_FACTOR.get(kv[0], 1.0)))[0][0]
+
+
+def _display_unit(base_unit: str, scale_label: str) -> str:
+    if base_unit == "%":
+        return "%"
+    return f"{scale_label}{base_unit}" if scale_label else base_unit
+
+
+def _choose(points: List[Any], primary_domains) -> Any:
+    """Best point for one (entity, metric, year, unit): primary source,
+    then not derived, then higher confidence, then earlier insertion."""
+    def rank(dp):
+        basis = _point_basis(dp, primary_domains)
+        conf = float(getattr(dp, "combined_confidence", 0.0) or 0.0)
+        # the URL breaks ties so the choice never depends on the
+        # (parallel) extraction order
+        return (_BASIS_RANK.get(basis, 9), -conf, str(getattr(dp, "source_url", "") or ""))
+    return sorted(points, key=rank)[0]
+
+
+def _labels_ref_for(cat: "SectionCatalog", labels: List[str], default: str) -> str:
+    """Series with the same label array share one labels_ref (so the LLM
+    can put them in one panel); a new array is stored under ``default``."""
+    for ref, existing in cat.labels.items():
+        if list(existing) == list(labels):
+            return ref
+    cat.labels[default] = list(labels)
+    return default
+
+
+def build_section_catalog(points: Iterable[Any], section_id: str,
+                          section_evidence_ids: Optional[Iterable[str]] = None,
+                          primary_domains: Sequence[str] = DEFAULT_PRIMARY_DOMAINS,
+                          min_points_time: int = 2,
+                          min_entities: int = 2,
+                          max_series: int = 60) -> SectionCatalog:
+    """Turn the store's points that belong to ``section_id`` into labelled
+    series. ``section_evidence_ids`` (the locker's section map) also claims
+    points whose section was not resolved at extraction time."""
+    evidence_ids = set(section_evidence_ids or [])
+    cat = SectionCatalog(section_id=section_id)
+    mine = []
+    for dp in points:
+        sid = str(getattr(dp, "section_id", "") or "")
+        eid = str(getattr(dp, "evidence_id", "") or "")
+        if sid == section_id or (sid == "" and eid and eid in evidence_ids):
+            mine.append(dp)
+    if not mine:
+        return cat
+
+    # bucket: (metric, base_unit) -> entity -> time label -> [points]
+    buckets: Dict[Tuple[str, str], Dict[str, Dict[Optional[str], List[Any]]]] = {}
+    for dp in mine:
+        metric = canon(getattr(dp, "metric_name", ""))
+        if not metric:
+            cat.dropped.append(f"{getattr(dp, 'raw_text', '')!r}: 指標名なし")
+            continue
+        base_unit, _f, _lab = parse_unit(getattr(dp, "unit", ""))
+        entity = canon(getattr(dp, "subject", "")) or ""
+        tl = _time_label(dp)
+        buckets.setdefault((metric, base_unit), {}).setdefault(entity, {}).setdefault(tl, []).append(dp)
+
+    n = 0
+    for (metric, base_unit), by_entity in sorted(buckets.items()):
+        # ---- time series: one per entity with >= min_points_time labels
+        for entity, by_time in sorted(by_entity.items()):
+            labels = sorted(t for t in by_time if t)
+            if len(labels) < min_points_time:
+                continue
+            chosen = {t: _choose(by_time[t], primary_domains) for t in labels}
+            scale = _pick_display_scale([(0.0, parse_unit(getattr(c, "unit", ""))[2]) for c in chosen.values()])
+            series = _series_from(chosen, labels, kind="time", metric=metric, base_unit=base_unit,
+                                  scale_label=scale, entity=entity, primary_domains=primary_domains)
+            n += 1
+            key = f"ts{n}"
+            labels_ref = _labels_ref_for(cat, labels, f"years_{key}")
+            series.key, series.labels_ref = key, labels_ref
+            series.name = _display_name(entity, metric, "")
+            cat.series[key] = series
+            if len(cat.series) >= max_series:
+                return cat
+        # ---- comparisons: one per time label with >= min_entities entities
+        by_time_all: Dict[Optional[str], Dict[str, List[Any]]] = {}
+        for entity, by_time in by_entity.items():
+            if not entity:
+                continue
+            for tl, pts in by_time.items():
+                by_time_all.setdefault(tl, {}).setdefault(entity, []).extend(pts)
+        for tl, by_entity2 in sorted(by_time_all.items(), key=lambda kv: (kv[0] is None, str(kv[0]))):
+            if len(by_entity2) < min_entities:
+                continue
+            chosen = {e: _choose(pts, primary_domains) for e, pts in by_entity2.items()}
+            scale = _pick_display_scale([(0.0, parse_unit(getattr(c, "unit", ""))[2]) for c in chosen.values()])
+            # entities ordered by value (desc) in the display scale
+            def _val(c):
+                b, f, _l = parse_unit(getattr(c, "unit", ""))
+                return float(getattr(c, "value", 0.0) or 0.0) * f / _SCALE_LABEL_FACTOR.get(scale, 1.0)
+            ordered = sorted(chosen.items(), key=lambda kv: -_val(kv[1]))
+            labels = [_display_entity(e) for e, _c in ordered]
+            series = _series_from({_display_entity(e): c for e, c in ordered}, labels, kind="comparison",
+                                  metric=metric, base_unit=base_unit, scale_label=scale, entity="",
+                                  primary_domains=primary_domains)
+            n += 1
+            key = f"cmp{n}"
+            labels_ref = _labels_ref_for(cat, labels, f"entities_{key}")
+            series.key, series.labels_ref = key, labels_ref
+            series.year = int(tl[:4]) if tl else None
+            series.name = _display_name("", metric, tl or "")
+            cat.series[key] = series
+            if len(cat.series) >= max_series:
+                return cat
+    return cat
+
+
+def _display_entity(entity: str) -> str:
+    return entity if entity else "（全体）"
+
+
+def _display_name(entity: str, metric: str, when: str) -> str:
+    parts = [p for p in (entity, metric, when) if p]
+    return " ".join(parts)
+
+
+def _series_from(chosen: Dict[str, Any], labels: List[str], *, kind: str, metric: str,
+                 base_unit: str, scale_label: str, entity: str, primary_domains) -> Series:
+    disp_factor = _SCALE_LABEL_FACTOR.get(scale_label, 1.0)
+    values: List[Optional[float]] = []
+    basis: List[Optional[str]] = []
+    sources: List[Dict[str, Any]] = []
+    notes: List[str] = []
+    for label in labels:
+        dp = chosen.get(label)
+        if dp is None:
+            values.append(None); basis.append(None); sources.append(None)
+            continue
+        b_unit, f, lab = parse_unit(getattr(dp, "unit", ""))
+        raw_value = float(getattr(dp, "value", 0.0) or 0.0)
+        if base_unit == "%":
+            value = raw_value
+        else:
+            value = raw_value * f / disp_factor
+        tag = _point_basis(dp, primary_domains)
+        if base_unit != "%" and lab != scale_label and tag in (BASIS_PUBLISHED, BASIS_SECONDARY):
+            tag = BASIS_CONVERTED
+            notes.append(f"{label}: {getattr(dp, 'raw_text', '')} を {scale_label or '基本単位'}に換算")
+        if getattr(dp, "is_forecast", False):
+            notes.append(f"{label}: 予測値")
+        values.append(round(value, 4))
+        basis.append(tag)
+        sources.append({
+            "url": getattr(dp, "source_url", "") or "",
+            "title": getattr(dp, "source_title", "") or "",
+            "evidence_id": getattr(dp, "evidence_id", "") or "",
+            "raw_text": getattr(dp, "raw_text", "") or "",
+        })
+    return Series(
+        key="", kind=kind, labels_ref="", name="", metric=metric, base_unit=base_unit,
+        unit=_display_unit(base_unit, scale_label), scale_factor=disp_factor,
+        values=values, basis=basis, sources=sources, entity=entity,
+        note="；".join(notes[:6]),
+    )
