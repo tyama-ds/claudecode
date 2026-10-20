@@ -626,6 +626,7 @@ class FinalizationController:
 
         def one(sid):
             try:
+                self._checkpoint()        # cancel / timeout boundary per section
                 return fn(sid, issues_for(sid))
             except (RunCancelled, VerificationCancelled, VerificationTimeout):
                 raise

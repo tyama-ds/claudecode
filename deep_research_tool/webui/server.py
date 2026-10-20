@@ -1118,7 +1118,7 @@ class JobManager:
                     session_path=spec.get("session_path"),
                     report_path=spec.get("report_path"),
                     evidence_path=spec.get("evidence_path"),
-                    query=params.get("query", ""),
+                    query=spec.get("query", ""),
                     requirements=params.get("requirements", ""),
                     progress_callback=job.update,
                 )
@@ -1233,8 +1233,11 @@ class JobManager:
                 session_id = None
                 if tool is not None:
                     try:
-                        saved = dict(getattr(tool, "partial_artifacts", {}) or {}) \
-                            or dict(tool.current_saved_artifacts() or {})
+                        saved = dict(getattr(tool, "partial_artifacts", {}) or {})
+                        if not saved and not params.get("verify"):
+                            # (a verify-only job loaded ANOTHER job's
+                            # session: its artifacts are not this job's)
+                            saved = dict(tool.current_saved_artifacts() or {})
                         sess = (tool.researcher.get_session()
                                 if getattr(tool, "researcher", None) is not None else None)
                         session_id = getattr(sess, "session_id", None) or \
@@ -1694,9 +1697,25 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                        "evidence_path", "resume_from", "regenerate",
                                        "fermi", "verify")}
             label = (rec or {}).get("query") if rec else Path(spec["report_path"]).name
-            job_params["query"] = (params.get("query") or "").strip() or f"検証のみ: {label}"
+            user_query = (params.get("query") or "").strip()
+            # the job's display label; verify_report gets the USER's topic
+            # (empty = the saved session's query / the report title), never
+            # the label — it would seed the evidence searches
+            spec["query"] = user_query
+            job_params["query"] = user_query or f"検証のみ: {label or '保存済みの調査'}"
             job_params["enable_verification"] = True
             job_params["verify"] = spec
+            # same validation as /api/research: a bad value is a 400 with
+            # the field, not a job that fails after it was recorded
+            try:
+                build_config_kwargs(job_params)
+            except FieldError as e:
+                self._send_json({"error": f"invalid parameter: {e}",
+                                 "field": e.field}, 400)
+                return
+            except ValueError as e:
+                self._send_json({"error": f"invalid parameter: {e}"}, 400)
+                return
             job = manager.start(job_params)
             self._send_json({"job_id": job.job_id, "state": job.state}, 202)
             return

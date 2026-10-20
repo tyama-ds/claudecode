@@ -781,6 +781,10 @@ class Researcher:
         section in flight when sections run concurrently."""
         with self._activity_lock:
             running = list(self._sections_running or [])
+            pos = getattr(self, "_activity_pos", None)
+            if pos is None:
+                pos = self._activity_pos = {}
+            pos[section.section] = (section_idx, total_sections)
         self.current_activity = {
             "phase": phase, "section": section.section,
             "title": section.title, "index": section_idx + 1,
@@ -788,6 +792,16 @@ class Researcher:
             "done": len(self.session.completed_sections),
             "running": sorted(running, key=str),
         }
+
+    def _set_phase(self, section: TableOfContentsItem, phase: str, **extra) -> None:
+        """Relabel the status line for THIS section (a worker thread must
+        not relabel whichever section started last)."""
+        with self._activity_lock:
+            idx, total = (getattr(self, "_activity_pos", None) or {}).get(
+                section.section, (0, 0))
+        self._set_activity(section, idx, total, phase=phase)
+        if extra:
+            self.current_activity = dict(self.current_activity, **extra)
 
     def _run_section(self, section: TableOfContentsItem,
                      section_queries: List[str], section_idx: int,
@@ -896,6 +910,8 @@ class Researcher:
                         self._sections_running.remove(section.section)
             return section
 
+        failure: Optional[BaseException] = None
+        futures: Dict[Any, TableOfContentsItem] = {}
         with ContextThreadPoolExecutor(
                 max_workers=min(workers, len(pending))) as ex:
             futures = {ex.submit(_work, idx, s): s for idx, s in pending}
@@ -909,10 +925,24 @@ class Researcher:
                         f"Completed section {section.section}. "
                         f"{section.title} ({done}/{total})",
                         10 + done / total * 70)
-            except BaseException:
+            except BaseException as e:
+                failure = e
                 for f in futures:
                     f.cancel()
-                raise
+        if failure is not None:
+            # the executor has waited for the in-flight workers: sections
+            # that FINISHED meanwhile are complete work and are
+            # checkpointed before the error / cancel propagates (a resume
+            # reuses them instead of researching them again)
+            for fut, section in futures.items():
+                if fut.done() and not fut.cancelled() and fut.exception() is None \
+                        and section.section not in self.session.completed_sections:
+                    try:
+                        self._complete_section(fut.result())
+                    except Exception as e:
+                        print(f"[Research] checkpoint of finished section "
+                              f"{section.section} failed: {e}")
+            raise failure
 
     def _process_section_with_fast_crawler(
         self,
@@ -1374,8 +1404,7 @@ class Researcher:
                 reverse=True,
             )
 
-            if self.current_activity:
-                self.current_activity = dict(self.current_activity, phase="write")
+            self._set_phase(section, "write")
             synthesized = self._synthesize_parts(section, section_content_parts)
 
             # Gap-fill: re-search when high-importance information is thin
@@ -1387,10 +1416,7 @@ class Researcher:
                 print(f"[GapFill] Section {section.section}: insufficient "
                       f"high-importance sources, round {round_num + 1} "
                       f"(gaps: {gaps[:3]})")
-                if self.current_activity:
-                    self.current_activity = dict(self.current_activity,
-                                                 phase="gapfill",
-                                                 round=round_num + 1)
+                self._set_phase(section, "gapfill", round=round_num + 1)
 
                 gathered_summary = "\n".join(
                     f"- {p.source_title}: {p.processed_content[:200]}"

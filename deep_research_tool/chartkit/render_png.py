@@ -109,7 +109,7 @@ def render_png(panel: Dict[str, Any], path: Path, language: str = "ja", dpi: int
     seg_row = form == "stacked_hbar"
 
     if seg_row:
-        fig_h = 2.6
+        fig_h = max(2.6, 0.55 * max(1, len(labels)) + 2.0)
     elif horiz:
         fig_h = max(3.2, 0.45 * max(1, len(labels)) * max(1, n_series) + 2.0)
     else:
@@ -140,21 +140,36 @@ def render_png(panel: Dict[str, Any], path: Path, language: str = "ja", dpi: int
         ax.set_ylim(bottom=0, top=panel.get("y_max") or None)
         ax.grid(axis="y", color=GRID)
     elif seg_row:
-        left = 0.0
+        # one segment row PER LABEL (the HTML page draws the same rows);
+        # a missing value is an empty segment, never a later label's value
+        rows = max(1, len(labels))
+        lefts = [0.0] * rows
+        widest = 1e-9
         for i, s in enumerate(series):
-            v = next((float(x) for x in (s.get("values") or []) if isinstance(x, (int, float))), None)
-            if v is None:
-                continue
             fill, text_color = SEG[i % len(SEG)]
-            b = (s.get("basis") or [None])[0]
-            ax.barh([0], [v], left=left, color=fill, height=0.6,
-                    hatch="////" if not _published(b) else None, edgecolor="white", linewidth=0.5)
-            ax.text(left + v / 2, 0, f"{s.get('name', '')} {fmt(v)}", ha="center", va="center",
-                    fontsize=10, color=text_color)
             handles.append(Patch(facecolor=fill, label=s.get("name", "")))
-            left += v
-        ax.set_xlim(0, panel.get("y_max") or max(left, 1e-9))
-        ax.set_yticks([]); ax.set_xticks([])
+            vals = s.get("values") or []
+            basis = s.get("basis") or []
+            for j in range(rows):
+                v = vals[j] if j < len(vals) else None
+                if not isinstance(v, (int, float)) or isinstance(v, bool):
+                    continue
+                v = float(v)
+                b = basis[j] if j < len(basis) else None
+                ax.barh([j], [v], left=lefts[j], color=fill, height=0.6,
+                        hatch="////" if not _published(b) else None, edgecolor="white", linewidth=0.5)
+                if v > 0:
+                    ax.text(lefts[j] + v / 2, j, f"{s.get('name', '')} {fmt(v)}", ha="center",
+                            va="center", fontsize=9, color=text_color)
+                lefts[j] += v
+                widest = max(widest, lefts[j])
+        y_max = panel.get("y_max")
+        ax.set_xlim(0, max(float(y_max) if isinstance(y_max, (int, float)) else 0.0, widest))
+        if rows > 1:
+            ax.set_yticks(range(rows)); ax.set_yticklabels(labels); ax.invert_yaxis()
+        else:
+            ax.set_yticks([])
+        ax.set_xticks([])
         for sp in ax.spines.values():
             sp.set_visible(False)
     else:

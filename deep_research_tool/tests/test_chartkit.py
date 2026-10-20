@@ -221,7 +221,7 @@ class TestRenderers:
         assert page.count("<canvas") == 8 and "cv_capacity" in page
         assert "&lt;/script&gt;" in page                       # title escaped in markup
         assert "</script><b>" not in page.split("const SPEC")[1].split("</script>")[0]
-        assert "<\\/script>" in page                          # … and inside the spec JSON
+        assert "\\u003c/script>" in page                      # … and inside the spec JSON ("<" is never literal there)
         assert "7.94億缶" in page and "2. 世界" in page
         assert len(page.encode("utf-8")) < 1_000_000
 

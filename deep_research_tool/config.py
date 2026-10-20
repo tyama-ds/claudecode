@@ -1339,8 +1339,8 @@ def create_config(
         local_backend=LocalLLMBackend(local_backend),
         local_timeout=local_timeout,
         local_concurrency=local_concurrency,
-        llm_retry_attempts=max(0, min(10, int(llm_retry_attempts or 0))),
-        llm_retry_backoff_seconds=max(0.0, float(llm_retry_backoff_seconds or 0.0)),
+        llm_retry_attempts=llm_retry_attempts,          # validated below
+        llm_retry_backoff_seconds=llm_retry_backoff_seconds,
         **({"temperature": float(temperature)} if temperature is not None else {}),
         **({"max_tokens": int(max_tokens)} if max_tokens is not None else {}),
         stage_overrides=dict(stage_llm) if stage_llm else {},
@@ -1383,6 +1383,17 @@ def create_config(
             not 1 <= research_section_workers <= 8:
         raise ValueError("research_section_workers must be an integer "
                          f"between 1 and 8 (got {research_section_workers!r})")
+    if isinstance(llm_retry_attempts, bool) or \
+            not isinstance(llm_retry_attempts, int) or \
+            not 0 <= llm_retry_attempts <= 10:
+        raise ValueError("llm_retry_attempts must be an integer between 0 and 10 "
+                         f"(got {llm_retry_attempts!r})")
+    if isinstance(llm_retry_backoff_seconds, bool) or \
+            not isinstance(llm_retry_backoff_seconds, (int, float)) or \
+            not 0.0 <= float(llm_retry_backoff_seconds) < float("inf"):
+        raise ValueError("llm_retry_backoff_seconds must be a non-negative number "
+                         f"(got {llm_retry_backoff_seconds!r})")
+    api_config.llm_retry_backoff_seconds = float(llm_retry_backoff_seconds)
 
     research_config = ResearchConfig(
         parallel_max_workers=parallel_max_workers,

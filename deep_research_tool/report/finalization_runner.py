@@ -82,6 +82,7 @@ class FinalizationRunner:
         cache_path=None,
         draft_path=None,
         resume: bool = False,
+        checkpoint_fn=None,
     ):
         """
         Args:
@@ -130,6 +131,10 @@ class FinalizationRunner:
         self.cache_path = Path(cache_path) if cache_path else None
         self.draft_path = Path(draft_path) if draft_path else None
         self.resume = bool(resume)
+        # checkpoint_fn: persists session + evidence (the evidence this
+        #   loop registers and the section stores it appends to) with the
+        #   draft, so a resumed loop rebuilds the registry its draft cites
+        self.checkpoint_fn = checkpoint_fn
         self.resumed_from_draft = False
         self.cache_entries_loaded = 0
         if self.resume and self.cache_path is not None:
@@ -540,8 +545,14 @@ class FinalizationRunner:
             self._persist_cache()
         outcome["resumed_from_draft"] = self.resumed_from_draft
         outcome["cache_entries_loaded"] = self.cache_entries_loaded
-        # the loop ended normally: the frozen body replaces the draft
-        if self.draft_path is not None and self.draft_path.is_file():
+        # the evidence this loop registered goes to disk with the body
+        self._checkpoint_state()
+        if outcome.get("decision") in ("cancelled", "timeout"):
+            # interrupted: the draft (already on disk after every edit)
+            # and the judgement cache are what a resume continues from
+            pass
+        elif self.draft_path is not None and self.draft_path.is_file():
+            # the loop ended normally: the frozen body replaces the draft
             try:
                 self.draft_path.unlink()
             except Exception:
@@ -638,6 +649,16 @@ class FinalizationRunner:
             _os.replace(tmp, self.draft_path)
         except Exception as e:
             print(f"[Finalize] body draft save failed: {e}")
+        self._checkpoint_state()
+
+    def _checkpoint_state(self) -> None:
+        """Session + evidence to disk (see checkpoint_fn)."""
+        if self.checkpoint_fn is None:
+            return
+        try:
+            self.checkpoint_fn()
+        except Exception as e:
+            print(f"[Finalize] checkpoint failed: {e}")
 
     # ------------------------------------------------------------------
     # interruption / summary
@@ -760,9 +781,13 @@ class FinalizationRunner:
         if not ordered or self.search_client is None:
             return {}
 
+        from ..utils.cancellation import RunCancelled
+
         def _fetch(u):
             try:
                 return self.search_client.get_page_content(u)
+            except RunCancelled:
+                raise
             except Exception:
                 return False
 
@@ -1408,6 +1433,12 @@ class FinalizationRunner:
                                  "key_points": [], "relevance_score": 0.6,
                                  "is_new": True}
                         self.section_evidence.setdefault(sid, []).append(entry)
+                        # the session store too: a resumed loop rebuilds
+                        # the registry from it (same order, same numbers)
+                        sdata = self.session_contents.get(sid)
+                        if sdata is not None and entry["url"]:
+                            sdata.setdefault("extracted_content", []).append(dict(entry))
+                            sdata.setdefault("sources", []).append(entry["url"])
                 if numbers:
                     hints[id(issue)] = ", ".join(
                         f"[SOURCE {n}]" for n in numbers)

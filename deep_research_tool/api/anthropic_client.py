@@ -91,7 +91,8 @@ class AnthropicClient(BaseLLMClient):
                 except ImportError:
                     print("Warning: httpx not installed, proxy settings ignored")
 
-            client_kwargs = {"api_key": self.api_key}
+            # retries live in BaseLLMClient._call_with_retry (one policy)
+            client_kwargs = {"api_key": self.api_key, "max_retries": 0}
             if self._base_url:
                 client_kwargs["base_url"] = self._base_url
             if http_client:
@@ -149,13 +150,13 @@ class AnthropicClient(BaseLLMClient):
         if temp != 1.0:  # Anthropic default is 1.0
             api_params["temperature"] = temp
 
-        # Make API call — leaf operation: one composed run+process
-        # concurrency permit. The Anthropic SDK client is thread-safe and
-        # retries 429/5xx internally with exponential backoff + jitter.
-        with self._leaf_permit():
-            response = self._call_with_retry(
-                lambda: self._client.messages.create(**api_params),
-                label="Anthropic request")
+        # Make API call — leaf operation under one composed run+process
+        # permit, retried here on connection errors / timeouts / 429 /
+        # 5xx (the SDK's own retries are off: max_retries=0); the permit
+        # is released while a retry waits
+        response = self._leaf_call(
+            lambda: self._client.messages.create(**api_params),
+            label="Anthropic request")
 
         # Extract response
         content = ""

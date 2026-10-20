@@ -44,6 +44,10 @@ def google_search_url(query: str, region: str) -> str:
 class SeleniumBrowser(BaseSearchClient):
     """Selenium-based browser for dynamic content extraction."""
 
+    # one WebDriver: the research sections and the finalization page
+    # prefetch run one at a time against it (researcher / runner check)
+    requires_serial_access = True
+
     def __init__(
         self,
         max_results: int = 10,

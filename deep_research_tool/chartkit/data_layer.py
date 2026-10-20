@@ -123,8 +123,9 @@ def classify_source_basis(url: Optional[str],
     host = (parsed.netloc or "").lower()
     path = (parsed.path or "").lower()
     for dom in primary_domains:
-        d = dom.lower()
-        if host == d.lstrip(".") or host.endswith(d) or (not d.startswith(".") and host.endswith("." + d)):
+        d = dom.lower().lstrip(".")
+        # label boundary: "oecd.org" matches "www.oecd.org", not "notoecd.org"
+        if host == d or host.endswith("." + d):
             return BASIS_PUBLISHED
     if any(h in path for h in PRIMARY_PATH_HINTS):
         return BASIS_PUBLISHED
@@ -165,6 +166,7 @@ class Series:
     def to_data(self) -> Dict[str, Any]:
         return {
             "unit": self.unit,
+            "labels_ref": self.labels_ref,     # the label array these values belong to
             "values": list(self.values),
             "basis": list(self.basis),
             "source": self.source_summary(),
@@ -273,8 +275,20 @@ def _choose(points: List[Any], primary_domains) -> Any:
     def rank(dp):
         basis = _point_basis(dp, primary_domains)
         conf = float(getattr(dp, "combined_confidence", 0.0) or 0.0)
-        return (_BASIS_RANK.get(basis, 9), -conf)
+        # the URL breaks ties so the choice never depends on the
+        # (parallel) extraction order
+        return (_BASIS_RANK.get(basis, 9), -conf, str(getattr(dp, "source_url", "") or ""))
     return sorted(points, key=rank)[0]
+
+
+def _labels_ref_for(cat: "SectionCatalog", labels: List[str], default: str) -> str:
+    """Series with the same label array share one labels_ref (so the LLM
+    can put them in one panel); a new array is stored under ``default``."""
+    for ref, existing in cat.labels.items():
+        if list(existing) == list(labels):
+            return ref
+    cat.labels[default] = list(labels)
+    return default
 
 
 def build_section_catalog(points: Iterable[Any], section_id: str,
@@ -322,10 +336,9 @@ def build_section_catalog(points: Iterable[Any], section_id: str,
                                   scale_label=scale, entity=entity, primary_domains=primary_domains)
             n += 1
             key = f"ts{n}"
-            labels_ref = f"years_{key}"
+            labels_ref = _labels_ref_for(cat, labels, f"years_{key}")
             series.key, series.labels_ref = key, labels_ref
             series.name = _display_name(entity, metric, "")
-            cat.labels[labels_ref] = labels
             cat.series[key] = series
             if len(cat.series) >= max_series:
                 return cat
@@ -352,11 +365,10 @@ def build_section_catalog(points: Iterable[Any], section_id: str,
                                   primary_domains=primary_domains)
             n += 1
             key = f"cmp{n}"
-            labels_ref = f"entities_{key}"
+            labels_ref = _labels_ref_for(cat, labels, f"entities_{key}")
             series.key, series.labels_ref = key, labels_ref
             series.year = int(tl[:4]) if tl else None
             series.name = _display_name("", metric, tl or "")
-            cat.labels[labels_ref] = labels
             cat.series[key] = series
             if len(cat.series) >= max_series:
                 return cat

@@ -18,18 +18,37 @@ from ..research.query_generator import (ResearchPlan, TableOfContents,
                                         TableOfContentsItem)
 from ..research.researcher import ResearchSession, ResearchState
 
-# headings that are not report body (never verified as claims)
+# headings that are not report body (never verified as claims). CJK
+# text has no \b boundary, so a Japanese heading counts only when the
+# word is followed by 一覧 / リスト, punctuation or the end ("文献調査の
+# 結果" stays a chapter)
 _NON_BODY = re.compile(
-    r"^(参考文献|引用文献|出典|文献|references?|sources?|bibliography|"
-    r"目次|table of contents|contents|図表一覧|figures and tables|"
-    r"用語集|glossary|付録[A-Za-z]?|appendix)\b", re.I)
+    r"^(?:(?:参考文献|引用文献|出典|文献|目次|図表一覧|用語集|付録[A-Za-z]?)"
+    r"(?:一覧|リスト)?(?=$|\s|[:：・（(\-–—])"
+    r"|(?:references?|sources?|bibliography|table of contents|contents|"
+    r"figures and tables|glossary|appendix)\b)", re.I)
+# "1." / "1.2" / "1 " / "第2章" / "IV." / "(3)" — a digit run glued to
+# the text ("5G市場", "2030年の展望") is part of the title
 _LEADING_NUMBER = re.compile(
-    r"^\s*(?:第\s*\d+\s*[章節部]|\d+(?:[.．]\d+)*[.．]?|[IVX]+\.|[（(]\d+[)）])\s*[:：.．\-–—]?\s*")
+    r"^\s*(?:第\s*\d+\s*[章節部]|\d+(?:[.．]\d+)*[.．](?![0-9])|\d+(?:[.．]\d+)*(?=\s)|"
+    r"[IVX]+\.|[（(]\d+[)）])\s*[:：.．\-–—]?\s*")
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 
 
 def _clean_title(text: str) -> str:
     return _LEADING_NUMBER.sub("", (text or "").strip()).strip() or (text or "").strip()
+
+
+def _decode_text(raw: bytes) -> str:
+    """UTF-8 (with or without BOM), then the Japanese Windows / Unix
+    encodings; a file none of them decodes is an error, never silent
+    mojibake fed to the verifier."""
+    for enc in ("utf-8-sig", "utf-8", "cp932", "euc_jp"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    raise ValueError("report text is not UTF-8 / Shift_JIS / EUC-JP")
 
 
 def report_text_from_file(path) -> Tuple[str, str]:
@@ -42,7 +61,7 @@ def report_text_from_file(path) -> Tuple[str, str]:
     p = Path(path)
     suffix = p.suffix.lower()
     if suffix in (".md", ".markdown", ".txt", ".text"):
-        return p.stem, p.read_text(encoding="utf-8", errors="replace")
+        return p.stem, _decode_text(p.read_bytes())
     if suffix == ".docx":
         try:
             import docx

@@ -1650,6 +1650,13 @@ $('settingsModal').addEventListener('click', (e) => {
   if (e.target === $('settingsModal')) { $('settingsModal').style.display = 'none'; renderDelegationNotice(); }
 });
 loadSettings();
+// a saved 機能 → 検証 OFF is the run mode 調査のみ: the cards decide at run
+// time, so they must show the saved choice (and not silently verify)
+if ($('feat_verification') && !$('feat_verification').checked && radioValue('run_mode') !== 'verify_only') {
+  setRadio('run_mode', 'research_only');
+  syncModeCards('run_mode');
+  applyModeVisibility();
+}
 
 // mode card selection highlight (per radio group). The radios themselves
 // stay keyboard-operable (arrow keys / Space); the card is just the visual.
@@ -2403,7 +2410,8 @@ function render(status) {
 function statusBadges(axes, result) {
   const b = [];
   const proc = axes.process || (result.run_status === 'cancelled' ? 'cancelled' : 'completed');
-  b.push(`<span class="badge ${proc === 'completed' ? 'ok' : 'bad'}">処理: ${proc === 'completed' ? '終了' : '中止'}</span>`);
+  const procLabel = proc === 'completed' ? '終了' : (proc === 'error' ? 'エラーで中断' : '中止');
+  b.push(`<span class="badge ${proc === 'completed' ? 'ok' : 'bad'}">処理: ${procLabel}</span>`);
   const ver = axes.verification || 'unknown';
   const verLabel = {performed: '検証: 実施済み', skipped: '検証: 未実施（無効）', cancelled: '検証: 中止',
                     timeout: '検証: タイムアウト', failed: '検証: 実行不能', unknown: '検証: 不明'}[ver] || ver;
@@ -2417,6 +2425,11 @@ function statusBadges(axes, result) {
   return b.join('');
 }
 function outcomeHeadline(axes, result) {
+  const resumable = !!((result.saved_artifacts || {}).session);
+  if (result.run_status === 'error' || axes.process === 'error')
+    return 'エラーで中断しました' + (resumable ? '（保存済みの成果物から「中断箇所から再開」できます）' : '');
+  if (result.run_status === 'cancelled' || axes.process === 'cancelled')
+    return '中止しました' + (resumable ? '（保存済みの成果物から「中断箇所から再開」できます）' : '');
   if ((result.run_status && result.run_status !== 'completed') || axes.quality === 'failed')
     return '成果物検査に失敗しました（要確認）';
   if (axes.verification === 'performed' && axes.quality === 'passed') return '検証済み・品質基準を達成して完了しました';
@@ -3367,7 +3380,7 @@ function renderHistory(records) {
     const ps = r.params_summary || {};
     // any run that did not complete can be resumed when a session was saved
     // (the server also finds the newest session_*.json in the job folder)
-    const canResume = (!!saved.session || !!r.output_dir) && ['cancelled', 'error', 'interrupted'].includes(r.state);
+    const canResume = !!saved.session && ['cancelled', 'error', 'interrupted'].includes(r.state);
     const canReout = !!saved.session;
     return `<div class="hist-row" data-job="${escapeHtml(r.job_id)}">
       <div class="q">${escapeHtml(r.query || '(無題)')}</div>
@@ -3518,6 +3531,9 @@ function applySnapshot(s) {
   Object.entries(s.text || {}).forEach(([id, v]) => { if ($(id)) $(id).value = v; });
   Object.entries(s.check || {}).forEach(([id, v]) => { if ($(id)) $(id).checked = !!v; });
   Object.entries(s.radio || {}).forEach(([n, v]) => setRadio(n, v));
+  // the 機能 tab switch mirrors a restored run mode
+  if ($('feat_verification') && s.radio && s.radio.run_mode)
+    $('feat_verification').checked = s.radio.run_mode !== 'research_only';
   Object.entries(s.stages || {}).forEach(([st, spec]) => {
     const sel = document.querySelector(`.stage-provider[data-stage=${st}]`);
     const inp = document.querySelector(`.stage-model[data-stage=${st}]`);

@@ -31,13 +31,23 @@ def panel_html(p: Dict[str, Any]) -> str:
     form = p.get("form", "bar")
     default_h = 80 if form == "stacked_hbar" else (
         max(260, len(p.get("series") or []) * len(p.get("labels") or []) * 40 + 80) if form == "hbar" else 260)
-    h = int(p.get("height") or default_h)
+    h = _px(p.get("height"), default_h)
     return (f'<section class="panel"><p class="lb">{e(str(p.get("title", "")))}</p>'
             f'<div class="lg" id="lg_{e(str(p["id"]))}"></div>'
             f'<div style="position:relative;width:100%;height:{h}px">'
             f'<canvas id="cv_{e(str(p["id"]))}" role="img" aria-label="{e(str(p.get("title", "")))}"></canvas></div>'
             f'<p class="cap">{e(str(p.get("caption", "")))}</p>'
             f'<p class="jd">{e(str(p.get("judgment", "")))}</p></section>')
+
+
+def _px(value: Any, default: int) -> int:
+    """An LLM-written height ("300px", "300.0", 300) as pixels, clamped;
+    anything unusable falls back to the default instead of raising."""
+    try:
+        n = int(float(str(value).strip().lower().removesuffix("px")))
+    except (TypeError, ValueError):
+        return default
+    return max(60, min(2000, n))
 
 
 def _spec_json(panels: Sequence[Dict[str, Any]]) -> str:
@@ -48,8 +58,9 @@ def _spec_json(panels: Sequence[Dict[str, Any]]) -> str:
         q["series"] = [{k: s.get(k) for k in ("name", "role", "values", "basis")}
                        for s in (p.get("series") or [])]
         slim.append(q)
-    # "</" inside a <script> would end the script element
-    return json.dumps(slim, ensure_ascii=False).replace("</", "<\\/")
+    # no "<" at all inside the <script>: "</script" / "<!--" in a label
+    # can never end or confuse the script element (< is plain JSON)
+    return json.dumps(slim, ensure_ascii=False).replace("<", "\\u003c")
 
 
 def render_html(panels: Sequence[Dict[str, Any]], kpis: Optional[Sequence[Dict[str, Any]]] = None,
@@ -78,13 +89,14 @@ def render_html(panels: Sequence[Dict[str, Any]], kpis: Optional[Sequence[Dict[s
     if not chartjs:
         panels_html = ('<p class="empty">Chart.js が同梱されていないため描画できません'
                        '（deep_research_tool/chartkit/vendor/chart.umd.js）。</p>' + panels_html)
-    return (tpl.replace("{{TITLE}}", html.escape(title))
-               .replace("{{SUBTITLE}}", html.escape(subtitle))
-               .replace("{{KPIS}}", "".join(kpi_card(k) for k in (kpis or [])))
-               .replace("{{PANELS}}", panels_html)
-               .replace("{{CHARTJS}}", chartjs)
-               .replace("{{SPEC}}", _spec_json(panels))
-               .replace("{{PRELUDE}}", prelude))
+    # one pass: a placeholder-like string inside a title / label is never
+    # substituted by a later replacement
+    fills = {"TITLE": html.escape(title), "SUBTITLE": html.escape(subtitle),
+             "KPIS": "".join(kpi_card(k) for k in (kpis or [])), "PANELS": panels_html,
+             "CHARTJS": chartjs, "SPEC": _spec_json(panels), "PRELUDE": prelude}
+    import re as _re
+    return _re.sub(r"\{\{(TITLE|SUBTITLE|KPIS|PANELS|CHARTJS|SPEC|PRELUDE)\}\}",
+                   lambda m: fills[m.group(1)], tpl)
 
 
 def to_jupyter(page: str, height: int = 900):

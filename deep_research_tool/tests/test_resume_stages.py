@@ -252,8 +252,11 @@ class TestTransientRetry:
         d = DelegatedLLMClient(local, fallback=None, role_label="検証", setting_label="x")
         d.retry_attempts = 4
         assert local.retry_attempts == 4            # forwarded to the local client
-        assert create_config(provider="openai", openai_api_key="t",
-                             llm_retry_attempts=99).api.llm_retry_attempts == 10
+        # out-of-range values are rejected, never silently clamped
+        for bad in ({"llm_retry_attempts": 99}, {"llm_retry_attempts": True},
+                    {"llm_retry_attempts": 2.5}, {"llm_retry_backoff_seconds": -1}):
+            with pytest.raises(ValueError):
+                create_config(provider="openai", openai_api_key="t", **bad)
 
 
 class _DyingTool:

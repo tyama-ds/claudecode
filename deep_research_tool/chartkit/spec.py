@@ -107,28 +107,104 @@ def parse_panels(text: str) -> List[Dict[str, Any]]:
 
 def resolve(panels: List[Dict[str, Any]], data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Fill labels / values / basis / unit from the data by key (values only
-    ever come from the data layer). Missing keys raise SpecError."""
+    ever come from the data layer). Missing keys raise SpecError; so does
+    a series whose own label array is not the panel's (its values would
+    be drawn under the wrong labels)."""
     out = []
     for p in panels:
         q = dict(p)
         q["series"] = [dict(s) for s in (p.get("series") or []) if isinstance(s, dict)]
-        if q.get("form") != "line_xy":
-            ref = q.get("labels_ref")
+        ref = q.get("labels_ref")
+        xy_form = q.get("form") == "line_xy"
+        if ref is not None or not xy_form:
             if ref not in data or not isinstance(data.get(ref), list):
                 raise SpecError(f"{q.get('id')}: labels_ref '{ref}' がデータにありません")
             q["labels"] = list(data[ref])
+        else:
+            q["labels"] = []            # line_xy over {x, y} points needs no label axis
         for s in q["series"]:
-            ref = s.get("values_ref")
-            d = data.get(ref)
+            vref = s.get("values_ref")
+            d = data.get(vref)
             if not isinstance(d, dict) or "values" not in d:
-                raise SpecError(f"{q.get('id')}/{s.get('name')}: values_ref '{ref}' がデータにありません")
+                raise SpecError(f"{q.get('id')}/{s.get('name')}: values_ref '{vref}' がデータにありません")
+            s_ref = d.get("labels_ref")
+            if s_ref and ref and s_ref != ref and list(data.get(s_ref) or []) != q["labels"]:
+                raise SpecError(f"{q.get('id')}/{s.get('name')}: 系列のラベル配列 '{s_ref}' が"
+                                f"パネルの labels_ref '{ref}' と一致しません")
             s["values"] = list(d["values"])
             s["basis"] = list(d.get("basis") or [None] * len(s["values"]))
-            s.setdefault("unit", d.get("unit"))
+            s["unit"] = d.get("unit")            # the DATA's unit, never the LLM's
             s["source"] = d.get("source", "")
             s["sources"] = list(d.get("sources") or [])
+            if xy_form and not all(isinstance(v, dict) for v in s["values"] if v is not None):
+                # a labelled series: its numeric labels (years) are the x axis
+                if not q["labels"]:
+                    raise SpecError(f"{q.get('id')}/{s.get('name')}: line_xy にはラベル配列（年）が必要です")
+                _to_xy(q, s)
+        _normalize_panel(q)
         out.append(q)
     return out
+
+
+def _to_xy(q: Dict[str, Any], s: Dict[str, Any]) -> None:
+    """line_xy plots a labelled series against numeric labels (years):
+    values become {x, y} points; non-numeric labels cannot be an x axis."""
+    xs = []
+    for lab in q["labels"]:
+        try:
+            xs.append(float(str(lab).strip()))
+        except ValueError:
+            raise SpecError(f"{q.get('id')}: line_xy はラベルが数値（年）の系列だけです（{lab!r}）")
+    pts, basis = [], []
+    for x, v, b in zip(xs, s["values"], s["basis"] + [None] * len(xs)):
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            pts.append({"x": x, "y": float(v)})
+            basis.append(b)
+    s["values"], s["basis"] = pts, basis
+
+
+def _data_max(q: Dict[str, Any]) -> float:
+    """The largest plotted value (stack total for stacked forms)."""
+    series = q["series"]
+    if q.get("form") == "line_xy":
+        ys = [float(v["y"]) for s in series for v in (s.get("values") or [])
+              if isinstance(v, dict) and isinstance(v.get("y"), (int, float))]
+        return max(ys) if ys else 0.0
+    if str(q.get("form") or "").startswith("stacked"):
+        n = max((len(s.get("values") or []) for s in series), default=0)
+        totals = []
+        for j in range(n):
+            tot = 0.0
+            for s in series:
+                vals = s.get("values") or []
+                v = vals[j] if j < len(vals) else None
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    tot += float(v)
+            totals.append(tot)
+        return max(totals) if totals else 0.0
+    vals = [float(v) for s in series for v in (s.get("values") or [])
+            if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    return max(vals) if vals else 0.0
+
+
+def _normalize_panel(q: Dict[str, Any]) -> None:
+    """Hints the LLM wrote WITHOUT seeing the values: the panel unit is
+    the data's unit, y_max never clips a bar (raised to the data max),
+    height is an int in pixels, highlight only applies to one series."""
+    units = [str(s.get("unit") or "") for s in q["series"]]
+    if units and len(set(units)) == 1:
+        q["unit"] = units[0]
+    y_max = q.get("y_max")
+    if isinstance(y_max, bool) or not isinstance(y_max, (int, float)):
+        q.pop("y_max", None)
+    else:
+        q["y_max"] = max(float(y_max), _data_max(q))
+    height = q.get("height")
+    if height is not None:
+        try:
+            q["height"] = max(60, min(2000, int(float(str(height).strip().lower().removesuffix("px")))))
+        except (TypeError, ValueError):
+            q.pop("height", None)
 
 
 def _cv(values: List[float]) -> float:
@@ -192,6 +268,11 @@ def validate(panels: List[Dict[str, Any]]) -> None:
         if hl is not None:
             if not isinstance(hl, list) or any(h not in labels for h in hl):
                 raise SpecError(f"{pid}: highlight にラベルにない項目があります")
+            if len(series) != 1:
+                # highlight is a single-series device (the prompt says so);
+                # on a multi-series panel it would recolour every series
+                # while the legend keeps the role colours
+                p.pop("highlight", None)
         # informativeness: a single series that is flat or a single point
         # says nothing (the old pipeline drew those by the dozen)
         all_numeric = [float(v) for s in series for v in (s.get("values") or [])
@@ -210,16 +291,21 @@ def validate_panels(panels: List[Dict[str, Any]], data: Dict[str, Any],
     valid: List[Dict[str, Any]] = []
     rejected: List[Tuple[Dict[str, Any], str]] = []
     seen: set = set()
+    ids: set = set()
     for p in panels:
         try:
             r = resolve([p], data)
             validate(r)
+            pid = str(r[0].get("id"))
+            if pid in ids:          # two panels, one PNG path / canvas id
+                raise SpecError(f"{pid}: id が重複しています")
             # the same series in the same form twice says nothing new
             sig = (r[0].get("form"), r[0].get("labels_ref"),
                    tuple(sorted(str(s.get("values_ref")) for s in r[0].get("series") or [])))
             if sig in seen:
-                raise SpecError(f"{r[0].get('id')}: 同じ系列・同じ形式のパネルが重複しています")
+                raise SpecError(f"{pid}: 同じ系列・同じ形式のパネルが重複しています")
             seen.add(sig)
+            ids.add(pid)
             valid.append(r[0])
         except SpecError as e:
             rejected.append((p, str(e)))

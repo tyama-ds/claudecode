@@ -78,7 +78,8 @@ class OpenAIClient(BaseLLMClient):
                 except ImportError:
                     print("Warning: httpx not installed, proxy settings ignored")
 
-            client_kwargs = {"api_key": self.api_key}
+            # retries live in BaseLLMClient._call_with_retry (one policy)
+            client_kwargs = {"api_key": self.api_key, "max_retries": 0}
             if self._base_url:
                 client_kwargs["base_url"] = self._base_url
             if http_client:
@@ -207,13 +208,13 @@ class OpenAIClient(BaseLLMClient):
         token_param_key = "max_completion_tokens" if self._requires_max_completion_tokens(model) else "max_tokens"
 
         while True:
-            # leaf API call: one composed run+process concurrency permit.
-            # The OpenAI SDK client is thread-safe and retries 429/5xx
-            # internally with exponential backoff + jitter.
-            with self._leaf_permit():
-                response = self._call_with_retry(
-                    lambda: self._client.chat.completions.create(**api_params),
-                    label="OpenAI request")
+            # leaf API call under one composed run+process permit, retried
+            # here on connection errors / timeouts / 429 / 5xx (the SDK's
+            # own retries are off: max_retries=0); the permit is released
+            # while a retry waits
+            response = self._leaf_call(
+                lambda: self._client.chat.completions.create(**api_params),
+                label="OpenAI request")
 
             # Extract response - handle missing/empty choices
             if not response.choices:
