@@ -1913,6 +1913,402 @@ class DeepResearchTool:
             "warning_count": warnings_collector.count(),
         }
 
+    # ------------------------------------------------------------------
+    # verify-only mode
+    # ------------------------------------------------------------------
+
+    def verify_report(
+        self,
+        *,
+        session_path: Optional[str] = None,
+        report_path: Optional[str] = None,
+        evidence_path: Optional[str] = None,
+        query: str = "",
+        requirements: str = "",
+        progress_callback: Callable[[str, float], None] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Dict[str, Any]:
+        """VERIFY-ONLY run: no research loop, no chapter writing.
+
+        The body comes from a saved session of this tool (``session_path``,
+        with its evidence JSON) or from an external report file
+        (``report_path``: markdown / text / Word, split into chapters by
+        its headings; ``evidence_path`` optional). It goes through the
+        SAME finalization loop as a live run — claim extraction, judging
+        against the evidence, targeted web research for the claims that
+        lack support, rewrite / hedge — then the frozen body is rendered
+        with the V1 renderer and checked against the saved artifact.
+        Returns the same shape as run() plus ``kind="verify"`` and
+        ``verify_source``.
+        """
+        import json as _json
+        from types import SimpleNamespace
+        from .api.base import TokenUsageStats
+        from .evidence.locker import EvidenceLocker as _Locker
+        from .report.generator import ReportGenerator
+        from .research.researcher import ResearchSession as _Session
+        from .utils.concurrency import RunLimits, bind_activity_gauge
+        from .utils.progress import ProgressPlan
+        from .utils.timing import StageTimer, StageTimings
+        from .verification.runtime import VerificationProgress
+
+        if not session_path and not report_path:
+            raise ValueError("verify_report needs session_path or report_path")
+        ResearchWarnings.reset_if_idle()
+        self.config.enable_verification = True     # this mode IS verification
+
+        # --- run plumbing (as in run(): cancel, one bar, limits, stats) ---
+        self.cancel_event = cancel_event or threading.Event()
+
+        def _cancel_checkpoint():
+            if self.cancel_event.is_set():
+                raise RunCancelled("cancelled by user")
+        self._cancel_checkpoint = _cancel_checkpoint
+        _user_progress_cb = progress_callback
+
+        def progress_callback(message, percentage, _cb=_user_progress_cb):
+            _cancel_checkpoint()
+            if _cb:
+                _cb(message, percentage)
+        self.progress_plan = ProgressPlan([("verification", 85.0),
+                                           ("writing", 10.0), ("rendering", 5.0)])
+        self.activity_note = ""
+        raw_progress = progress_callback
+        progress_callback = self.progress_plan.callback(raw_progress)
+        quiet_progress = self.progress_plan.callback(_user_progress_cb)
+        self.timer = StageTimer()
+        self.verification_progress = VerificationProgress()
+        self.stage_timings = StageTimings()
+        run_limits = RunLimits(self.config.research.parallel_max_workers)
+        self.run_limits = run_limits
+        self.activity_gauge = bind_activity_gauge()
+        run_token_stats = TokenUsageStats()
+        self.run_token_stats = run_token_stats
+        role_clients = list((getattr(self, "role_llm_clients", None) or {}).values())
+        for _client in [self.llm_client, *self.stage_llm_clients.values(), *role_clients]:
+            try:
+                _client.concurrency_limiter = run_limits
+                _client.token_stats = run_token_stats
+                _client.cancel_check = _cancel_checkpoint
+            except Exception:
+                pass
+        try:
+            self.search_client.concurrency_limiter = run_limits
+        except Exception:
+            pass
+        self.finalization_outcome = None
+        self.resume_plan = None
+        self.charts_html_path = None
+        self.partial_artifacts = {}
+        self.partial_session_id = None
+        self._announce_and_preflight_delegation(raw_progress)
+
+        # --- the body to verify and its evidence ---------------------------
+        output_dir = Path(self.config.report.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        source = "session" if session_path else "report"
+        body_source = "session"
+        if session_path:
+            session = _Session.load(Path(session_path))
+            session_dir = Path(session_path).parent
+            ev_path = (Path(evidence_path) if evidence_path else
+                       session_dir / "evidence" / f"evidence_{session.session_id}.json")
+            query = query or session.query
+            requirements = requirements or session.requirements
+            # a verified run stores the DISPLAY-numbered text ([1]) in the
+            # session; the verifier reads [SOURCE N] tags, so the frozen
+            # raw chapters of final_body_<id>.json are the body to verify
+            final_body = session_dir / f"final_body_{session.session_id}.json"
+            if final_body.is_file():
+                try:
+                    raw = (_json.loads(final_body.read_text(encoding="utf-8"))
+                           .get("raw_chapters") or {})
+                except Exception:
+                    raw = {}
+                for sid, text in raw.items():
+                    if (sid in session.section_contents and not str(sid).startswith("_")
+                            and text and str(text).strip()):
+                        session.section_contents[sid]["content"] = str(text)
+                        body_source = "final_body_raw"
+        else:
+            from .report.report_loader import session_from_report
+            session = session_from_report(
+                report_path, query=query, requirements=requirements,
+                language=self.config.research.language)
+            query = session.query
+            ev_path = Path(evidence_path) if evidence_path else None
+        if ev_path is not None and ev_path.is_file():
+            evidence_locker = _Locker.load_from_json(ev_path)
+            # exports of THIS run go next to its own artifacts
+            evidence_locker.output_dir = output_dir / "evidence"
+            evidence_locker.output_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            evidence_locker = _Locker(research_id=session.session_id,
+                                      output_dir=output_dir / "evidence")
+        chapters_before = {
+            sid: sd.get("content", "")
+            for sid, sd in session.section_contents.items()
+            if not sid.startswith("_") and sd.get("content")}
+        if not chapters_before:
+            raise ValueError("nothing to verify: the report has no chapter text")
+        self.partial_session_id = session.session_id
+        # the plan viewer / evidence page / status line read through the
+        # researcher: a stand-in that serves the loaded session
+        self.researcher = SimpleNamespace(
+            get_session=lambda: session,
+            get_evidence_locker=lambda: evidence_locker,
+            current_activity=None, timings=None, content_extractor=None,
+            resume_plan=None)
+        self.verify_source = {
+            "mode": source, "body": body_source if source == "session" else "report",
+            "session_path": session_path,
+            "report_path": report_path,
+            "evidence_path": str(ev_path) if ev_path else None,
+            "chapters": len(chapters_before),
+            "evidence_items": len(evidence_locker.get_all_evidence()),
+        }
+        raw_progress(
+            f"検証対象: {len(chapters_before)} 章、根拠 "
+            f"{self.verify_source['evidence_items']} 件"
+            f"（{'保存済みの調査' if source == 'session' else '外部レポート'}）", 0)
+        if source == "report" and not evidence_locker.get_all_evidence():
+            # an external report arrives WITHOUT evidence: collect candidate
+            # sources per chapter first, so the loop can cite, judge and
+            # research instead of only hedging every uncited claim
+            raw_progress("外部レポート: 各章の根拠候補を Web から収集しています", 0)
+            self.verify_source["seeded_pages"] = self._seed_evidence_for_report(
+                session, evidence_locker, query)
+            raw_progress(f"根拠候補 {self.verify_source['seeded_pages']} 件を登録しました", 0)
+
+        # --- verification: the same finalization loop as a live run ------
+        self.progress_plan.enter("verification")
+        self.timer.start("verification")
+        try:
+            verification_result, verification_html = self.stage_timings.call(
+                "verification", self._run_finalization_v1,
+                session=session, evidence_locker=evidence_locker,
+                query=query, requirements=requirements,
+                progress_callback=progress_callback)
+        except (RunCancelled, Exception):
+            self.timer.stop("verification", interrupted=True)
+            raise
+        self.timer.stop("verification")
+        _exec = session.section_contents.get("_executive_summary") or {}
+        extras = {k: _exec.get(k) for k in
+                  ("executive_summary", "key_findings", "recommendations")
+                  if _exec.get(k)} or None
+        output_chapters = {
+            sid: sd.get("content", "")
+            for sid, sd in session.section_contents.items()
+            if not sid.startswith("_") and sd.get("content")}
+        semantic_freeze_hash = self._freeze_semantics(
+            dict(output_chapters), None, extras=extras)
+
+        # --- deterministic V1 render of the frozen body -------------------
+        self.progress_plan.enter("writing")
+        quiet_progress("Generating report...", 0)
+        generator = ReportGenerator(
+            output_dir=output_dir / "reports",
+            include_toc=self.config.report.include_toc,
+            include_citations=self.config.report.include_citations,
+            include_images=self.config.report.include_images,
+            language=self.config.research.language)
+        self.report_generator = generator
+        report_out = self.stage_timings.call(
+            "writing", generator.generate_report,
+            session=session, evidence_locker=evidence_locker,
+            format=self.config.report.format, verification_result=None)
+        report_out = Path(report_out)
+
+        # --- artifacts, checks, metadata ----------------------------------
+        self.progress_plan.enter("rendering")
+        quiet_progress("Saving artifacts...", 0)
+        evidence_json = evidence_locker.export_to_json()
+        evidence_csv = None
+        if self.config.research.evidence_format in ("csv", "both"):
+            try:
+                evidence_csv = evidence_locker.export_to_csv()
+            except Exception as e:
+                print(f"[VerifyOnly] evidence CSV export failed: {e}")
+        session_out = output_dir / f"session_{session.session_id}.json"
+        session.saved_artifacts = {"session": str(session_out),
+                                   "evidence_json": str(evidence_json)}
+        session.stage = "verified"
+        session.run_config = {**(session.run_config or {}),
+                              "verify_only": True, "verify_source": source,
+                              "verification_enabled": True}
+        try:
+            session.save(session_out)
+        except Exception as e:
+            print(f"[VerifyOnly] session save failed: {e}")
+            session.saved_artifacts.pop("session", None)
+        final_body_path = None
+        if self.finalization_outcome:
+            final_body_path = self._save_final_body(
+                session, self.finalization_outcome, output_dir)
+        semantic_output_hash = self._check_semantics_at_output(
+            {sid: sd.get("content", "")
+             for sid, sd in session.section_contents.items()
+             if not sid.startswith("_") and sd.get("content")},
+            None, semantic_freeze_hash, extras=extras)
+        semantic_artifact_check = self._check_semantics_in_artifact(
+            report_out, evidence_locker=evidence_locker)
+        drift = bool(semantic_freeze_hash and semantic_output_hash
+                     and semantic_output_hash != semantic_freeze_hash)
+        if hasattr(self.search_client, "close"):
+            try:
+                self.search_client.close()
+            except Exception:
+                pass
+        performance = self.stage_timings.snapshot()
+        performance["token_usage"] = run_token_stats.to_dict()
+        performance["max_concurrency_observed"] = run_limits.run_peak
+        performance["llm_concurrency"] = self.concurrency_snapshot()
+        self._warn_if_llm_serialized(performance["llm_concurrency"])
+        performance["llm_routing"] = self.llm_routing_snapshot()
+        performance["verify_source"] = dict(self.verify_source)
+        performance_path = output_dir / f"performance_{session.session_id}.json"
+        performance_path.write_text(
+            _json.dumps(performance, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.progress_plan.done(_user_progress_cb, "Completed")
+        warnings_collector = ResearchWarnings.get_instance()
+        outcome = self.finalization_outcome or {}
+        return {
+            "kind": "verify",
+            "verify_source": dict(self.verify_source),
+            "session_id": session.session_id,
+            "report_path": str(report_out),
+            "report_path_original": str(report_out),
+            "figures_report_path": None,
+            "charts_html": None,
+            "evidence_json": str(evidence_json),
+            "evidence_csv": str(evidence_csv) if evidence_csv else None,
+            "verification_html": str(verification_html) if verification_html else None,
+            "session": session,
+            "evidence_locker": evidence_locker,
+            "verification_result": verification_result,
+            "deep_think_results": None,
+            "fermi_estimation_results": None,
+            "performance": performance,
+            "performance_json": str(performance_path),
+            "llm_routing": performance["llm_routing"],
+            "token_usage": run_token_stats.to_dict(),
+            "max_concurrency_observed": run_limits.run_peak,
+            "semantic_manifest_hash_at_freeze": semantic_freeze_hash,
+            "semantic_manifest_hash_at_output": semantic_output_hash,
+            "semantic_artifact_check": semantic_artifact_check,
+            "run_status": ("failed_semantic_check"
+                           if (semantic_artifact_check == "fail" or drift)
+                           else "completed"),
+            "status": self._status_axes(
+                semantic_artifact_check=semantic_artifact_check,
+                semantic_drift=drift),
+            "saved_artifacts": {
+                **session.saved_artifacts,
+                **({"final_body": str(final_body_path)} if final_body_path else {}),
+                "report": str(report_out),
+                **({"verification_html": str(verification_html)}
+                   if verification_html else {})},
+            "resume_plan": None,
+            "research_plan": self.current_plan(),
+            "timings": self._collect_timings(run_token_stats),
+            "verification_summary": outcome.get("verification_summary"),
+            "verification_cancelled": outcome.get("decision") == "cancelled",
+            "warnings": warnings_collector.to_dict_list(),
+            "warning_count": warnings_collector.count(),
+        }
+
+    def _seed_evidence_for_report(self, session, evidence_locker, query: str) -> int:
+        """Candidate sources for an external report's chapters (chapter
+        title + topic queries, the configured pages per query), fetched
+        concurrently and registered as section evidence. Returns the
+        number of pages registered. Never raises: a chapter that finds
+        nothing simply stays uncited for the loop to research."""
+        from .evidence.locker import EvidenceType, SourceType
+        from .evidence.source_metadata import extract_source_metadata
+        search = getattr(self, "search_client", None)
+        plan_obj = getattr(session, "research_plan", None)
+        if search is None or plan_obj is None:
+            return 0
+        rc = self.config.research
+        per_query = max(1, int(getattr(rc, "max_pages_per_query", 3) or 3))
+        plan: List[tuple] = []
+        for item in plan_obj.table_of_contents.get_flat_sections():
+            sid = item.section
+            if sid not in session.section_contents:
+                continue
+            for q in dict.fromkeys(q.strip() for q in
+                                   (f"{query} {item.title}", item.title) if q.strip()):
+                plan.append((sid, q))
+        if not plan:
+            return 0
+        serial = bool(getattr(search, "requires_serial_access", False))
+
+        def _search(entry):
+            sid, q = entry
+            try:
+                return sid, q, list(search.search(q) or [])[:per_query]
+            except Exception as e:
+                print(f"[VerifyOnly] search failed ({q[:40]}): {e}")
+                return sid, q, []
+
+        workers = 1 if serial else effective_workers(
+            getattr(rc, "parallel_max_workers", 8), 4, len(plan))
+        if workers > 1:
+            with ContextThreadPoolExecutor(max_workers=workers) as ex:
+                found = list(ex.map(_search, plan))
+        else:
+            found = [_search(p) for p in plan]
+        seen = set()
+        targets: List[tuple] = []
+        for sid, q, results in found:
+            for r in results:
+                url = getattr(r, "url", "") or ""
+                if url and url not in seen:
+                    seen.add(url)
+                    targets.append((sid, q, url, getattr(r, "title", "") or ""))
+
+        def _fetch(entry):
+            try:
+                return entry, search.get_page_content(entry[2])
+            except Exception as e:
+                print(f"[VerifyOnly] fetch failed ({entry[2][:60]}): {e}")
+                return entry, None
+
+        workers = 1 if serial else effective_workers(
+            getattr(rc, "parallel_max_workers", 8), 4, len(targets))
+        if workers > 1:
+            with ContextThreadPoolExecutor(max_workers=workers) as ex:
+                pages = list(ex.map(_fetch, targets))
+        else:
+            pages = [_fetch(t) for t in targets]
+        registered = 0
+        for (sid, q, url, title), page in pages:
+            text = (getattr(page, "text_content", "") or "") if page is not None else ""
+            if len(text) < 200 or (getattr(page, "metadata", None) or {}).get("error"):
+                continue
+            try:
+                meta = extract_source_metadata(url, text=text)
+                evidence_locker.add_evidence(
+                    url=url, title=getattr(page, "title", "") or title or url,
+                    content_excerpt=text[:500], extracted_text=text,
+                    evidence_type=EvidenceType.WEB_PAGE, search_query=q,
+                    section_reference=sid,
+                    published_date=meta["published_date"],
+                    source_type=SourceType(meta["source_type"]),
+                    metadata=getattr(page, "metadata", None) or {})
+            except Exception as e:
+                print(f"[VerifyOnly] evidence registration failed ({url[:60]}): {e}")
+                continue
+            sdata = session.section_contents[sid]
+            sdata.setdefault("extracted_content", []).append({
+                "title": getattr(page, "title", "") or title or url, "url": url,
+                "content": text[:2000], "raw_content": text,
+                "key_points": [], "relevance_score": 0.5})
+            sdata.setdefault("sources", []).append(url)
+            registered += 1
+        return registered
+
     def _run_fermi_estimation(
         self,
         session: ResearchSession,

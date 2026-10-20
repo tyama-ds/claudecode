@@ -867,6 +867,26 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
   <section class="card" id="formCard">
     <h2><span class="n">1</span>新規調査</h2>
 
+    <!-- 0. 実行モード -->
+    <label id="runModeLabel">実行モード</label>
+    <div class="mode-cards mode-cards-3" id="runModes" role="radiogroup" aria-labelledby="runModeLabel">
+      <label class="mode-card sel"><input type="radio" name="run_mode" value="research_verify" checked>
+        <span class="t">検証入り調査</span><span class="d">　調査→執筆→根拠との照合と修正（既定）</span></label>
+      <label class="mode-card"><input type="radio" name="run_mode" value="research_only">
+        <span class="t">調査のみ</span><span class="d">　検証を行わず、未検証のまま出力（速い）</span></label>
+      <label class="mode-card"><input type="radio" name="run_mode" value="verify_only">
+        <span class="t">検証のみ</span><span class="d">　既存のレポートを根拠と照合・修正（調査は行わない）</span></label>
+    </div>
+    <div id="verifyOnlyBox" style="display:none;margin-top:8px;border:1px solid var(--border);border-radius:10px;padding:10px 12px">
+      <label for="verifyHistorySelect">検証する調査（履歴から選ぶ）</label>
+      <select id="verifyHistorySelect"><option value="">— 保存済みの調査を選択 —</option></select>
+      <label for="verifyReportFile">または レポートファイルをアップロード（md / txt / docx）</label>
+      <input type="file" id="verifyReportFile" accept=".md,.markdown,.txt,.docx">
+      <label for="verifyEvidenceFile">根拠 JSON（任意。このツールが出力した evidence_*.json）</label>
+      <input type="file" id="verifyEvidenceFile" accept=".json">
+      <p class="hint">外部レポートは見出しごとに章として読み込みます。根拠が無い主張は Web を検索して根拠を集めてから判定し、修正した本文・検証レポートを出力します。LLM・検索・検証の設定は下の項目をそのまま使います（調査テーマは任意。空欄ならレポートの題名を使います）。</p>
+    </div>
+
     <!-- 1. 何を調べるか -->
     <label for="query">調査テーマ <span style="color:var(--error)">*</span></label>
     <textarea id="query" placeholder="例: 国内の炭素繊維市場の動向と主要メーカーの戦略" aria-describedby="queryHint"></textarea>
@@ -1654,6 +1674,9 @@ document.querySelectorAll('.mode-card input').forEach(input => {
     syncModeCards(input.name);
     if (input.name === 'deliverable') applyDeliverablePreset(input.value);
     if (input.name === 'research_preset') applyResearchPreset(input.value);
+    // the 機能 tab switch mirrors the run mode (research only = verification off)
+    if (input.name === 'run_mode' && $('feat_verification'))
+      $('feat_verification').checked = input.value !== 'research_only';
     applyModeVisibility();
     updateSummaryStrip();
   });
@@ -1875,7 +1898,11 @@ function collectParams() {
     // provider credentials / endpoints / proxy from the ⚙ settings modal:
     // all providers' keys are sent so per-stage overrides can mix providers
     ...settingsParams(),
+    run_mode: radioValue('run_mode') || 'research_verify',
   };
+  // the form's run mode is authoritative over the 機能 tab switch:
+  // 調査のみ = no verification; the other two modes verify
+  params.enable_verification = params.run_mode !== 'research_only';
   if ($('search_region').value && $('search_region').value !== 'wt-wt')
     params.search_region = $('search_region').value;
   if (params.iterations !== undefined && params.max_iterations !== undefined
@@ -1917,6 +1944,10 @@ async function startResearch() {
     return;
   }
   $('formError').className = 'banner';
+  if (params.run_mode === 'verify_only') {
+    await startVerifyOnly(params);
+    return;
+  }
   if (!params.query) {
     $('formError').className = 'banner error';
     $('formError').textContent = '調査テーマを入力してください';
@@ -1958,6 +1989,85 @@ async function startResearch() {
   } finally {
     $('startBtn').disabled = false;  // parallel runs allowed (server caps them)
   }
+}
+
+// the 機能 tab switch and the run-mode cards stay in sync both ways
+if ($('feat_verification')) {
+  $('feat_verification').addEventListener('change', e => {
+    if (radioValue('run_mode') === 'verify_only') return;
+    setRadio('run_mode', e.target.checked ? 'research_verify' : 'research_only');
+    syncModeCards('run_mode');
+    applyModeVisibility();
+    updateSummaryStrip();
+  });
+}
+
+// ==================== 検証のみ（既存レポートの検証） ====================
+async function uploadForVerify(file) {
+  const fd = new FormData();
+  fd.append('files', file, file.name);
+  const res = await fetch('/api/upload', {method: 'POST', body: fd});
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'upload failed');
+  const entry = (data.files || [])[0];
+  if (!entry || !entry.path) throw new Error('アップロードしたファイルのパスを取得できませんでした');
+  return entry.path;
+}
+
+async function startVerifyOnly(params) {
+  const jobId = $('verifyHistorySelect').value;
+  const reportFile = $('verifyReportFile').files[0];
+  const evidenceFile = $('verifyEvidenceFile').files[0];
+  if (!jobId && !reportFile) {
+    $('formError').className = 'banner error';
+    $('formError').textContent = '検証のみ: 履歴から調査を選ぶか、レポートファイルを指定してください';
+    return;
+  }
+  $('startBtn').disabled = true;
+  try {
+    const body = {...params};
+    delete body.local_documents;
+    if (jobId) {
+      body.job_id = jobId;
+    } else {
+      $('formError').textContent = 'レポートをアップロードしています…';
+      body.report_path = await uploadForVerify(reportFile);
+      if (evidenceFile) body.evidence_path = await uploadForVerify(evidenceFile);
+    }
+    const res = await fetch('/api/verify', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)});
+    const data = await res.json();
+    if (!res.ok) {
+      const err = new Error(data.error || 'failed');
+      if (data.field) err.field = data.field;
+      throw err;
+    }
+    selectedJobId = data.job_id;
+    $('formError').className = 'banner';
+    $('formError').textContent = data.state === 'queued' ? '実行待ちに入りました' : '';
+    await pollJobs();
+    loadHistory();
+    $('progressPanel').scrollIntoView({behavior: 'smooth', block: 'start'});
+  } catch (e) {
+    $('formError').className = 'banner error';
+    $('formError').textContent = '検証を開始できませんでした: ' + e.message;
+  } finally {
+    $('startBtn').disabled = false;
+  }
+}
+
+function renderVerifyHistoryOptions(records) {
+  const sel = $('verifyHistorySelect');
+  const current = sel.value;
+  const opts = ['<option value="">— 保存済みの調査を選択 —</option>'];
+  (records || []).forEach(r => {
+    const saved = (r.result || {}).saved_artifacts || {};
+    if (!saved.session) return;
+    const kind = (r.result || {}).kind === 'verify' ? '（検証のみ）' : '';
+    opts.push(`<option value="${escapeHtml(r.job_id)}">${escapeHtml((r.query || '(無題)').slice(0, 60))}${kind} ・ ${fmtDate(r.started_at || r.created_at)}</option>`);
+  });
+  sel.innerHTML = opts.join('');
+  if ([...sel.options].some(o => o.value === current)) sel.value = current;
 }
 
 const STATE_ICON = {queued: '⏳', running: '🔄', plan_review: '📋', completed: '✅',
@@ -2557,6 +2667,7 @@ function showResults(result) {
     <div style="font-weight:700;margin-bottom:4px">${escapeHtml(outcomeHeadline(axes, result))}</div>
     <div>${statusBadges(axes, result)}</div>
     ${result.regenerated_from ? `<p class="hint">保存済みの調査結果から再出力しました（元データ: ${result.regenerated_from === 'final_body' ? '検証済みの最終本文' : '章本文（未検証・草稿）'}、検索・LLM呼び出しなし）</p>` : ''}
+    ${result.kind === 'verify' && result.verify_source ? `<p class="hint">検証のみ: ${result.verify_source.mode === 'session' ? '保存済みの調査' : '外部レポート'}の本文 ${result.verify_source.chapters} 章を、根拠 ${result.verify_source.evidence_items} 件（開始時）と照合しました（調査ループなし）</p>` : ''}
     ${renderResumePlan(result.resume_plan)}
     ${renderTimings(result.timings)}
     ${renderConcurrency(result.performance)}
@@ -2918,6 +3029,10 @@ function renderPresetEffects() {
 
 // show only the advanced items that matter for the chosen modes
 function applyModeVisibility() {
+  const runMode = radioValue('run_mode') || 'research_verify';
+  $('verifyOnlyBox').style.display = runMode === 'verify_only' ? 'block' : 'none';
+  $('startBtn').textContent = runMode === 'verify_only' ? '🔍 検証を開始' :
+    (runMode === 'research_only' ? '🚀 調査を開始（検証なし）' : '🚀 調査を開始');
   const source = radioValue('source_mode');
   const needsDocs = source === 'local' || source === 'hybrid';
   $('localDocsBox').style.display = needsDocs ? 'block' : 'none';
@@ -3254,6 +3369,7 @@ function renderHistory(records) {
         <button type="button" class="secondary" data-act="dup">条件を複製</button>
         ${canResume ? '<button type="button" class="secondary" data-act="resume">中断箇所から再開</button>' : ''}
         ${canReout ? '<button type="button" class="secondary" data-act="reout">再出力</button>' : ''}
+        ${canReout ? '<button type="button" class="secondary" data-act="verify">検証のみ再実行</button>' : ''}
         ${(res.evidence_json || (res.saved_artifacts || {}).evidence_json) ? '<button type="button" class="secondary" data-act="evidence">根拠を開く</button>' : ''}
         ${res.report_path ? `<a class="secondary" style="font-size:11.5px;padding:4px 9px;border:1.5px solid var(--border);border-radius:10px;text-decoration:none" href="/api/report-file?path=${encodeURIComponent(res.report_path)}" target="_blank">レポートを開く</a>` : ''}
         ${['running', 'queued', 'plan_review'].includes(r.state) ? '' : '<button type="button" class="secondary" data-act="forget">履歴から削除</button>'}
@@ -3286,6 +3402,28 @@ async function historyAction(act, row) {
     await fetch('/api/history/forget', {method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({job_id: jobId})});
     loadHistory();
+    return;
+  }
+  if (act === 'verify') {
+    // verify ONLY this saved research again with the CURRENT form's LLM /
+    // verification settings (no research loop)
+    msg.textContent = '検証のみのジョブを開始しています…';
+    let params = {};
+    try { params = collectParams(); } catch (e) { msg.textContent = '設定エラー: ' + e.message; return; }
+    delete params.query; delete params.local_documents;
+    params.enable_verification = true;
+    try {
+      const res = await fetch('/api/verify', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({...params, job_id: jobId})});
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'failed');
+      msg.textContent = '検証のみを開始しました（保存済みの本文と根拠を使用。不足する根拠は Web で補います）';
+      selectedJobId = data.job_id;
+      pollJobs();
+      $('progressPanel').scrollIntoView({behavior: 'smooth', block: 'start'});
+    } catch (e) {
+      msg.textContent = '検証を開始できません: ' + e.message;
+    }
     return;
   }
   if (act === 'resume') {
@@ -3336,6 +3474,7 @@ async function loadHistory() {
     const data = await res.json();
     historyCache = data.history || [];
     renderHistory(historyCache);
+    renderVerifyHistoryOptions(historyCache);
   } catch (e) { /* server briefly unavailable */ }
 }
 setInterval(loadHistory, 10000);
@@ -3352,7 +3491,7 @@ const FORM_TEXT_IDS = ['requirements', 'language', 'output_format', 'iterations'
 const FORM_CHECK_IDS = ['cache_reuse', 'refresh_fetched', 'waf_mitigation', 'auto_figures',
   'v2_enable_polish', 'live_report_word', 'plan_review', 'verification_cache_enabled',
   'include_toc', 'include_citations', 'include_images'];
-const FORM_RADIOS = ['source_mode', 'deliverable', 'research_preset', 'crawl_mode', 'verification_profile'];
+const FORM_RADIOS = ['run_mode', 'source_mode', 'deliverable', 'research_preset', 'crawl_mode', 'verification_profile'];
 
 function formSnapshot() {
   const s = {text: {}, check: {}, radio: {}, stages: {}};

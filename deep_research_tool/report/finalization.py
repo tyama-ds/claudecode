@@ -432,6 +432,12 @@ def decide(
     if m.claim_support_score < budget.min_claim_support_score:
         if significant_gaps and budget.research_allowed():
             return ResearchDecision.RESEARCH
+        # uncited claims while the section HAS registered evidence (an
+        # external report in verify-only mode, a draft whose citations
+        # were stripped): rewrite from that evidence before giving up —
+        # a search cannot help a body that does not cite what it has
+        if verdict.issues_of(ISSUE_UNCITED_CLAIM) and budget.revision_allowed():
+            return ResearchDecision.REWRITE_FROM_EVIDENCE
         return ResearchDecision.FINALIZE_WITH_LIMITATIONS
 
     # --- invalid citations are a body defect: fix from evidence, not search ---
