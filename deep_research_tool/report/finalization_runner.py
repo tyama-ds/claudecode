@@ -32,6 +32,7 @@ Guarantees implemented here (audit items 1-3, 5, 7, 12, 13):
 
 import html as _html
 import re
+import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -120,6 +121,15 @@ class FinalizationRunner:
             enabled=self.verification_settings.cache_enabled)
         self.verification_progress = (verification_progress
                                       or VerificationProgress())
+        # Post-verification edits (rewrite / compress / hedge, and the
+        # sentence patches inside one section) run concurrently up to
+        # this many workers; the per-section registries below are
+        # mutated under _edit_lock, results are applied in order.
+        from ..utils.concurrency import effective_workers
+        self.edit_workers = effective_workers(
+            getattr(self.rc, "parallel_max_workers", None) if self.rc else None,
+            self.verification_settings.max_workers)
+        self._edit_lock = threading.Lock()
 
         self.citation_mgr = CitationManager(
             evidence_ids_exist=self._evidence_id_exists)
@@ -461,6 +471,7 @@ class FinalizationRunner:
             length_tolerance=self._rp("length_tolerance", 0.20),
             language=self.language,
             progress=self.verification_progress,
+            edit_workers=self.edit_workers,
         )
 
         import time as _time
@@ -659,10 +670,40 @@ class FinalizationRunner:
                 return True
         return False
 
+    def _prefetch_pages(self, urls: List[str]) -> Dict[str, Any]:
+        """Fetch candidate pages CONCURRENTLY (network only; nothing is
+        registered here). Returns {url: page} with ``False`` for a failed
+        fetch; URLs the budget already saw are skipped. Registration
+        (locker, citation registry, session contents, seen_urls) stays
+        on the caller's thread in deterministic order."""
+        from ..utils.concurrency import ContextThreadPoolExecutor, effective_workers
+        ordered: List[str] = []
+        for u in urls:
+            if u and u not in self.budget.seen_urls and u not in ordered:
+                ordered.append(u)
+        if not ordered or self.search_client is None:
+            return {}
+
+        def _fetch(u):
+            try:
+                return self.search_client.get_page_content(u)
+            except Exception:
+                return False
+
+        serial = bool(getattr(self.search_client, "requires_serial_access", False))
+        workers = 1 if serial else effective_workers(
+            getattr(self.rc, "parallel_max_workers", None) if self.rc else None,
+            self.verification_settings.max_workers, len(ordered))
+        if workers <= 1:
+            return {u: _fetch(u) for u in ordered}
+        with ContextThreadPoolExecutor(max_workers=workers) as ex:
+            return dict(zip(ordered, ex.map(_fetch, ordered)))
+
     def _fetch_and_register(self, url: str, query: str,
                             target_sections: List[str],
                             changed_sections: List[str],
-                            meta: Optional[Dict[str, str]] = None):
+                            meta: Optional[Dict[str, str]] = None,
+                            page=None):
         """Fetch one novel URL and register it as evidence (shared by the
         legacy and adaptive research rounds). Returns the Evidence or
         None (already seen / too short / duplicate content / fetch
@@ -680,10 +721,13 @@ class FinalizationRunner:
 
         if not self.budget.is_novel_url(url):
             return None
-        try:
-            page = self.search_client.get_page_content(url)
-        except Exception:
+        if page is False:              # prefetched and failed
             return None
+        if page is None:
+            try:
+                page = self.search_client.get_page_content(url)
+            except Exception:
+                return None
         text = getattr(page, "text_content", "") or ""
         if len(text) < 200:
             return None
@@ -954,26 +998,33 @@ class FinalizationRunner:
         changed_sections: List[str] = []
         new_evidence_ids: List[str] = []
         unassigned: List[str] = []
+        # plan the fetches in deterministic order, fetch the pages
+        # concurrently, then register them in that same order
+        plan: List[tuple] = []
         for key in sorted(by_target):
             req_id, section_id = key
-            req = self.ledger.get(req_id)
             task = task_of_target[key]
             fused = rrf_merge(by_target[key], limit=4)
             targets = [section_id] if section_id else []
             for r in fused:
-                url = getattr(r, "url", "")
-                evidence = self._fetch_and_register(
-                    url, task.query, targets, changed_sections,
-                    meta={"query_id": task.task_id,
-                          "requirement_id": req_id,
-                          "section_id": section_id,
-                          "claim_id": task.claim_id})
-                if evidence is not None:
-                    new_sources += 1
-                    new_evidence_ids.append(evidence.id)
-                    req.evidence_ids.append(evidence.id)
-                    if not targets:
-                        unassigned.append(evidence.id)
+                plan.append((key, task, targets, getattr(r, "url", "")))
+        pages = self._prefetch_pages([p[3] for p in plan])
+        for key, task, targets, url in plan:
+            req_id, section_id = key
+            req = self.ledger.get(req_id)
+            evidence = self._fetch_and_register(
+                url, task.query, targets, changed_sections,
+                meta={"query_id": task.task_id,
+                      "requirement_id": req_id,
+                      "section_id": section_id,
+                      "claim_id": task.claim_id},
+                page=pages.get(url))
+            if evidence is not None:
+                new_sources += 1
+                new_evidence_ids.append(evidence.id)
+                req.evidence_ids.append(evidence.id)
+                if not targets:
+                    unassigned.append(evidence.id)
 
         if changed_sections:
             self._recalc_units()
@@ -1259,31 +1310,42 @@ class FinalizationRunner:
         so the rewrite prompt can quote it. Returns {id(issue): hint}.
         """
         hints: Dict[int, str] = {}
-        for issue in issues:
-            if issue.type != "invalid_citation" or \
-                    not issue.supporting_source_ids:
-                continue
-            numbers = []
-            for eid in issue.supporting_source_ids:
-                n = self.citation_mgr.append_evidence(sid, eid)
-                numbers.append(n)
-                # ensure the evidence text is available to the rewrite
-                entry_urls = {ec.get("url") for ec in
-                              self.section_evidence.get(sid, [])}
-                ev = self.locker.get_evidence(eid)
-                if ev is not None and getattr(ev, "url", "") not in entry_urls:
-                    text = (getattr(ev, "extracted_text", "") or
-                            getattr(ev, "content_excerpt", "") or "")
-                    entry = {"title": getattr(ev, "title", "") or eid,
-                             "url": getattr(ev, "url", ""),
-                             "content": text[:2000], "raw_content": text,
-                             "key_points": [], "relevance_score": 0.6,
-                             "is_new": True}
-                    self.section_evidence.setdefault(sid, []).append(entry)
-            if numbers:
-                hints[id(issue)] = ", ".join(
-                    f"[SOURCE {n}]" for n in numbers)
+        with self._edit_lock:       # sections are edited concurrently
+            for issue in issues:
+                if issue.type != "invalid_citation" or \
+                        not issue.supporting_source_ids:
+                    continue
+                numbers = []
+                for eid in issue.supporting_source_ids:
+                    n = self.citation_mgr.append_evidence(sid, eid)
+                    numbers.append(n)
+                    # ensure the evidence text is available to the rewrite
+                    entry_urls = {ec.get("url") for ec in
+                                  self.section_evidence.get(sid, [])}
+                    ev = self.locker.get_evidence(eid)
+                    if ev is not None and getattr(ev, "url", "") not in entry_urls:
+                        text = (getattr(ev, "extracted_text", "") or
+                                getattr(ev, "content_excerpt", "") or "")
+                        entry = {"title": getattr(ev, "title", "") or eid,
+                                 "url": getattr(ev, "url", ""),
+                                 "content": text[:2000], "raw_content": text,
+                                 "key_points": [], "relevance_score": 0.6,
+                                 "is_new": True}
+                        self.section_evidence.setdefault(sid, []).append(entry)
+                if numbers:
+                    hints[id(issue)] = ", ".join(
+                        f"[SOURCE {n}]" for n in numbers)
         return hints
+
+    def _map_parallel(self, fn, items):
+        """Order-preserving map; parallel within ``edit_workers``."""
+        items = list(items)
+        if self.edit_workers <= 1 or len(items) <= 1:
+            return [fn(it) for it in items]
+        from ..utils.concurrency import ContextThreadPoolExecutor
+        with ContextThreadPoolExecutor(
+                max_workers=min(self.edit_workers, len(items))) as ex:
+            return list(ex.map(fn, items))
 
     def _evidence_blocks(self, sid: str) -> str:
         """All section evidence within a char budget, NEW evidence first,
@@ -1387,12 +1449,21 @@ class FinalizationRunner:
         evidence_text = self._evidence_blocks(sid)
         atomic_claims: List[AtomicClaim] = []
         patches: List[tuple] = []
-        for (start, end), group in sorted(located.items()):
+        groups = sorted(located.items())
+
+        def _patch_one(item):
+            (_start, _end), group = item
             issue, sentence = group[0]
             hint = replacement_hints.get(id(issue)) or ""
-            new_sentence = self._patch_sentence(
+            return self._patch_sentence(
                 sid, sentence, [i for i, _s in group], hint,
                 evidence_text, mode)
+
+        # one LLM call per failing sentence — concurrently; a single
+        # unusable patch still discards the whole section's patches
+        new_sentences = self._map_parallel(_patch_one, groups)
+        for ((start, end), group), new_sentence in zip(groups, new_sentences):
+            issue, sentence = group[0]
             if not new_sentence:
                 self.audit.event("patch_fallback", section_id=sid,
                                  reason="llm_patch_unusable",

@@ -49,6 +49,7 @@ _CONFIG_PARAM_MAP = {
     "verify_ssl": "verify_ssl",
     "iterations": "research_iterations",
     "parallel_max_workers": "parallel_max_workers",
+    "research_section_workers": "research_section_workers",
     "output_format": "output_format",
     "output_dir": "output_dir",
     "language": "language",
@@ -206,6 +207,7 @@ def _int_range(lo, hi):
 
 _PARAM_CONVERTERS = {
     "parallel_max_workers": _strict_workers,
+    "research_section_workers": _int_range(1, 8),
     "verification_profile": _profile,
     "verification_max_workers": _int_range(1, 16),
     "verification_batch_size": _int_range(1, 32),

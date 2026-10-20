@@ -969,6 +969,8 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
                 </div>
                 <label>⚙ 全体の並列ワーカー数（1〜16。LLM・通信の同時実行数の上限。DeepThink・図表などの個別ワーカー数はこの範囲内で機能タブから調整）</label>
                 <input type="number" id="parallel_max_workers" value="8" min="1" max="16" step="1" style="width:100px">
+                <label for="research_section_workers">章の並列調査数（1〜8。複数の章を同時に調査・執筆。1 で従来どおり章を順番に処理。AIクロールとブラウザ検索では常に 1）</label>
+                <input type="number" id="research_section_workers" value="2" min="1" max="8" step="1" style="width:100px">
                 <div class="grid2">
                   <div data-crawl="aicrawl ai_crawl_selenium"><label for="ai_crawl_max_pages">最大取得ページ数 / 章</label><input type="number" id="ai_crawl_max_pages" value="15" min="3" max="50"></div>
                   <div data-crawl="aicrawl ai_crawl_selenium"><label for="ai_crawl_site_depth">サイト内の探索階層</label><input type="number" id="ai_crawl_site_depth" value="2" min="0" max="5"></div>
@@ -1805,7 +1807,14 @@ function collectWorkerParam() {
   const v = parseInt(raw, 10);
   if (v < 1 || v > 16)
     throw new Error('全体の並列ワーカー数は1〜16で入力してください');
-  return {parallel_max_workers: v};
+  const out = {parallel_max_workers: v};
+  const sec = ($('research_section_workers').value || '').trim();
+  if (sec !== '') {
+    if (!/^[0-9]+$/.test(sec) || parseInt(sec, 10) < 1 || parseInt(sec, 10) > 8)
+      throw new Error('章の並列調査数は1〜8の整数で入力してください');
+    out.research_section_workers = parseInt(sec, 10);
+  }
+  return out;
 }
 
 const ITERATION_FIELDS = {
@@ -3186,7 +3195,14 @@ function renderExecSummary(status) {
   if (cc && cc.configured) {
     const llm = (cc.activity && cc.activity.llm) || {};
     const cap = cc.configured.llm;
-    rows.push(['LLM 同時実行', `設定 ${cap === null || cap === undefined ? '上限なし' : cap} / 現在 ${llm.active || 0} / 最大 ${llm.peak || 0}`]);
+    const fmtCap = c => (c === null || c === undefined) ? '上限なし' : c;
+    let capText = `設定 ${fmtCap(cap)}`;
+    const vcap = cc.configured.verification_llm, rcap = cc.configured.revision_llm;
+    if (vcap !== undefined && rcap !== undefined && (vcap !== cap || rcap !== cap)) {
+      // the delegated / stage-override local client binds these stages at its own cap
+      capText += `（検証 ${fmtCap(vcap)}・修正 ${fmtCap(rcap)}）`;
+    }
+    rows.push(['LLM 同時実行', `${capText} / 現在 ${llm.active || 0} / 最大 ${llm.peak || 0}`]);
     const act = cc.activity || {};
     const part = ['fetch', 'extract', 'verify'].map(k => `${ACTIVITY_LABELS[k]} ${(act[k] || {}).active || 0}`).join('・');
     rows.push(['並列の稼働', `${part}（枠 ${cc.run_permits ? cc.run_permits.active : 0}/${cc.run_permits ? cc.run_permits.limit : '?'}）`]);
@@ -3328,7 +3344,7 @@ setInterval(loadHistory, 10000);
 const FORM_PRESETS_KEY = 'drt_form_presets';
 const FORM_TEXT_IDS = ['requirements', 'language', 'output_format', 'iterations', 'max_iterations',
   'ai_crawl_max_pages', 'ai_crawl_site_depth', 'gap_fill_rounds', 'max_pages_per_query',
-  'parallel_max_workers', 'browser', 'driver_path', 'per_domain_delay', 'report_version',
+  'parallel_max_workers', 'research_section_workers', 'browser', 'driver_path', 'per_domain_delay', 'report_version',
   'v2_writing_style', 'chart_library', 'length_mode', 'preferred_body_chars', 'hard_min_body_chars',
   'hard_max_body_chars', 'length_tolerance', 'provider', 'model', 'plan_review_mode',
   'temperature', 'max_tokens', 'max_results', 'target_pages', 'search_region',

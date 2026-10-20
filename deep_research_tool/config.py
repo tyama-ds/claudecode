@@ -513,6 +513,12 @@ class ResearchConfig:
     # min(parallel_max_workers, stage_cap, task_count), and a shared
     # ConcurrencyLimiter enforces the run-wide and process-wide totals.
     parallel_max_workers: int = 8
+    # Sections (chapters) researched CONCURRENTLY in the research loop
+    # (each section keeps its own inner search/fetch/extract pools and is
+    # checkpointed as it completes). 1 = the classic sequential loop;
+    # bounded by parallel_max_workers and the section count. AI-crawl
+    # modes and serial (Selenium) search clients always run one at a time.
+    research_section_workers: int = 2
 
     # Research loop settings
     min_iterations: int = 3
@@ -946,6 +952,7 @@ def create_config(
     waf_mitigation: bool = True,
     per_domain_delay: float = 1.0,
     parallel_max_workers: int = 8,
+    research_section_workers: int = 2,
     research_iterations: int = 3,
     output_format: str = "markdown",
     output_dir: str = "./output",
@@ -1142,6 +1149,10 @@ def create_config(
             network operations per research run (default 8, allowed 1..16,
             hard cap 16). Stage caps stay as ceilings; invalid values
             (bool, float, 0, negative, >16, non-numeric) raise ValueError
+        research_section_workers: Sections researched concurrently in
+            the research loop (default 2, allowed 1..8; 1 = sequential).
+            Bounded by parallel_max_workers; AI-crawl modes and serial
+            search clients stay sequential
         research_iterations: Number of research iterations
         output_format: Report format ('docx', 'pdf', or 'markdown')
         output_dir: Output directory path
@@ -1357,9 +1368,15 @@ def create_config(
     # rejected with a clear error — NEVER silently clamped.
     from .utils.concurrency import validate_parallel_max_workers
     parallel_max_workers = validate_parallel_max_workers(parallel_max_workers)
+    if isinstance(research_section_workers, bool) or \
+            not isinstance(research_section_workers, int) or \
+            not 1 <= research_section_workers <= 8:
+        raise ValueError("research_section_workers must be an integer "
+                         f"between 1 and 8 (got {research_section_workers!r})")
 
     research_config = ResearchConfig(
         parallel_max_workers=parallel_max_workers,
+        research_section_workers=research_section_workers,
         min_iterations=research_iterations,
         max_iterations=kwargs.get("max_iterations", research_iterations + 5),
         max_queries_per_iteration=max_queries_per_iteration,

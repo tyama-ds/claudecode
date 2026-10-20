@@ -37,7 +37,7 @@ from .utils.document_reader import DocumentReader, auto_detect_additional_docume
 from .thinking import DeepThinkProcessor, DeepThinkConfig as ThinkingConfig
 from .thinking.reasoning_chain import ConsistencyMode
 from .estimation import FermiEstimator, FermiEstimationConfig as EstimationConfig
-from .utils.concurrency import ContextThreadPoolExecutor
+from .utils.concurrency import ContextThreadPoolExecutor, effective_workers
 
 
 # Style/Audience mapping for V2
@@ -752,6 +752,31 @@ class DeepResearchTool:
             llm_cap = local_cap if local_cap is not None else workers
         else:
             llm_cap = workers
+
+        # Caps that bind SPECIFIC stages: a delegated / stage-override local
+        # client serializes its own calls at its max_concurrency (default
+        # 1) even when the main provider is cloud and shows "8" above.
+        def _cap_of(client):
+            if client is None:
+                return llm_cap
+            if getattr(client, "tripped", False):
+                return llm_cap            # fell back to the main client
+            local = getattr(client, "delegate", client)
+            cap = getattr(local, "max_concurrency", "__none__")
+            if cap == "__none__":
+                return llm_cap            # cloud client: run-wide limit
+            return cap if cap is not None else workers
+
+        delegated: Dict[str, Any] = {}
+        try:
+            for key, client in self._delegated_clients():
+                delegated[key] = _cap_of(client)
+        except Exception:
+            pass
+        try:
+            eval_llm, writing_llm = self._finalization_llms()
+        except Exception:
+            eval_llm, writing_llm = None, None
         gauge = getattr(self, "activity_gauge", None)
         limits = getattr(self, "run_limits", None)
         return {
@@ -760,6 +785,10 @@ class DeepResearchTool:
                 "llm": llm_cap,
                 "local_concurrency": local_cap,
                 "parallel_max_workers": workers,
+                # effective caps of the verification / revision calls
+                "verification_llm": _cap_of(eval_llm),
+                "revision_llm": _cap_of(writing_llm),
+                "delegated": delegated,
             },
             "activity": gauge.snapshot() if gauge is not None else {},
             "run_permits": {
@@ -818,12 +847,16 @@ class DeepResearchTool:
                     counts = (f"（{act.get('index')}/{act.get('total')} 章目、"
                               f"完了 {act.get('done', 0)} 章）")
                 phase = act.get("phase")
+                running = [str(s) for s in (act.get("running") or [])]
                 if phase == "write":
                     text = f"{_sec(act)}を執筆しています{counts}"
                 elif phase == "gapfill":
                     text = f"{_sec(act)}の不足情報を追加調査しています（{act.get('round')} 回目）"
                 elif phase == "summary":
                     text = "全章の要旨・結論を作成しています"
+                elif len(running) >= 2:
+                    text = (f"第{'・'.join(running)}章を並列に調査しています"
+                            f"（完了 {act.get('done', 0)}/{act.get('total')} 章）")
                 else:
                     text = f"{_sec(act)}の情報を検索・取得・抽出しています{counts}"
             else:
@@ -891,18 +924,37 @@ class DeepResearchTool:
         the client was allowed to send several is worth a warning: the
         parallel setting is not taking effect server-side."""
         try:
-            if snapshot.get("provider") != "local":
+            from .utils.helpers import ResearchWarnings
+            configured = snapshot.get("configured") or {}
+            activity = snapshot.get("activity") or {}
+            llm = activity.get("llm") or {}
+            verify = activity.get("verify") or {}
+            if snapshot.get("provider") == "local":
+                cap = configured.get("llm") or 1
+                if cap > 1 and llm.get("total", 0) >= 10 and llm.get("peak", 0) <= 1:
+                    ResearchWarnings.get_instance().add(
+                        ResearchWarnings.MEDIUM, "LLM",
+                        f"ローカルLLMの同時リクエスト上限は {cap} ですが、この実行で"
+                        f"同時に処理された要求は最大 1 件でした（{llm.get('total')} 回）。"
+                        "サーバー側が並列処理していない可能性があります（Ollama: "
+                        "OLLAMA_NUM_PARALLEL、llama.cpp: -np、vLLM: --max-num-seqs を確認）。")
+                elif cap == 1 and llm.get("total", 0) >= 10:
+                    ResearchWarnings.get_instance().add(
+                        ResearchWarnings.MEDIUM, "LLM",
+                        f"ローカルLLMの同時リクエスト上限が 1（既定）のため、この実行の "
+                        f"LLM 呼び出し {llm.get('total')} 回はすべて 1 本ずつ処理されました。"
+                        "サーバーが複数リクエストを処理できるなら、⚙設定 → ローカルLLM →"
+                        "「同時リクエスト上限」を上げると検証・執筆が並列になります。")
                 return
-            cap = snapshot["configured"].get("llm") or 1
-            llm = (snapshot.get("activity") or {}).get("llm") or {}
-            if cap > 1 and llm.get("total", 0) >= 10 and llm.get("peak", 0) <= 1:
-                from .utils.helpers import ResearchWarnings
+            # cloud main provider with the verification / revision calls
+            # delegated to a local server: its own cap binds those stages
+            vcap = configured.get("verification_llm")
+            if vcap == 1 and verify.get("total", 0) >= 10:
                 ResearchWarnings.get_instance().add(
                     ResearchWarnings.MEDIUM, "LLM",
-                    f"ローカルLLMの同時リクエスト上限は {cap} ですが、この実行で"
-                    f"同時に処理された要求は最大 1 件でした（{llm.get('total')} 回）。"
-                    "サーバー側が並列処理していない可能性があります（Ollama: "
-                    "OLLAMA_NUM_PARALLEL、llama.cpp: -np、vLLM: --max-num-seqs を確認）。")
+                    f"検証の LLM 呼び出し（{verify.get('total')} 回）は、委譲先ローカルLLM の"
+                    "同時リクエスト上限 1（既定）で 1 本ずつ処理されました。⚙設定 → "
+                    "ローカルLLM →「同時リクエスト上限」を上げると検証が並列になります。")
         except Exception:
             pass
 
@@ -1170,6 +1222,8 @@ class DeepResearchTool:
             crawl_mode=self.config.research.crawl_mode,
             fast_crawl_workers=self.config.research.fast_crawl_workers,
             parallel_max_workers=self.config.research.parallel_max_workers,
+            section_workers=getattr(self.config.research,
+                                    "research_section_workers", 1),
             fast_crawl_batch_size=self.config.research.fast_crawl_batch_size,
             ai_crawl_max_total_pages=self.config.research.ai_crawl_max_total_pages,
             ai_crawl_max_depth=self.config.research.ai_crawl_max_depth,
@@ -1901,22 +1955,11 @@ class DeepResearchTool:
                 language=self.config.research.language,
             )
 
-            # Extract numerical data
-            data_store = NumericalDataStore(research_topic=query)
-            extractor = NumericalDataExtractor(
-                llm_client=self.llm_client,
-                language=self.config.research.language,
-            )
-            for evidence in evidence_locker.get_all_evidence():
-                content = evidence.content_excerpt or ""
-                if content:
-                    points = extractor.extract_from_content(
-                        content=content[:3000],
-                        source_url=evidence.url,
-                        source_title=evidence.title,
-                        evidence_id=evidence.id,
-                    )
-                    data_store.add_many(points)
+            # Extract numerical data: the SAME capped, parallel pass the
+            # figure stage uses (full evidence text, <= 80 items, one
+            # thread pool) — previously one sequential LLM call per
+            # evidence item over 3,000-char excerpts, with no cap
+            data_store = self._numerical_store_for(session, evidence_locker)
 
             # Determine target metrics
             target_metrics = config.target_metrics
@@ -2693,6 +2736,14 @@ class DeepResearchTool:
                          f"{w.get('source', '')}: {w.get('message', '')}")
         return "\n".join(lines)
 
+    def _parallel_cap(self) -> int:
+        """research.parallel_max_workers (8 when no config is attached)."""
+        rc = getattr(getattr(self, "config", None), "research", None)
+        try:
+            return int(getattr(rc, "parallel_max_workers", 8) or 8)
+        except Exception:
+            return 8
+
     def _enhance_sections_with_full_evidence(
         self,
         session: ResearchSession,
@@ -2770,11 +2821,12 @@ class DeepResearchTool:
             # Step 2: Re-access important URLs for precise data extraction
             re_extracted_data = {}
             if urls_with_key_data:
-                print(f"[Evidence Review] Re-accessing {min(len(urls_with_key_data), 5)} URLs for precise data")
-                for url_info in urls_with_key_data[:5]:  # Limit re-access
+                targets = [u for u in urls_with_key_data[:5]  # Limit re-access
+                           if u["url"] and u["url"].startswith("http")]
+                print(f"[Evidence Review] Re-accessing {len(targets)} URLs for precise data")
+
+                def _reaccess(url_info):
                     url = url_info["url"]
-                    if not url or not url.startswith("http"):
-                        continue
                     try:
                         stored = evidence_locker.get_by_url(url)
                         raw_text = getattr(stored, "extracted_text", "") if stored else ""
@@ -2782,13 +2834,26 @@ class DeepResearchTool:
                             page = self.search_client.get_page_content(url)
                             raw_text = page.text_content if not page.metadata.get("error") else ""
                         if raw_text and len(raw_text) > 100:
-                            re_extracted_data[url] = {
-                                "title": url_info["title"],
-                                "content": raw_text[:3000],
-                            }
                             print(f"[Evidence Review] Re-extracted data from: {url[:60]}")
+                            return {"title": url_info["title"], "content": raw_text[:3000]}
                     except Exception as e:
                         print(f"[Evidence Review] Failed to re-access {url[:60]}: {e}")
+                    return None
+
+                # the re-fetches are independent: run them concurrently
+                # (serial browsers keep one at a time)
+                workers = effective_workers(self._parallel_cap(), 5, len(targets))
+                if getattr(getattr(self, "search_client", None),
+                           "requires_serial_access", False):
+                    workers = 1
+                if workers > 1:
+                    with ContextThreadPoolExecutor(max_workers=workers) as ex:
+                        fetched = list(ex.map(_reaccess, targets))
+                else:
+                    fetched = [_reaccess(t) for t in targets]
+                for url_info, data in zip(targets, fetched):
+                    if data:
+                        re_extracted_data[url_info["url"]] = data
 
             # Step 3: Generate comprehensive evidence overview for LLM
             evidence_overview = self._build_evidence_overview(evidence_summaries, re_extracted_data)
@@ -2806,15 +2871,15 @@ class DeepResearchTool:
                 content = section_data.get("content", "")
                 all_sections_text += f"\n### Section {key}: {title}\n{content[:500]}...\n"
 
-            for section_key in section_keys:
+            def _review_one(section_key):
+                """One LLM call per section; reads only shared, frozen
+                inputs (overview, re-extracted data, section snapshot)."""
                 section_data = session.section_contents[section_key]
                 current_content = section_data.get("content", "")
                 section_title = section_data.get("title", section_key)
-
-                # Skip sections that already have substantial content
                 if current_content and len(current_content) > 200:
                     # Still enhance with key data from re-accessed URLs
-                    enhanced = self._enhance_section_content(
+                    return "enhanced", current_content, self._enhance_section_content(
                         section_key=section_key,
                         section_title=section_title,
                         current_content=current_content,
@@ -2823,22 +2888,32 @@ class DeepResearchTool:
                         all_sections_text=all_sections_text,
                         query=query,
                     )
-                    if enhanced and len(enhanced) > len(current_content) * 0.8:
-                        session.section_contents[section_key]["content"] = enhanced
-                        print(f"[Evidence Review] Enhanced section {section_key}: {len(current_content)} -> {len(enhanced)} chars")
-                else:
-                    # Generate content for empty/short sections
-                    generated = self._generate_section_from_evidence(
-                        section_key=section_key,
-                        section_title=section_title,
-                        evidence_overview=evidence_overview,
-                        re_extracted_data=re_extracted_data,
-                        all_sections_text=all_sections_text,
-                        query=query,
-                    )
-                    if generated and len(generated) > 50:
-                        session.section_contents[section_key]["content"] = generated
-                        print(f"[Evidence Review] Generated content for section {section_key}: {len(generated)} chars")
+                # Generate content for empty/short sections
+                return "generated", current_content, self._generate_section_from_evidence(
+                    section_key=section_key,
+                    section_title=section_title,
+                    evidence_overview=evidence_overview,
+                    re_extracted_data=re_extracted_data,
+                    all_sections_text=all_sections_text,
+                    query=query,
+                )
+
+            # sections are independent: review them concurrently, apply
+            # the results in section order
+            workers = effective_workers(self._parallel_cap(), 4, len(section_keys))
+            if workers > 1:
+                with ContextThreadPoolExecutor(max_workers=workers) as ex:
+                    reviewed = list(ex.map(_review_one, section_keys))
+            else:
+                reviewed = [_review_one(k) for k in section_keys]
+            for section_key, (kind, current_content, text) in zip(section_keys, reviewed):
+                if kind == "enhanced":
+                    if text and len(text) > len(current_content) * 0.8:
+                        session.section_contents[section_key]["content"] = text
+                        print(f"[Evidence Review] Enhanced section {section_key}: {len(current_content)} -> {len(text)} chars")
+                elif text and len(text) > 50:
+                    session.section_contents[section_key]["content"] = text
+                    print(f"[Evidence Review] Generated content for section {section_key}: {len(text)} chars")
 
             print("[Evidence Review] Section enhancement complete")
             return session
@@ -3064,10 +3139,8 @@ Output only the text (no JSON, no heading):"""
 
         if self.config.report.numerical_extraction:
             try:
-                numerical_store = self._extract_numerical_data(
-                    session=session,
-                    evidence_locker=evidence_locker,
-                )
+                numerical_store = self._numerical_store_for(
+                    session, evidence_locker)
 
                 # Step 2: Calculate derived metrics if enabled
                 if self.config.report.derived_metrics and numerical_store:
@@ -3474,6 +3547,24 @@ Output only the text (no JSON, no heading):"""
             print(f"[AutoFigures] charts.html failed: {e}")
         print(f"[AutoFigures] chart spec: {len(figures)} chart(s) across {len(page_sections)} chapter(s)")
         return figures
+
+    def _numerical_store_for(self, session: ResearchSession,
+                             evidence_locker: EvidenceLocker) -> NumericalDataStore:
+        """ONE numerical-extraction pass per run: Fermi estimation and the
+        figure stage both read it (the locker does not change between
+        them), so the LLM extraction never runs twice."""
+        try:
+            key = (id(evidence_locker), len(evidence_locker.get_all_evidence()))
+        except Exception:
+            key = None
+        cached = getattr(self, "_numerical_store_cache", None)
+        if key is not None and cached and cached[0] == key:
+            return cached[1]
+        store = self._extract_numerical_data(session=session,
+                                             evidence_locker=evidence_locker)
+        if key is not None:
+            self._numerical_store_cache = (key, store)
+        return store
 
     def _extract_numerical_data(
         self,

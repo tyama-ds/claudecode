@@ -564,8 +564,12 @@ class FinalizationController:
         length_tolerance: float = 0.20,
         language: str = "ja",
         progress=None,
+        edit_workers: int = 1,
     ):
         self.verify_fn = verify_fn
+        # sections are edited concurrently (rewrite / compress / hedge)
+        # when > 1; results are always APPLIED in section order
+        self.edit_workers = max(1, int(edit_workers or 1))
         self.research_fn = research_fn
         self.rewrite_fn = rewrite_fn
         self.compress_fn = compress_fn
@@ -587,6 +591,35 @@ class FinalizationController:
     def _checkpoint(self) -> None:
         if self.progress is not None:
             self.progress.checkpoint()
+
+    def _map_edits(self, fn: Callable, sections: List[str],
+                   issues_for: Callable) -> List[tuple]:
+        """Run ``fn(sid, issues_for(sid))`` for every section — in a
+        thread pool when ``edit_workers`` > 1 (each section's edit reads
+        only its own text and evidence) — and return ``[(sid, new_text)]``
+        in INPUT order so the caller applies edits deterministically.
+        A failing section yields None (logged); cancellation / timeout
+        propagate so the loop stops at the next safe boundary."""
+        from ..utils.cancellation import RunCancelled
+        from ..verification.runtime import (VerificationCancelled,
+                                            VerificationTimeout)
+        sections = list(sections)
+
+        def one(sid):
+            try:
+                return fn(sid, issues_for(sid))
+            except (RunCancelled, VerificationCancelled, VerificationTimeout):
+                raise
+            except Exception as e:
+                print(f"[Finalize] revision failed for {sid}: {e}")
+                return None
+
+        if self.edit_workers <= 1 or len(sections) <= 1:
+            return [(sid, one(sid)) for sid in sections]
+        from ..utils.concurrency import ContextThreadPoolExecutor
+        workers = min(self.edit_workers, len(sections))
+        with ContextThreadPoolExecutor(max_workers=workers) as ex:
+            return list(zip(sections, ex.map(one, sections)))
 
     def _phase(self, phase: str, label: str = "") -> None:
         if self.progress is not None:
@@ -789,10 +822,13 @@ class FinalizationController:
         self._last_new_sources = int(outcome.get("new_sources", 0))
         changed = bool(outcome.get("changed_sections"))
         # After research, affected sections are rewritten from evidence
+        # (concurrently across sections, applied in order)
         if self.rewrite_fn:
-            for sid in outcome.get("changed_sections", []) or \
-                    self._sections_with_issues(verdict):
-                new_text = self.rewrite_fn(sid, issues)
+            targets = [sid for sid in (outcome.get("changed_sections", []) or
+                                       self._sections_with_issues(verdict))
+                       if sid in chapters]
+            for sid, new_text in self._map_edits(
+                    self.rewrite_fn, targets, lambda _sid: issues):
                 if self._apply_edit(chapters, sid, new_text):
                     changed = True
         return changed or self._last_new_sources > 0
@@ -811,16 +847,11 @@ class FinalizationController:
             sections = list(chapters.keys())
         changed = False
         issues = verdict.issues_of(*issue_types) or verdict.issues
-        for sid in sections:
-            if sid not in chapters:
-                continue
-            self._checkpoint()      # safe boundary between section edits
-            try:
-                new_text = fn(sid, [i for i in issues
-                                    if i.section_id in ("", sid)])
-            except Exception as e:
-                print(f"[Finalize] revision failed for {sid}: {e}")
-                continue
+        sections = [sid for sid in sections if sid in chapters]
+        self._checkpoint()      # safe boundary before the edit round
+        for sid, new_text in self._map_edits(
+                fn, sections,
+                lambda sid: [i for i in issues if i.section_id in ("", sid)]):
             if self._apply_edit(chapters, sid, new_text):
                 changed = True
         return changed
@@ -838,15 +869,11 @@ class FinalizationController:
         if self.hedge_fn is None:
             return False
         changed = False
-        for sid in self._sections_with_issues(verdict):
-            if sid not in chapters:
-                continue
-            try:
-                new_text = self.hedge_fn(
-                    sid, [i for i in verdict.issues if i.section_id == sid])
-            except Exception as e:
-                print(f"[Finalize] hedging failed for {sid}: {e}")
-                continue
+        sections = [sid for sid in self._sections_with_issues(verdict)
+                    if sid in chapters]
+        for sid, new_text in self._map_edits(
+                self.hedge_fn, sections,
+                lambda sid: [i for i in verdict.issues if i.section_id == sid]):
             if self._apply_edit(chapters, sid, new_text):
                 changed = True
         return changed

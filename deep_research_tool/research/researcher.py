@@ -3,6 +3,7 @@ Researcher - Main research orchestration module.
 """
 
 import json
+import threading
 import os
 import time
 from dataclasses import dataclass, field
@@ -106,8 +107,10 @@ class ResearchSession:
             "requirements": self.requirements,
             "state": self.state.value,
             "research_plan": self.research_plan.to_dict() if self.research_plan else None,
-            "iterations": [i.to_dict() for i in self.iterations],
-            "section_contents": self.section_contents,
+            # shallow snapshots: sections may be researched concurrently
+            # while a checkpoint serializes the session
+            "iterations": [i.to_dict() for i in list(self.iterations)],
+            "section_contents": dict(self.section_contents),
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "error_message": self.error_message,
@@ -214,6 +217,7 @@ class Researcher:
         crawl_mode: CrawlMode = CrawlMode.STANDARD,
         fast_crawl_workers: int = 10,
         parallel_max_workers: int = 8,
+        section_workers: int = 1,
         fast_crawl_batch_size: int = 5,
         ai_crawl_max_total_pages: int = 15,
         ai_crawl_max_depth: int = 3,
@@ -332,6 +336,11 @@ class Researcher:
         # ContentExtractor is created without per-section target initially;
         # it will be updated in _execute_research_loop once we know the section count.
         self.parallel_max_workers = parallel_max_workers
+        # sections researched at once (1 = the classic sequential loop)
+        self.section_workers = max(1, int(section_workers or 1))
+        self._sections_running: List[str] = []
+        self._activity_lock = threading.Lock()
+        self._checkpoint_lock = threading.RLock()
         self.content_extractor = ContentExtractor(
             self.writing_llm, language,
             evaluation_llm_client=self.evaluation_llm,
@@ -702,101 +711,208 @@ class Researcher:
         # Log crawl mode
         print(f"[DEBUG] Using crawl mode: {self.crawl_mode.value}")
 
-        for section_idx, section in enumerate(sections):
-            section_progress_base = 10 + (section_idx / total_sections) * 70
-            self._section_slice = (section_progress_base, 70 / total_sections)
+        workers = self._section_workers(total_sections)
+        k = max(1, self.max_queries_per_iteration)
+        # every section takes the next k plan queries (exactly what the
+        # sequential loop consumed), pre-sliced so sections can run
+        # concurrently without sharing a mutable query list
+        queries_for = {s.section: list(available_queries[i * k:(i + 1) * k])
+                       for i, s in enumerate(sections)}
+        self._sections_running = []
 
+        def _reuse(section, section_idx):
             # resume: sections that already finished are reused verbatim
-            if section.section in self._resume_skip:
-                section.status = "completed"
-                if section.section not in self.session.completed_sections:
-                    self.session.completed_sections.append(section.section)
-                self._report_progress(
-                    f"Reusing completed section {section.section}. "
-                    f"{section.title}", section_progress_base)
-                if available_queries:
-                    available_queries = available_queries[self.max_queries_per_iteration:]
-                continue
-
-            # no NEW section starts after a cancel was accepted
-            self._check_cancel()
-
-            # the status line must already name this section when the
-            # "Researching:" message reaches the UI
-            self.current_activity = {
-                "phase": "research", "section": section.section,
-                "title": section.title, "index": section_idx + 1,
-                "total": total_sections,
-                "done": len(self.session.completed_sections),
-            }
-            self._report_progress(
-                f"Researching: {section.section}. {section.title}",
-                section_progress_base
-            )
-
-            section.status = "in_progress"
-
-            # Local document retrieval (local / hybrid source modes)
-            local_parts: List[ExtractedContent] = []
-            if self.source_mode in (ResearchSourceMode.LOCAL, ResearchSourceMode.HYBRID):
-                local_parts = self._collect_local_parts(section, available_queries)
-
-            if self.source_mode == ResearchSourceMode.LOCAL:
-                # Local-only: no web access at all
-                self._process_section_local_only(
-                    section=section,
-                    available_queries=available_queries,
-                    local_parts=local_parts,
-                )
-            # Web / hybrid: choose processing method based on crawl mode
-            elif self.fast_crawler and self.crawl_mode in (CrawlMode.FAST_BATCH, CrawlMode.FAST_PARALLEL):
-                # Fast crawl mode: parallel fetch + batch/parallel evaluation
-                self._process_section_with_fast_crawler(
-                    section=section,
-                    available_queries=available_queries,
-                    section_idx=section_idx,
-                    total_sections=total_sections,
-                    extra_parts=local_parts,
-                )
-            elif self.ai_crawler and self.crawl_mode in (
-                CrawlMode.AI_CRAWL, CrawlMode.AI_CRAWL_SELENIUM
-            ):
-                # AI crawl mode: LLM decides which links to follow
-                self._process_section_with_ai_crawler(
-                    section=section,
-                    available_queries=available_queries,
-                    section_idx=section_idx,
-                    total_sections=total_sections,
-                    extra_parts=local_parts,
-                )
-            else:
-                # Standard mode: sequential processing
-                self._process_section_with_immediate_generation(
-                    section=section,
-                    available_queries=available_queries,
-                    section_idx=section_idx,
-                    total_sections=total_sections,
-                    extra_parts=local_parts,
-                )
-
-            # Remove used queries
-            if available_queries:
-                available_queries = available_queries[self.max_queries_per_iteration:]
-
             section.status = "completed"
             if section.section not in self.session.completed_sections:
                 self.session.completed_sections.append(section.section)
-            # ATOMIC checkpoint after every completed section: body,
-            # evidence, stage and config are on disk before the next
-            # section starts (a cancel/crash loses at most one section)
-            self._checkpoint("section_completed",
-                             f"section {section.section} completed")
+            self._report_progress(
+                f"Reusing completed section {section.section}. "
+                f"{section.title}", 10 + (section_idx / total_sections) * 70)
+
+        if workers > 1:
+            print(f"[DEBUG] Researching up to {workers} sections concurrently")
+            self._run_sections_parallel(sections, queries_for, workers, _reuse)
+        else:
+            for section_idx, section in enumerate(sections):
+                section_progress_base = 10 + (section_idx / total_sections) * 70
+                self._section_slice = (section_progress_base, 70 / total_sections)
+                if section.section in self._resume_skip:
+                    _reuse(section, section_idx)
+                    continue
+                # no NEW section starts after a cancel was accepted
+                self._check_cancel()
+                self._run_section(section, queries_for[section.section],
+                                  section_idx, total_sections)
+                self._complete_section(section)
 
         # Debug: Log final section contents
         print(f"[DEBUG] Research loop completed. Section contents keys: {list(self.session.section_contents.keys())}")
+        # (the former cross-section "coherence check" LLM call was removed:
+        # its result was stored under _coherence_check and never read)
 
-        # Final coherence check
-        self._check_report_coherence()
+    # ------------------------------------------------------------------
+    # section-level execution (sequential or concurrent)
+    # ------------------------------------------------------------------
+
+    def _section_workers(self, total_sections: int) -> int:
+        """How many sections may be researched at once: the
+        ``section_workers`` knob bounded by the section count and
+        ``parallel_max_workers``; crawl modes that keep a browser /
+        frontier per run, and serial search clients, stay sequential."""
+        cap = max(1, int(getattr(self, "section_workers", 1) or 1))
+        if cap <= 1 or total_sections <= 1:
+            return 1
+        if self.crawl_mode in (CrawlMode.AI_CRAWL, CrawlMode.AI_CRAWL_SELENIUM):
+            print("[Research] AI crawl keeps a browser/frontier per run: "
+                  "sections are researched one at a time")
+            return 1
+        inner = getattr(self.search, "_client", None)
+        if getattr(self.search, "requires_serial_access", False) or \
+                getattr(inner, "requires_serial_access", False):
+            print("[Research] serial search client: sections are "
+                  "researched one at a time")
+            return 1
+        return max(1, min(cap, total_sections, self.parallel_max_workers))
+
+    def _set_activity(self, section: TableOfContentsItem, section_idx: int,
+                      total_sections: int, phase: str = "research") -> None:
+        """The status line must already name this section when the
+        "Researching:" message reaches the UI; ``running`` lists every
+        section in flight when sections run concurrently."""
+        with self._activity_lock:
+            running = list(self._sections_running or [])
+        self.current_activity = {
+            "phase": phase, "section": section.section,
+            "title": section.title, "index": section_idx + 1,
+            "total": total_sections,
+            "done": len(self.session.completed_sections),
+            "running": sorted(running, key=str),
+        }
+
+    def _run_section(self, section: TableOfContentsItem,
+                     section_queries: List[str], section_idx: int,
+                     total_sections: int) -> None:
+        """Research ONE section (local retrieval + the crawl-mode specific
+        processing + immediate synthesis). Safe to run concurrently with
+        other sections: the only shared state it writes is the evidence
+        locker (locked) and this section's own session entry."""
+        self._set_activity(section, section_idx, total_sections)
+        # sequential: the section index places the bar; concurrent: only
+        # COMPLETED sections move it (several sections start at once)
+        if self._sections_running:
+            base = 10 + (len(self.session.completed_sections) / total_sections) * 70
+        else:
+            base = 10 + (section_idx / total_sections) * 70
+        self._report_progress(
+            f"Researching: {section.section}. {section.title}", base)
+        section.status = "in_progress"
+
+        # Local document retrieval (local / hybrid source modes)
+        local_parts: List[ExtractedContent] = []
+        if self.source_mode in (ResearchSourceMode.LOCAL, ResearchSourceMode.HYBRID):
+            local_parts = self._collect_local_parts(section, section_queries)
+
+        if self.source_mode == ResearchSourceMode.LOCAL:
+            # Local-only: no web access at all
+            self._process_section_local_only(
+                section=section,
+                available_queries=section_queries,
+                local_parts=local_parts,
+            )
+        # Web / hybrid: choose processing method based on crawl mode
+        elif self.fast_crawler and self.crawl_mode in (CrawlMode.FAST_BATCH, CrawlMode.FAST_PARALLEL):
+            # Fast crawl mode: parallel fetch + batch/parallel evaluation
+            self._process_section_with_fast_crawler(
+                section=section,
+                available_queries=section_queries,
+                section_idx=section_idx,
+                total_sections=total_sections,
+                extra_parts=local_parts,
+            )
+        elif self.ai_crawler and self.crawl_mode in (
+            CrawlMode.AI_CRAWL, CrawlMode.AI_CRAWL_SELENIUM
+        ):
+            # AI crawl mode: LLM decides which links to follow
+            self._process_section_with_ai_crawler(
+                section=section,
+                available_queries=section_queries,
+                section_idx=section_idx,
+                total_sections=total_sections,
+                extra_parts=local_parts,
+            )
+        else:
+            # Standard mode: sequential processing
+            self._process_section_with_immediate_generation(
+                section=section,
+                available_queries=section_queries,
+                section_idx=section_idx,
+                total_sections=total_sections,
+                extra_parts=local_parts,
+            )
+
+    def _complete_section(self, section: TableOfContentsItem) -> None:
+        section.status = "completed"
+        if section.section not in self.session.completed_sections:
+            self.session.completed_sections.append(section.section)
+        # ATOMIC checkpoint after every completed section: body,
+        # evidence, stage and config are on disk before the next
+        # section starts (a cancel/crash loses at most one section)
+        self._checkpoint("section_completed",
+                         f"section {section.section} completed")
+
+    def _run_sections_parallel(self, sections, queries_for, workers,
+                               reuse) -> None:
+        """Research sections CONCURRENTLY (``workers`` at a time).
+
+        Completed sections are checkpointed as they finish (in completion
+        order, under the checkpoint lock); a cancel or an error stops
+        new sections and propagates once the running ones return.
+        """
+        from concurrent.futures import as_completed
+        from ..utils.concurrency import ContextThreadPoolExecutor
+
+        total = len(sections)
+        pending = []
+        for idx, section in enumerate(sections):
+            if section.section in self._resume_skip:
+                reuse(section, idx)
+            else:
+                pending.append((idx, section))
+        if not pending:
+            return
+        done = len(self.session.completed_sections)
+        self._section_slice = (10 + done / total * 70, 70 / total)
+
+        def _work(idx, section):
+            self._check_cancel()
+            with self._activity_lock:
+                self._sections_running.append(section.section)
+            try:
+                self._run_section(section, queries_for[section.section],
+                                  idx, total)
+            finally:
+                with self._activity_lock:
+                    if section.section in self._sections_running:
+                        self._sections_running.remove(section.section)
+            return section
+
+        with ContextThreadPoolExecutor(
+                max_workers=min(workers, len(pending))) as ex:
+            futures = {ex.submit(_work, idx, s): s for idx, s in pending}
+            try:
+                for fut in as_completed(futures):
+                    section = fut.result()   # re-raises cancel / errors
+                    self._complete_section(section)
+                    done = len(self.session.completed_sections)
+                    self._section_slice = (10 + done / total * 70, 70 / total)
+                    self._report_progress(
+                        f"Completed section {section.section}. "
+                        f"{section.title} ({done}/{total})",
+                        10 + done / total * 70)
+            except BaseException:
+                for f in futures:
+                    f.cancel()
+                raise
 
     def _process_section_with_fast_crawler(
         self,
@@ -1402,15 +1518,28 @@ class Researcher:
         print(f"[LocalStore] Section {section.section}: {len(chunks)} candidate chunks")
 
         parts: List[ExtractedContent] = []
-        for chunk in chunks:
+
+        def _extract(chunk):
             self._check_cancel()
-            extracted = self.content_extractor.extract_relevant_content(
+            return self.content_extractor.extract_relevant_content(
                 raw_content=chunk.content,
                 source_url=chunk.source_url,
                 source_title=chunk.doc_title,
                 section_context=f"{section.section}. {section.title}",
                 research_query=self.session.query,
             )
+
+        # chunk extraction is one LLM call each: run them concurrently
+        # (same cap as web-page extraction); evidence commits stay in
+        # chunk order on this thread
+        from ..utils.concurrency import ContextThreadPoolExecutor, effective_workers
+        workers = effective_workers(self.parallel_max_workers, 4, len(chunks))
+        if workers > 1:
+            with ContextThreadPoolExecutor(max_workers=workers) as ex:
+                extracted_all = list(ex.map(_extract, chunks))
+        else:
+            extracted_all = [_extract(c) for c in chunks]
+        for chunk, extracted in zip(chunks, extracted_all):
             if extracted.relevance_score >= 0.2:
                 parts.append(extracted)
                 self.evidence_locker.add_evidence(
@@ -2019,6 +2148,10 @@ Return as JSON:
         "saved" only for these). Never raises — a failed save is reported
         as a warning, and the run's own outcome is unaffected.
         """
+        with self._checkpoint_lock:
+            return self._checkpoint_locked(stage, reason)
+
+    def _checkpoint_locked(self, stage: str, reason: str = "") -> Dict[str, str]:
         saved: Dict[str, str] = {}
         if self.session is None:
             return saved
