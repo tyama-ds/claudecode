@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable, Tuple
 
 from .utils.helpers import ResearchWarnings, ensure_utf8_output
-from .config import Config, LLMProvider, SearchMethod, ReportFormat, ReportGeneratorVersion
+from .config import (Config, LLMProvider, SearchMethod, ReportFormat,
+                     ReportGeneratorVersion, ResearchSourceMode)
 from .api import get_client
 from .api.base import get_token_stats, reset_token_stats
 from .search import get_search_client
@@ -681,9 +682,77 @@ class DeepResearchTool:
                 "auto_figures": bool(c.report.auto_figures),
                 "target_pages": c.report.target_pages,
                 "target_characters": c.report.target_characters,
+                "research_engine": getattr(c.research, "research_engine", "builtin"),
+                "engine_options": dict(getattr(c.research, "engine_options", None) or {}),
+                "engine_max_time_seconds": getattr(c.research, "engine_max_time_seconds", None),
             }
         except Exception:
             return {}
+
+    def _create_engine_researcher(self, engine_id: str, raw_progress,
+                                  cancel_check):
+        """The Researcher-compatible driver for an external engine, or a
+        ValueError naming what is missing (unknown / not installed engine,
+        non-Web sources, no local server URL). Engine results are always
+        rendered by the V1 generator (its chapter bodies are the engine's
+        text; V2/V3 would rewrite them)."""
+        from .engines import get_engine, engine_display_name
+        from .engines.adapter import EngineResearcher
+        from .engines.llm_profile import (llm_run_config, proxy_env,
+                                          search_run_config)
+        rc = self.config.research
+        name = engine_display_name(engine_id)
+        if rc.source_mode != ResearchSourceMode.WEB:
+            raise ValueError(
+                f"{name} は手元の資料（source_mode={rc.source_mode.value}）を扱えません。"
+                "使用する資料を「Web」にするか、内蔵エンジンを選んでください")
+        engine = get_engine(engine_id, self.config)      # EngineUnavailable (ValueError)
+        if self.config.report.generator_version != ReportGeneratorVersion.V1:
+            old = self.config.report.generator_version.value
+            ResearchWarnings.get_instance().add(
+                "MEDIUM", "Engine",
+                f"外部エンジン（{name}）の結果は V1 のレポート生成で出力します"
+                f"（設定の {old} は使いません）")
+            self.config.report.generator_version = ReportGeneratorVersion.V1
+        llm = llm_run_config(self.config)                # ValueError: no local URL
+        return EngineResearcher(
+            engine,
+            output_dir=self.config.report.output_dir,
+            language=rc.language,
+            llm_client=self.llm_client,
+            search_client=self.search_client,
+            progress_callback=self.progress_plan.research_callback(raw_progress),
+            cancel_check=cancel_check,
+            run_config=self._run_config_snapshot(),
+            llm=llm,
+            search=search_run_config(self.config),
+            proxy_env=proxy_env(self.config),
+            options=dict(rc.engine_options or {}),
+            max_time_seconds=rc.engine_max_time_seconds,
+            fetch_sources=True,
+            parallel_max_workers=rc.parallel_max_workers,
+        )
+
+    def _engine_summary(self) -> Optional[Dict[str, Any]]:
+        """What the external engine reported (None for the built-in loop)."""
+        r = getattr(self, "researcher", None)
+        if r is None or not hasattr(r, "engine_id"):
+            return None
+        from .engines.llm_profile import describe_profile
+        result = getattr(r, "result", None)
+        caps = getattr(r, "capabilities", None)
+        return {
+            "id": r.engine_id,
+            "name": r.engine_name,
+            "version": getattr(caps, "version", None),
+            "elapsed_seconds": getattr(r, "engine_elapsed", None),
+            "metrics": result.metrics.model_dump(mode="json") if result else None,
+            "ingest": dict(getattr(r, "ingest_stats", None) or {}),
+            "warnings": list(getattr(r, "engine_warnings", None) or []),
+            "artifacts": dict(getattr(r, "engine_artifacts", None) or {}),
+            "llm": describe_profile(getattr(r, "llm_run_config", None)),
+            "resumed": dict(getattr(r, "resume_plan", None) or {}) or None,
+        }
 
     def _status_axes(self, semantic_artifact_check=None,
                      semantic_drift: bool = False) -> Dict[str, str]:
@@ -840,7 +909,14 @@ class DeepResearchTool:
         if stage == "plan":
             text = "調査計画（題名・目次・検索クエリ）を作成しています"
         elif stage == "research":
-            if act:
+            if act and act.get("phase") == "engine":
+                # an external engine: its stage, not a chapter of ours
+                detail = dict(act)
+                label = act.get("stage_label") or act.get("stage") or ""
+                counts = (f"（{act.get('index')}/{act.get('total')}）"
+                          if act.get("total") and act.get("index") else "")
+                text = f"{act.get('engine')} が調査しています: {label}{counts}"
+            elif act:
                 detail = dict(act)
                 counts = ""
                 if act.get("total"):
@@ -1200,7 +1276,17 @@ class DeepResearchTool:
                 language=self.config.research.language,
             )
 
-        self.researcher = Researcher(
+        # An external research engine (GPT Researcher / Open Deep Research /
+        # mock) replaces ONLY the research loop: EngineResearcher offers the
+        # Researcher's surface and ingests the engine's report + sources
+        # into the same session / evidence structures (see engines/).
+        self.research_engine_id = str(getattr(rc_, "research_engine", "builtin")
+                                      or "builtin")
+        engine_researcher = None
+        if self.research_engine_id != "builtin":
+            engine_researcher = self._create_engine_researcher(
+                self.research_engine_id, raw_progress, _cancel_checkpoint)
+        self.researcher = engine_researcher or Researcher(
             llm_client=self.llm_client,
             search_client=self.search_client,
             min_iterations=self.config.research.min_iterations,
@@ -1291,6 +1377,11 @@ class DeepResearchTool:
                 self.partial_session_id = sess.session_id
             raise
         self.timer.stop("research")
+        # the engine's own warnings (missing metrics, unread sources, …)
+        # join the run's 要確認事項
+        for _w in list(getattr(self.researcher, "engine_warnings", None) or []):
+            ResearchWarnings.get_instance().add(
+                "LOW", f"Engine:{self.research_engine_id}", str(_w))
 
         evidence_locker = self.researcher.get_evidence_locker()
         research_search = getattr(self.researcher, "search", None)
@@ -1979,6 +2070,10 @@ class DeepResearchTool:
                 **({"report": str(active_report_path)}
                    if active_report_path else {})},
             "resume_plan": self._resume_plan_for_result(),
+            # which engine did the research (None = the built-in loop) and
+            # what it reported: version, elapsed, metrics, ingestion counts
+            "research_engine": getattr(self, "research_engine_id", "builtin"),
+            "engine": self._engine_summary(),
             # the plan that was researched (table of contents / queries)
             "research_plan": self.current_plan(),
             "timings": self._collect_timings(run_token_stats),

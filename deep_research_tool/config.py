@@ -662,6 +662,27 @@ class ResearchConfig:
     # names the role and the setting.
     local_llm_fallback: bool = True
 
+    # --- Research engine (who performs the research stage) ---
+    # builtin (default): this tool's own loop. gpt-researcher /
+    # open-deep-research: an external engine in its own Python
+    # environment whose report + sources are ingested into the same
+    # session / evidence structures; the stages after the research loop
+    # are unchanged. mock-*: deterministic mocks (developer toggle / tests).
+    research_engine: str = "builtin"
+    # interpreter per external engine ({engine_id: path}); unset = the
+    # DRT_ENGINE_PYTHON_<ID> variable, then <repo>/engines_venv/<id>
+    engine_python: Dict[str, str] = field(default_factory=dict)
+    # embedding model for engines that need one (None = provider default:
+    # OpenAI text-embedding-3-small / Ollama nomic-embed-text)
+    engine_embedding_model: Optional[str] = None
+    # engine-specific options (free-form; see the engine's options_schema)
+    engine_options: Dict[str, Any] = field(default_factory=dict)
+    # hard time limit for one engine run (the engine is cancelled after it)
+    engine_max_time_seconds: int = 1800
+    # SearXNG base URL; when set, external engines search through it
+    # instead of the tool's DuckDuckGo / Selenium client
+    searx_url: Optional[str] = None
+
 
 @dataclass
 class ReportConfig:
@@ -1077,6 +1098,13 @@ def create_config(
     max_stall_rounds: int = 2,
     audit_log_enabled: bool = True,
     local_llm_role: str = "off",
+    # Research engine (builtin / gpt-researcher / open-deep-research / mock-*)
+    research_engine: str = "builtin",
+    engine_python: Optional[Dict[str, str]] = None,
+    engine_embedding_model: Optional[str] = None,
+    engine_options: Optional[Dict[str, Any]] = None,
+    engine_max_time_seconds: int = 1800,
+    searx_url: Optional[str] = None,
     auto_figures_include_images: bool = True,
     auto_figures_include_tables: bool = True,
     auto_figures_include_charts: bool = True,
@@ -1328,6 +1356,32 @@ def create_config(
                 f"Valid stages: {list(LLM_STAGES)}"
             )
 
+    # --- research engine: validated here so a bad selection fails before
+    # anything (clients, caches) is built; the engine's availability is
+    # checked again when the run starts (its environment may change)
+    from .engines import known_engine_ids
+    research_engine = str(research_engine or "builtin").strip() or "builtin"
+    if research_engine not in known_engine_ids(include_mocks=True):
+        raise ValueError(
+            f"Unknown research_engine: {research_engine!r}. "
+            f"Valid engines: {known_engine_ids(include_mocks=False)} (and mock-*)")
+    if engine_python is not None and not isinstance(engine_python, dict):
+        raise ValueError("engine_python must be a {engine_id: python_path} mapping")
+    if engine_options is not None and not isinstance(engine_options, dict):
+        raise ValueError("engine_options must be a mapping")
+    try:
+        engine_max_time_seconds = int(engine_max_time_seconds)
+    except (TypeError, ValueError):
+        raise ValueError("engine_max_time_seconds must be an integer "
+                         f"(got {engine_max_time_seconds!r})")
+    if not 60 <= engine_max_time_seconds <= 86400:
+        raise ValueError("engine_max_time_seconds must be between 60 and 86400 "
+                         f"(got {engine_max_time_seconds})")
+    if research_engine != "builtin" and str(source_mode) != "web":
+        raise ValueError(
+            f"research_engine={research_engine!r} supports source_mode='web' only "
+            f"(got {source_mode!r}); external engines do not read local documents")
+
     api_config = APIConfig(
         provider=LLMProvider(provider),
         openai_api_key=openai_api_key,
@@ -1452,6 +1506,12 @@ def create_config(
         audit_log_enabled=audit_log_enabled,
         local_llm_role=local_llm_role,
         local_llm_fallback=bool(local_llm_fallback),
+        research_engine=research_engine,
+        engine_python={str(k): str(v) for k, v in (engine_python or {}).items() if v},
+        engine_embedding_model=(engine_embedding_model or None),
+        engine_options=dict(engine_options or {}),
+        engine_max_time_seconds=engine_max_time_seconds,
+        searx_url=(str(searx_url).strip() or None) if searx_url else None,
     )
 
     report_config = ReportConfig(

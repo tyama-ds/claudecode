@@ -241,6 +241,18 @@ details .body { padding: 0 2px 14px; }
 .mode-card { position: relative; }
 .mode-card:focus-within { outline: 3px solid var(--accent); outline-offset: 2px; }
 .mode-cards-3 { grid-template-columns: repeat(3, 1fr); }
+.mode-cards-auto { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+/* an engine / source that cannot be chosen here: visible, explained, not selectable */
+.mode-card.disabled { opacity: .62; cursor: not-allowed; }
+.mode-card.disabled:hover { border-color: var(--border); transform: none; box-shadow: none; }
+.mode-card .t .badge { margin-left: 6px; vertical-align: 1px; font-size: 10.5px; padding: 0 7px; }
+.mode-card .t .v { font-weight: 400; font-size: 11px; color: var(--muted); margin-left: 4px; }
+.mode-card .r { display: block; margin-top: 4px; font-size: 11px; color: #92400e; line-height: 1.45; }
+.mode-card .r a { color: var(--accent); }
+.engine-flow { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 4px; margin-top: 6px; font-size: 11.5px; color: var(--muted); }
+.engine-flow span { border: 1px solid var(--border); border-radius: 999px; padding: 1px 9px; background: var(--bg); }
+.engine-flow span.ext { border-color: var(--accent); color: var(--text); background: var(--accent-soft); font-weight: 700; }
+.engine-flow i { font-style: normal; opacity: .6; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
 .chip { border: 1px solid var(--border); background: var(--bg); border-radius: 999px; padding: 3px 10px; font-size: 11.5px; cursor: pointer; color: var(--text); }
 .chip:hover, .chip:focus-visible { border-color: var(--accent); outline: none; }
@@ -907,6 +919,39 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
           <span class="feat-sub">1 パネル＝1 つの問い。既定 6</span></div>
         <input type="number" id="feat_chart_max" value="6" min="1" max="12" style="width:80px">
       </div>
+
+      <label style="margin-top:14px;font-weight:700">🔌 調査エンジン（外部エンジンの環境）</label>
+      <p class="hint">GPT Researcher / Open Deep Research は専用の Python 環境（3.12 以上）で動きます。<code>python3.12 -m deep_research_tool.scripts.setup_engine_venv &lt;engine-id&gt;</code> で作成すると自動で見つかります。別の場所に作った場合はここにパスを入力してください（保存後に「新規調査」のカードが更新されます）。</p>
+      <div class="feat-row" data-tip="GPT Researcher 用の Python 実行ファイルのパス。空欄 = 既定の engines_venv/gpt-researcher、または環境変数 DRT_ENGINE_PYTHON_GPT_RESEARCHER">
+        <div class="feat-info"><span class="feat-name">GPT Researcher の Python</span>
+          <span class="feat-sub">空欄 = 既定の場所</span></div>
+        <input type="text" id="set_engine_python_gptr" placeholder="…/engines_venv/gpt-researcher/bin/python" style="width:52%">
+      </div>
+      <div class="feat-row" data-tip="Open Deep Research 用の Python 実行ファイルのパス。空欄 = 既定の engines_venv/open-deep-research、または環境変数 DRT_ENGINE_PYTHON_OPEN_DEEP_RESEARCH">
+        <div class="feat-info"><span class="feat-name">Open Deep Research の Python</span>
+          <span class="feat-sub">空欄 = 既定の場所</span></div>
+        <input type="text" id="set_engine_python_odr" placeholder="…/engines_venv/open-deep-research/bin/python" style="width:52%">
+      </div>
+      <div class="feat-row" data-tip="外部エンジンが使う埋め込みモデル（GPT Researcher に必須）。空欄 = OpenAI は text-embedding-3-small、Ollama は nomic-embed-text">
+        <div class="feat-info"><span class="feat-name">埋め込みモデル</span>
+          <span class="feat-sub">空欄 = プロバイダの既定</span></div>
+        <input type="text" id="set_engine_embedding" placeholder="text-embedding-3-small" style="width:40%">
+      </div>
+      <div class="feat-row" data-tip="SearXNG の URL。設定すると外部エンジンは DuckDuckGo の代わりにここで検索します">
+        <div class="feat-info"><span class="feat-name">SearXNG の URL</span>
+          <span class="feat-sub">空欄 = DuckDuckGo</span></div>
+        <input type="text" id="set_searx_url" placeholder="http://localhost:8080" style="width:40%">
+      </div>
+      <div class="feat-row" data-tip="外部エンジン 1 回の制限時間（秒）。超えると中止してエラーになります（60〜86400）">
+        <div class="feat-info"><span class="feat-name">エンジンの制限時間（秒）</span>
+          <span class="feat-sub">既定 1800</span></div>
+        <input type="number" id="set_engine_max_time" value="1800" min="60" max="86400" style="width:100px">
+      </div>
+      <div class="feat-row" data-tip="開発用: 通信を行わない決定論的なモックエンジン（mock-fast / mock-fail など）を「調査エンジン」の選択肢に表示します。取り込み経路の確認用です">
+        <div class="feat-info"><span class="feat-name">🧪 モック調査エンジンを表示（開発用）</span>
+          <span class="feat-sub">通信なしで取り込み経路を試す</span></div>
+        <label class="switch"><input type="checkbox" id="feat_engine_mocks"><span class="slider"></span></label>
+      </div>
      </div><!-- /tabFeatures -->
 
       <label class="check"><input type="checkbox" id="set_persist_keys"> 🔐 APIキーをこの端末に保存する（localStorage・平文）。OFF（既定）ではこのタブを閉じるまでの一時保存（sessionStorage）のみ</label>
@@ -951,6 +996,18 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
       <label for="verifyEvidenceFile">根拠 JSON（任意。このツールが出力した evidence_*.json）</label>
       <input type="file" id="verifyEvidenceFile" accept=".json">
       <p class="hint">外部レポートは見出しごとに章として読み込みます。根拠が無い主張は Web を検索して根拠を集めてから判定し、修正した本文・検証レポートを出力します。LLM・検索・検証の設定は下の項目をそのまま使います（調査テーマは任意。空欄ならレポートの題名を使います）。</p>
+    </div>
+
+    <!-- 0b. 調査エンジン（誰が調査するか） -->
+    <div id="engineBox">
+      <label id="engineLabel">調査エンジン</label>
+      <div class="mode-cards mode-cards-3" id="engineModes" role="radiogroup" aria-labelledby="engineLabel">
+        <label class="mode-card sel"><input type="radio" name="research_engine" value="builtin" checked>
+          <span class="t">内蔵</span><span class="d">　このツールの調査ループ（既定）</span></label>
+      </div>
+      <div class="engine-flow" id="engineFlow" aria-live="polite"></div>
+      <p class="hint" id="engineNeeds"></p>
+      <div class="banner" id="engineNotice" aria-live="polite"></div>
     </div>
 
     <!-- 1. 何を調べるか -->
@@ -1636,6 +1693,11 @@ let lastRenderedJobId = null;
 // 非secret設定は localStorage、APIキー（secret）は既定で sessionStorage
 // のみ（タブを閉じると消える）。「この端末に保存する」を明示的にONに
 // した場合だけ localStorage へ永続化する。
+// research engine catalog (/api/engines): id -> card entry
+let engineCatalog = [];
+let engineById = {};
+let pendingEngineSelection = null;
+
 const SETTINGS_FIELDS = {
   set_openai_url: 'openai_base_url',
   set_anthropic_url: 'anthropic_base_url',
@@ -1647,6 +1709,12 @@ const SETTINGS_FIELDS = {
   set_local_concurrency: 'local_concurrency',
   set_https_proxy: 'https_proxy',
   set_http_proxy: 'http_proxy',
+  // external research engines (folded into engine_python by settingsParams)
+  set_engine_python_gptr: 'engine_python_gpt_researcher',
+  set_engine_python_odr: 'engine_python_open_deep_research',
+  set_engine_embedding: 'engine_embedding_model',
+  set_searx_url: 'searx_url',
+  set_engine_max_time: 'engine_max_time_seconds',
 };
 
 // secrets: NEVER mixed into the non-secret settings object
@@ -1710,6 +1778,7 @@ const FEATURE_FIELDS = {
   feat_verification: 'enable_verification',
   feat_multilingual: 'multilingual',
   feat_enhanced: 'use_enhanced_synthesis',
+  feat_engine_mocks: 'engine_mocks',       // UI only (never sent to the server)
 };
 
 function loadSettings() {
@@ -1782,7 +1851,22 @@ function settingsParams() {
   p.figure_max_workers = Math.min(16, Math.max(1, parseInt($('feat_fig_workers').value) || 8));
   if ($('feat_chart_max')) p.chart_max_per_section = Math.min(12, Math.max(1, parseInt($('feat_chart_max').value) || 6));
   p.deep_think_max_workers = Math.min(8, Math.max(1, parseInt($('feat_dt_workers').value) || 4));
+  // engine interpreter paths travel as one {engine_id: path} object
+  const enginePython = engineSettingsPython();
+  delete p.engine_python_gpt_researcher;
+  delete p.engine_python_open_deep_research;
+  if (Object.keys(enginePython).length) p.engine_python = enginePython;
+  delete p.engine_mocks;
   return p;
+}
+
+function engineSettingsPython() {
+  const out = {};
+  const g = ($('set_engine_python_gptr') ? $('set_engine_python_gptr').value : '').trim();
+  const o = ($('set_engine_python_odr') ? $('set_engine_python_odr').value : '').trim();
+  if (g) out['gpt-researcher'] = g;
+  if (o) out['open-deep-research'] = o;
+  return out;
 }
 
 // settings modal tab switching
@@ -1863,7 +1947,7 @@ $('settingsBtn').addEventListener('click', () => { $('settingsModal').style.disp
 // a run uses the modal's CURRENT values even when they were not saved,
 // so the delegation notice follows every change / close of the modal
 $('settingsCloseBtn').addEventListener('click', () => { $('settingsModal').style.display = 'none'; renderDelegationNotice(); });
-$('settingsSaveBtn').addEventListener('click', () => { saveSettings(); $('settingsModal').style.display = 'none'; renderDelegationNotice(); });
+$('settingsSaveBtn').addEventListener('click', () => { saveSettings(); $('settingsModal').style.display = 'none'; renderDelegationNotice(); loadEngines(); });
 $('settingsModal').addEventListener('change', () => renderDelegationNotice());
 $('settingsModal').addEventListener('click', (e) => {
   if (e.target === $('settingsModal')) { $('settingsModal').style.display = 'none'; renderDelegationNotice(); }
@@ -1876,6 +1960,85 @@ if ($('feat_verification') && !$('feat_verification').checked && radioValue('run
   syncModeCards('run_mode');
   applyModeVisibility();
 }
+
+// ==================== 調査エンジン（内蔵 / 外部エンジン / モック） ====================
+const ENGINE_HEALTH = {
+  available: ['ok', '利用可能'], needs_setup: ['warn', '要設定'], unsupported: ['bad', '未対応'],
+  planned: ['muted', '未実装'], unhealthy: ['bad', '利用不可'], disabled: ['muted', '無効'],
+};
+function engineBadge(e) {
+  const [cls, label] = ENGINE_HEALTH[e.health] || ['muted', e.health || ''];
+  return `<span class="badge ${cls}">${escapeHtml(label)}</span>`;
+}
+function openSettingsTab(tabId) {
+  $('settingsModal').style.display = 'flex';
+  const tab = document.querySelector(`.modal-tab[data-tab="${tabId}"]`);
+  if (tab) tab.click();
+}
+async function loadEngines() {
+  const mocks = $('feat_engine_mocks') && $('feat_engine_mocks').checked;
+  try {
+    const res = await fetch('/api/engines', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mocks: !!mocks, engine_python: engineSettingsPython()})});
+    const data = await res.json();
+    if (!res.ok || !Array.isArray(data.engines)) throw new Error(data.error || 'failed');
+    engineCatalog = data.engines;
+  } catch (e) {
+    engineCatalog = [{id: 'builtin', kind: 'builtin', name: '内蔵（Deep Research Tool）', health: 'available',
+      description: 'このツール自身の調査ループ', needs: '', flow: []}];
+  }
+  engineById = Object.fromEntries(engineCatalog.map(e => [e.id, e]));
+  renderEngineCards();
+}
+function renderEngineCards() {
+  const box = $('engineModes');
+  if (!box) return;
+  const wanted = pendingEngineSelection || radioValue('research_engine') || 'builtin';
+  pendingEngineSelection = null;
+  const list = engineCatalog.length ? engineCatalog : [{id: 'builtin', kind: 'builtin', name: '内蔵', health: 'available'}];
+  const selectable = new Set(list.filter(e => e.health === 'available').map(e => e.id));
+  const current = selectable.has(wanted) ? wanted : 'builtin';
+  box.innerHTML = list.map(e => {
+    const ok = e.health === 'available';
+    const sel = e.id === current;
+    const title = e.kind === 'builtin' ? '内蔵' : e.name;
+    const sub = e.kind === 'builtin' ? 'このツールの調査ループ（既定）'
+      : (e.kind === 'mock' ? '開発用モック（通信なし）' : '別の Python 環境で実行');
+    const fix = (!ok && e.kind === 'external' && e.health !== 'planned')
+      ? ' <a href="#" class="engine-setup">設定を開く</a>' : '';
+    return `<label class="mode-card${sel ? ' sel' : ''}${ok ? '' : ' disabled'}" title="${escapeHtml(e.description || '')}" data-engine="${escapeHtml(e.id)}">
+      <input type="radio" name="research_engine" value="${escapeHtml(e.id)}"${sel ? ' checked' : ''}${ok ? '' : ' disabled'}>
+      <span class="t">${escapeHtml(title)}${e.kind === 'builtin' ? '' : engineBadge(e)}${e.version && e.kind !== 'builtin' ? `<span class="v">${escapeHtml(String(e.version))}</span>` : ''}</span>
+      <span class="d">　${escapeHtml(sub)}</span>
+      ${!ok && e.reason ? `<span class="r">${escapeHtml(e.reason)}${fix}</span>` : ''}
+    </label>`;
+  }).join('');
+  box.classList.toggle('mode-cards-3', list.length <= 3);
+  box.classList.toggle('mode-cards-auto', list.length > 3);
+  box.querySelectorAll('.engine-setup').forEach(a => a.addEventListener('click', ev => {
+    ev.preventDefault(); ev.stopPropagation(); openSettingsTab('tabFeatures');
+  }));
+  box.querySelectorAll('input[name=research_engine]').forEach(inp => inp.addEventListener('change', () => {
+    syncModeCards('research_engine'); applyModeVisibility(); updateSummaryStrip();
+  }));
+  applyModeVisibility();
+  updateSummaryStrip();
+}
+function renderEngineInfo(eng, external) {
+  const flow = $('engineFlow'), needs = $('engineNeeds'), notice = $('engineNotice');
+  if (!flow) return;
+  const steps = (eng && Array.isArray(eng.flow)) ? eng.flow : [];
+  flow.innerHTML = steps.map((s, i) => `<span class="${external && i === 0 ? 'ext' : ''}">${escapeHtml(s)}</span>`).join('<i>→</i>');
+  needs.textContent = eng && eng.needs ? '通信先: ' + eng.needs : '';
+  if (external && eng) {
+    notice.className = 'banner notice';
+    notice.textContent = `${eng.name} が計画・検索・執筆を行い、本文と出典をこのツールに取り込みます。手元の資料と開始前の計画確認は使えません（エンジンが独自に計画します）。取り込み後の根拠の取得・検証・出力はこのツールが行います。`;
+  } else {
+    notice.className = 'banner';
+    notice.textContent = '';
+  }
+}
+if ($('feat_engine_mocks')) $('feat_engine_mocks').addEventListener('change', loadEngines);
 
 // mode card selection highlight (per radio group). The radios themselves
 // stay keyboard-operable (arrow keys / Space); the card is just the visual.
@@ -1948,8 +2111,10 @@ function clearFieldErrors() {
   document.querySelectorAll('.invalid').forEach(el => el.classList.remove('invalid'));
   document.querySelectorAll('.field-err').forEach(el => el.remove());
 }
+// server field names that are not an input id (the message goes next to the cards)
+const FIELD_ALIASES = {research_engine: 'engineModes'};
 function showFieldError(id, message) {
-  const el = $(id);
+  const el = $(id) || (FIELD_ALIASES[id] ? $(FIELD_ALIASES[id]) : null);
   if (!el) return false;
   el.classList.add('invalid');
   const span = document.createElement('span');
@@ -2125,10 +2290,13 @@ function collectParams() {
     // all providers' keys are sent so per-stage overrides can mix providers
     ...settingsParams(),
     run_mode: radioValue('run_mode') || 'research_verify',
+    research_engine: radioValue('research_engine') || 'builtin',
   };
   // the form's run mode is authoritative over the 機能 tab switch:
   // 調査のみ = no verification; the other two modes verify
   params.enable_verification = params.run_mode !== 'research_only';
+  // an external engine makes its own plan and reads the Web only
+  if (params.research_engine !== 'builtin') { params.plan_review = false; params.source_mode = 'web'; }
   if ($('search_region').value && $('search_region').value !== 'wt-wt')
     params.search_region = $('search_region').value;
   if (params.iterations !== undefined && params.max_iterations !== undefined
@@ -2909,6 +3077,25 @@ function renderResumePlan(rp) {
     </div>`;
 }
 
+function renderEngineSummary(e) {
+  if (!e || !e.id) return '';
+  const m = e.metrics || {}, ing = e.ingest || {};
+  const rows = [
+    `<span>エンジン: <b>${escapeHtml(e.name || e.id)}</b>${e.version ? ' ' + escapeHtml(String(e.version)) : ''}</span>`,
+    e.elapsed_seconds !== null && e.elapsed_seconds !== undefined ? `<span>エンジンの所要時間: <b>${fmtSec(e.elapsed_seconds)}</b></span>` : '',
+    ing.sources !== undefined ? `<span>取り込んだ情報源: <b>${ing.sources}</b> 件（ページ取得 ${ing.fetched || 0}・抜粋のみ ${ing.excerpt_only || 0}）</span>` : '',
+    m.searches !== null && m.searches !== undefined ? `<span>エンジンの検索回数: <b>${m.searches}</b></span>` : '',
+    m.total_tokens !== null && m.total_tokens !== undefined ? `<span>エンジンのトークン: <b>${Number(m.total_tokens).toLocaleString()}</b></span>` : '<span>エンジンのトークン: <b>不明</b>（エンジンが報告しません）</span>',
+    m.llm_cost_usd !== null && m.llm_cost_usd !== undefined ? `<span>エンジンの LLM 費用: <b>$${Number(m.llm_cost_usd).toFixed(4)}</b>${m.llm_cost_is_estimate ? '（推定）' : ''}</span>` : '',
+    e.llm && e.llm.model ? `<span>エンジンの LLM: <b>${escapeHtml(e.llm.model)}</b>（${escapeHtml(e.llm.api || '')}）</span>` : '',
+    e.resumed && e.resumed.reused && e.resumed.reused.length ? '<span>エンジンの結果を再利用しました（再実行なし）</span>' : '',
+  ].filter(Boolean);
+  const files = Object.values(e.artifacts || {}).map(p => `<b>${escapeHtml(String(p).split(/[\\/]/).pop())}</b>`).join('・');
+  return `<label style="margin-top:10px">🔌 調査エンジン</label>
+    <div class="exec-summary" style="margin-top:4px">${rows.join('')}${files ? `<span>エンジンの生出力: ${files}</span>` : ''}</div>
+    ${(e.warnings || []).length ? `<div class="warn-row"><b>エンジンからの注意:</b> ${e.warnings.map(w => escapeHtml(String(w))).join(' / ')}</div>` : ''}`;
+}
+
 let currentResult = null;
 
 function showResults(result, jobId, pinned) {
@@ -2945,6 +3132,7 @@ function showResults(result, jobId, pinned) {
     ${result.regenerated_from ? `<p class="hint">保存済みの調査結果から再出力しました（元データ: ${result.regenerated_from === 'final_body' ? '検証済みの最終本文' : '章本文（未検証・草稿）'}、検索・LLM呼び出しなし）</p>` : ''}
     ${result.kind === 'verify' && result.verify_source ? `<p class="hint">検証のみ: ${result.verify_source.mode === 'session' ? '保存済みの調査' : '外部レポート'}の本文 ${result.verify_source.chapters} 章を、根拠 ${result.verify_source.evidence_items} 件（開始時）と照合しました（調査ループなし）</p>` : ''}
     ${renderResumePlan(result.resume_plan)}
+    ${renderEngineSummary(result.engine)}
     ${renderTimings(result.timings)}
     ${renderConcurrency(result.performance)}
     ${renderRouting(result.llm_routing || (result.performance && result.performance.llm_routing))}
@@ -3320,19 +3508,46 @@ function applyModeVisibility() {
   $('verifyOnlyBox').style.display = runMode === 'verify_only' ? 'block' : 'none';
   $('startBtn').textContent = runMode === 'verify_only' ? '🔍 検証を開始' :
     (runMode === 'research_only' ? '🚀 調査を開始（検証なし）' : '🚀 調査を開始');
+  // --- research engine: an external engine plans / searches / writes by
+  // itself, from the Web only — local documents and the plan review are
+  // shown greyed with the reason, never silently ignored
+  const engine = radioValue('research_engine') || 'builtin';
+  const external = engine !== 'builtin';
+  const eng = engineById[engine] || null;
+  if ($('engineBox')) $('engineBox').style.display = runMode === 'verify_only' ? 'none' : '';
+  document.querySelectorAll('#sourceModes .mode-card').forEach(card => {
+    const inp = card.querySelector('input');
+    const off = external && inp.value !== 'web';
+    card.classList.toggle('disabled', off);
+    inp.disabled = off;
+    card.title = off ? `${eng ? eng.name : 'この調査エンジン'}では手元の資料を使えません（内蔵エンジンを選んでください）` : '';
+  });
+  if (external && radioValue('source_mode') !== 'web') setRadio('source_mode', 'web');
+  const pr = $('plan_review');
+  if (external) {
+    if (pr.checked) { pr.dataset.wasChecked = '1'; pr.checked = false; }
+    pr.disabled = true; $('plan_review_mode').disabled = true;
+  } else {
+    pr.disabled = false; $('plan_review_mode').disabled = false;
+    if (pr.dataset.wasChecked) { pr.checked = true; delete pr.dataset.wasChecked; }
+  }
+  pr.closest('label').classList.toggle('disabled', external);
+  renderEngineInfo(eng, external);
   const source = radioValue('source_mode');
   const needsDocs = source === 'local' || source === 'hybrid';
   $('localDocsBox').style.display = needsDocs ? 'block' : 'none';
   const web = source !== 'local';
+  // the crawl mode is the built-in loop's: an external engine crawls by itself
+  const crawlIds = new Set(['crawlModes', 'crawlLabel']);
   Array.from($('webCollectBody').children).forEach(el => {
     if (el.id === 'webCollectHidden') el.style.display = web ? 'none' : 'block';
-    else el.style.display = web ? '' : 'none';
+    else el.style.display = (web && !(external && crawlIds.has(el.id))) ? '' : 'none';
   });
   $('refresh_fetched').closest('label').style.display = web ? '' : 'none';
   const crawl = radioValue('crawl_mode');
   document.querySelectorAll('[data-crawl]').forEach(el => {
     const modes = (el.dataset.crawl || '').split(/\s+/);
-    el.style.display = (web && modes.includes(crawl)) ? '' : 'none';
+    el.style.display = (web && !external && modes.includes(crawl)) ? '' : 'none';
   });
   const v2 = $('report_version').value === 'v2';
   $('v2_writing_style').closest('div').style.display = v2 ? '' : 'none';
@@ -3427,6 +3642,8 @@ function updateSummaryStrip() {
   }
   items.push(['再利用', $('cache_reuse').checked ? ($('refresh_fetched').checked ? 'ON（鮮度優先で更新確認）' : 'ON') : 'OFF']);
   items.push(['計画確認', $('plan_review').checked ? ($('plan_review_mode').value === 'auto60' ? '60秒で自動開始' : '操作を待つ') : 'なし']);
+  const engine = radioValue('research_engine') || 'builtin';
+  if (engine !== 'builtin') items.unshift(['エンジン', (engineById[engine] || {}).name || engine]);
   $('summaryStrip').innerHTML = items.map(([k, v]) => `<span>${escapeHtml(k)}: <b>${escapeHtml(v)}</b></span>`).join('');
 }
 
@@ -3652,7 +3869,7 @@ function renderHistory(records) {
     return `<div class="hist-row" data-job="${escapeHtml(r.job_id)}">
       <div class="q">${escapeHtml(r.query || '(無題)')}</div>
       <div class="meta">${HIST_STATE[r.state] || escapeHtml(r.state || '')} ・ ${fmtDate(r.started_at || r.created_at)} ・ ${fmtSec(r.elapsed_seconds)}
-        ・ ${escapeHtml(LABELS.source_mode[ps.source_mode] || ps.source_mode || '')}${ps.research_preset ? ' ・ ' + escapeHtml((RESEARCH_PRESETS[ps.research_preset] || {}).label || ps.research_preset) : ''}
+        ・ ${escapeHtml(LABELS.source_mode[ps.source_mode] || ps.source_mode || '')}${ps.research_preset ? ' ・ ' + escapeHtml((RESEARCH_PRESETS[ps.research_preset] || {}).label || ps.research_preset) : ''}${ps.research_engine && ps.research_engine !== 'builtin' ? ' ・ エンジン: ' + escapeHtml((engineById[ps.research_engine] || {}).name || ps.research_engine) : ''}
         ${axes.verification ? '<div>' + statusBadges(axes, res) + '</div>' : ''}</div>
       <div class="acts">
         ${(res.report_path || Object.keys(saved).length) ? '<button type="button" class="secondary" data-act="show">結果を見る</button>' : ''}
@@ -3791,7 +4008,7 @@ const FORM_TEXT_IDS = ['requirements', 'language', 'output_format', 'iterations'
 const FORM_CHECK_IDS = ['cache_reuse', 'refresh_fetched', 'waf_mitigation', 'auto_figures',
   'v2_enable_polish', 'live_report_word', 'plan_review', 'verification_cache_enabled',
   'include_toc', 'include_citations', 'include_images'];
-const FORM_RADIOS = ['run_mode', 'source_mode', 'deliverable', 'research_preset', 'crawl_mode', 'verification_profile'];
+const FORM_RADIOS = ['run_mode', 'research_engine', 'source_mode', 'deliverable', 'research_preset', 'crawl_mode', 'verification_profile'];
 
 function formSnapshot() {
   const s = {text: {}, check: {}, radio: {}, stages: {}};
@@ -3864,6 +4081,8 @@ function applyParamsToForm(params, query) {
   if (query !== undefined) $('query').value = query || '';
   const p = params || {};
   FORM_RADIOS.forEach(n => { if (p[n] !== undefined) setRadio(n, p[n]); });
+  // the engine cards arrive from the server; keep the wish until they do
+  if (p.research_engine && radioValue('research_engine') !== p.research_engine) pendingEngineSelection = p.research_engine;
   const skip = new Set(['query', 'local_documents', 'stage_llm', ...FORM_RADIOS,
     ...Object.keys(SETTINGS_FIELDS).map(k => SETTINGS_FIELDS[k]), ...Object.values(SECRET_FIELDS)]);
   Object.entries(p).forEach(([k, v]) => {
@@ -4486,6 +4705,8 @@ document.addEventListener('pointerleave', () => document.querySelectorAll('.mode
 
 // initial load: pick up any jobs already running on the server
 pollJobs();
+// the 調査エンジン cards (availability is checked by the server)
+loadEngines();
 </script>
 </body>
 </html>

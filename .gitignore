@@ -53,3 +53,6 @@ pipeline_output/
 
 # J-Quants API取得データ(利用規約により再配布不可)
 stock-tracker/research/jquants_data.json
+
+# per-engine Python environments (deep_research_tool/scripts/setup_engine_venv.py)
+engines_venv/

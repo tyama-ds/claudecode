@@ -130,6 +130,13 @@ _CONFIG_PARAM_MAP = {
     "include_images": "include_images",
     "include_citations": "include_citations",
     "include_toc": "include_toc",
+    # research engine (builtin / gpt-researcher / open-deep-research / mock-*)
+    "research_engine": "research_engine",
+    "engine_python": "engine_python",
+    "engine_embedding_model": "engine_embedding_model",
+    "engine_options": "engine_options",
+    "engine_max_time_seconds": "engine_max_time_seconds",
+    "searx_url": "searx_url",
 }
 
 
@@ -206,7 +213,39 @@ def _int_range(lo, hi):
     return convert
 
 
+def _engine_id(value, name):
+    from ..engines import known_engine_ids
+    v = str(value or "").strip() or "builtin"
+    if v not in known_engine_ids(include_mocks=True):
+        raise ValueError(f"unknown research engine {v!r}")
+    return v
+
+
+def _str_mapping(value, name):
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be an object")
+    return {str(k): str(v) for k, v in value.items() if v not in (None, "")}
+
+
+def _mapping(value, name):
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be an object")
+    return dict(value)
+
+
+def _url_text(value, name):
+    v = str(value or "").strip()
+    if v and not v.lower().startswith(("http://", "https://")):
+        raise ValueError(f"{name} must start with http:// or https://")
+    return v
+
+
 _PARAM_CONVERTERS = {
+    "research_engine": _engine_id,
+    "engine_python": _str_mapping,
+    "engine_options": _mapping,
+    "engine_max_time_seconds": _int_range(60, 86400),
+    "searx_url": _url_text,
     "parallel_max_workers": _strict_workers,
     "research_section_workers": _int_range(1, 8),
     "verification_profile": _profile,
@@ -304,6 +343,29 @@ def build_config_kwargs(params: Dict[str, Any]) -> Dict[str, Any]:
         kwargs["stage_llm"] = cleaned_stages
 
     return kwargs
+
+
+def engine_request_error(params: Dict[str, Any]):
+    """(message, field) when the selected research engine cannot run with
+    these request parameters, else None. Checked BEFORE the job is
+    queued so the form shows the reason next to the engine cards."""
+    engine_id = str(params.get("research_engine") or "builtin").strip() or "builtin"
+    if engine_id == "builtin":
+        return None
+    from ..engines import check_engine_selectable, engine_display_name
+    engine_python = params.get("engine_python")
+    reason = check_engine_selectable(
+        engine_id, engine_python=engine_python if isinstance(engine_python, dict) else None)
+    if reason:
+        return reason, "research_engine"
+    name = engine_display_name(engine_id)
+    if params.get("local_documents"):
+        return (f"{name} は手元の資料を扱えません（使用する資料を「Web」にするか、"
+                "内蔵エンジンを選んでください）", "research_engine")
+    if str(params.get("source_mode") or "web") != "web":
+        return (f"{name} は Web 以外の資料（source_mode="
+                f"{params.get('source_mode')}）を扱えません", "research_engine")
+    return None
 
 
 SUPPORTED_DOC_SUFFIXES = {".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx", ".pptx"}
@@ -1008,6 +1070,9 @@ class JobManager:
             "output_dir": params.get("output_dir"),
             "timings": result.get("timings"),
             "resume_plan": result.get("resume_plan"),
+            # which research engine ran, and what it reported (None = builtin)
+            "research_engine": result.get("research_engine", "builtin"),
+            "engine": result.get("engine"),
             # measured performance (stage seconds, token usage,
             # configured vs observed concurrency) — numbers only
             "performance": result.get("performance"),
@@ -1506,6 +1571,18 @@ class WebUIHandler(BaseHTTPRequestHandler):
             self._serve_evidence((query.get("job_id") or [""])[0])
         elif route == "/api/version":
             self._send_json({"version": __version__})
+        elif route == "/api/engines":
+            # the 調査エンジン cards: availability is checked live (the
+            # engine's interpreter / package), mocks only on request
+            from ..engines import engine_catalog
+            query = parse_qs(parsed.query)
+            include_mocks = (query.get("mocks") or ["0"])[0] in ("1", "true", "yes")
+            try:
+                engines = engine_catalog(include_mocks=include_mocks)
+            except Exception as e:
+                self._send_json({"error": f"engine catalog failed: {e}"}, 500)
+                return
+            self._send_json({"default": "builtin", "engines": engines})
         elif route == "/api/jobs":
             manager: JobManager = self.server.job_manager
             self._send_json({
@@ -1587,7 +1664,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                "/api/cancel-verification",
                                "/api/cancel-run", "/api/precheck",
                                "/api/resume", "/api/regenerate",
-                               "/api/verify",
+                               "/api/verify", "/api/engines",
                                "/api/history/forget", "/api/fermi",
                                "/api/llm-parallel-test"):
             self._send_json({"error": "not found"}, 404)
@@ -1601,6 +1678,21 @@ class WebUIHandler(BaseHTTPRequestHandler):
             return
 
         manager: JobManager = self.server.job_manager
+
+        if parsed.path == "/api/engines":
+            # same catalog as GET, but with the browser's (unsaved) engine
+            # settings: interpreter paths typed in ⚙設定 and the mock toggle
+            from ..engines import engine_catalog
+            engine_python = params.get("engine_python")
+            try:
+                engines = engine_catalog(
+                    include_mocks=bool(params.get("mocks")),
+                    engine_python=engine_python if isinstance(engine_python, dict) else None)
+            except Exception as e:
+                self._send_json({"error": f"engine catalog failed: {e}"}, 500)
+                return
+            self._send_json({"default": "builtin", "engines": engines})
+            return
 
         if parsed.path == "/api/precheck":
             # readability pre-check of SERVER-side paths (never confused
@@ -1826,6 +1918,16 @@ class WebUIHandler(BaseHTTPRequestHandler):
         except ValueError as e:
             self._send_json({"error": f"invalid parameter: {e}"}, 400)
             return
+
+        # an external research engine: must be runnable here, Web sources
+        # only, and it makes its own plan (no plan review step)
+        engine_error = engine_request_error(params)
+        if engine_error is not None:
+            self._send_json({"error": engine_error[0], "field": engine_error[1]}, 400)
+            return
+        if str(params.get("research_engine") or "builtin") != "builtin":
+            params = dict(params)
+            params["plan_review"] = False
 
         try:
             job = manager.start(params)
