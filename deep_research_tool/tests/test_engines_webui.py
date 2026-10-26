@@ -15,6 +15,18 @@ from deep_research_tool.tests.test_e2e_pipeline import FakeLLM, FakeSearchClient
 from deep_research_tool.webui.server import FieldError, build_config_kwargs, engine_request_error
 
 
+@pytest.fixture(autouse=True)
+def _no_engine_venvs(tmp_path, monkeypatch):
+    """The catalog must not depend on this machine's engine virtualenvs."""
+    from deep_research_tool.engines import venv as venv_mod
+    monkeypatch.setenv("DRT_ENGINES_VENV_DIR", str(tmp_path / "no-venvs"))
+    for engine_id in venv_mod.ENGINE_SPECS:
+        monkeypatch.delenv(venv_mod.env_var_name(engine_id), raising=False)
+    venv_mod.clear_check_cache()
+    yield
+    venv_mod.clear_check_cache()
+
+
 def _get(server, path):
     port = server.server_address[1]
     try:
@@ -34,7 +46,10 @@ class TestEngineCatalogApi:
         assert status == 200 and d["default"] == "builtin"
         ids = [e["id"] for e in d["engines"]]
         assert ids == ["builtin", "gpt-researcher", "open-deep-research"]
-        assert d["engines"][1]["health"] == "planned"
+        assert d["engines"][1]["health"] == "needs_setup"      # implemented, no venv here
+        assert d["engines"][1]["setup_command"].endswith("setup_engine_venv gpt-researcher")
+        assert d["engines"][1]["options_schema"]["properties"]["report_type"]["enum"]
+        assert d["engines"][2]["health"] == "planned"
         status, d = _get(web, "/api/engines?mocks=1")
         assert "mock-fast" in [e["id"] for e in d["engines"]]
         status, d = _post(web, "/api/engines", {"mocks": True, "engine_python": {"gpt-researcher": "/nope"}})
@@ -65,8 +80,13 @@ class TestEngineRequestValidation:
     def test_engine_request_error(self):
         assert engine_request_error({}) is None
         assert engine_request_error({"research_engine": "mock-fast"}) is None
-        msg, field = engine_request_error({"research_engine": "gpt-researcher"})
+        msg, field = engine_request_error({"research_engine": "open-deep-research"})
         assert field == "research_engine" and "まだ使えません" in msg
+        msg, field = engine_request_error({"research_engine": "gpt-researcher"})
+        assert field == "research_engine" and "Python 環境がありません" in msg
+        msg, _ = engine_request_error({"research_engine": "gpt-researcher",
+                                       "engine_python": {"gpt-researcher": "/no/such/python"}})
+        assert "/no/such/python" in msg
         msg, _ = engine_request_error({"research_engine": "mock-fast", "local_documents": ["a.pdf"]})
         assert "手元の資料" in msg
         msg, _ = engine_request_error({"research_engine": "mock-fast", "source_mode": "hybrid"})
@@ -74,6 +94,7 @@ class TestEngineRequestValidation:
 
     def test_api_rejects_before_queueing(self, web):
         for extra, field in [({"research_engine": "gpt-researcher"}, "research_engine"),
+                             ({"research_engine": "open-deep-research"}, "research_engine"),
                              ({"research_engine": "zzz"}, "research_engine"),
                              ({"research_engine": "mock-fast", "local_documents": ["x"]}, "research_engine"),
                              ({"research_engine": "mock-fast", "source_mode": "local"}, "research_engine"),

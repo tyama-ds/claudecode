@@ -47,6 +47,18 @@ class FakeSearch:
 # ----------------------------------------------------------------------
 # registry / catalog
 # ----------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _no_engine_venvs(tmp_path, monkeypatch):
+    """Catalog answers must not depend on whether this machine has the
+    engine virtualenvs: point the default location at an empty folder."""
+    monkeypatch.setenv("DRT_ENGINES_VENV_DIR", str(tmp_path / "no-venvs"))
+    for engine_id in venv_mod.ENGINE_SPECS:
+        monkeypatch.delenv(venv_mod.env_var_name(engine_id), raising=False)
+    venv_mod.clear_check_cache()
+    yield
+    venv_mod.clear_check_cache()
+
+
 class TestRegistry:
     def test_known_ids_and_names(self):
         ids = known_engine_ids()
@@ -63,9 +75,13 @@ class TestRegistry:
         assert [e["id"] for e in cat] == ["builtin", "gpt-researcher", "open-deep-research"]
         assert cat[0]["health"] == "available" and cat[0]["kind"] == "builtin"
         for e in cat[1:]:
-            assert e["kind"] == "external" and e["health"] == "planned"
-            assert "未実装" in e["reason"] and e["flow"] and e["needs"]
+            assert e["kind"] == "external" and e["flow"] and e["needs"]
             assert e["version"] == EXTERNAL_ENGINES[e["id"]]["version"]
+        # GPT Researcher is implemented: without its virtualenv it needs setup
+        assert cat[1]["id"] == "gpt-researcher" and cat[1]["health"] == "needs_setup"
+        assert "setup_engine_venv gpt-researcher" in cat[1]["reason"]
+        assert cat[2]["id"] == "open-deep-research" and cat[2]["health"] == "planned"
+        assert "未実装" in cat[2]["reason"]
         with_mocks = engine_catalog(include_mocks=True)
         mocks = [e for e in with_mocks if e["kind"] == "mock"]
         assert {m["id"] for m in mocks} == {"mock-fast", "mock-slow", "mock-fail",
@@ -80,11 +96,14 @@ class TestRegistry:
             get_engine("mock-nope")
         with pytest.raises(EngineUnavailable, match="不明な調査エンジン"):
             get_engine("zzz")
-        with pytest.raises(EngineUnavailable, match="まだ使えません"):
+        with pytest.raises(EngineUnavailable, match="使えません: .*Python 環境がありません"):
             get_engine("gpt-researcher")
+        with pytest.raises(EngineUnavailable, match="まだ使えません"):
+            get_engine("open-deep-research")
         assert check_engine_selectable("builtin") is None
         assert check_engine_selectable("mock-fast") is None
         assert "まだ使えません" in check_engine_selectable("open-deep-research")
+        assert "Python 環境がありません" in check_engine_selectable("gpt-researcher")
 
     def test_create_config_validates_engine_fields(self):
         c = create_config(provider="openai", openai_api_key="x", research_engine="mock-fast",
@@ -471,8 +490,11 @@ class TestToolIntegration:
             tool.run(query="x")
         tool = build_tool(tmp_path / "u", FakeLLM(), FakeSearchClient(),
                           research_engine="mock-fast", enable_verification=False)
-        tool.config.research.research_engine = "gpt-researcher"
+        tool.config.research.research_engine = "open-deep-research"
         with pytest.raises(ValueError, match="まだ使えません"):
+            tool.run(query="x")
+        tool.config.research.research_engine = "gpt-researcher"
+        with pytest.raises(ValueError, match="Python 環境がありません"):
             tool.run(query="x")
 
     def test_run_config_snapshot_records_the_engine(self, tmp_path):

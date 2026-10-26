@@ -40,6 +40,23 @@ STAGE_LABELS = {
     "planning": "計画", "searching": "検索", "reading": "読み込み",
     "writing": "執筆", "starting_worker": "ワーカー起動", "finalizing": "仕上げ",
     "research": "調査", "report": "レポート作成", "draft": "下書き",
+    # gpt-researcher worker stages (ours + the library's research steps)
+    "conduct_research": "調査（検索と読み込み）", "write_report": "レポート執筆",
+    "start": "開始", "conducting_research": "検索と読み込み",
+    "research_completed": "調査完了", "writing_report": "レポート執筆",
+    "report_completed": "レポート完成",
+    "action:plan": "計画", "action:search": "検索", "action:scrape": "ページ取得",
+    "action:write": "執筆",
+}
+# where a stage sits in the engine's 10–85 progress band when the engine
+# reports no step / total (fractions of the band; the bar never moves back)
+STAGE_FRACTION = {
+    "starting_worker": 0.02, "planning": 0.05, "action:plan": 0.05, "start": 0.05,
+    "conduct_research": 0.10, "conducting_research": 0.12,
+    "searching": 0.25, "action:search": 0.25,
+    "reading": 0.45, "action:scrape": 0.45, "research_completed": 0.65,
+    "write_report": 0.72, "writing_report": 0.75,
+    "writing": 0.80, "action:write": 0.80, "finalizing": 0.95, "report_completed": 0.98,
 }
 
 ENGINE_PROGRESS_START = 10.0   # the research slice starts here (see ProgressPlan)
@@ -330,13 +347,18 @@ class EngineResearcher:
         if etype == "stage":
             stage = str(payload.get("stage") or "")
             label = STAGE_LABELS.get(stage, stage)
+            if label == stage and stage.startswith("action:"):
+                label = stage.split(":", 1)[1]
             step = payload.get("step")
             total = payload.get("total")
             pct = None
+            band = ENGINE_PROGRESS_END - ENGINE_PROGRESS_START
             try:
                 if total and int(total) > 0:
                     frac = max(0.0, min(1.0, (float(step) - 1.0) / float(total)))
-                    pct = ENGINE_PROGRESS_START + frac * (ENGINE_PROGRESS_END - ENGINE_PROGRESS_START)
+                    pct = ENGINE_PROGRESS_START + frac * band
+                elif stage in STAGE_FRACTION:
+                    pct = ENGINE_PROGRESS_START + STAGE_FRACTION[stage] * band
             except (TypeError, ValueError):
                 pct = None
             self.current_activity = {"phase": "engine", "engine": name,
@@ -351,9 +373,11 @@ class EngineResearcher:
             t = payload.get("title") or payload.get("url") or ""
             self._report(f"Researching ({name}): 情報源 {t}", None)
         elif etype in ("log", "status"):
-            msg = payload.get("message") or payload.get("status") or ""
+            if payload.get("content") == "report_chunk":
+                return                      # streamed body chunks: not a log line each
+            msg = " ".join(str(payload.get("message") or payload.get("status") or "").split())
             if msg:
-                self._report(f"Researching ({name}): {msg}", None)
+                self._report(f"Researching ({name}): {msg[:200]}", None)
         elif etype == "warning":
             msg = str(payload.get("message") or payload)
             self.engine_warnings.append(msg)

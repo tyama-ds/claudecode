@@ -253,6 +253,12 @@ details .body { padding: 0 2px 14px; }
 .engine-flow span { border: 1px solid var(--border); border-radius: 999px; padding: 1px 9px; background: var(--bg); }
 .engine-flow span.ext { border-color: var(--accent); color: var(--text); background: var(--accent-soft); font-weight: 700; }
 .engine-flow i { font-style: normal; opacity: .6; }
+/* engine-specific options rendered from the engine's options_schema */
+.engine-options { margin-top: 8px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px 14px; }
+.engine-options > div { display: grid; gap: 2px; }
+.engine-options label { margin: 0; font-size: 11.5px; }
+.engine-options .hint { margin: 0; }
+.engine-options .eo-title { grid-column: 1 / -1; font-size: 12px; font-weight: 700; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
 .chip { border: 1px solid var(--border); background: var(--bg); border-radius: 999px; padding: 3px 10px; font-size: 11.5px; cursor: pointer; color: var(--text); }
 .chip:hover, .chip:focus-visible { border-color: var(--accent); outline: none; }
@@ -1008,6 +1014,7 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
       <div class="engine-flow" id="engineFlow" aria-live="polite"></div>
       <p class="hint" id="engineNeeds"></p>
       <div class="banner" id="engineNotice" aria-live="polite"></div>
+      <div id="engineOptions" class="engine-options" style="display:none"></div>
     </div>
 
     <!-- 1. 何を調べるか -->
@@ -2024,9 +2031,59 @@ function renderEngineCards() {
   applyModeVisibility();
   updateSummaryStrip();
 }
+// engine options (options_schema → inputs). Values live on the inputs;
+// collectEngineOptions() reads them back for the request.
+let engineOptionsFor = null;
+function renderEngineOptions(eng, external) {
+  const box = $('engineOptions');
+  if (!box) return;
+  const props = (eng && eng.options_schema && eng.options_schema.properties) || {};
+  const keys = Object.keys(props);
+  if (!external || !keys.length) { box.style.display = 'none'; box.innerHTML = ''; engineOptionsFor = null; return; }
+  if (engineOptionsFor === eng.id && box.children.length) { box.style.display = ''; return; }
+  engineOptionsFor = eng.id;
+  box.innerHTML = `<div class="eo-title">${escapeHtml(eng.name)} の設定</div>` + keys.map(k => {
+    const s = props[k] || {};
+    const id = 'eo_' + k.replace(/[^a-z0-9_]/gi, '_');
+    const label = escapeHtml(s.title || k);
+    const desc = s.description ? `<p class="hint">${escapeHtml(s.description)}</p>` : '';
+    let input;
+    if (Array.isArray(s.enum)) {
+      input = `<select id="${id}" data-opt="${escapeHtml(k)}" data-type="${escapeHtml(s.type || 'string')}">${s.enum.map(v =>
+        `<option value="${escapeHtml(String(v))}"${String(v) === String(s.default) ? ' selected' : ''}>${escapeHtml(String(v))}</option>`).join('')}</select>`;
+    } else if (s.type === 'boolean') {
+      input = `<label class="check" style="margin:0"><input type="checkbox" id="${id}" data-opt="${escapeHtml(k)}" data-type="boolean"${s.default ? ' checked' : ''}> ${label}</label>`;
+      return `<div>${input}${desc}</div>`;
+    } else if (s.type === 'integer' || s.type === 'number') {
+      const attrs = [s.minimum !== undefined ? `min="${s.minimum}"` : '', s.maximum !== undefined ? `max="${s.maximum}"` : '',
+        s.type === 'number' ? 'step="any"' : 'step="1"'].filter(Boolean).join(' ');
+      input = `<input type="number" id="${id}" data-opt="${escapeHtml(k)}" data-type="${s.type}" ${attrs} value="${s.default !== undefined ? escapeHtml(String(s.default)) : ''}">`;
+    } else {
+      input = `<input type="text" id="${id}" data-opt="${escapeHtml(k)}" data-type="string" value="${s.default !== undefined ? escapeHtml(String(s.default)) : ''}">`;
+    }
+    return `<div><label for="${id}">${label}</label>${input}${desc}</div>`;
+  }).join('');
+  box.style.display = '';
+}
+function collectEngineOptions() {
+  const box = $('engineOptions');
+  const out = {};
+  if (!box || box.style.display === 'none') return out;
+  box.querySelectorAll('[data-opt]').forEach(el => {
+    const k = el.dataset.opt, t = el.dataset.type;
+    if (t === 'boolean') { out[k] = !!el.checked; return; }
+    const raw = (el.value || '').trim();
+    if (raw === '') return;
+    if (t === 'integer') { const n = parseInt(raw, 10); if (!Number.isNaN(n)) out[k] = n; }
+    else if (t === 'number') { const n = parseFloat(raw); if (!Number.isNaN(n)) out[k] = n; }
+    else out[k] = raw;
+  });
+  return out;
+}
 function renderEngineInfo(eng, external) {
   const flow = $('engineFlow'), needs = $('engineNeeds'), notice = $('engineNotice');
   if (!flow) return;
+  renderEngineOptions(eng, external);
   const steps = (eng && Array.isArray(eng.flow)) ? eng.flow : [];
   flow.innerHTML = steps.map((s, i) => `<span class="${external && i === 0 ? 'ext' : ''}">${escapeHtml(s)}</span>`).join('<i>→</i>');
   needs.textContent = eng && eng.needs ? '通信先: ' + eng.needs : '';
@@ -2296,7 +2353,11 @@ function collectParams() {
   // 調査のみ = no verification; the other two modes verify
   params.enable_verification = params.run_mode !== 'research_only';
   // an external engine makes its own plan and reads the Web only
-  if (params.research_engine !== 'builtin') { params.plan_review = false; params.source_mode = 'web'; }
+  if (params.research_engine !== 'builtin') {
+    params.plan_review = false; params.source_mode = 'web';
+    const opts = collectEngineOptions();
+    if (Object.keys(opts).length) params.engine_options = opts;
+  }
   if ($('search_region').value && $('search_region').value !== 'wt-wt')
     params.search_region = $('search_region').value;
   if (params.iterations !== undefined && params.max_iterations !== undefined

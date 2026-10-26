@@ -907,8 +907,8 @@ v1.6.0 で、これまで LLM を 1 本ずつしか呼んでいなかった工�
 | エンジン | 内容 | この版での状態 |
 |---|---|---|
 | 内蔵（既定） | このツール自身の調査ループ。手元の資料・計画確認・全クロールモードが使える | 利用可能 |
-| GPT Researcher | 専用の Python 環境（3.12 以上）で別プロセスとして実行し、本文と出典を取り込む | 未実装（カードはグレー。次の更新で対応） |
-| Open Deep Research | LangChain の多段エージェント。同じく別環境で実行 | 未実装（同上） |
+| GPT Researcher | gpt-researcher 0.16.0 を専用の Python 環境（3.12 以上）で別プロセスとして実行し、本文と出典を取り込む | 利用可能（環境を作成すると「利用可能」、無ければ「要設定」と作成コマンド） |
+| Open Deep Research | LangChain の多段エージェント。同じく別環境で実行 | 未実装（カードはグレー。次の更新で対応） |
 | モック（mock-fast / mock-slow / mock-fail / mock-partial / mock-timeout / mock-cancellable） | 通信を行わない決定論的エンジン。取り込み経路の確認とテスト用 | ⚙設定 → 機能 →「モック調査エンジンを表示（開発用）」を ON にするとカードに出る |
 
 画面では「新規調査」の実行モードの下に「調査エンジン」のカード行が出ます（利用可能 / 要設定 / 未対応 / 未実装 のバッジと理由、流れの帯、通信先）。利用できないカードは選べません。外部エンジンを選ぶと「手元の資料」と「開始前の計画確認」はグレー表示になり（エンジンが独自に計画するため。API では 400 で拒否）、クロールモードは隠れます。
@@ -927,6 +927,17 @@ v1.6.0 で、これまで LLM を 1 本ずつしか呼んでいなかった工�
 設定: `create_config(research_engine="builtin"|"gpt-researcher"|"open-deep-research"|"mock-*", engine_python={engine_id: Pythonのパス}, engine_embedding_model=..., engine_options={...}, engine_max_time_seconds=1800, searx_url=None)`。Web UI は同名のパラメータ（`/api/research`）と `GET /api/engines`（`?mocks=1`）／`POST /api/engines`（`{"mocks": true, "engine_python": {...}}`）でカードの一覧と利用可否を返します。外部エンジンの環境は `python3.12 -m deep_research_tool.scripts.setup_engine_venv <engine-id>` で `engines_venv/<engine-id>` に作成します（別の場所に作ったときは ⚙設定 → 機能 のパス欄、または環境変数 `DRT_ENGINE_PYTHON_<ENGINE_ID>`、`DRT_ENGINES_VENV_DIR`）。LLM は設定中のプロバイダをそのまま渡します（OpenAI 互換のエンドポイント・モデル・キー。ローカルLLM は `local_base_url`（Ollama は `/v1` を補う）、Anthropic は Open Deep Research のみ）。埋め込みモデルの既定は OpenAI `text-embedding-3-small`、Ollama `nomic-embed-text`。検索は `searx_url` があれば SearXNG、無ければ DuckDuckGo。
 
 結果（`run()` の戻り値・履歴）には `research_engine` と `engine`（名前・版・所要時間・エンジンが報告した指標（検索回数・トークン・費用。報告しないエンジンは不明のまま）・取り込み件数・生出力の場所・LLM の割り当て）が入り、結果タブの概要に「🔌 調査エンジン」として表示します。
+
+### GPT Researcher（Phase 2）
+
+`deep_research_tool/engines/gptr/`。gpt-researcher は設定をプロセス全体の環境変数で受け取るため、実行ごとに `worker.py` を専用環境の Python でサブプロセスとして起動します（`engine.py` は gpt_researcher を import しません）。
+
+- **環境の作成**: `python3.12 deep_research_tool/scripts/setup_engine_venv.py gpt-researcher`（`engines_venv/gpt-researcher` に `gpt-researcher==0.16.0` と `ddgs==9.16.1` を入れます。0.16.0 の DuckDuckGo 検索は新しい `ddgs` パッケージを要求しますが依存に含まれていないため、こちらで固定しています）。作成後はカードが「利用可能 0.16.0」になります（1 分ごとに再確認）。
+- **ワーカーの環境変数は最小構成**: PATH / HOME / 証明書・プロキシ系だけを引き継ぎ、サーバー側の API キーや検索 API キー（TAVILY など）は渡しません。`RETRIEVER` は `searx_url` があれば `searx`、無ければ `duckduckgo`（ブラウザ検索＝Selenium の設定時は DuckDuckGo に置き換えて注意を出します）。既定の Tavily には決して戻りません。LLM は `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `FAST_LLM`=`SMART_LLM`=`STRATEGIC_LLM`=`openai:<モデル>`、埋め込みは `EMBEDDING=openai:<埋め込みモデル>`（必須。OpenAI は `text-embedding-3-small`、Ollama は `nomic-embed-text` が既定）。Anthropic は使えません（Open Deep Research で対応予定）。
+- **ワーカーの出力**: 起動直後に fd1 を stderr に付け替えて JSONL 専用の出力を確保するので、ライブラリの `print()` が混ざってもプロトコルは壊れません。進捗（エージェント選択・検索クエリ・取得ページ数）は実行中タブのログと「いま何をしているか」に流れ、API キーはエラー文でもマスクします。
+- **結果**: 本文は `write_report()` の Markdown、出典は `get_research_sources()`（題名・抜粋）＋ `get_source_urls()`。構造化の主張は返さず、トークン数も取得できません（費用は gpt-researcher 内蔵の OpenAI 価格表による推定）。**出典が 1 件も無い実行はエラー**にします（gpt-researcher は検索が空だと謝罪文を本文として返すため。DuckDuckGo への到達・プロキシ・SearXNG の URL と、ワーカーの stderr 末尾のエラーを添えます）。
+- **カードの設定欄**: エンジンを選ぶと `options_schema` から作った入力（レポートの種類 `research_report` / `detailed_report`、検索イテレーション数 1〜10）が出ます。送信は `engine_options`。
+- **検証**: 0.16.0 を本物の環境で起動し、偽の OpenAI 互換サーバーで計画→検索→執筆→取り込みまで通ることを確認しました（この開発環境は DuckDuckGo に到達できないため、検索結果ありの実行は実環境で確認してください）。
 
 ## 途中再開と通信断の再試行（v1.6.0）
 

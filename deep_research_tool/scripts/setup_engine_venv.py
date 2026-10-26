@@ -14,13 +14,27 @@ after the path is entered in ⚙設定 / the DRT_ENGINE_PYTHON_<ID> variable
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import subprocess
 import sys
 import venv
 from pathlib import Path
 
-from ..engines.venv import ENGINE_SPECS, env_var_name, venv_root
+
+def _load_venv_module():
+    """engines/venv.py by path: this script runs under a bare Python 3.12
+    that has none of the package's dependencies, so the package itself
+    (deep_research_tool/__init__) must not be imported."""
+    path = Path(__file__).resolve().parent.parent / "engines" / "venv.py"
+    spec = importlib.util.spec_from_file_location("_drt_engines_venv", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_venv = _load_venv_module()
+ENGINE_SPECS, env_var_name, venv_root = _venv.ENGINE_SPECS, _venv.env_var_name, _venv.venv_root
 
 
 def main(argv=None) -> int:

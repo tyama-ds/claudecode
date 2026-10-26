@@ -68,12 +68,14 @@ async def run_jsonl_worker(
     cwd: str,
     secrets: List[Optional[str]],
     term_grace_seconds: float = 5.0,
+    stderr_tail_out: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """JSONL プロトコルの worker サブプロセスを実行し、result payload を返す。
 
     - event は ctx.emit に転送
     - キャンセル要求で SIGTERM → SIGKILL
     - fatal / 異常終了は RuntimeError（API キーはマスク）
+    - ``stderr_tail_out`` に最後の 100 行（マスク済み）を残す（成功時の診断用）
     """
     proc = await asyncio.create_subprocess_exec(
         *argv,
@@ -143,11 +145,19 @@ async def run_jsonl_worker(
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
+        # the process is gone: let the drain read what is left (EOF comes
+        # at once), then stop it
+        try:
+            await asyncio.wait_for(asyncio.shield(stderr_task), timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            pass
         stderr_task.cancel()
         try:
             await stderr_task
         except asyncio.CancelledError:
             pass
+        if stderr_tail_out is not None:
+            stderr_tail_out.extend(redact_secrets(line, secrets) for line in stderr_tail)
 
     if fatal_error is not None:
         raise RuntimeError(redact_secrets(f"engine worker 失敗: {fatal_error}", secrets))

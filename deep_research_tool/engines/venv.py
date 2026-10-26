@@ -37,7 +37,9 @@ ENGINE_SPECS: Dict[str, Dict[str, Any]] = {
         "dist": "gpt-researcher",
         "version": "0.16.0",
         "min_python": (3, 12),
-        "packages": ["gpt-researcher==0.16.0"],
+        # 0.16.0's DuckDuckGo retriever imports the renamed ``ddgs`` package,
+        # which its own dependency list does not pull in
+        "packages": ["gpt-researcher==0.16.0", "ddgs==9.16.1"],
     },
     "open-deep-research": {
         "name": "Open Deep Research",
@@ -110,6 +112,11 @@ def _check_code(spec: Dict[str, Any]) -> str:
     return (
         "import sys, json\n"
         "out = {'python_version': '.'.join(map(str, sys.version_info[:3]))}\n"
+        # gpt-researcher 0.16.0 annotates with typing names it never imports;
+        # the worker installs the same shim before importing the package
+        "import builtins, typing\n"
+        "for _n in ('Any','List','Dict','Optional','Tuple','Set','Union','Callable','Iterable','Sequence'):\n"
+        "    hasattr(builtins, _n) or setattr(builtins, _n, getattr(typing, _n))\n"
         "try:\n"
         f"    import {mod}\n"
         "    out['ok'] = True\n"

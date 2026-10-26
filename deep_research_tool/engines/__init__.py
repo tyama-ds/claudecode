@@ -32,7 +32,7 @@ EXTERNAL_ENGINES: Dict[str, Dict[str, Any]] = {
     "gpt-researcher": {
         "name": "GPT Researcher",
         "version": ENGINE_SPECS["gpt-researcher"]["version"],
-        "implemented": False,
+        "implemented": True,
         "description": "GPT Researcher（別の Python 環境で実行）。独自に計画・検索・執筆した"
                        "本文と出典を取り込み、このツールの根拠管理と検証にかけます。",
         "needs": "LLM: 設定中のプロバイダ（OpenAI 互換 / ローカル、埋め込みモデル必須） / "
@@ -123,7 +123,10 @@ def get_engine(engine_id: str, config=None,
     entry = _external_entry(engine_id, config, engine_python)
     if entry["health"] != "available":
         raise EngineUnavailable(f"{spec['name']} は使えません: {entry.get('reason')}")
-    raise EngineUnavailable(f"{spec['name']} の実装が登録されていません")   # Phase 2/3
+    if engine_id == "gpt-researcher":
+        from .gptr.engine import GptResearcherEngine
+        return GptResearcherEngine(python_path=entry["python"])
+    raise EngineUnavailable(f"{spec['name']} の実装が登録されていません")   # Phase 3
 
 
 def _external_entry(engine_id: str, config=None,
@@ -141,6 +144,9 @@ def _external_entry(engine_id: str, config=None,
                      reason="このバージョンでは未実装です（次の更新で対応）",
                      setup_command=None, python=None)
         return entry
+    if engine_id == "gpt-researcher":
+        from .gptr.engine import GptResearcherEngine
+        entry["options_schema"] = GptResearcherEngine().capabilities().options_schema
     configured: Dict[str, str] = {}
     if config is not None:
         configured = dict(getattr(config.research, "engine_python", None) or {})

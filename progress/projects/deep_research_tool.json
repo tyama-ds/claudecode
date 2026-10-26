@@ -4,8 +4,8 @@
   "path": "deep_research_tool/",
   "summary": "Web検索→調査ループ→根拠管理→ハルシネーション検証→レポート生成（Markdown / DOCX / PDF）を自動で行うディープリサーチ。フェルミ推定・多言語検索・Web UI つき。",
   "status": "active",
-  "phase": "v1.7.0 に向けて調査エンジンの切り替えを実装中。Phase 1（契約・モック・取り込み経路・画面）を完了。次は GPT Researcher（Phase 2）→ Open Deep Research（Phase 3）",
-  "progress": 94,
+  "phase": "v1.7.0 に向けて調査エンジンの切り替えを実装中。Phase 1（契約・モック・取り込み経路・画面）と Phase 2（GPT Researcher）を完了。次は Open Deep Research（Phase 3）",
+  "progress": 95,
   "started": "2026-02-04",
   "version": "1.6.1",
   "ports": [
@@ -85,8 +85,8 @@
     }
   ],
   "next": [
-    "調査エンジン Phase 2: GPT Researcher（専用 Python 環境のワーカー・LLM/検索の受け渡し・実環境での確認）",
     "調査エンジン Phase 3: Open Deep Research（MCP 経由の検索・Anthropic 対応）",
+    "GPT Researcher を実環境（DuckDuckGo / SearXNG に到達できる端末・実 LLM）で 1 回通して所要時間と出典数を確認",
     "ローカルLLM 利用時の所要時間短縮（小節の個別処理・抽出チャンク数の見直し）",
     "テスト（53ファイル）の CI 化"
   ],
@@ -95,6 +95,10 @@
     "Selenium・Word COM など環境依存の経路がある"
   ],
   "log": [
+    {
+      "date": "2026-10-26",
+      "summary": "調査エンジン Phase 2: GPT Researcher（gpt-researcher 0.16.0）を移植。専用 Python 環境のワーカーを JSONL で駆動（最小構成の環境変数・検索は DuckDuckGo / SearXNG 固定・API キーのマスク・ddgs の固定ピンを追加）、出典ゼロの実行はエラー、ワーカーの段階を進捗バーに対応付け、環境の疎通確認に 0.16.0 の typing バグ回避を適用。カードに options_schema からの設定欄（レポートの種類・検索イテレーション数）を追加。本物の 0.16.0 を偽 OpenAI サーバーで起動し計画→検索→執筆→取り込みまで通ることを確認（検索到達は実環境で要確認）。テスト 16 件とブラウザ検査を追加"
+    },
     {
       "date": "2026-10-26",
       "summary": "調査エンジンの切り替え Phase 1（骨組み）: deep-research-orchestrator の Runner API v1（Engine / RunContext / RunRequest / RunResult）を engines/runner_core に移植し、JSONL ワーカー駆動・決定論的モック 6 種・エンジン結果の取り込み（章分割・出典の章割り当て・[SOURCE k] への引用橋渡し・ページ取得と抜粋のみ登録・生出力の保存）・Researcher 互換アダプタ（進捗・中止・制限時間・再開）・専用 Python 環境の解決と疎通確認・設定 6 項目・/api/engines を追加。新規調査に「調査エンジン」のカード行（利用可否バッジ・理由・流れ・通信先、外部エンジン選択時は手元の資料と計画確認をグレー）、⚙設定に環境のパス・埋め込みモデル・SearXNG・制限時間・モック表示、結果と履歴にエンジンの表示。GPT Researcher / Open Deep Research は未実装の表示（Phase 2/3）。テスト 3 ファイル 41 件とブラウザ検査を追加"
