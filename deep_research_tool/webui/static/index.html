@@ -1704,6 +1704,7 @@ let lastRenderedJobId = null;
 let engineCatalog = [];
 let engineById = {};
 let pendingEngineSelection = null;
+let pendingEngineOptions = null;     // engine_options to restore (条件を複製)
 
 const SETTINGS_FIELDS = {
   set_openai_url: 'openai_base_url',
@@ -2040,7 +2041,7 @@ function renderEngineOptions(eng, external) {
   const props = (eng && eng.options_schema && eng.options_schema.properties) || {};
   const keys = Object.keys(props);
   if (!external || !keys.length) { box.style.display = 'none'; box.innerHTML = ''; engineOptionsFor = null; return; }
-  if (engineOptionsFor === eng.id && box.children.length) { box.style.display = ''; return; }
+  if (engineOptionsFor === eng.id && box.children.length) { box.style.display = ''; applyEngineOptionValues(); return; }
   engineOptionsFor = eng.id;
   box.innerHTML = `<div class="eo-title">${escapeHtml(eng.name)} の設定</div>` + keys.map(k => {
     const s = props[k] || {};
@@ -2064,6 +2065,22 @@ function renderEngineOptions(eng, external) {
     return `<div><label for="${id}">${label}</label>${input}${desc}</div>`;
   }).join('');
   box.style.display = '';
+  applyEngineOptionValues();
+}
+// values a duplicated run carried (engine_options) go into the inputs once
+// the form for that engine exists; unknown keys are ignored
+function applyEngineOptionValues() {
+  const vals = pendingEngineOptions;
+  if (!vals || typeof vals !== 'object') return;
+  const box = $('engineOptions');
+  let applied = false;
+  box.querySelectorAll('[data-opt]').forEach(el => {
+    const k = el.dataset.opt;
+    if (!(k in vals)) return;
+    if (el.dataset.type === 'boolean') el.checked = !!vals[k]; else el.value = String(vals[k]);
+    applied = true;
+  });
+  if (applied) pendingEngineOptions = null;
 }
 function collectEngineOptions() {
   const box = $('engineOptions');
@@ -4144,6 +4161,7 @@ function applyParamsToForm(params, query) {
   FORM_RADIOS.forEach(n => { if (p[n] !== undefined) setRadio(n, p[n]); });
   // the engine cards arrive from the server; keep the wish until they do
   if (p.research_engine && radioValue('research_engine') !== p.research_engine) pendingEngineSelection = p.research_engine;
+  pendingEngineOptions = (p.engine_options && typeof p.engine_options === 'object') ? {...p.engine_options} : null;
   const skip = new Set(['query', 'local_documents', 'stage_llm', ...FORM_RADIOS,
     ...Object.keys(SETTINGS_FIELDS).map(k => SETTINGS_FIELDS[k]), ...Object.values(SECRET_FIELDS)]);
   Object.entries(p).forEach(([k, v]) => {
