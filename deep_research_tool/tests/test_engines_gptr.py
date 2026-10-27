@@ -353,7 +353,7 @@ class TestRegistry:
         monkeypatch.delenv("DRT_ENGINE_PYTHON_GPT_RESEARCHER", raising=False)
         entry = [e for e in engine_catalog() if e["id"] == "gpt-researcher"][0]
         assert entry["implemented"] is True and entry["health"] == "needs_setup"
-        assert "setup_engine_venv gpt-researcher" in entry["reason"]
+        assert "setup_engine_venv.py gpt-researcher" in entry["reason"]
         assert entry["options_schema"]["properties"]["max_iterations"]["default"] == 3
         with pytest.raises(EngineUnavailable, match="使えません"):
             get_engine("gpt-researcher")
@@ -365,7 +365,7 @@ class TestRegistry:
         eng = get_engine("gpt-researcher", engine_python={"gpt-researcher": sys.executable})
         assert isinstance(eng, gptr.GptResearcherEngine) and eng.python_path == sys.executable
         venv_mod.clear_check_cache()
-        assert EXTERNAL_ENGINES["open-deep-research"]["implemented"] is False
+        assert EXTERNAL_ENGINES["open-deep-research"]["implemented"] is True
 
 
 @pytest.mark.skipif(not VENV_PY.is_file(), reason="engine virtualenv not created on this machine")

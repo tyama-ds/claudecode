@@ -101,9 +101,13 @@ def resolve_engine_python(engine_id: str,
 
 
 def setup_command(engine_id: str) -> str:
-    """The one command that creates the engine's environment."""
+    """The one command that creates the engine's environment. The script
+    is run BY PATH: ``-m deep_research_tool.scripts…`` would import the
+    package (and its dependencies) into the bare Python 3.12 that runs
+    the setup, which has none of them."""
     py = "py -3.12" if os.name == "nt" else "python3.12"
-    return f"{py} -m deep_research_tool.scripts.setup_engine_venv {engine_id}"
+    script = os.path.join("deep_research_tool", "scripts", "setup_engine_venv.py")
+    return f"{py} {script} {engine_id}"
 
 
 def _check_code(spec: Dict[str, Any]) -> str:

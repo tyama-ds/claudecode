@@ -4,10 +4,10 @@
   "path": "deep_research_tool/",
   "summary": "Web検索→調査ループ→根拠管理→ハルシネーション検証→レポート生成（Markdown / DOCX / PDF）を自動で行うディープリサーチ。フェルミ推定・多言語検索・Web UI つき。",
   "status": "active",
-  "phase": "v1.8.0 レポートへのフィードバック再調査（キャッチボール、PR #85）。次は Open Deep Research エンジン（Phase 3）と実環境での確認",
-  "progress": 96,
+  "phase": "v1.9.0 Open Deep Research エンジン（Phase 3、MCP 経由の検索・Anthropic 対応）。次は外部調査資料の取り込み（起案中）と実環境での確認",
+  "progress": 97,
   "started": "2026-02-04",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "ports": [
     8802
   ],
@@ -92,7 +92,8 @@
     },
     {
       "title": "Open Deep Research エンジン（Phase 3）",
-      "state": "todo"
+      "state": "done",
+      "date": "2026-10-27"
     },
     {
       "title": "自動テストの CI 化",
@@ -100,8 +101,9 @@
     }
   ],
   "next": [
-    "調査エンジン Phase 3: Open Deep Research（MCP 経由の検索・Anthropic 対応）",
+    "外部調査資料（OpenAI Deep Research の結果など）をフィードバック再調査に取り込む機能（起案 C、承認待ち）",
     "フィードバック再調査を実 LLM で試し、修正計画の精度（対象章の判定・クエリ）と第 2 版の差分表示を確認",
+    "Open Deep Research を実環境（実 LLM・DuckDuckGo / SearXNG に到達できる端末）で 1 回通し、所要時間・出典数・ツール呼び出しの挙動を確認",
     "GPT Researcher と指定 URL モードを実環境（DuckDuckGo / SearXNG に到達できる端末・実 LLM）で 1 回通して所要時間と出典数を確認",
     "ローカルLLM 利用時の所要時間短縮（小節の個別処理・抽出チャンク数の見直し）",
     "テスト（53ファイル）の CI 化"
@@ -111,6 +113,10 @@
     "Selenium・Word COM など環境依存の経路がある"
   ],
   "log": [
+    {
+      "date": "2026-10-27",
+      "summary": "調査エンジン Phase 3: Open Deep Research（open-deep-research 0.0.16）を移植（v1.9.0）。専用環境のワーカーを JSONL で駆動し、エンジンに無い DuckDuckGo / SearXNG 検索はツール側のプロセス内 MCP サーバー（標準ライブラリだけの streamable HTTP、web_search は上位結果のページ抜粋つき・fetch_page、指定 URL のみは fetch_page だけ）で貸し出す。最小構成の環境変数（Configuration のフィールド名・検索 API キーを遮断、NO_PROXY に localhost）、OpenAI 互換と Anthropic、カードの設定欄 4 項目、グラフのノード名を進捗に対応付け、出典は Sources 節（無ければ本文の URL）、検索ゼロ・結果ゼロはエラー。環境作成コマンドを -m 形式からスクリプトのパス形式に修正（素の 3.12 ではパッケージを読み込めないため）。本物の 0.0.16 で MCP クライアントの接続とグラフ全体（偽 OpenAI）の通しを確認。テスト 18 件"
+    },
     {
       "date": "2026-10-27",
       "summary": "レポートへのフィードバック再調査（キャッチボール、v1.8.0）: 結果タブの「フィードバック」から意見・追加 URL・踏まえる過去の調査・優先サイト・やり方（追加調査／再調査／全面再調査）を送ると、LLM が章ごとの修正計画（そのまま／直す／追加・指示・検索クエリ）を作り、計画確認の画面で承認・修正・中止。新しいジョブに元の計画と「そのまま」の章の本文・根拠を引き継ぎ、途中再開と同じ仕組みで「直す」「追加」の章だけ調査（修正指示は章の説明に、クエリは計画の枠に）。過去の調査の根拠ページは資料として登録し同じ URL は再取得しない。LLM の答えが使えないときは規則で対象章を決定、肯定意見は記録のみ、変更なしなら開始しない。結果に章ごとの変更（文字数・新しい根拠・URL/過去調査由来）と記録のみの意見、履歴に系譜（↳ 元の調査）と「元の版を見る」。外部エンジンは全面再調査。/api/feedback、revise_report()。テスト 10 件・ブラウザ検査 15 項目",

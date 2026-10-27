@@ -326,7 +326,7 @@ class TestWebApi:
         status, d = _post(web, "/api/feedback", {**self.BASE, "job_id": parent["job_id"], "feedback": "x", "mode": "zzz"})
         assert status == 400 and d["field"] == "feedback_mode"
         status, d = _post(web, "/api/feedback", {**self.BASE, "job_id": parent["job_id"], "feedback": "x",
-                                                 "urls": ["ftp://nope"], "research_engine": "open-deep-research"})
+                                                 "urls": ["ftp://nope"], "research_engine": "zzz-unknown"})
         assert status == 400 and d["field"] == "research_engine"
         # the real thing
         status, d = _post(web, "/api/feedback", {**self.BASE, "job_id": parent["job_id"], "feedback": FEEDBACK,

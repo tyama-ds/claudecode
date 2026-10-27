@@ -929,7 +929,7 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
       </div>
 
       <label style="margin-top:14px;font-weight:700">🔌 調査エンジン（外部エンジンの環境）</label>
-      <p class="hint">GPT Researcher / Open Deep Research は専用の Python 環境（3.12 以上）で動きます。<code>python3.12 -m deep_research_tool.scripts.setup_engine_venv &lt;engine-id&gt;</code> で作成すると自動で見つかります。別の場所に作った場合はここにパスを入力してください（保存後に「新規調査」のカードが更新されます）。</p>
+      <p class="hint">GPT Researcher / Open Deep Research は専用の Python 環境（3.12 以上）で動きます。リポジトリのフォルダで <code>python3.12 deep_research_tool/scripts/setup_engine_venv.py &lt;engine-id&gt;</code>（Windows は <code>py -3.12 …</code>）を実行して作成すると自動で見つかります。別の場所に作った場合はここにパスを入力してください（保存後に「新規調査」のカードが更新されます）。</p>
       <div class="feat-row" data-tip="GPT Researcher 用の Python 実行ファイルのパス。空欄 = 既定の engines_venv/gpt-researcher、または環境変数 DRT_ENGINE_PYTHON_GPT_RESEARCHER">
         <div class="feat-info"><span class="feat-name">GPT Researcher の Python</span>
           <span class="feat-sub">空欄 = 既定の場所</span></div>
@@ -1587,7 +1587,7 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
               <label class="check" style="margin:0"><input type="checkbox" id="feedback_verify" checked> 検証を行う</label>
               <button type="button" class="primary" id="feedbackStartBtn" style="margin:0">💬 フィードバックを送って再調査</button>
             </div>
-            <p class="hint">外部エンジン（GPT Researcher）を選んでいるときは全面再調査になります。新しいジョブとして実行中タブに移ります。</p>
+            <p class="hint">外部エンジン（GPT Researcher / Open Deep Research）を選んでいるときは全面再調査になります。新しいジョブとして実行中タブに移ります。</p>
             <div class="banner" id="feedbackError" role="alert"></div>
           </div>
         </div>
