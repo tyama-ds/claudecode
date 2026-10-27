@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable, Tuple
 
 from .utils.helpers import ResearchWarnings, ensure_utf8_output
-from .config import Config, LLMProvider, SearchMethod, ReportFormat, ReportGeneratorVersion
+from .config import (Config, LLMProvider, SearchMethod, ReportFormat,
+                     ReportGeneratorVersion, ResearchSourceMode)
 from .api import get_client
 from .api.base import get_token_stats, reset_token_stats
 from .search import get_search_client
@@ -135,6 +136,40 @@ def _create_report_generator(
 # RunCancelled lives in utils.cancellation so the researcher/crawlers can
 # raise it without importing main; re-exported here for existing callers.
 from .utils.cancellation import RunCancelled  # noqa: E402
+
+
+def build_search_client(config: Config):
+    """The search / page-fetch client a run with this config uses (also
+    used on its own, e.g. to check the user's 指定 URL before a run)."""
+    kwargs = {
+        "max_results": config.search.max_results,
+        "timeout": config.search.page_load_timeout,
+        "extract_images": config.search.extract_images,
+        "max_images": config.search.max_images_per_page,
+    }
+
+    # Add proxy settings
+    if config.proxy.is_configured():
+        kwargs["proxies"] = config.proxy.get_proxies_dict()
+        kwargs["verify_ssl"] = config.proxy.verify_ssl
+
+    if config.search.method == SearchMethod.SELENIUM:
+        kwargs["headless"] = config.search.headless
+        kwargs["browser"] = config.search.browser
+        kwargs["implicit_wait"] = config.search.implicit_wait
+        kwargs["driver_path"] = config.search.driver_path
+    elif config.search.method == SearchMethod.DUCKDUCKGO:
+        kwargs["region"] = config.search.region
+        kwargs["safe_search"] = config.search.safe_search
+        kwargs["simplify_min_results"] = config.search.query_simplify_min_results
+        kwargs["simplify_max_retries"] = config.search.query_simplify_max_retries
+        kwargs["waf_mitigation"] = config.search.waf_mitigation
+        kwargs["per_domain_delay"] = config.search.per_domain_delay
+
+    return get_search_client(
+        method=config.search.method.value,
+        **kwargs
+    )
 
 
 class DeepResearchTool:
@@ -546,35 +581,12 @@ class DeepResearchTool:
 
     def _create_search_client(self):
         """Create search client based on configuration."""
-        kwargs = {
-            "max_results": self.config.search.max_results,
-            "timeout": self.config.search.page_load_timeout,
-            "extract_images": self.config.search.extract_images,
-            "max_images": self.config.search.max_images_per_page,
-        }
+        return build_search_client(self.config)
 
-        # Add proxy settings
-        if self.config.proxy.is_configured():
-            kwargs["proxies"] = self.config.proxy.get_proxies_dict()
-            kwargs["verify_ssl"] = self.config.proxy.verify_ssl
-
-        if self.config.search.method == SearchMethod.SELENIUM:
-            kwargs["headless"] = self.config.search.headless
-            kwargs["browser"] = self.config.search.browser
-            kwargs["implicit_wait"] = self.config.search.implicit_wait
-            kwargs["driver_path"] = self.config.search.driver_path
-        elif self.config.search.method == SearchMethod.DUCKDUCKGO:
-            kwargs["region"] = self.config.search.region
-            kwargs["safe_search"] = self.config.search.safe_search
-            kwargs["simplify_min_results"] = self.config.search.query_simplify_min_results
-            kwargs["simplify_max_retries"] = self.config.search.query_simplify_max_retries
-            kwargs["waf_mitigation"] = self.config.search.waf_mitigation
-            kwargs["per_domain_delay"] = self.config.search.per_domain_delay
-
-        return get_search_client(
-            method=self.config.search.method.value,
-            **kwargs
-        )
+    @staticmethod
+    def search_client_for(config: Config):
+        """The search / page-fetch client a run with this config uses."""
+        return build_search_client(config)
 
     def _create_content_filter(self):
         """Create content filter based on configuration."""
@@ -681,9 +693,113 @@ class DeepResearchTool:
                 "auto_figures": bool(c.report.auto_figures),
                 "target_pages": c.report.target_pages,
                 "target_characters": c.report.target_characters,
+                "research_engine": getattr(c.research, "research_engine", "builtin"),
+                "engine_options": dict(getattr(c.research, "engine_options", None) or {}),
+                "source_urls": list(getattr(c.research, "source_urls", None) or []),
+                "url_crawl_depth": getattr(c.research, "url_crawl_depth", 0),
+                "preferred_domains": list(getattr(c.research, "preferred_domains", None) or []),
+                "engine_max_time_seconds": getattr(c.research, "engine_max_time_seconds", None),
             }
         except Exception:
             return {}
+
+    def _create_engine_researcher(self, engine_id: str, raw_progress,
+                                  cancel_check):
+        """The Researcher-compatible driver for an external engine, or a
+        ValueError naming what is missing (unknown / not installed engine,
+        non-Web sources, no local server URL). Engine results are always
+        rendered by the V1 generator (its chapter bodies are the engine's
+        text; V2/V3 would rewrite them)."""
+        from .engines import get_engine, engine_display_name
+        from .engines.adapter import EngineResearcher
+        from .engines.llm_profile import (llm_run_config, proxy_env,
+                                          search_run_config)
+        rc = self.config.research
+        name = engine_display_name(engine_id)
+        if rc.source_mode.uses_local_files:
+            raise ValueError(
+                f"{name} は手元の資料（source_mode={rc.source_mode.value}）を扱えません。"
+                "使用する資料を「Web」か「指定 URL」にするか、内蔵エンジンを選んでください")
+        engine = get_engine(engine_id, self.config)      # EngineUnavailable (ValueError)
+        if self.config.report.generator_version != ReportGeneratorVersion.V1:
+            old = self.config.report.generator_version.value
+            ResearchWarnings.get_instance().add(
+                "MEDIUM", "Engine",
+                f"外部エンジン（{name}）の結果は V1 のレポート生成で出力します"
+                f"（設定の {old} は使いません）")
+            self.config.report.generator_version = ReportGeneratorVersion.V1
+        llm = llm_run_config(self.config)                # ValueError: no local URL
+        return EngineResearcher(
+            engine,
+            output_dir=self.config.report.output_dir,
+            language=rc.language,
+            llm_client=self.llm_client,
+            search_client=self.search_client,
+            progress_callback=self.progress_plan.research_callback(raw_progress),
+            cancel_check=cancel_check,
+            run_config=self._run_config_snapshot(),
+            llm=llm,
+            search=search_run_config(self.config),
+            proxy_env=proxy_env(self.config),
+            options=dict(rc.engine_options or {}),
+            max_time_seconds=rc.engine_max_time_seconds,
+            fetch_sources=True,
+            parallel_max_workers=rc.parallel_max_workers,
+            # 指定 URL: the engine researches those pages only (urls) or
+            # those pages first plus the web (urls_web)
+            source_urls=list(rc.source_urls or []) if rc.source_mode.uses_url_sources else [],
+            complement_urls=(rc.source_mode == ResearchSourceMode.URLS_WEB),
+        )
+
+    def _url_sources_summary(self) -> Optional[Dict[str, Any]]:
+        """What became of the user's 指定 URL (None unless that mode ran):
+        requested / fetched / failed pages and how much evidence came from
+        them."""
+        rc = self.config.research
+        if not getattr(rc.source_mode, "uses_url_sources", False):
+            return None
+        researcher = getattr(self, "researcher", None)
+        out: Dict[str, Any] = {
+            "mode": rc.source_mode.value,
+            "requested": len(rc.source_urls or []),
+            "crawl_depth": int(rc.url_crawl_depth or 0),
+            "preferred_domains": list(rc.preferred_domains or []),
+            "engine": getattr(self, "research_engine_id", "builtin"),
+        }
+        report = getattr(researcher, "url_source_report", None)
+        if report:
+            out.update({k: report.get(k) for k in ("fetched", "crawled", "pages", "failed")})
+        try:
+            locker = researcher.get_evidence_locker() if researcher is not None else None
+            if locker is not None:
+                out["evidence_count"] = sum(
+                    1 for e in locker.get_all_evidence()
+                    if getattr(e, "access_method", "") == "url"
+                    or (getattr(e, "metadata", {}) or {}).get("source") == "url")
+        except Exception:
+            pass
+        return out
+
+    def _engine_summary(self) -> Optional[Dict[str, Any]]:
+        """What the external engine reported (None for the built-in loop)."""
+        r = getattr(self, "researcher", None)
+        if r is None or not hasattr(r, "engine_id"):
+            return None
+        from .engines.llm_profile import describe_profile
+        result = getattr(r, "result", None)
+        caps = getattr(r, "capabilities", None)
+        return {
+            "id": r.engine_id,
+            "name": r.engine_name,
+            "version": getattr(caps, "version", None),
+            "elapsed_seconds": getattr(r, "engine_elapsed", None),
+            "metrics": result.metrics.model_dump(mode="json") if result else None,
+            "ingest": dict(getattr(r, "ingest_stats", None) or {}),
+            "warnings": list(getattr(r, "engine_warnings", None) or []),
+            "artifacts": dict(getattr(r, "engine_artifacts", None) or {}),
+            "llm": describe_profile(getattr(r, "llm_run_config", None)),
+            "resumed": dict(getattr(r, "resume_plan", None) or {}) or None,
+        }
 
     def _status_axes(self, semantic_artifact_check=None,
                      semantic_drift: bool = False) -> Dict[str, str]:
@@ -840,7 +956,14 @@ class DeepResearchTool:
         if stage == "plan":
             text = "調査計画（題名・目次・検索クエリ）を作成しています"
         elif stage == "research":
-            if act:
+            if act and act.get("phase") == "engine":
+                # an external engine: its stage, not a chapter of ours
+                detail = dict(act)
+                label = act.get("stage_label") or act.get("stage") or ""
+                counts = (f"（{act.get('index')}/{act.get('total')}）"
+                          if act.get("total") and act.get("index") else "")
+                text = f"{act.get('engine')} が調査しています: {label}{counts}"
+            elif act:
                 detail = dict(act)
                 counts = ""
                 if act.get("total"):
@@ -1200,7 +1323,17 @@ class DeepResearchTool:
                 language=self.config.research.language,
             )
 
-        self.researcher = Researcher(
+        # An external research engine (GPT Researcher / Open Deep Research /
+        # mock) replaces ONLY the research loop: EngineResearcher offers the
+        # Researcher's surface and ingests the engine's report + sources
+        # into the same session / evidence structures (see engines/).
+        self.research_engine_id = str(getattr(rc_, "research_engine", "builtin")
+                                      or "builtin")
+        engine_researcher = None
+        if self.research_engine_id != "builtin":
+            engine_researcher = self._create_engine_researcher(
+                self.research_engine_id, raw_progress, _cancel_checkpoint)
+        self.researcher = engine_researcher or Researcher(
             llm_client=self.llm_client,
             search_client=self.search_client,
             min_iterations=self.config.research.min_iterations,
@@ -1254,6 +1387,10 @@ class DeepResearchTool:
             run_config=self._run_config_snapshot(),
             fetch_cache=self.fetch_cache,
             refresh_fetched=bool(rc_.refresh_fetched),
+            source_urls=list(rc_.source_urls or []),
+            url_crawl_depth=rc_.url_crawl_depth,
+            url_max_pages=rc_.url_max_pages,
+            preferred_domains=list(rc_.preferred_domains or []),
         )
 
         self.researcher.cancel_check = _cancel_checkpoint
@@ -1291,6 +1428,11 @@ class DeepResearchTool:
                 self.partial_session_id = sess.session_id
             raise
         self.timer.stop("research")
+        # the engine's own warnings (missing metrics, unread sources, …)
+        # join the run's 要確認事項
+        for _w in list(getattr(self.researcher, "engine_warnings", None) or []):
+            ResearchWarnings.get_instance().add(
+                "LOW", f"Engine:{self.research_engine_id}", str(_w))
 
         evidence_locker = self.researcher.get_evidence_locker()
         research_search = getattr(self.researcher, "search", None)
@@ -1979,6 +2121,12 @@ class DeepResearchTool:
                 **({"report": str(active_report_path)}
                    if active_report_path else {})},
             "resume_plan": self._resume_plan_for_result(),
+            # which engine did the research (None = the built-in loop) and
+            # what it reported: version, elapsed, metrics, ingestion counts
+            "research_engine": getattr(self, "research_engine_id", "builtin"),
+            "engine": self._engine_summary(),
+            # 指定 URL: requested / fetched / failed pages, evidence from them
+            "url_sources": self._url_sources_summary(),
             # the plan that was researched (table of contents / queries)
             "research_plan": self.current_plan(),
             "timings": self._collect_timings(run_token_stats),

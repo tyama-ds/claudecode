@@ -25,7 +25,12 @@ class LocalChunk:
 
     @property
     def source_url(self) -> str:
-        """Pseudo-URL used for evidence/citation bookkeeping."""
+        """Pseudo-URL used for evidence/citation bookkeeping. A document
+        fetched from a real URL (指定 URL) keeps that URL, with the chunk
+        as the fragment, so citations and re-fetches point at the page."""
+        real = (self.metadata or {}).get("source_url")
+        if real:
+            return real          # every chunk cites the page itself
         base = self.doc_path or self.doc_title
         return f"local://{base}#chunk{self.chunk_index}"
 

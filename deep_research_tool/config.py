@@ -492,9 +492,31 @@ class ContentFilterMode(str, Enum):
 
 class ResearchSourceMode(str, Enum):
     """Which information sources the research uses."""
-    WEB = "web"        # Web search/crawl only (default)
-    LOCAL = "local"    # Local documents only (no web access)
-    HYBRID = "hybrid"  # Local documents + web
+    WEB = "web"            # Web search/crawl only (default)
+    LOCAL = "local"        # Local documents only (no web access)
+    HYBRID = "hybrid"      # Local documents + web
+    URLS = "urls"          # pages named by the user only (no web search)
+    URLS_WEB = "urls_web"  # named pages first, web search for the rest
+
+    @property
+    def uses_web_search(self) -> bool:
+        return self in (ResearchSourceMode.WEB, ResearchSourceMode.HYBRID,
+                        ResearchSourceMode.URLS_WEB)
+
+    @property
+    def uses_local_store(self) -> bool:
+        """Documents (files or fetched URL pages) are retrieved from the
+        local document store."""
+        return self in (ResearchSourceMode.LOCAL, ResearchSourceMode.HYBRID,
+                        ResearchSourceMode.URLS, ResearchSourceMode.URLS_WEB)
+
+    @property
+    def uses_url_sources(self) -> bool:
+        return self in (ResearchSourceMode.URLS, ResearchSourceMode.URLS_WEB)
+
+    @property
+    def uses_local_files(self) -> bool:
+        return self in (ResearchSourceMode.LOCAL, ResearchSourceMode.HYBRID)
 
 
 class CrawlMode(str, Enum):
@@ -602,8 +624,18 @@ class ResearchConfig:
     ai_crawl_max_pages_per_domain: int = 5  # Cap of fetched pages per domain
     ai_crawl_politeness_delay: float = 1.0  # Min seconds between same-domain fetches
 
-    # Information source mode (web / local documents / hybrid)
+    # Information source mode (web / local documents / hybrid / named URLs)
     source_mode: ResearchSourceMode = ResearchSourceMode.WEB
+    # --- 指定 URL (source_mode urls / urls_web) ---
+    # pages named by the user; fetched at the start and registered in the
+    # local document store (the same path as 手元の資料)
+    source_urls: List[str] = field(default_factory=list)
+    # 1 = also read same-site pages the named pages link to (0 = named only)
+    url_crawl_depth: int = 0
+    # total pages read through links (hard cap 100)
+    url_max_pages: int = 30
+    # urls_web: search these hosts first (site:host query) before the open web
+    preferred_domains: List[str] = field(default_factory=list)
 
     # Evidence importance / gap-fill settings
     importance_threshold: float = 0.6      # Min score to count as high-importance
@@ -661,6 +693,27 @@ class ResearchConfig:
     # instead of aborting the whole run. False = stop with an error that
     # names the role and the setting.
     local_llm_fallback: bool = True
+
+    # --- Research engine (who performs the research stage) ---
+    # builtin (default): this tool's own loop. gpt-researcher /
+    # open-deep-research: an external engine in its own Python
+    # environment whose report + sources are ingested into the same
+    # session / evidence structures; the stages after the research loop
+    # are unchanged. mock-*: deterministic mocks (developer toggle / tests).
+    research_engine: str = "builtin"
+    # interpreter per external engine ({engine_id: path}); unset = the
+    # DRT_ENGINE_PYTHON_<ID> variable, then <repo>/engines_venv/<id>
+    engine_python: Dict[str, str] = field(default_factory=dict)
+    # embedding model for engines that need one (None = provider default:
+    # OpenAI text-embedding-3-small / Ollama nomic-embed-text)
+    engine_embedding_model: Optional[str] = None
+    # engine-specific options (free-form; see the engine's options_schema)
+    engine_options: Dict[str, Any] = field(default_factory=dict)
+    # hard time limit for one engine run (the engine is cancelled after it)
+    engine_max_time_seconds: int = 1800
+    # SearXNG base URL; when set, external engines search through it
+    # instead of the tool's DuckDuckGo / Selenium client
+    searx_url: Optional[str] = None
 
 
 @dataclass
@@ -1022,8 +1075,12 @@ def create_config(
     ai_crawl_max_llm_calls: int = 25,
     ai_crawl_max_pages_per_domain: int = 5,
     ai_crawl_politeness_delay: float = 1.0,
-    # Information source mode
+    # Information source mode (web / local / hybrid / urls / urls_web)
     source_mode: str = "web",
+    source_urls: Optional[List[str]] = None,
+    url_crawl_depth: int = 0,
+    url_max_pages: int = 30,
+    preferred_domains: Optional[List[str]] = None,
     # Evidence importance / gap-fill parameters
     importance_threshold: float = 0.6,
     min_high_importance_sources: int = 2,
@@ -1077,6 +1134,13 @@ def create_config(
     max_stall_rounds: int = 2,
     audit_log_enabled: bool = True,
     local_llm_role: str = "off",
+    # Research engine (builtin / gpt-researcher / open-deep-research / mock-*)
+    research_engine: str = "builtin",
+    engine_python: Optional[Dict[str, str]] = None,
+    engine_embedding_model: Optional[str] = None,
+    engine_options: Optional[Dict[str, Any]] = None,
+    engine_max_time_seconds: int = 1800,
+    searx_url: Optional[str] = None,
     auto_figures_include_images: bool = True,
     auto_figures_include_tables: bool = True,
     auto_figures_include_charts: bool = True,
@@ -1328,6 +1392,48 @@ def create_config(
                 f"Valid stages: {list(LLM_STAGES)}"
             )
 
+    # --- research engine: validated here so a bad selection fails before
+    # anything (clients, caches) is built; the engine's availability is
+    # checked again when the run starts (its environment may change)
+    from .engines import known_engine_ids
+    research_engine = str(research_engine or "builtin").strip() or "builtin"
+    if research_engine not in known_engine_ids(include_mocks=True):
+        raise ValueError(
+            f"Unknown research_engine: {research_engine!r}. "
+            f"Valid engines: {known_engine_ids(include_mocks=False)} (and mock-*)")
+    if engine_python is not None and not isinstance(engine_python, dict):
+        raise ValueError("engine_python must be a {engine_id: python_path} mapping")
+    if engine_options is not None and not isinstance(engine_options, dict):
+        raise ValueError("engine_options must be a mapping")
+    try:
+        engine_max_time_seconds = int(engine_max_time_seconds)
+    except (TypeError, ValueError):
+        raise ValueError("engine_max_time_seconds must be an integer "
+                         f"(got {engine_max_time_seconds!r})")
+    if not 60 <= engine_max_time_seconds <= 86400:
+        raise ValueError("engine_max_time_seconds must be between 60 and 86400 "
+                         f"(got {engine_max_time_seconds})")
+    if research_engine != "builtin" and str(source_mode) not in ("web", "urls", "urls_web"):
+        raise ValueError(
+            f"research_engine={research_engine!r} supports source_mode 'web', 'urls' or "
+            f"'urls_web' only (got {source_mode!r}); external engines do not read local files")
+    # --- named URLs (source_mode urls / urls_web) ---
+    from .research.url_sources import normalize_domains, normalize_urls
+    source_urls = normalize_urls(source_urls)
+    preferred_domains = normalize_domains(preferred_domains)
+    if str(source_mode) in ("urls", "urls_web") and not source_urls:
+        raise ValueError(
+            f"source_mode={source_mode!r} requires source_urls (at least one http(s) URL)")
+    try:
+        url_crawl_depth = 0 if url_crawl_depth is None else int(url_crawl_depth)
+        url_max_pages = 30 if url_max_pages is None else int(url_max_pages)
+    except (TypeError, ValueError):
+        raise ValueError("url_crawl_depth and url_max_pages must be integers")
+    if url_crawl_depth not in (0, 1):
+        raise ValueError(f"url_crawl_depth must be 0 or 1 (got {url_crawl_depth})")
+    if not 1 <= url_max_pages <= 100:
+        raise ValueError(f"url_max_pages must be between 1 and 100 (got {url_max_pages})")
+
     api_config = APIConfig(
         provider=LLMProvider(provider),
         openai_api_key=openai_api_key,
@@ -1439,6 +1545,10 @@ def create_config(
         ai_crawl_max_pages_per_domain=ai_crawl_max_pages_per_domain,
         ai_crawl_politeness_delay=ai_crawl_politeness_delay,
         source_mode=ResearchSourceMode(source_mode),
+        source_urls=list(source_urls),
+        url_crawl_depth=url_crawl_depth,
+        url_max_pages=url_max_pages,
+        preferred_domains=list(preferred_domains),
         importance_threshold=importance_threshold,
         min_high_importance_sources=min_high_importance_sources,
         max_gap_fill_rounds=max_gap_fill_rounds,
@@ -1452,6 +1562,12 @@ def create_config(
         audit_log_enabled=audit_log_enabled,
         local_llm_role=local_llm_role,
         local_llm_fallback=bool(local_llm_fallback),
+        research_engine=research_engine,
+        engine_python={str(k): str(v) for k, v in (engine_python or {}).items() if v},
+        engine_embedding_model=(engine_embedding_model or None),
+        engine_options=dict(engine_options or {}),
+        engine_max_time_seconds=engine_max_time_seconds,
+        searx_url=(str(searx_url).strip() or None) if searx_url else None,
     )
 
     report_config = ReportConfig(

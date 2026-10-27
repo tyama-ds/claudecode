@@ -900,6 +900,60 @@ v1.6.0 で、これまで LLM を 1 本ずつしか呼んでいなかった工�
 
 検証のみで外部レポートを扱う場合、引用のない主張は「引用なし」として扱われ、登録した根拠から書き直して引用を付けた上で再判定します（v1.6.0 で、引用のない主張は限定表現に落とす前に一度は根拠から書き直すようになりました）。
 
+## 使用する資料：指定 URL のみ／指定 URL を重視＋Web（v1.7.0）
+
+「使用する資料」に 2 つのモードを追加しました（`source_mode`）。
+
+- **指定 URL のみ（`urls`）**: 入力した URL のページ（HTML・PDF・Word など、ページ取得と同じ仕組みで読めるもの）だけを根拠にします。Web 検索・クロールは行いません。
+- **指定 URL を重視＋Web（`urls_web`）**: 同じページを先に読み込み、各章でその根拠を優先して引用し（重要度 0.8 未満なら 0.8 に引き上げ。編集者 LLM が明らかに無関係と判定した 0.4 未満はそのまま）、足りない分だけ Web を検索します。「優先する検索サイト」（ドメイン、最大 3 件）を入れると、章の最初の検索を `site:ドメイン` で先に行ってから通常の検索を行います。
+
+仕組み: 開始時に URL を取得して「手元の資料」と同じローカル資料ストアに登録します（`research/url_sources.py`）。取り込み後は従来の「手元の資料のみ／両方」と同じ経路なので、検証・図表・途中再開・根拠ロッカーはそのまま使えます。根拠はページの実 URL で登録され（`access_method=url`）、検証の再取得・引用がページを指します。
+
+- **同一サイト内のリンク先も読む**（`url_crawl_depth=1`、既定 0）: 指定ページが同じサイト内にリンクするページを 1 段だけ追加で読みます（画像などは除外、合計 `url_max_pages`＝既定 30・上限 100 ページ）。
+- **取得を確認**（`POST /api/precheck-urls`）: 開始前に到達可否・題名・文字数を表示します（調査と同じ検索クライアント＝プロキシ・証明書・WAF 対策込み）。
+- 取得できない URL（404・接続失敗・200 文字未満）は要確認事項に残し、**1 件も読めなければ開始しません**。結果の概要に「🔗 指定 URL: n 件（取得 k 件・サイト内リンク m ページ）・URL 由来の根拠 e 件・取得できなかった URL」を表示し、履歴の「条件を複製」で URL とドメインも戻ります。
+- **外部エンジン**（GPT Researcher）でも使えます: URL は `source_urls` として渡し、「指定 URL のみ」は `complement_source_urls=False`（そのページだけを調査）、「重視＋Web」は `True`（そのページを先に、足りない分は検索）。手元の資料（ファイル）は従来どおり外部エンジンでは使えません。
+- 設定: `create_config(source_mode="urls"|"urls_web", source_urls=[...], url_crawl_depth=0|1, url_max_pages=30, preferred_domains=[...])`。Web UI は同名のパラメータ（URL は 1 行 1 つ、ドメインはカンマ区切りでも配列でも可）。URL 以外（`ftp:` など）は無視し、`http(s)://` が無ければ `https://` を補います。
+
+## 調査エンジンの選択（v1.7.0 に向けた Phase 1）
+
+調査（計画・検索・執筆）を誰が行うかを選べます（`research_engine`）。取り込み後の根拠の取得・検証・図表・出力・途中再開はエンジンに関係なく共通です。契約は deep-research-orchestrator の Runner API v1（`deep_research_tool/engines/runner_core`: `Engine` / `RunContext` / `RunRequest` / `RunResult` …）をそのまま使っているので、エンジン実装は両方で使い回せます。
+
+| エンジン | 内容 | この版での状態 |
+|---|---|---|
+| 内蔵（既定） | このツール自身の調査ループ。手元の資料・計画確認・全クロールモードが使える | 利用可能 |
+| GPT Researcher | gpt-researcher 0.16.0 を専用の Python 環境（3.12 以上）で別プロセスとして実行し、本文と出典を取り込む | 利用可能（環境を作成すると「利用可能」、無ければ「要設定」と作成コマンド） |
+| Open Deep Research | LangChain の多段エージェント。同じく別環境で実行 | 未実装（カードはグレー。次の更新で対応） |
+| モック（mock-fast / mock-slow / mock-fail / mock-partial / mock-timeout / mock-cancellable） | 通信を行わない決定論的エンジン。取り込み経路の確認とテスト用 | ⚙設定 → 機能 →「モック調査エンジンを表示（開発用）」を ON にするとカードに出る |
+
+画面では「新規調査」の実行モードの下に「調査エンジン」のカード行が出ます（利用可能 / 要設定 / 未対応 / 未実装 のバッジと理由、流れの帯、通信先）。利用できないカードは選べません。外部エンジンを選ぶと「手元の資料」と「開始前の計画確認」はグレー表示になり（エンジンが独自に計画するため。API では 400 で拒否）、クロールモードは隠れます。
+
+取り込みの仕組み（`engines/ingest.py`。検証のみモードの外部レポート読み込みと同じ経路）:
+
+- 章 = エンジンのレポート（Markdown）の `##` 見出し。出典・参考文献の節は本文から除きます。
+- 出典は正規化 URL（utm_ などの追跡パラメータ・フラグメント・末尾スラッシュを除去）で重複排除し、各章に割り当てます。本文中の `[n]`・`[題名](URL)`・URL の引用が優先、無ければ出典の題名＋抜粋と章本文の 2-gram 含有率で最も近い章、それでも無ければ第 1 章。出典を捨てることはありません。
+- 引用は `[n]` / `[題名](URL)` → `[SOURCE k]`（章ごとの根拠の順番）に橋渡しし、通常の検証がそのまま番号を解決できるようにします。
+- 各出典のページを検索クライアントで取得して根拠ロッカーに登録します。取得できないページ（エラー・200 文字未満）はエンジンの抜粋だけを「抜粋のみ」（根拠の `metadata.excerpt_only`）として登録し、件数を要確認事項に出します（捏造も省略もしません）。
+- エンジンの生出力は `engine_<セッションID>/result.json`（結果・イベント・秘密を除いた依頼内容）と `report.md` に保存します。
+- レポート生成は V1 固定です（V2/V3 を設定していると要確認事項に記録して V1 で出力。章本文はエンジンの文章そのもの）。
+- 制限時間 `engine_max_time_seconds`（既定 1800 秒、60〜86400）を超えるとエンジンを止めてエラーにします。中止はエンジンへ協調的に伝え、10 秒以内に応じなければ強制停止します。途中で終わった実行の再開は、外部エンジンに途中状態が無いので同じセッション ID でエンジンを最初から実行します（完了済みなら結果を再利用し、その後の工程だけ再開）。
+- 進捗は `Researching (<エンジン名>): <段階>` の行と「いま何をしているか」の `<エンジン名> が調査しています: <段階>` で表示し、全体バーの調査の区間（10〜85%）に収まります。
+
+設定: `create_config(research_engine="builtin"|"gpt-researcher"|"open-deep-research"|"mock-*", engine_python={engine_id: Pythonのパス}, engine_embedding_model=..., engine_options={...}, engine_max_time_seconds=1800, searx_url=None)`。Web UI は同名のパラメータ（`/api/research`）と `GET /api/engines`（`?mocks=1`）／`POST /api/engines`（`{"mocks": true, "engine_python": {...}}`）でカードの一覧と利用可否を返します。外部エンジンの環境は `python3.12 -m deep_research_tool.scripts.setup_engine_venv <engine-id>` で `engines_venv/<engine-id>` に作成します（別の場所に作ったときは ⚙設定 → 機能 のパス欄、または環境変数 `DRT_ENGINE_PYTHON_<ENGINE_ID>`、`DRT_ENGINES_VENV_DIR`）。LLM は設定中のプロバイダをそのまま渡します（OpenAI 互換のエンドポイント・モデル・キー。ローカルLLM は `local_base_url`（Ollama は `/v1` を補う）、Anthropic は Open Deep Research のみ）。埋め込みモデルの既定は OpenAI `text-embedding-3-small`、Ollama `nomic-embed-text`。検索は `searx_url` があれば SearXNG、無ければ DuckDuckGo。
+
+結果（`run()` の戻り値・履歴）には `research_engine` と `engine`（名前・版・所要時間・エンジンが報告した指標（検索回数・トークン・費用。報告しないエンジンは不明のまま）・取り込み件数・生出力の場所・LLM の割り当て）が入り、結果タブの概要に「🔌 調査エンジン」として表示します。
+
+### GPT Researcher（Phase 2）
+
+`deep_research_tool/engines/gptr/`。gpt-researcher は設定をプロセス全体の環境変数で受け取るため、実行ごとに `worker.py` を専用環境の Python でサブプロセスとして起動します（`engine.py` は gpt_researcher を import しません）。
+
+- **環境の作成**: `python3.12 deep_research_tool/scripts/setup_engine_venv.py gpt-researcher`（`engines_venv/gpt-researcher` に `gpt-researcher==0.16.0` と `ddgs==9.16.1` を入れます。0.16.0 の DuckDuckGo 検索は新しい `ddgs` パッケージを要求しますが依存に含まれていないため、こちらで固定しています）。作成後はカードが「利用可能 0.16.0」になります（1 分ごとに再確認）。
+- **ワーカーの環境変数は最小構成**: PATH / HOME / 証明書・プロキシ系だけを引き継ぎ、サーバー側の API キーや検索 API キー（TAVILY など）は渡しません。`RETRIEVER` は `searx_url` があれば `searx`、無ければ `duckduckgo`（ブラウザ検索＝Selenium の設定時は DuckDuckGo に置き換えて注意を出します）。既定の Tavily には決して戻りません。LLM は `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `FAST_LLM`=`SMART_LLM`=`STRATEGIC_LLM`=`openai:<モデル>`、埋め込みは `EMBEDDING=openai:<埋め込みモデル>`（必須。OpenAI は `text-embedding-3-small`、Ollama は `nomic-embed-text` が既定）。Anthropic は使えません（Open Deep Research で対応予定）。
+- **ワーカーの出力**: 起動直後に fd1 を stderr に付け替えて JSONL 専用の出力を確保するので、ライブラリの `print()` が混ざってもプロトコルは壊れません。進捗（エージェント選択・検索クエリ・取得ページ数）は実行中タブのログと「いま何をしているか」に流れ、API キーはエラー文でもマスクします。
+- **結果**: 本文は `write_report()` の Markdown、出典は `get_research_sources()`（題名・抜粋）＋ `get_source_urls()`。構造化の主張は返さず、トークン数も取得できません（費用は gpt-researcher 内蔵の OpenAI 価格表による推定）。**出典が 1 件も無い実行はエラー**にします（gpt-researcher は検索が空だと謝罪文を本文として返すため。DuckDuckGo への到達・プロキシ・SearXNG の URL と、ワーカーの stderr 末尾のエラーを添えます）。
+- **カードの設定欄**: エンジンを選ぶと `options_schema` から作った入力（レポートの種類 `research_report` / `detailed_report`、検索イテレーション数 1〜10）が出ます。送信は `engine_options`。
+- **検証**: 0.16.0 を本物の環境で起動し、偽の OpenAI 互換サーバーで計画→検索→執筆→取り込みまで通ることを確認しました（この開発環境は DuckDuckGo に到達できないため、検索結果ありの実行は実環境で確認してください）。
+
 ## 途中再開と通信断の再試行（v1.6.0）
 
 時間切れ・通信断・サーバー停止などで調査が途中で終わったとき、最後に完了した工程から再開します。履歴行の「中断箇所から再開」（`POST /api/resume`）、コードからは `run(resume_from=<セッション JSON>)` です。v1.5 までは調査ループの章だけが再利用され、その後の工程（DeepThink・根拠の見直し・フェルミ推定・図表・執筆・検証）は毎回やり直しでした。

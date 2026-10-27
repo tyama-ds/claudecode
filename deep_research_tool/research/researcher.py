@@ -247,6 +247,10 @@ class Researcher:
         run_config: Dict[str, Any] = None,
         fetch_cache=None,
         refresh_fetched: bool = False,
+        source_urls: List[str] = None,
+        url_crawl_depth: int = 0,
+        url_max_pages: int = 30,
+        preferred_domains: List[str] = None,
     ):
         """
         Initialize Researcher.
@@ -496,6 +500,14 @@ class Researcher:
         # Information source mode and local document store
         self.source_mode = source_mode
         self.local_store = LocalDocumentStore()
+        # 指定 URL (source_mode urls / urls_web): fetched at the start of the
+        # run and registered in the local store; the report is shown in
+        # the result ("3 URLs, 2 fetched")
+        self.source_urls = [str(u) for u in (source_urls or []) if u]
+        self.url_crawl_depth = int(url_crawl_depth or 0)
+        self.url_max_pages = int(url_max_pages or 30)
+        self.preferred_domains = [str(d) for d in (preferred_domains or []) if d]
+        self.url_source_report: Optional[Dict[str, Any]] = None
 
     def _report_progress(self, message: str, percentage: float) -> None:
         """Report progress to callback if available."""
@@ -539,6 +551,11 @@ class Researcher:
                 "source_mode='local' requires additional_documents "
                 "(ローカル文献モードには文書の指定が必要です)"
             )
+        if self.source_mode.uses_url_sources and not self.source_urls:
+            raise ValueError(
+                f"source_mode='{self.source_mode.value}' requires source_urls "
+                "(指定 URL モードには URL の指定が必要です)"
+            )
 
         # Initialize session
         self._reset_timings()
@@ -552,10 +569,33 @@ class Researcher:
             output_dir=self.output_dir / "evidence",
         )
 
+        # 指定 URL: fetch the named pages now (and same-site links when
+        # asked) and treat them as documents; nothing readable = no run
+        self.url_source_report = None
+        if self.source_mode.uses_url_sources:
+            from .url_sources import fetch_url_documents
+            self._report_progress(
+                f"Fetching {len(self.source_urls)} named URL(s)...", 2)
+            url_docs, report = fetch_url_documents(
+                self.source_urls, self.search,
+                crawl_depth=self.url_crawl_depth, max_pages=self.url_max_pages,
+                parallel_max_workers=self.parallel_max_workers,
+                cancel_check=self._check_cancel,
+                progress=lambda m: self._report_progress(m, 3))
+            self.url_source_report = report
+            for entry in report.get("failed", []):
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.MEDIUM, "Researcher",
+                    f"指定 URL を取得できませんでした: {entry['url']} — {entry['error']}")
+            if not url_docs:
+                detail = "; ".join(f"{e['url']}: {e['error']}" for e in report.get("failed", [])[:5])
+                raise ValueError(
+                    "指定 URL から本文を取得できませんでした"
+                    + (f"（{detail}）" if detail else ""))
+            additional_documents = list(additional_documents or []) + url_docs
+
         # Register local documents for local/hybrid retrieval
-        if additional_documents and self.source_mode in (
-            ResearchSourceMode.LOCAL, ResearchSourceMode.HYBRID
-        ):
+        if additional_documents and self.source_mode.uses_local_store:
             for doc in additional_documents:
                 self.local_store.add_document(
                     title=doc.get("title", ""),
@@ -577,16 +617,22 @@ class Researcher:
             if additional_documents:
                 doc_summaries = []
                 for doc in additional_documents:
-                    # Add to evidence locker as user-provided
+                    # Add to evidence locker as user-provided. A page the
+                    # user named (指定 URL) is NOT registered whole: its
+                    # chunks become section evidence when a chapter uses
+                    # them (with the section, importance and the page's
+                    # own URL), and the fetch report lists the page.
                     full_content = doc.get("content", "")
-                    self.evidence_locker.add_evidence(
-                        url=doc.get("path", ""),
-                        title=doc.get("title", Path(doc.get("path", "")).name),
-                        content_excerpt=full_content[:1000],
-                        extracted_text=full_content,
-                        evidence_type=EvidenceType.USER_PROVIDED,
-                        metadata=doc.get('metadata', {}),
-                    )
+                    doc_meta = doc.get("metadata", {}) or {}
+                    if doc_meta.get("source") != "url":
+                        self.evidence_locker.add_evidence(
+                            url=doc.get("path", ""),
+                            title=doc.get("title", Path(doc.get("path", "")).name),
+                            content_excerpt=full_content[:1000],
+                            extracted_text=full_content,
+                            evidence_type=EvidenceType.USER_PROVIDED,
+                            metadata=doc.get('metadata', {}),
+                        )
                     doc_summaries.append(
                         f"Document: {doc.get('title', 'Unknown')}\n"
                         f"Content: {doc.get('content', '')[:2000]}"
@@ -821,13 +867,13 @@ class Researcher:
             f"Researching: {section.section}. {section.title}", base)
         section.status = "in_progress"
 
-        # Local document retrieval (local / hybrid source modes)
+        # Local document retrieval (local / hybrid / 指定 URL source modes)
         local_parts: List[ExtractedContent] = []
-        if self.source_mode in (ResearchSourceMode.LOCAL, ResearchSourceMode.HYBRID):
+        if self.source_mode.uses_local_store:
             local_parts = self._collect_local_parts(section, section_queries)
 
-        if self.source_mode == ResearchSourceMode.LOCAL:
-            # Local-only: no web access at all
+        if not self.source_mode.uses_web_search:
+            # Local-only / 指定 URL のみ: no web search at all
             self._process_section_local_only(
                 section=section,
                 available_queries=section_queries,
@@ -978,7 +1024,8 @@ class Researcher:
             )
 
         # Get queries for this section
-        queries = available_queries[:self.max_queries_per_iteration]
+        queries = self._queries_with_preferred_domains(
+            available_queries[:self.max_queries_per_iteration])
         if not queries:
             # Generate queries if none available
             queries = self.query_generator.generate_follow_up_queries(
@@ -1075,7 +1122,8 @@ class Researcher:
                 + (current / max(total, 1)) * span * 0.8
             )
 
-        queries = available_queries[:self.max_queries_per_iteration]
+        queries = self._queries_with_preferred_domains(
+            available_queries[:self.max_queries_per_iteration])
         if not queries:
             queries = self.query_generator.generate_follow_up_queries(
                 section, "", []
@@ -1299,7 +1347,8 @@ class Researcher:
         for iteration in range(1, self.max_iterations + 1):
             record = ResearchIteration(iteration_number=iteration, section=section.section)
             if iteration == 1 and available_queries:
-                queries = available_queries[:self.max_queries_per_iteration]
+                queries = self._queries_with_preferred_domains(
+                    available_queries[:self.max_queries_per_iteration])
             else:
                 current = '\n'.join(p.processed_content for p in parts)
                 gaps = self.query_generator.identify_gaps(section, current, self.session.requirements)
@@ -1567,23 +1616,44 @@ class Researcher:
             extracted_all = [_extract(c) for c in chunks]
         for chunk, extracted in zip(chunks, extracted_all):
             if extracted.relevance_score >= 0.2:
+                chunk_meta = dict(getattr(chunk, 'metadata', {}) or {})
+                from_url = chunk_meta.get("source") == "url"
+                if from_url:
+                    # a page the user named: cited by its real URL, ranked
+                    # ahead of search results (see _score_importance)
+                    extracted.metadata["source"] = "url"
+                    extracted.metadata["seed_url"] = chunk_meta.get("seed_url")
                 parts.append(extracted)
                 self.evidence_locker.add_evidence(
                     url=chunk.source_url,
                     title=chunk.doc_title,
                     content_excerpt=extracted.processed_content[:500],
                     extracted_text=chunk.content,
-                    evidence_type=EvidenceType.USER_PROVIDED,
-                    search_query="local_documents",
+                    evidence_type=(EvidenceType.WEB_PAGE if from_url
+                                   else EvidenceType.USER_PROVIDED),
+                    search_query="source_urls" if from_url else "local_documents",
                     section_reference=section.section,
                     relevance_score=extracted.relevance_score,
-                    access_method="local",
-                    metadata={**getattr(chunk, 'metadata', {}),
+                    access_method="url" if from_url else "local",
+                    metadata={**chunk_meta,
                               'source_spans': extracted.metadata.get('source_spans', []),
                               'document_path': chunk.doc_path,
                               'chunk_index': chunk.chunk_index},
                 )
         return parts
+
+    # 指定 URL を重視: a page the user named outranks search results unless
+    # the editor scored it as clearly peripheral
+    URL_SOURCE_MIN_IMPORTANCE = 0.8
+
+    def _queries_with_preferred_domains(self, queries: List[str]) -> List[str]:
+        """urls_web: search the preferred hosts first (one site: query per
+        host on the first query), then the open web."""
+        if not self.preferred_domains or not queries or not self.source_mode.uses_web_search:
+            return list(queries)
+        first = queries[0]
+        site_queries = [f"site:{d} {first}" for d in self.preferred_domains[:3]]
+        return site_queries + [q for q in queries if q not in site_queries]
 
     def _process_section_local_only(
         self,
@@ -1737,6 +1807,10 @@ Output JSON only:"""
 
         for i, part in enumerate(parts, 1):
             part.importance_score = scores.get(i, part.relevance_score)
+            if (part.metadata or {}).get("source") == "url" and part.importance_score < 0.4:
+                pass        # the editor found the named page peripheral: keep that
+            elif (part.metadata or {}).get("source") == "url":
+                part.importance_score = max(part.importance_score, self.URL_SOURCE_MIN_IMPORTANCE)
             if self.evidence_locker:
                 self.evidence_locker.update_importance_by_url(
                     url=part.source_url,
@@ -1761,12 +1835,12 @@ Output JSON only:"""
         """
         parts: List[ExtractedContent] = []
 
-        # Local retrieval with the NEW queries (local and hybrid modes)
-        if self.source_mode in (ResearchSourceMode.LOCAL, ResearchSourceMode.HYBRID):
+        # Local retrieval with the NEW queries (local / hybrid / 指定 URL)
+        if self.source_mode.uses_local_store:
             parts.extend(self._collect_local_parts(
                 section, [], queries_override=queries,
             ))
-            if self.source_mode == ResearchSourceMode.LOCAL:
+            if not self.source_mode.uses_web_search:
                 return parts
 
         crawler = self.ai_crawler or self.fast_crawler
