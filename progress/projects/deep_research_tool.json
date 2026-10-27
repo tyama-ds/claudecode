@@ -4,7 +4,7 @@
   "path": "deep_research_tool/",
   "summary": "Web検索→調査ループ→根拠管理→ハルシネーション検証→レポート生成（Markdown / DOCX / PDF）を自動で行うディープリサーチ。フェルミ推定・多言語検索・Web UI つき。",
   "status": "active",
-  "phase": "v1.7.0: 調査エンジンの切り替え（GPT Researcher）と指定 URL の資料モード。次はレポートへのフィードバック再調査（キャッチボール）→ Open Deep Research（Phase 3）",
+  "phase": "v1.7.0 調査エンジンの切り替え（GPT Researcher）と指定 URL の資料モード（PR #84）。次はレポートへのフィードバック再調査（キャッチボール）→ Open Deep Research（Phase 3）",
   "progress": 95,
   "started": "2026-02-04",
   "version": "1.7.0",
@@ -112,15 +112,18 @@
   "log": [
     {
       "date": "2026-10-27",
-      "summary": "使用する資料に「指定 URL のみ」「指定 URL を重視＋Web」を追加（v1.7.0）: URL のページ（HTML / PDF / Word 等）を開始時に取得して手元の資料と同じローカル資料ストアに登録し、根拠はページの実 URL で管理。URL のみは Web 検索なし、重視＋Web は URL 由来の根拠の重要度を 0.8 以上に引き上げ、優先する検索サイト（site: 検索を先に実行）に対応。同一サイト内のリンク先 1 段（最大 30 ページ）、「取得を確認」（/api/precheck-urls）、取得できない URL の要確認事項と結果の「指定 URL」ブロック、条件の複製、外部エンジンへの受け渡し（GPT Researcher の source_urls / complement_source_urls）。テスト 18 件・ブラウザ検査 22 項目"
+      "summary": "使用する資料に「指定 URL のみ」「指定 URL を重視＋Web」を追加（v1.7.0）: URL のページ（HTML / PDF / Word 等）を開始時に取得して手元の資料と同じローカル資料ストアに登録し、根拠はページの実 URL で管理。URL のみは Web 検索なし、重視＋Web は URL 由来の根拠の重要度を 0.8 以上に引き上げ、優先する検索サイト（site: 検索を先に実行）に対応。同一サイト内のリンク先 1 段（最大 30 ページ）、「取得を確認」（/api/precheck-urls）、取得できない URL の要確認事項と結果の「指定 URL」ブロック、条件の複製、外部エンジンへの受け渡し（GPT Researcher の source_urls / complement_source_urls）。テスト 18 件・ブラウザ検査 22 項目",
+      "ref": "#84"
     },
     {
       "date": "2026-10-26",
-      "summary": "調査エンジン Phase 2: GPT Researcher（gpt-researcher 0.16.0）を移植。専用 Python 環境のワーカーを JSONL で駆動（最小構成の環境変数・検索は DuckDuckGo / SearXNG 固定・API キーのマスク・ddgs の固定ピンを追加）、出典ゼロの実行はエラー、ワーカーの段階を進捗バーに対応付け、環境の疎通確認に 0.16.0 の typing バグ回避を適用。カードに options_schema からの設定欄（レポートの種類・検索イテレーション数）を追加し、履歴の「条件を複製」で値を復元。本物の 0.16.0 を偽 OpenAI サーバーで起動し計画→検索→執筆→取り込みまで通ることを確認（検索到達は実環境で要確認）。テスト 16 件とブラウザ検査を追加"
+      "summary": "調査エンジン Phase 2: GPT Researcher（gpt-researcher 0.16.0）を移植。専用 Python 環境のワーカーを JSONL で駆動（最小構成の環境変数・検索は DuckDuckGo / SearXNG 固定・API キーのマスク・ddgs の固定ピンを追加）、出典ゼロの実行はエラー、ワーカーの段階を進捗バーに対応付け、環境の疎通確認に 0.16.0 の typing バグ回避を適用。カードに options_schema からの設定欄（レポートの種類・検索イテレーション数）を追加し、履歴の「条件を複製」で値を復元。本物の 0.16.0 を偽 OpenAI サーバーで起動し計画→検索→執筆→取り込みまで通ることを確認（検索到達は実環境で要確認）。テスト 16 件とブラウザ検査を追加",
+      "ref": "#84"
     },
     {
       "date": "2026-10-26",
-      "summary": "調査エンジンの切り替え Phase 1（骨組み）: deep-research-orchestrator の Runner API v1（Engine / RunContext / RunRequest / RunResult）を engines/runner_core に移植し、JSONL ワーカー駆動・決定論的モック 6 種・エンジン結果の取り込み（章分割・出典の章割り当て・[SOURCE k] への引用橋渡し・ページ取得と抜粋のみ登録・生出力の保存）・Researcher 互換アダプタ（進捗・中止・制限時間・再開）・専用 Python 環境の解決と疎通確認・設定 6 項目・/api/engines を追加。新規調査に「調査エンジン」のカード行（利用可否バッジ・理由・流れ・通信先、外部エンジン選択時は手元の資料と計画確認をグレー）、⚙設定に環境のパス・埋め込みモデル・SearXNG・制限時間・モック表示、結果と履歴にエンジンの表示。GPT Researcher / Open Deep Research は未実装の表示（Phase 2/3）。テスト 3 ファイル 41 件とブラウザ検査を追加"
+      "summary": "調査エンジンの切り替え Phase 1（骨組み）: deep-research-orchestrator の Runner API v1（Engine / RunContext / RunRequest / RunResult）を engines/runner_core に移植し、JSONL ワーカー駆動・決定論的モック 6 種・エンジン結果の取り込み（章分割・出典の章割り当て・[SOURCE k] への引用橋渡し・ページ取得と抜粋のみ登録・生出力の保存）・Researcher 互換アダプタ（進捗・中止・制限時間・再開）・専用 Python 環境の解決と疎通確認・設定 6 項目・/api/engines を追加。新規調査に「調査エンジン」のカード行（利用可否バッジ・理由・流れ・通信先、外部エンジン選択時は手元の資料と計画確認をグレー）、⚙設定に環境のパス・埋め込みモデル・SearXNG・制限時間・モック表示、結果と履歴にエンジンの表示。GPT Researcher / Open Deep Research は未実装の表示（Phase 2/3）。テスト 3 ファイル 41 件とブラウザ検査を追加",
+      "ref": "#84"
     },
     {
       "date": "2026-10-23",
