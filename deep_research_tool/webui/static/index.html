@@ -1539,6 +1539,7 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
           <button class="tab" role="tab" data-tab="evidence" aria-selected="false">根拠</button>
           <button class="tab" role="tab" data-tab="review" aria-selected="false">要確認事項</button>
           <button class="tab" role="tab" data-tab="output" aria-selected="false">出力</button>
+          <button class="tab" role="tab" data-tab="feedback" aria-selected="false">💬 フィードバック</button>
         </div>
         <div class="tab-pane" data-pane="overview">
           <div id="resultOverview"></div>
@@ -1562,6 +1563,33 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
           <label>生成されたファイル</label>
           <div class="files" id="resultFiles"></div>
           <div class="reoutput" id="reoutputBox"></div>
+        </div>
+        <div class="tab-pane" data-pane="feedback" style="display:none">
+          <div id="feedbackPane">
+            <p class="hint" id="feedbackHint" style="margin:0 0 6px">このレポートへの意見・URL・過去の調査をもとに修正計画を作り、指摘された章だけを調べ直して新しい版（別のジョブ）を作ります。元の版は変更しません。</p>
+            <label for="feedback_text">意見・指摘（章や文を引いて書くと、その章が対象になります）</label>
+            <textarea id="feedback_text" placeholder="例: 第2章の市場規模は2023年の数字で古い。2025年の経産省の資料で更新してほしい。&#10;第3章は東レだけでなく帝人・三菱ケミカルの戦略も比較してほしい（表にする）。&#10;航空機向け需要の回復の話は妥当。リサイクル炭素繊維の章を追加してほしい。"></textarea>
+            <label for="feedback_urls">追加する URL・推奨資料（1 行 1 つ・任意。指定 URL と同じ取り込み）</label>
+            <textarea id="feedback_urls" placeholder="https://www.example.go.jp/report/2025.pdf"></textarea>
+            <label>踏まえる過去の調査（任意。根拠ページを資料として登録し、同じ URL は再取得しません）</label>
+            <div id="feedbackRefs" class="doclist"></div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px 14px;align-items:flex-end;margin-top:8px">
+              <div style="flex:1 1 220px"><label for="feedback_domains">優先する検索サイト（任意・ドメイン）</label><input type="text" id="feedback_domains" placeholder="meti.go.jp, jcma.jp"></div>
+              <div style="flex:1 1 260px"><label for="feedback_mode">やり方</label>
+                <select id="feedback_mode">
+                  <option value="add" selected>追加調査（指摘章を直す＋章を足す。他はそのまま）</option>
+                  <option value="revise">再調査（指摘章を調べ直して書き直す）</option>
+                  <option value="full">全面再調査（意見を要件に加えて計画から作り直し）</option>
+                </select></div>
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin-top:8px">
+              <label class="check" style="margin:0"><input type="checkbox" id="feedback_plan_review" checked> 修正計画を確認してから開始する</label>
+              <label class="check" style="margin:0"><input type="checkbox" id="feedback_verify" checked> 検証を行う</label>
+              <button type="button" class="primary" id="feedbackStartBtn" style="margin:0">💬 フィードバックを送って再調査</button>
+            </div>
+            <p class="hint">外部エンジン（GPT Researcher）を選んでいるときは全面再調査になります。新しいジョブとして実行中タブに移ります。</p>
+            <div class="banner" id="feedbackError" role="alert"></div>
+          </div>
         </div>
       </div>
   </section>
@@ -3187,6 +3215,117 @@ function renderResumePlan(rp) {
     </div>`;
 }
 
+// ==================== フィードバック再調査（キャッチボール） ====================
+const REVISION_ACTIONS = {keep: ['muted', 'そのまま'], revise: ['warn', '直す'], add: ['ok', '追加']};
+function renderRevision(r) {
+  if (!r || !r.mode) return '';
+  const rows = (r.sections || []).map(s => {
+    const [cls, label] = REVISION_ACTIONS[s.action] || ['muted', s.action];
+    const detail = s.action === 'keep'
+      ? `根拠 ${s.evidence_after !== undefined ? s.evidence_after : '—'} 件（再利用）`
+      : `${s.chars_before || 0}→${s.chars_after || 0} 文字、新しい根拠 ${s.new_evidence !== undefined ? s.new_evidence : '—'} 件` +
+        (s.url_evidence ? `・指定URL ${s.url_evidence}` : '') + (s.reference_evidence ? `・過去調査 ${s.reference_evidence}` : '');
+    return `<div class="doc-row"><span class="badge ${cls}">${label}</span><span class="nm" title="${escapeHtml(s.instructions || '')}">${escapeHtml(s.section)}. ${escapeHtml(s.title)}</span>
+      <span class="hint" style="margin:0">${escapeHtml(detail)}${s.instructions ? ' — ' + escapeHtml(s.instructions) : ''}</span></div>`;
+  }).join('');
+  const refs = (r.references || []).map(x => `${escapeHtml(x.query || x.session_id || '')}（根拠 ${x.used || 0} 件を資料化${x.error ? '・' + escapeHtml(x.error) : ''}）`).join(' / ');
+  return `<label style="margin-top:10px">💬 フィードバック再調査（${escapeHtml(r.mode_label || r.mode)}${r.engine_rerun ? '・外部エンジンで全面再実行' : ''}）</label>
+    <div class="exec-summary" style="margin-top:4px">
+      <span>元の調査: <b>${escapeHtml(r.parent_query || r.parent_session_id || '')}</b>${r.parent_job_id ? ` <button type="button" class="secondary" data-show-job="${escapeHtml(r.parent_job_id)}" style="padding:2px 8px;font-size:11px">元の版を見る</button>` : ''}</span>
+      <span>そのまま <b>${(r.kept || []).length}</b>・直す <b>${(r.revised || []).length}</b>・追加 <b>${(r.added || []).length}</b> 章</span>
+      ${r.plan_source === 'fallback' ? '<span><span class="badge warn">修正計画は規則で決定（LLM の答えが使えず）</span></span>' : ''}
+    </div>
+    ${rows ? `<div class="doclist" style="margin-top:4px">${rows}</div>` : ''}
+    ${(r.acknowledged || []).length ? `<p class="hint">記録のみ（章は変更なし）: ${r.acknowledged.map(a => escapeHtml(a)).join(' / ')}</p>` : ''}
+    ${r.requirements_addendum ? `<p class="hint">追加要件: ${escapeHtml(r.requirements_addendum)}</p>` : ''}
+    ${refs ? `<p class="hint">参照した過去の調査: ${refs}</p>` : ''}
+    <details style="margin-top:4px"><summary class="hint" style="cursor:pointer">送ったフィードバック</summary><pre class="hint" style="white-space:pre-wrap;margin:4px 0">${escapeHtml(r.feedback || '')}</pre></details>`;
+}
+
+function renderFeedbackRefs() {
+  const box = $('feedbackRefs');
+  if (!box) return;
+  const current = resultJobId || selectedJobId;
+  const refs = (historyCache || []).filter(r => r.job_id !== current && r.result && r.result.saved_artifacts
+    && r.result.saved_artifacts.session && r.state === 'completed').slice(0, 20);
+  box.innerHTML = refs.length
+    ? refs.map(r => `<div class="doc-row"><label class="check" style="margin:0"><input type="checkbox" data-ref="${escapeHtml(r.job_id)}"> ${escapeHtml(fmtDate(r.started_at || r.created_at))} ${escapeHtml(r.query || '')}</label></div>`).join('')
+    : '<p class="hint" style="margin:0">保存済みの他の調査はありません</p>';
+}
+
+function renderFeedbackPane(result, saved) {
+  const pane = $('feedbackPane');
+  if (!pane) return;
+  const ok = !!(saved && saved.session) && result.kind !== 'fermi';
+  $('feedbackStartBtn').disabled = !ok;
+  $('feedbackHint').textContent = ok
+    ? 'このレポートへの意見・URL・過去の調査をもとに修正計画を作り、指摘された章だけを調べ直して新しい版（別のジョブ）を作ります。元の版は変更しません。'
+    : 'この結果には保存済みのセッションが無いため、フィードバック再調査はできません。';
+  $('feedbackError').className = 'banner';
+  $('feedbackError').textContent = '';
+  if (!(historyCache || []).length) {
+    fetch('/api/history').then(r => r.json()).then(d => { historyCache = d.history || []; renderFeedbackRefs(); }).catch(() => renderFeedbackRefs());
+  } else {
+    renderFeedbackRefs();
+  }
+}
+
+async function startFeedback() {
+  const err = $('feedbackError');
+  const text = $('feedback_text').value.trim();
+  if (!text) { err.className = 'banner error'; err.textContent = '意見・指摘を入力してください'; $('feedback_text').focus(); return; }
+  const jobId = resultJobId || selectedJobId;
+  if (!jobId) { err.className = 'banner error'; err.textContent = '対象の調査が選ばれていません'; return; }
+  const refs = [...document.querySelectorAll('#feedbackRefs input[data-ref]:checked')].map(i => i.dataset.ref);
+  const verify = $('feedback_verify').checked;
+  const params = {
+    job_id: jobId, feedback: text, mode: $('feedback_mode').value,
+    urls: $('feedback_urls').value.split('\n').map(s => s.trim()).filter(Boolean),
+    reference_jobs: refs,
+    preferred_domains: $('feedback_domains').value.split(/[,\n]/).map(s => s.trim()).filter(Boolean),
+    plan_review: $('feedback_plan_review').checked,
+    plan_review_timeout: ($('plan_review_mode') && $('plan_review_mode').value === 'auto60') ? 60 : 0,
+    enable_verification: verify,
+    run_mode: verify ? 'research_verify' : 'research_only',
+    research_engine: radioValue('research_engine') || 'builtin',
+    provider: $('provider').value, model: $('model').value.trim(), language: $('language').value,
+    output_format: $('output_format').value,
+    ...collectVerificationParams(), ...settingsParams(),
+  };
+  if (params.research_engine !== 'builtin') { params.plan_review = false; const opts = collectEngineOptions(); if (Object.keys(opts).length) params.engine_options = opts; }
+  $('feedbackStartBtn').disabled = true;
+  err.className = 'banner'; err.textContent = '';
+  try {
+    const res = await fetch('/api/feedback', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(params)});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'failed');
+    startedHere.add(data.job_id);
+    selectedJobId = data.job_id;
+    seenStates[data.job_id] = data.state;
+    $('feedback_text').value = '';
+    setView('run', {user: true});
+    pollJobs();
+  } catch (e) {
+    err.className = 'banner error';
+    err.textContent = 'フィードバック再調査を開始できませんでした: ' + e.message;
+  } finally {
+    $('feedbackStartBtn').disabled = false;
+  }
+}
+$('feedbackStartBtn').addEventListener('click', startFeedback);
+// 「元の版を見る」(result overview) → that job's saved result
+$('resultOverview').addEventListener('click', (e) => {
+  const btn = e.target.closest && e.target.closest('[data-show-job]');
+  if (!btn) return;
+  const rec = (historyCache || []).find(r => r.job_id === btn.dataset.showJob);
+  if (rec && rec.result) { showResults(rec.result, rec.job_id, true); selectResultTab('overview'); }
+  else fetch('/api/history').then(r => r.json()).then(d => {
+    historyCache = d.history || [];
+    const rec2 = historyCache.find(r => r.job_id === btn.dataset.showJob);
+    if (rec2 && rec2.result) { showResults(rec2.result, rec2.job_id, true); selectResultTab('overview'); }
+  });
+});
+
 function renderUrlSources(u) {
   if (!u || !u.mode) return '';
   const failed = u.failed || [];
@@ -3256,6 +3395,7 @@ function showResults(result, jobId, pinned) {
     ${result.regenerated_from ? `<p class="hint">保存済みの調査結果から再出力しました（元データ: ${result.regenerated_from === 'final_body' ? '検証済みの最終本文' : '章本文（未検証・草稿）'}、検索・LLM呼び出しなし）</p>` : ''}
     ${result.kind === 'verify' && result.verify_source ? `<p class="hint">検証のみ: ${result.verify_source.mode === 'session' ? '保存済みの調査' : '外部レポート'}の本文 ${result.verify_source.chapters} 章を、根拠 ${result.verify_source.evidence_items} 件（開始時）と照合しました（調査ループなし）</p>` : ''}
     ${renderResumePlan(result.resume_plan)}
+    ${renderRevision(result.revision)}
     ${renderUrlSources(result.url_sources)}
     ${renderEngineSummary(result.engine)}
     ${renderTimings(result.timings)}
@@ -3319,6 +3459,7 @@ function showResults(result, jobId, pinned) {
   }
   $('resultFiles').innerHTML = fileRows(files) || '<p class="hint">生成されたファイルはありません</p>';
   renderReoutputBox(saved.session ? {job_id: resultJobId || selectedJobId} : null);
+  renderFeedbackPane(result, saved);
 
   $('resultPanel').style.display = 'block';
   syncResultView();
@@ -4036,6 +4177,7 @@ function renderHistory(records) {
       <div class="q">${escapeHtml(r.query || '(無題)')}</div>
       <div class="meta">${HIST_STATE[r.state] || escapeHtml(r.state || '')} ・ ${fmtDate(r.started_at || r.created_at)} ・ ${fmtSec(r.elapsed_seconds)}
         ・ ${escapeHtml(LABELS.source_mode[ps.source_mode] || ps.source_mode || '')}${ps.research_preset ? ' ・ ' + escapeHtml((RESEARCH_PRESETS[ps.research_preset] || {}).label || ps.research_preset) : ''}${ps.research_engine && ps.research_engine !== 'builtin' ? ' ・ エンジン: ' + escapeHtml((engineById[ps.research_engine] || {}).name || ps.research_engine) : ''}
+        ${ps.parent_job_id ? `<div style="margin-top:2px">↳ フィードバック再調査（元: ${escapeHtml((records.find(x => x.job_id === ps.parent_job_id) || {}).query || ps.parent_job_id)}${res.revision ? '・' + escapeHtml(res.revision.mode_label || res.revision.mode) : ''}）</div>` : ''}
         ${axes.verification ? '<div>' + statusBadges(axes, res) + '</div>' : ''}</div>
       <div class="acts">
         ${(res.report_path || Object.keys(saved).length) ? '<button type="button" class="secondary" data-act="show">結果を見る</button>' : ''}

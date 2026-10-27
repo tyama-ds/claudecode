@@ -251,6 +251,7 @@ class Researcher:
         url_crawl_depth: int = 0,
         url_max_pages: int = 30,
         preferred_domains: List[str] = None,
+        reference_documents: List[Dict[str, Any]] = None,
     ):
         """
         Initialize Researcher.
@@ -508,6 +509,42 @@ class Researcher:
         self.url_max_pages = int(url_max_pages or 30)
         self.preferred_domains = [str(d) for d in (preferred_domains or []) if d]
         self.url_source_report: Optional[Dict[str, Any]] = None
+        # earlier research handed in as documents (feedback re-research):
+        # registered in the local store at the start of a run / resume
+        self.reference_documents = list(reference_documents or [])
+
+    def _extra_source_documents(self) -> List[Dict[str, Any]]:
+        """Documents beyond the user's files: the 指定 URL pages (fetched
+        now; nothing readable raises) and the reference research handed
+        in for a feedback revision."""
+        docs: List[Dict[str, Any]] = []
+        self.url_source_report = None
+        if self.source_mode.uses_url_sources:
+            from .url_sources import fetch_url_documents
+            self._report_progress(
+                f"Fetching {len(self.source_urls)} named URL(s)...", 2)
+            url_docs, report = fetch_url_documents(
+                self.source_urls, self.search,
+                crawl_depth=self.url_crawl_depth, max_pages=self.url_max_pages,
+                parallel_max_workers=self.parallel_max_workers,
+                cancel_check=self._check_cancel,
+                progress=lambda m: self._report_progress(m, 3))
+            self.url_source_report = report
+            for entry in report.get("failed", []):
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.MEDIUM, "Researcher",
+                    f"指定 URL を取得できませんでした: {entry['url']} — {entry['error']}")
+            if not url_docs:
+                detail = "; ".join(f"{e['url']}: {e['error']}" for e in report.get("failed", [])[:5])
+                raise ValueError(
+                    "指定 URL から本文を取得できませんでした"
+                    + (f"（{detail}）" if detail else ""))
+            docs.extend(url_docs)
+        if self.reference_documents:
+            docs.extend(self.reference_documents)
+            self._report_progress(
+                f"Registering {len(self.reference_documents)} page(s) from earlier research...", 3)
+        return docs
 
     def _report_progress(self, message: str, percentage: float) -> None:
         """Report progress to callback if available."""
@@ -569,33 +606,14 @@ class Researcher:
             output_dir=self.output_dir / "evidence",
         )
 
-        # 指定 URL: fetch the named pages now (and same-site links when
-        # asked) and treat them as documents; nothing readable = no run
-        self.url_source_report = None
-        if self.source_mode.uses_url_sources:
-            from .url_sources import fetch_url_documents
-            self._report_progress(
-                f"Fetching {len(self.source_urls)} named URL(s)...", 2)
-            url_docs, report = fetch_url_documents(
-                self.source_urls, self.search,
-                crawl_depth=self.url_crawl_depth, max_pages=self.url_max_pages,
-                parallel_max_workers=self.parallel_max_workers,
-                cancel_check=self._check_cancel,
-                progress=lambda m: self._report_progress(m, 3))
-            self.url_source_report = report
-            for entry in report.get("failed", []):
-                ResearchWarnings.get_instance().add(
-                    ResearchWarnings.MEDIUM, "Researcher",
-                    f"指定 URL を取得できませんでした: {entry['url']} — {entry['error']}")
-            if not url_docs:
-                detail = "; ".join(f"{e['url']}: {e['error']}" for e in report.get("failed", [])[:5])
-                raise ValueError(
-                    "指定 URL から本文を取得できませんでした"
-                    + (f"（{detail}）" if detail else ""))
-            additional_documents = list(additional_documents or []) + url_docs
+        # 指定 URL (fetched now) and reference research are documents too;
+        # nothing readable among the named URLs = no run
+        additional_documents = list(additional_documents or []) + self._extra_source_documents()
 
-        # Register local documents for local/hybrid retrieval
-        if additional_documents and self.source_mode.uses_local_store:
+        # Register local documents for local/hybrid/URL/reference retrieval
+        if additional_documents and (self.source_mode.uses_local_store
+                                     or any((d.get("metadata") or {}).get("source") in ("url", "reference")
+                                            for d in additional_documents)):
             for doc in additional_documents:
                 self.local_store.add_document(
                     title=doc.get("title", ""),
@@ -624,7 +642,7 @@ class Researcher:
                     # own URL), and the fetch report lists the page.
                     full_content = doc.get("content", "")
                     doc_meta = doc.get("metadata", {}) or {}
-                    if doc_meta.get("source") != "url":
+                    if doc_meta.get("source") not in ("url", "reference"):
                         self.evidence_locker.add_evidence(
                             url=doc.get("path", ""),
                             title=doc.get("title", Path(doc.get("path", "")).name),
@@ -867,9 +885,10 @@ class Researcher:
             f"Researching: {section.section}. {section.title}", base)
         section.status = "in_progress"
 
-        # Local document retrieval (local / hybrid / 指定 URL source modes)
+        # Local document retrieval (local / hybrid / 指定 URL source modes,
+        # and reference research registered for a revision)
         local_parts: List[ExtractedContent] = []
-        if self.source_mode.uses_local_store:
+        if self.source_mode.uses_local_store or not self.local_store.is_empty():
             local_parts = self._collect_local_parts(section, section_queries)
 
         if not self.source_mode.uses_web_search:
@@ -1617,11 +1636,14 @@ class Researcher:
         for chunk, extracted in zip(chunks, extracted_all):
             if extracted.relevance_score >= 0.2:
                 chunk_meta = dict(getattr(chunk, 'metadata', {}) or {})
-                from_url = chunk_meta.get("source") == "url"
-                if from_url:
-                    # a page the user named: cited by its real URL, ranked
-                    # ahead of search results (see _score_importance)
-                    extracted.metadata["source"] = "url"
+                origin = chunk_meta.get("source")          # url | reference | None
+                from_url = origin == "url"
+                from_ref = origin == "reference"
+                if from_url or from_ref:
+                    # a page the user named (ranked ahead of search results,
+                    # see _score_importance) or one an earlier research read:
+                    # cited by its real URL
+                    extracted.metadata["source"] = origin
                     extracted.metadata["seed_url"] = chunk_meta.get("seed_url")
                 parts.append(extracted)
                 self.evidence_locker.add_evidence(
@@ -1629,12 +1651,13 @@ class Researcher:
                     title=chunk.doc_title,
                     content_excerpt=extracted.processed_content[:500],
                     extracted_text=chunk.content,
-                    evidence_type=(EvidenceType.WEB_PAGE if from_url
+                    evidence_type=(EvidenceType.WEB_PAGE if (from_url or from_ref)
                                    else EvidenceType.USER_PROVIDED),
-                    search_query="source_urls" if from_url else "local_documents",
+                    search_query=("source_urls" if from_url else
+                                  "reference_research" if from_ref else "local_documents"),
                     section_reference=section.section,
                     relevance_score=extracted.relevance_score,
-                    access_method="url" if from_url else "local",
+                    access_method=("url" if from_url else "reference" if from_ref else "local"),
                     metadata={**chunk_meta,
                               'source_spans': extracted.metadata.get('source_spans', []),
                               'document_path': chunk.doc_path,
@@ -1835,8 +1858,8 @@ Output JSON only:"""
         """
         parts: List[ExtractedContent] = []
 
-        # Local retrieval with the NEW queries (local / hybrid / 指定 URL)
-        if self.source_mode.uses_local_store:
+        # Local retrieval with the NEW queries (local / hybrid / 指定 URL / references)
+        if self.source_mode.uses_local_store or not self.local_store.is_empty():
             parts.extend(self._collect_local_parts(
                 section, [], queries_override=queries,
             ))
@@ -2184,6 +2207,11 @@ Return as JSON:
             Updated ResearchSession
         """
         self.session = ResearchSession.load(session_path)
+        # a revised session carries its lineage (parent, revision plan,
+        # feedback); the checkpoint writes this run's config, so keep those
+        for key in ("parent_session_id", "revision_mode", "revision", "feedback", "revised_at"):
+            if key in (self.session.run_config or {}) and key not in self.run_config:
+                self.run_config[key] = self.session.run_config[key]
 
         # Load evidence if available
         evidence_path = self.output_dir / "evidence" / f"evidence_{self.session.session_id}.json"
@@ -2218,6 +2246,12 @@ Return as JSON:
             self.session.state = ResearchState.RESEARCHING
             self.session.error_message = None
             try:
+                # 指定 URL pages and reference research are documents for
+                # the sections still to be researched (feedback revision)
+                for doc in self._extra_source_documents():
+                    self.local_store.add_document(
+                        title=doc.get("title", ""), content=doc.get("content", ""),
+                        path=str(doc.get("path", "")), metadata=doc.get("metadata", {}))
                 self._conduct_research_loop()
                 self._synthesize_findings()
                 self.session.state = ResearchState.COMPLETED

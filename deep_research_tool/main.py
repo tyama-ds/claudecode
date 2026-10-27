@@ -703,6 +703,140 @@ class DeepResearchTool:
         except Exception:
             return {}
 
+    # ------------------------------------------------------------------
+    # feedback re-research (キャッチボール)
+    # ------------------------------------------------------------------
+    def revise_report(
+        self,
+        *,
+        parent_session_path: str,
+        feedback: str,
+        mode: str = "add",
+        reference_session_paths: Optional[List[str]] = None,
+        parent_job_id: Optional[str] = None,
+        progress_callback: Callable[[str, float], None] = None,
+        plan_review_callback: Callable = None,
+        live_sink=None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Dict[str, Any]:
+        """A NEW version of a finished report from the reader's feedback.
+
+        add / revise: the LLM turns the feedback into a per-chapter plan
+        (keep / revise / add) — shown through ``plan_review_callback`` when
+        given — a new session reuses the kept chapters and the research
+        loop processes the others (``resume_research``), with the named
+        URLs (config.research.source_urls) and the evidence pages of the
+        reference research registered as documents. full, or an external
+        engine: the feedback joins the requirements and the research
+        starts from scratch. The original session is never modified.
+        Returns run()'s result plus ``kind="revision"`` and ``revision``
+        (per-chapter actions, counts, acknowledged remarks)."""
+        from .revision import (MODES, build_revised_session, evidence_path_for,
+                               plan_revision, reference_documents,
+                               reference_summaries, review_plan_for, revision_summary,
+                               seed_locker)
+        if mode not in MODES:
+            raise ValueError(f"unknown revision mode: {mode} (add / revise / full)")
+        feedback = (feedback or "").strip()
+        if not feedback:
+            raise ValueError("フィードバックの本文が空です")
+        parent_path = Path(parent_session_path)
+        if not parent_path.is_file():
+            raise ValueError(f"元の調査のセッションが見つかりません: {parent_path}")
+        parent = ResearchSession.load(parent_path)
+        if parent.research_plan is None or not parent.section_contents:
+            raise ValueError("元の調査に章がないため、フィードバック再調査はできません")
+        parent_evidence = evidence_path_for(parent_path, parent)
+
+        def _progress(message: str, pct: float) -> None:
+            if progress_callback:
+                progress_callback(message, pct)
+
+        rc = self.config.research
+        ref_paths = [str(p) for p in (reference_session_paths or []) if p]
+        _progress("過去の調査の根拠を読み込んでいます" if ref_paths else "フィードバックを読み込んでいます", 1)
+        ref_docs, ref_info = reference_documents(ref_paths)
+        ref_notes = reference_summaries(ref_paths)
+        feedback_context = f"【読者からのフィードバック（第 {parent.session_id} 版への意見）】\n{feedback}"
+        external_engine = str(getattr(rc, "research_engine", "builtin") or "builtin") != "builtin"
+
+        if mode == "full" or external_engine:
+            rp = plan_revision(self.llm_client, parent, feedback, "full", language=rc.language)
+            requirements = parent.requirements or ""
+            requirements = (requirements + "\n\n" if requirements else "") + \
+                f"【追加要件（フィードバック）】{feedback[:2000]}"
+            self._revision_reference_docs = ref_docs if not external_engine else []
+            try:
+                result = self.run(query=parent.query, requirements=requirements,
+                                  additional_context=feedback_context,
+                                  progress_callback=progress_callback,
+                                  plan_review_callback=plan_review_callback,
+                                  live_sink=live_sink, cancel_event=cancel_event)
+            finally:
+                self._revision_reference_docs = []
+            new_session = self.researcher.get_session() if getattr(self, "researcher", None) else parent
+            result["kind"] = "revision"
+            result["revision"] = revision_summary(
+                parent, new_session, rp, self.researcher.get_evidence_locker()
+                if getattr(self, "researcher", None) else None,
+                parent_job_id=parent_job_id, feedback=feedback, references=ref_info)
+            result["revision"]["engine_rerun"] = external_engine
+            return result
+
+        _progress("フィードバックから修正計画を作成しています", 2)
+        planner_llm = (getattr(self, "stage_llm_clients", None) or {}).get("planning") or self.llm_client
+        k = max(1, int(rc.max_queries_per_iteration or 3))
+        holder = {"rp": plan_revision(planner_llm, parent, feedback, mode, language=rc.language,
+                                      k=k, reference_summaries=ref_notes)}
+        if plan_review_callback is not None:
+            def revise_fn(_current, instructions):
+                holder["rp"] = plan_revision(planner_llm, parent, feedback, mode,
+                                             language=rc.language, k=k,
+                                             extra_instructions=instructions,
+                                             reference_summaries=ref_notes)
+                return review_plan_for(holder["rp"], parent)
+            plan_review_callback(review_plan_for(holder["rp"], parent), revise_fn)
+        rp = holder["rp"]
+        if not rp.changes:
+            raise ValueError("フィードバックから修正すべき章が見つかりませんでした"
+                             "（記録のみの意見のようです）")
+
+        out_dir = Path(self.config.report.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        session = build_revised_session(parent, rp, k=k, feedback=feedback)
+        locker = seed_locker(parent_evidence, session.session_id, out_dir)
+        parent_evidence_ids = {e.id for e in locker.get_all_evidence()}
+        session_path = out_dir / f"session_{session.session_id}.json"
+        saved: Dict[str, str] = {"session": str(session_path)}
+        try:
+            ev_path = locker.export_to_json()
+            saved["evidence_json"] = str(ev_path)
+        except Exception as e:  # noqa: BLE001 - the parent's evidence is optional
+            ResearchWarnings.get_instance().add(
+                "MEDIUM", "Revision", f"元の根拠を新しい調査に引き継げませんでした（{e}）")
+        session.saved_artifacts = saved
+        session.save(session_path)
+        _progress(f"修正計画: 直す {len(rp.by_action('revise'))} 章・追加 "
+                  f"{len(rp.by_action('add'))} 章・そのまま {len(rp.by_action('keep'))} 章", 3)
+
+        self._revision_reference_docs = ref_docs
+        try:
+            result = self.run(query=parent.query, requirements=session.requirements,
+                              additional_context=feedback_context,
+                              progress_callback=progress_callback,
+                              plan_review_callback=None, live_sink=live_sink,
+                              cancel_event=cancel_event, resume_from=str(session_path))
+        finally:
+            self._revision_reference_docs = []
+        new_session = self.researcher.get_session() or session
+        result["kind"] = "revision"
+        result["revision"] = revision_summary(
+            parent, new_session, rp, self.researcher.get_evidence_locker(),
+            parent_job_id=parent_job_id, feedback=feedback, references=ref_info,
+            parent_evidence_ids=parent_evidence_ids)
+        result["revision"]["engine_rerun"] = False
+        return result
+
     def _create_engine_researcher(self, engine_id: str, raw_progress,
                                   cancel_check):
         """The Researcher-compatible driver for an external engine, or a
@@ -1391,6 +1525,8 @@ class DeepResearchTool:
             url_crawl_depth=rc_.url_crawl_depth,
             url_max_pages=rc_.url_max_pages,
             preferred_domains=list(rc_.preferred_domains or []),
+            # feedback revision: pages of the earlier research as documents
+            reference_documents=list(getattr(self, "_revision_reference_docs", None) or []),
         )
 
         self.researcher.cancel_check = _cancel_checkpoint
