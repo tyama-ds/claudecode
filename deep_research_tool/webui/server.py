@@ -1131,6 +1131,9 @@ class JobManager:
             "engine": result.get("engine"),
             # 指定 URL: what was fetched / failed and the evidence from them
             "url_sources": result.get("url_sources"),
+            # feedback re-research: the plan, per-chapter changes, the parent
+            "revision": result.get("revision"),
+            "parent_job_id": params.get("parent_job_id"),
             # measured performance (stage seconds, token usage,
             # configured vs observed concurrency) — numbers only
             "performance": result.get("performance"),
@@ -1314,6 +1317,24 @@ class JobManager:
             # chapters/figures as they are written
             from ..report.live_report import WebUILiveSink
             job.live_sink = WebUILiveSink()
+
+            if params.get("feedback"):
+                # feedback re-research: a new version of a finished report
+                # (the original is never modified)
+                spec = params["feedback"]
+                job.update("フィードバック再調査: 元の調査を読み込んでいます", 2)
+                result = tool.revise_report(
+                    parent_session_path=spec["parent_session_path"],
+                    feedback=spec.get("text", ""),
+                    mode=spec.get("mode", "add"),
+                    reference_session_paths=spec.get("reference_session_paths") or [],
+                    parent_job_id=spec.get("parent_job_id"),
+                    progress_callback=job.update,
+                    plan_review_callback=plan_cb if params.get("plan_review") else None,
+                    live_sink=job.live_sink,
+                )
+                self._finish_from_result(job, params, result, job_warnings)
+                return
 
             result = tool.run(
                 query=params.get("query", ""),
@@ -1725,7 +1746,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                "/api/cancel-verification",
                                "/api/cancel-run", "/api/precheck",
                                "/api/resume", "/api/regenerate",
-                               "/api/verify", "/api/engines",
+                               "/api/verify", "/api/engines", "/api/feedback",
                                "/api/history/forget", "/api/fermi",
                                "/api/llm-parallel-test", "/api/precheck-urls"):
             self._send_json({"error": "not found"}, 404)
@@ -1880,6 +1901,77 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": f"invalid parameter: {e}"}, 400)
                 return
             job = manager.start(job_params)
+            self._send_json({"job_id": job.job_id, "state": job.state}, 202)
+            return
+
+        if parsed.path == "/api/feedback":
+            # FEEDBACK RE-RESEARCH: a new job that revises / extends a
+            # finished report (job_id or session_path) from the reader's
+            # remarks, named URLs, reference research and preferred hosts
+            from ..research.url_sources import normalize_domains, normalize_urls
+            from ..revision import MODES
+            rec = self._history_record(manager, params)
+            session_path = (rec or {}).get("session_path")
+            if not session_path or not Path(session_path).is_file():
+                self._send_json({"error": "元の調査のセッションが見つかりません",
+                                 "field": "feedback_text"}, 404)
+                return
+            text = (params.get("feedback") or params.get("feedback_text") or "").strip()
+            if not text:
+                self._send_json({"error": "フィードバックを入力してください",
+                                 "field": "feedback_text"}, 400)
+                return
+            mode = str(params.get("mode") or "add")
+            if mode not in MODES:
+                self._send_json({"error": f"mode は add / revise / full のいずれか（{mode}）",
+                                 "field": "feedback_mode"}, 400)
+                return
+            ref_paths, ref_ids = [], []
+            for rid in (params.get("reference_jobs") or []):
+                r = self._history_record(manager, {"job_id": str(rid)})
+                sp = (r or {}).get("session_path")
+                if sp and Path(sp).is_file() and sp != session_path and sp not in ref_paths:
+                    ref_paths.append(sp)
+                    ref_ids.append(str(rid))
+            control = {"job_id", "session_path", "feedback", "feedback_text", "mode", "urls",
+                       "reference_jobs", "preferred_domains", "query", "local_documents",
+                       "resume_from", "verify", "fermi", "regenerate", "parent_job_id",
+                       "source_urls", "source_mode"}
+            base_params = {k: v for k, v in dict((rec or {}).get("params_summary") or {}).items()
+                           if k not in control}
+            base_params.update({k: v for k, v in params.items() if k not in control})
+            urls = normalize_urls(params.get("urls") or [])
+            if urls:
+                base_params["source_mode"] = "urls_web"
+                base_params["source_urls"] = urls
+            else:
+                base_params["source_mode"] = "web"
+            base_params["preferred_domains"] = normalize_domains(params.get("preferred_domains") or [])
+            base_params["query"] = f"再調査: {(rec or {}).get('query') or Path(session_path).stem}"
+            base_params["parent_job_id"] = (rec or {}).get("job_id")
+            base_params["feedback"] = {
+                "parent_session_path": session_path,
+                "parent_job_id": (rec or {}).get("job_id"),
+                "parent_query": (rec or {}).get("query"),
+                "text": text, "mode": mode,
+                "reference_session_paths": ref_paths,
+                "reference_job_ids": ref_ids,
+            }
+            try:
+                build_config_kwargs(base_params)
+            except FieldError as e:
+                self._send_json({"error": f"invalid parameter: {e}", "field": e.field}, 400)
+                return
+            except ValueError as e:
+                self._send_json({"error": f"invalid parameter: {e}"}, 400)
+                return
+            engine_error = engine_request_error(base_params)
+            if engine_error is not None:
+                self._send_json({"error": engine_error[0], "field": engine_error[1]}, 400)
+                return
+            if str(base_params.get("research_engine") or "builtin") != "builtin":
+                base_params["plan_review"] = False
+            job = manager.start(base_params)
             self._send_json({"job_id": job.job_id, "state": job.state}, 202)
             return
 
