@@ -228,6 +228,9 @@ def build_worker_payload(request: RunRequest) -> Tuple[Dict[str, Any], List[str]
         "report_type": str(request.options.get("report_type", "research_report")),
         "language": request.input.language,
         "input_urls": list(request.input.input_urls or []),
+        # with input_urls: False = research those pages only, True = those
+        # pages first plus web search (gpt-researcher's complement_source_urls)
+        "complement_source_urls": bool(request.options.get("complement_source_urls", True)),
     }
     return payload, warnings
 

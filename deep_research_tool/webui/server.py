@@ -54,6 +54,10 @@ _CONFIG_PARAM_MAP = {
     "output_dir": "output_dir",
     "language": "language",
     "source_mode": "source_mode",
+    "source_urls": "source_urls",
+    "url_crawl_depth": "url_crawl_depth",
+    "url_max_pages": "url_max_pages",
+    "preferred_domains": "preferred_domains",
     "crawl_mode": "crawl_mode",
     "ai_crawl_max_pages": "ai_crawl_max_total_pages",
     "ai_crawl_site_depth": "ai_crawl_site_depth",
@@ -240,7 +244,31 @@ def _url_text(value, name):
     return v
 
 
+def _url_list(value, name):
+    from ..research.url_sources import normalize_urls
+    if isinstance(value, (list, tuple, str)):
+        return normalize_urls(value)
+    raise ValueError(f"{name} must be a list of URLs or a newline-separated string")
+
+
+def _domain_list(value, name):
+    from ..research.url_sources import normalize_domains
+    if isinstance(value, (list, tuple, str)):
+        return normalize_domains(value)
+    raise ValueError(f"{name} must be a list of hostnames or a comma-separated string")
+
+
+def _crawl_depth(value, name):
+    if value in (True, False):
+        return 1 if value else 0
+    return _int_range(0, 1)(value, name)
+
+
 _PARAM_CONVERTERS = {
+    "source_urls": _url_list,
+    "preferred_domains": _domain_list,
+    "url_crawl_depth": _crawl_depth,
+    "url_max_pages": _int_range(1, 100),
     "research_engine": _engine_id,
     "engine_python": _str_mapping,
     "engine_options": _mapping,
@@ -321,6 +349,10 @@ def build_config_kwargs(params: Dict[str, Any]) -> Dict[str, Any]:
                 raise FieldError(ui_key, str(e)) from e
         kwargs[config_key] = value
 
+    # 指定 URL modes need at least one readable URL (mirrors create_config)
+    if kwargs.get("source_mode") in ("urls", "urls_web") and not kwargs.get("source_urls"):
+        raise FieldError("source_urls", "指定 URL を 1 つ以上入力してください（http:// または https://）")
+
     # cross-field check mirrored from Config.validate()
     hard_min = kwargs.get("hard_min_body_chars")
     hard_max = kwargs.get("hard_max_body_chars")
@@ -360,12 +392,36 @@ def engine_request_error(params: Dict[str, Any]):
         return reason, "research_engine"
     name = engine_display_name(engine_id)
     if params.get("local_documents"):
-        return (f"{name} は手元の資料を扱えません（使用する資料を「Web」にするか、"
+        return (f"{name} は手元の資料を扱えません（使用する資料を「Web」か「指定 URL」にするか、"
                 "内蔵エンジンを選んでください）", "research_engine")
-    if str(params.get("source_mode") or "web") != "web":
-        return (f"{name} は Web 以外の資料（source_mode="
+    if str(params.get("source_mode") or "web") not in ("web", "urls", "urls_web"):
+        return (f"{name} は手元の資料（source_mode="
                 f"{params.get('source_mode')}）を扱えません", "research_engine")
     return None
+
+
+def precheck_url_sources(params: Dict[str, Any]) -> list:
+    """Reachability of the named URLs with the search client the run would
+    use (proxy / certificates / WAF handling included). Nothing is kept."""
+    from ..config import create_config
+    from ..main import build_search_client
+    from ..research.url_sources import normalize_urls, precheck_urls
+    urls = normalize_urls(params.get("urls") or params.get("source_urls") or [])
+    if not urls:
+        return []
+    cfg_params = {k: v for k, v in params.items()
+                  if k not in ("urls", "source_urls", "source_mode", "query")}
+    cfg_params.setdefault("provider", "openai")
+    cfg_params.setdefault("openai_api_key", "precheck")   # no LLM is used
+    config = create_config(**build_config_kwargs(cfg_params))
+    client = build_search_client(config)
+    try:
+        return precheck_urls(urls, client)
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
 
 
 SUPPORTED_DOC_SUFFIXES = {".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx", ".pptx"}
@@ -1073,6 +1129,8 @@ class JobManager:
             # which research engine ran, and what it reported (None = builtin)
             "research_engine": result.get("research_engine", "builtin"),
             "engine": result.get("engine"),
+            # 指定 URL: what was fetched / failed and the evidence from them
+            "url_sources": result.get("url_sources"),
             # measured performance (stage seconds, token usage,
             # configured vs observed concurrency) — numbers only
             "performance": result.get("performance"),
@@ -1197,6 +1255,9 @@ class JobManager:
                 raise ValueError(
                     "ローカル文献モードには文書パスの指定が必要です"
                 )
+            if params.get("source_mode") in ("urls", "urls_web"):
+                n = len(config.research.source_urls)
+                job.update(f"指定 URL {n} 件を取得して資料として登録します", 1)
             if documents:
                 job.update(f"ローカル文書 {len(documents)} 件を読み込みます", 1)
 
@@ -1666,7 +1727,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                "/api/resume", "/api/regenerate",
                                "/api/verify", "/api/engines",
                                "/api/history/forget", "/api/fermi",
-                               "/api/llm-parallel-test"):
+                               "/api/llm-parallel-test", "/api/precheck-urls"):
             self._send_json({"error": "not found"}, 404)
             return
 
@@ -1699,6 +1760,16 @@ class WebUIHandler(BaseHTTPRequestHandler):
             # with the browser's local files, which go through /api/upload)
             self._send_json({"files": precheck_documents(
                 params.get("paths") or [])})
+            return
+
+        if parsed.path == "/api/precheck-urls":
+            # reachability of 指定 URL before the run (title / size / error)
+            try:
+                self._send_json({"urls": precheck_url_sources(params)})
+            except FieldError as e:
+                self._send_json({"error": str(e), "field": e.field}, 400)
+            except Exception as e:  # noqa: BLE001 - reported, never a crash
+                self._send_json({"error": f"確認に失敗しました: {e}"}, 400)
             return
 
         if parsed.path == "/api/llm-parallel-test":

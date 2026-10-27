@@ -267,6 +267,8 @@ details .body { padding: 0 2px 14px; }
 .doclist { margin-top: 6px; display: grid; gap: 4px; }
 .doc-row { display: flex; gap: 8px; align-items: center; font-size: 12px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; }
 .doc-row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.doc-row .badge { max-width: 100%; white-space: normal; word-break: break-all; }
+.doc-row { max-width: 100%; min-width: 0; flex-wrap: wrap; }
 .doc-row button { border: none; background: transparent; cursor: pointer; color: var(--muted); }
 .preset-effects { margin-top: 6px; font-size: 12px; color: var(--muted); line-height: 1.6; background: var(--bg); border-radius: 8px; padding: 8px 10px; }
 .start-box { position: sticky; bottom: 0; background: var(--card); padding-top: 10px; margin-top: 14px; border-top: 1px solid var(--border); }
@@ -1032,13 +1034,32 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
 
     <!-- 2. どの資料を使うか -->
     <label id="sourceLabel">使用する資料</label>
-    <div class="mode-cards" id="sourceModes" role="radiogroup" aria-labelledby="sourceLabel">
+    <div class="mode-cards mode-cards-auto" id="sourceModes" role="radiogroup" aria-labelledby="sourceLabel">
       <label class="mode-card sel"><input type="radio" name="source_mode" value="web" checked>
         <span class="t">Web</span><span class="d">　Web検索・クロールで情報収集</span></label>
       <label class="mode-card"><input type="radio" name="source_mode" value="local">
         <span class="t">手元の資料のみ</span><span class="d">　アップロード／サーバー上の文書だけを使用（Webアクセスなし）</span></label>
       <label class="mode-card"><input type="radio" name="source_mode" value="hybrid">
         <span class="t">両方</span><span class="d">　手元の資料＋Webの両方を使用</span></label>
+      <label class="mode-card"><input type="radio" name="source_mode" value="urls">
+        <span class="t">指定 URL のみ</span><span class="d">　入力した URL のページだけを根拠にする（Web 検索なし）</span></label>
+      <label class="mode-card"><input type="radio" name="source_mode" value="urls_web">
+        <span class="t">指定 URL を重視＋Web</span><span class="d">　URL のページを先に読み込んで優先し、足りない分だけ Web を検索</span></label>
+    </div>
+    <div id="urlBox" style="display:none">
+      <label for="source_urls">指定 URL（1 行 1 つ。ページ・PDF・Word など）</label>
+      <textarea id="source_urls" placeholder="https://www.example.go.jp/report/2026/&#10;https://www.example.com/ir/annual.pdf" aria-describedby="urlHint"></textarea>
+      <div style="display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin-top:6px">
+        <label class="check" style="margin:0"><input type="checkbox" id="url_crawl_depth"> 同一サイト内のリンク先も読む（1 段・最大 30 ページ）</label>
+        <button type="button" class="secondary" id="urlPrecheckBtn">取得を確認</button>
+      </div>
+      <p class="hint" id="urlHint">開始時にページを取得して「手元の資料」と同じ仕組みに登録します。取得できない URL は要確認事項に残し、1 件も読めなければ開始しません。</p>
+      <div id="urlPrecheckResult" class="doclist" aria-live="polite"></div>
+      <div id="preferredDomainsField" style="display:none">
+        <label for="preferred_domains">優先する検索サイト（任意・ドメイン。カンマ区切り）</label>
+        <input type="text" id="preferred_domains" placeholder="meti.go.jp, jcma.jp">
+        <p class="hint">まず <code>site:ドメイン</code> で検索し、その後に通常の検索を行います（最大 3 件）。</p>
+      </div>
     </div>
     <div id="localDocsBox" style="display:none">
       <label>手元の資料（この端末のファイル）</label>
@@ -2106,7 +2127,7 @@ function renderEngineInfo(eng, external) {
   needs.textContent = eng && eng.needs ? '通信先: ' + eng.needs : '';
   if (external && eng) {
     notice.className = 'banner notice';
-    notice.textContent = `${eng.name} が計画・検索・執筆を行い、本文と出典をこのツールに取り込みます。手元の資料と開始前の計画確認は使えません（エンジンが独自に計画します）。取り込み後の根拠の取得・検証・出力はこのツールが行います。`;
+    notice.textContent = `${eng.name} が計画・検索・執筆を行い、本文と出典をこのツールに取り込みます。手元の資料と開始前の計画確認は使えません（エンジンが独自に計画します。指定 URL は渡せます）。取り込み後の根拠の取得・検証・出力はこのツールが行います。`;
   } else {
     notice.className = 'banner';
     notice.textContent = '';
@@ -2369,9 +2390,20 @@ function collectParams() {
   // the form's run mode is authoritative over the 機能 tab switch:
   // 調査のみ = no verification; the other two modes verify
   params.enable_verification = params.run_mode !== 'research_only';
-  // an external engine makes its own plan and reads the Web only
+  // 指定 URL: the list, same-site crawl flag and (urls_web) preferred hosts
+  if (params.source_mode === 'urls' || params.source_mode === 'urls_web') {
+    params.source_urls = $('source_urls').value.split('\n').map(s => s.trim()).filter(Boolean);
+    if (!params.source_urls.length) throw fieldError('source_urls', '指定 URL を 1 つ以上入力してください');
+    params.url_crawl_depth = $('url_crawl_depth').checked ? 1 : 0;
+    if (params.source_mode === 'urls_web') {
+      const domains = $('preferred_domains').value.split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+      if (domains.length) params.preferred_domains = domains;
+    }
+  }
+  // an external engine makes its own plan and reads the Web (or the named URLs) only
   if (params.research_engine !== 'builtin') {
-    params.plan_review = false; params.source_mode = 'web';
+    params.plan_review = false;
+    if (params.source_mode === 'local' || params.source_mode === 'hybrid') params.source_mode = 'web';
     const opts = collectEngineOptions();
     if (Object.keys(opts).length) params.engine_options = opts;
   }
@@ -3155,6 +3187,20 @@ function renderResumePlan(rp) {
     </div>`;
 }
 
+function renderUrlSources(u) {
+  if (!u || !u.mode) return '';
+  const failed = u.failed || [];
+  const rows = [
+    `<span>モード: <b>${escapeHtml(LABELS.source_mode[u.mode] || u.mode)}</b></span>`,
+    `<span>指定 URL: <b>${u.requested}</b> 件${u.fetched !== undefined ? `（取得 ${u.fetched} 件${u.crawled ? '・サイト内リンク ' + u.crawled + ' ページ' : ''}）` : ''}</span>`,
+    u.evidence_count !== undefined ? `<span>URL 由来の根拠: <b>${u.evidence_count}</b> 件</span>` : '',
+    (u.preferred_domains || []).length ? `<span>優先サイト: <b>${escapeHtml(u.preferred_domains.join(', '))}</b></span>` : '',
+  ].filter(Boolean);
+  return `<label style="margin-top:10px">🔗 指定 URL</label>
+    <div class="exec-summary" style="margin-top:4px">${rows.join('')}</div>
+    ${failed.length ? `<div class="warn-row"><b>取得できなかった URL:</b> ${failed.map(f => escapeHtml(f.url) + '（' + escapeHtml(f.error || '') + '）').join(' / ')}</div>` : ''}`;
+}
+
 function renderEngineSummary(e) {
   if (!e || !e.id) return '';
   const m = e.metrics || {}, ing = e.ingest || {};
@@ -3210,6 +3256,7 @@ function showResults(result, jobId, pinned) {
     ${result.regenerated_from ? `<p class="hint">保存済みの調査結果から再出力しました（元データ: ${result.regenerated_from === 'final_body' ? '検証済みの最終本文' : '章本文（未検証・草稿）'}、検索・LLM呼び出しなし）</p>` : ''}
     ${result.kind === 'verify' && result.verify_source ? `<p class="hint">検証のみ: ${result.verify_source.mode === 'session' ? '保存済みの調査' : '外部レポート'}の本文 ${result.verify_source.chapters} 章を、根拠 ${result.verify_source.evidence_items} 件（開始時）と照合しました（調査ループなし）</p>` : ''}
     ${renderResumePlan(result.resume_plan)}
+    ${renderUrlSources(result.url_sources)}
     ${renderEngineSummary(result.engine)}
     ${renderTimings(result.timings)}
     ${renderConcurrency(result.performance)}
@@ -3595,12 +3642,12 @@ function applyModeVisibility() {
   if ($('engineBox')) $('engineBox').style.display = runMode === 'verify_only' ? 'none' : '';
   document.querySelectorAll('#sourceModes .mode-card').forEach(card => {
     const inp = card.querySelector('input');
-    const off = external && inp.value !== 'web';
+    const off = external && (inp.value === 'local' || inp.value === 'hybrid');
     card.classList.toggle('disabled', off);
     inp.disabled = off;
-    card.title = off ? `${eng ? eng.name : 'この調査エンジン'}では手元の資料を使えません（内蔵エンジンを選んでください）` : '';
+    card.title = off ? `${eng ? eng.name : 'この調査エンジン'}では手元の資料を使えません（Web か指定 URL を選んでください）` : '';
   });
-  if (external && radioValue('source_mode') !== 'web') setRadio('source_mode', 'web');
+  if (external && ['local', 'hybrid'].includes(radioValue('source_mode'))) setRadio('source_mode', 'web');
   const pr = $('plan_review');
   if (external) {
     if (pr.checked) { pr.dataset.wasChecked = '1'; pr.checked = false; }
@@ -3614,7 +3661,11 @@ function applyModeVisibility() {
   const source = radioValue('source_mode');
   const needsDocs = source === 'local' || source === 'hybrid';
   $('localDocsBox').style.display = needsDocs ? 'block' : 'none';
-  const web = source !== 'local';
+  const urlMode = source === 'urls' || source === 'urls_web';
+  $('urlBox').style.display = urlMode ? 'block' : 'none';
+  $('preferredDomainsField').style.display = source === 'urls_web' ? '' : 'none';
+  // Web からの収集の設定は Web 検索を行うモードだけ（指定 URL のみ＝検索なし）
+  const web = source !== 'local' && source !== 'urls';
   // the crawl mode is the built-in loop's: an external engine crawls by itself
   const crawlIds = new Set(['crawlModes', 'crawlLabel']);
   Array.from($('webCollectBody').children).forEach(el => {
@@ -3635,7 +3686,7 @@ function applyModeVisibility() {
 }
 
 const LABELS = {
-  source_mode: {web: 'Web', local: '手元の資料のみ', hybrid: '手元の資料＋Web'},
+  source_mode: {web: 'Web', local: '手元の資料のみ', hybrid: '手元の資料＋Web', urls: '指定URLのみ', urls_web: '指定URL重視＋Web'},
   crawl_mode: {standard: '標準', fast_batch: '高速', aicrawl: 'AIクロール', ai_crawl_selenium: 'AIクロール（ブラウザ）'},
   verification_profile: {fast: 'Fast', balanced: 'Balanced', strict: 'Strict', custom: 'Custom'},
   output_format: {markdown: 'Markdown', docx: 'Word', pdf: 'PDF', html: 'HTML'},
@@ -3712,11 +3763,16 @@ function updateSummaryStrip() {
     ['調査回数/章', `${$('iterations').value || '既定'}〜${$('max_iterations').value || '既定'}`],
     ['検証', LABELS.verification_profile[radioValue('verification_profile')] || ''],
   ];
-  if (source !== 'local') items.push(['クロール', LABELS.crawl_mode[radioValue('crawl_mode')] || '']);
-  if (source !== 'web') {
+  if (source !== 'local' && source !== 'urls') items.push(['クロール', LABELS.crawl_mode[radioValue('crawl_mode')] || '']);
+  if (source === 'local' || source === 'hybrid') {
     const n = uploadedDocs.filter(x => x.readable).length +
       $('local_documents').value.split('\n').map(s => s.trim()).filter(Boolean).length;
     items.push(['資料ファイル', `${n}件`]);
+  }
+  if (source === 'urls' || source === 'urls_web') {
+    const n = $('source_urls').value.split('\n').map(s => s.trim()).filter(Boolean).length;
+    items.push(['指定URL', `${n}件${$('url_crawl_depth').checked ? '＋サイト内リンク' : ''}`]);
+    if (source === 'urls_web' && $('preferred_domains').value.trim()) items.push(['優先サイト', $('preferred_domains').value.trim()]);
   }
   items.push(['再利用', $('cache_reuse').checked ? ($('refresh_fetched').checked ? 'ON（鮮度優先で更新確認）' : 'ON') : 'OFF']);
   items.push(['計画確認', $('plan_review').checked ? ($('plan_review_mode').value === 'auto60' ? '60秒で自動開始' : '操作を待つ') : 'なし']);
@@ -3728,7 +3784,39 @@ function updateSummaryStrip() {
 // any change in the form refreshes the visible summary
 $('formCard').addEventListener('change', () => { applyModeVisibility(); updateSummaryStrip(); renderDelegationNotice(); });
 $('formCard').addEventListener('input', (e) => {
-  if (e.target && /^(iterations|max_iterations|local_documents|query)$/.test(e.target.id)) updateSummaryStrip();
+  if (e.target && /^(iterations|max_iterations|local_documents|query|source_urls|preferred_domains)$/.test(e.target.id)) updateSummaryStrip();
+});
+
+// ==================== 指定 URL: 取得の事前確認 ====================
+function urlRow(u) {
+  // errors from the fetch client can be one long unbreakable token: cut them
+  const err = String(u.error || '取得できません');
+  const st = u.ok ? `<span class="badge ok">✅ 取得可${u.kind && u.kind !== 'page' ? '（' + escapeHtml(u.kind.toUpperCase()) + '）' : ''}</span>`
+    : `<span class="badge bad" title="${escapeHtml(err)}">❌ ${escapeHtml(err.length > 70 ? err.slice(0, 70) + '…' : err)}</span>`;
+  const info = u.ok ? `${escapeHtml(u.title || '')} ・ ${(u.chars || 0).toLocaleString()}文字` : '';
+  return `<div class="doc-row">${st}<span class="nm" title="${escapeHtml(u.url)}">${escapeHtml(u.url)}</span><span class="hint" style="margin:0">${info}</span></div>`;
+}
+$('urlPrecheckBtn').addEventListener('click', async () => {
+  const urls = $('source_urls').value.split('\n').map(s => s.trim()).filter(Boolean);
+  if (!urls.length) { $('urlPrecheckResult').innerHTML = '<p class="hint">確認する URL を入力してください</p>'; return; }
+  $('urlPrecheckBtn').disabled = true;
+  $('urlPrecheckResult').innerHTML = '<p class="hint">取得を確認しています…</p>';
+  try {
+    const res = await fetch('/api/precheck-urls', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({urls, ...settingsParams(), search_method: $('search_method') ? $('search_method').value : undefined,
+        browser: $('browser').value, driver_path: $('driver_path').value.trim(), waf_mitigation: $('waf_mitigation').checked})});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'failed');
+    const list = data.urls || [];
+    const ok = list.filter(u => u.ok).length;
+    $('urlPrecheckResult').innerHTML =
+      `<p class="hint" style="margin:4px 0">取得可 ${ok} / ${list.length} 件（サーバーから取得。同一サイト内のリンク先は開始時に読みます）</p>` +
+      list.map(urlRow).join('');
+  } catch (e) {
+    $('urlPrecheckResult').innerHTML = `<p class="hint">確認に失敗しました: ${escapeHtml(e.message)}</p>`;
+  } finally {
+    $('urlPrecheckBtn').disabled = false;
+  }
 });
 
 // ==================== 手元の資料: アップロード / D&D / 事前確認 ====================
@@ -4076,14 +4164,14 @@ setInterval(loadHistory, 10000);
 
 // ==================== フォーム設定プリセット（このブラウザ・APIキーなし） ====================
 const FORM_PRESETS_KEY = 'drt_form_presets';
-const FORM_TEXT_IDS = ['requirements', 'language', 'output_format', 'iterations', 'max_iterations',
+const FORM_TEXT_IDS = ['requirements', 'language', 'output_format', 'iterations', 'max_iterations', 'source_urls', 'preferred_domains',
   'ai_crawl_max_pages', 'ai_crawl_site_depth', 'gap_fill_rounds', 'max_pages_per_query',
   'parallel_max_workers', 'research_section_workers', 'browser', 'driver_path', 'per_domain_delay', 'report_version',
   'v2_writing_style', 'chart_library', 'length_mode', 'preferred_body_chars', 'hard_min_body_chars',
   'hard_max_body_chars', 'length_tolerance', 'provider', 'model', 'plan_review_mode',
   'temperature', 'max_tokens', 'max_results', 'target_pages', 'search_region',
   ...Object.keys(VERIFY_FIELDS)];
-const FORM_CHECK_IDS = ['cache_reuse', 'refresh_fetched', 'waf_mitigation', 'auto_figures',
+const FORM_CHECK_IDS = ['url_crawl_depth', 'cache_reuse', 'refresh_fetched', 'waf_mitigation', 'auto_figures',
   'v2_enable_polish', 'live_report_word', 'plan_review', 'verification_cache_enabled',
   'include_toc', 'include_citations', 'include_images'];
 const FORM_RADIOS = ['run_mode', 'research_engine', 'source_mode', 'deliverable', 'research_preset', 'crawl_mode', 'verification_profile'];
@@ -4169,7 +4257,9 @@ function applyParamsToForm(params, query) {
     const id = PARAM_TO_ID[k] || k;
     const el = $(id);
     if (!el || !FORM_TEXT_IDS.concat(FORM_CHECK_IDS).includes(id)) return;
-    if (el.type === 'checkbox') el.checked = !!v; else el.value = String(v);
+    if (el.type === 'checkbox') el.checked = !!v;
+    else if (Array.isArray(v)) el.value = v.join(id === 'source_urls' ? '\n' : ', ');
+    else el.value = String(v);
   });
   if (p.plan_review_timeout !== undefined) $('plan_review_mode').value = Number(p.plan_review_timeout) > 0 ? 'auto60' : 'explicit';
   if (Array.isArray(p.local_documents)) {

@@ -130,7 +130,8 @@ class TestWorkerEnv:
             _req(options={"report_type": "detailed_report"}, input_urls=["https://a/1"],
                  documents=[{"name": "x", "text": "y"}]))
         assert payload == {"query": "炭素繊維市場", "report_type": "detailed_report",
-                           "language": "ja", "input_urls": ["https://a/1"]}
+                           "language": "ja", "input_urls": ["https://a/1"],
+                           "complement_source_urls": True}
         assert warnings and "手元の資料" in warnings[0]
 
 

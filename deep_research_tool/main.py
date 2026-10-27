@@ -138,6 +138,40 @@ def _create_report_generator(
 from .utils.cancellation import RunCancelled  # noqa: E402
 
 
+def build_search_client(config: Config):
+    """The search / page-fetch client a run with this config uses (also
+    used on its own, e.g. to check the user's 指定 URL before a run)."""
+    kwargs = {
+        "max_results": config.search.max_results,
+        "timeout": config.search.page_load_timeout,
+        "extract_images": config.search.extract_images,
+        "max_images": config.search.max_images_per_page,
+    }
+
+    # Add proxy settings
+    if config.proxy.is_configured():
+        kwargs["proxies"] = config.proxy.get_proxies_dict()
+        kwargs["verify_ssl"] = config.proxy.verify_ssl
+
+    if config.search.method == SearchMethod.SELENIUM:
+        kwargs["headless"] = config.search.headless
+        kwargs["browser"] = config.search.browser
+        kwargs["implicit_wait"] = config.search.implicit_wait
+        kwargs["driver_path"] = config.search.driver_path
+    elif config.search.method == SearchMethod.DUCKDUCKGO:
+        kwargs["region"] = config.search.region
+        kwargs["safe_search"] = config.search.safe_search
+        kwargs["simplify_min_results"] = config.search.query_simplify_min_results
+        kwargs["simplify_max_retries"] = config.search.query_simplify_max_retries
+        kwargs["waf_mitigation"] = config.search.waf_mitigation
+        kwargs["per_domain_delay"] = config.search.per_domain_delay
+
+    return get_search_client(
+        method=config.search.method.value,
+        **kwargs
+    )
+
+
 class DeepResearchTool:
     """
     Main interface for the Deep Research Tool.
@@ -547,35 +581,12 @@ class DeepResearchTool:
 
     def _create_search_client(self):
         """Create search client based on configuration."""
-        kwargs = {
-            "max_results": self.config.search.max_results,
-            "timeout": self.config.search.page_load_timeout,
-            "extract_images": self.config.search.extract_images,
-            "max_images": self.config.search.max_images_per_page,
-        }
+        return build_search_client(self.config)
 
-        # Add proxy settings
-        if self.config.proxy.is_configured():
-            kwargs["proxies"] = self.config.proxy.get_proxies_dict()
-            kwargs["verify_ssl"] = self.config.proxy.verify_ssl
-
-        if self.config.search.method == SearchMethod.SELENIUM:
-            kwargs["headless"] = self.config.search.headless
-            kwargs["browser"] = self.config.search.browser
-            kwargs["implicit_wait"] = self.config.search.implicit_wait
-            kwargs["driver_path"] = self.config.search.driver_path
-        elif self.config.search.method == SearchMethod.DUCKDUCKGO:
-            kwargs["region"] = self.config.search.region
-            kwargs["safe_search"] = self.config.search.safe_search
-            kwargs["simplify_min_results"] = self.config.search.query_simplify_min_results
-            kwargs["simplify_max_retries"] = self.config.search.query_simplify_max_retries
-            kwargs["waf_mitigation"] = self.config.search.waf_mitigation
-            kwargs["per_domain_delay"] = self.config.search.per_domain_delay
-
-        return get_search_client(
-            method=self.config.search.method.value,
-            **kwargs
-        )
+    @staticmethod
+    def search_client_for(config: Config):
+        """The search / page-fetch client a run with this config uses."""
+        return build_search_client(config)
 
     def _create_content_filter(self):
         """Create content filter based on configuration."""
@@ -684,6 +695,9 @@ class DeepResearchTool:
                 "target_characters": c.report.target_characters,
                 "research_engine": getattr(c.research, "research_engine", "builtin"),
                 "engine_options": dict(getattr(c.research, "engine_options", None) or {}),
+                "source_urls": list(getattr(c.research, "source_urls", None) or []),
+                "url_crawl_depth": getattr(c.research, "url_crawl_depth", 0),
+                "preferred_domains": list(getattr(c.research, "preferred_domains", None) or []),
                 "engine_max_time_seconds": getattr(c.research, "engine_max_time_seconds", None),
             }
         except Exception:
@@ -702,10 +716,10 @@ class DeepResearchTool:
                                           search_run_config)
         rc = self.config.research
         name = engine_display_name(engine_id)
-        if rc.source_mode != ResearchSourceMode.WEB:
+        if rc.source_mode.uses_local_files:
             raise ValueError(
                 f"{name} は手元の資料（source_mode={rc.source_mode.value}）を扱えません。"
-                "使用する資料を「Web」にするか、内蔵エンジンを選んでください")
+                "使用する資料を「Web」か「指定 URL」にするか、内蔵エンジンを選んでください")
         engine = get_engine(engine_id, self.config)      # EngineUnavailable (ValueError)
         if self.config.report.generator_version != ReportGeneratorVersion.V1:
             old = self.config.report.generator_version.value
@@ -731,7 +745,40 @@ class DeepResearchTool:
             max_time_seconds=rc.engine_max_time_seconds,
             fetch_sources=True,
             parallel_max_workers=rc.parallel_max_workers,
+            # 指定 URL: the engine researches those pages only (urls) or
+            # those pages first plus the web (urls_web)
+            source_urls=list(rc.source_urls or []) if rc.source_mode.uses_url_sources else [],
+            complement_urls=(rc.source_mode == ResearchSourceMode.URLS_WEB),
         )
+
+    def _url_sources_summary(self) -> Optional[Dict[str, Any]]:
+        """What became of the user's 指定 URL (None unless that mode ran):
+        requested / fetched / failed pages and how much evidence came from
+        them."""
+        rc = self.config.research
+        if not getattr(rc.source_mode, "uses_url_sources", False):
+            return None
+        researcher = getattr(self, "researcher", None)
+        out: Dict[str, Any] = {
+            "mode": rc.source_mode.value,
+            "requested": len(rc.source_urls or []),
+            "crawl_depth": int(rc.url_crawl_depth or 0),
+            "preferred_domains": list(rc.preferred_domains or []),
+            "engine": getattr(self, "research_engine_id", "builtin"),
+        }
+        report = getattr(researcher, "url_source_report", None)
+        if report:
+            out.update({k: report.get(k) for k in ("fetched", "crawled", "pages", "failed")})
+        try:
+            locker = researcher.get_evidence_locker() if researcher is not None else None
+            if locker is not None:
+                out["evidence_count"] = sum(
+                    1 for e in locker.get_all_evidence()
+                    if getattr(e, "access_method", "") == "url"
+                    or (getattr(e, "metadata", {}) or {}).get("source") == "url")
+        except Exception:
+            pass
+        return out
 
     def _engine_summary(self) -> Optional[Dict[str, Any]]:
         """What the external engine reported (None for the built-in loop)."""
@@ -1340,6 +1387,10 @@ class DeepResearchTool:
             run_config=self._run_config_snapshot(),
             fetch_cache=self.fetch_cache,
             refresh_fetched=bool(rc_.refresh_fetched),
+            source_urls=list(rc_.source_urls or []),
+            url_crawl_depth=rc_.url_crawl_depth,
+            url_max_pages=rc_.url_max_pages,
+            preferred_domains=list(rc_.preferred_domains or []),
         )
 
         self.researcher.cancel_check = _cancel_checkpoint
@@ -2074,6 +2125,8 @@ class DeepResearchTool:
             # what it reported: version, elapsed, metrics, ingestion counts
             "research_engine": getattr(self, "research_engine_id", "builtin"),
             "engine": self._engine_summary(),
+            # 指定 URL: requested / fetched / failed pages, evidence from them
+            "url_sources": self._url_sources_summary(),
             # the plan that was researched (table of contents / queries)
             "research_plan": self.current_plan(),
             "timings": self._collect_timings(run_token_stats),

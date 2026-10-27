@@ -4,10 +4,10 @@
   "path": "deep_research_tool/",
   "summary": "Web検索→調査ループ→根拠管理→ハルシネーション検証→レポート生成（Markdown / DOCX / PDF）を自動で行うディープリサーチ。フェルミ推定・多言語検索・Web UI つき。",
   "status": "active",
-  "phase": "v1.7.0 に向けて調査エンジンの切り替えを実装中。Phase 1（契約・モック・取り込み経路・画面）と Phase 2（GPT Researcher）を完了。次は Open Deep Research（Phase 3）",
+  "phase": "v1.7.0: 調査エンジンの切り替え（GPT Researcher）と指定 URL の資料モード。次はレポートへのフィードバック再調査（キャッチボール）→ Open Deep Research（Phase 3）",
   "progress": 95,
   "started": "2026-02-04",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "ports": [
     8802
   ],
@@ -76,8 +76,22 @@
       "date": "2026-10-20"
     },
     {
-      "title": "調査エンジンの切り替え（GPT Researcher / Open Deep Research の移植、v1.7.0）",
-      "state": "doing"
+      "title": "調査エンジンの切り替え（GPT Researcher の移植、v1.7.0）",
+      "state": "done",
+      "date": "2026-10-26"
+    },
+    {
+      "title": "使用する資料に「指定 URL のみ／指定 URL を重視＋Web」を追加（v1.7.0）",
+      "state": "done",
+      "date": "2026-10-27"
+    },
+    {
+      "title": "レポートへのフィードバック再調査（キャッチボール）",
+      "state": "todo"
+    },
+    {
+      "title": "Open Deep Research エンジン（Phase 3）",
+      "state": "todo"
     },
     {
       "title": "自動テストの CI 化",
@@ -85,8 +99,9 @@
     }
   ],
   "next": [
+    "レポートへのフィードバック再調査（意見・URL・過去の調査・優先サイト → 修正計画 → 指摘章だけ再調査 → 第 2 版と差分）",
     "調査エンジン Phase 3: Open Deep Research（MCP 経由の検索・Anthropic 対応）",
-    "GPT Researcher を実環境（DuckDuckGo / SearXNG に到達できる端末・実 LLM）で 1 回通して所要時間と出典数を確認",
+    "GPT Researcher と指定 URL モードを実環境（DuckDuckGo / SearXNG に到達できる端末・実 LLM）で 1 回通して所要時間と出典数を確認",
     "ローカルLLM 利用時の所要時間短縮（小節の個別処理・抽出チャンク数の見直し）",
     "テスト（53ファイル）の CI 化"
   ],
@@ -95,6 +110,10 @@
     "Selenium・Word COM など環境依存の経路がある"
   ],
   "log": [
+    {
+      "date": "2026-10-27",
+      "summary": "使用する資料に「指定 URL のみ」「指定 URL を重視＋Web」を追加（v1.7.0）: URL のページ（HTML / PDF / Word 等）を開始時に取得して手元の資料と同じローカル資料ストアに登録し、根拠はページの実 URL で管理。URL のみは Web 検索なし、重視＋Web は URL 由来の根拠の重要度を 0.8 以上に引き上げ、優先する検索サイト（site: 検索を先に実行）に対応。同一サイト内のリンク先 1 段（最大 30 ページ）、「取得を確認」（/api/precheck-urls）、取得できない URL の要確認事項と結果の「指定 URL」ブロック、条件の複製、外部エンジンへの受け渡し（GPT Researcher の source_urls / complement_source_urls）。テスト 18 件・ブラウザ検査 22 項目"
+    },
     {
       "date": "2026-10-26",
       "summary": "調査エンジン Phase 2: GPT Researcher（gpt-researcher 0.16.0）を移植。専用 Python 環境のワーカーを JSONL で駆動（最小構成の環境変数・検索は DuckDuckGo / SearXNG 固定・API キーのマスク・ddgs の固定ピンを追加）、出典ゼロの実行はエラー、ワーカーの段階を進捗バーに対応付け、環境の疎通確認に 0.16.0 の typing バグ回避を適用。カードに options_schema からの設定欄（レポートの種類・検索イテレーション数）を追加し、履歴の「条件を複製」で値を復元。本物の 0.16.0 を偽 OpenAI サーバーで起動し計画→検索→執筆→取り込みまで通ることを確認（検索到達は実環境で要確認）。テスト 16 件とブラウザ検査を追加"
@@ -208,5 +227,5 @@
       "summary": "初版"
     }
   ],
-  "updated": "2026-10-26"
+  "updated": "2026-10-27"
 }

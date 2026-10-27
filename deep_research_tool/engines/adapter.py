@@ -97,7 +97,9 @@ class EngineResearcher:
                  options: Optional[Dict[str, Any]] = None,
                  max_time_seconds: Optional[int] = 1800,
                  fetch_sources: bool = True,
-                 parallel_max_workers: int = 4):
+                 parallel_max_workers: int = 4,
+                 source_urls: Optional[List[str]] = None,
+                 complement_urls: bool = True):
         self.engine = engine
         self.capabilities = engine.capabilities()
         self.engine_id = self.capabilities.engine_id
@@ -117,6 +119,12 @@ class EngineResearcher:
         self.max_time_seconds = int(max_time_seconds) if max_time_seconds else None
         self.fetch_sources = bool(fetch_sources)
         self.parallel_max_workers = max(1, int(parallel_max_workers or 1))
+        # 指定 URL: handed to the engine as input_urls; complement_urls=False
+        # means "these pages only" (no web search), True "these first"
+        self.source_urls = [str(u) for u in (source_urls or []) if u]
+        self.complement_urls = bool(complement_urls)
+        if self.source_urls:
+            self.options["complement_source_urls"] = self.complement_urls
 
         # Researcher surface
         self.session: Optional[ResearchSession] = None
@@ -253,7 +261,8 @@ class EngineResearcher:
             engine_id=self.engine_id,
             input=RunInput(topic=query, objective=requirements or None,
                            instructions=additional_context or None,
-                           language=self.language),
+                           language=self.language,
+                           input_urls=list(self.source_urls)),
             options=dict(self.options),
             llm=self.llm_run_config,
             search=self.search_run_config,

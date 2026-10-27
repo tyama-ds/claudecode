@@ -157,12 +157,13 @@ async def _research(payload: Dict[str, Any]) -> Dict[str, Any]:
     from gpt_researcher import GPTResearcher  # noqa: PLC0415 (after the env is set)
 
     input_urls = payload.get("input_urls") or []
+    complement = bool(payload.get("complement_source_urls", True)) if input_urls else False
     researcher = GPTResearcher(
         query=payload["query"],
         report_type=payload.get("report_type", "research_report"),
         report_source="web",
         source_urls=input_urls or None,
-        complement_source_urls=bool(input_urls),
+        complement_source_urls=complement,
         websocket=WsBridge(),
         log_handler=LogBridge(),
         verbose=True,

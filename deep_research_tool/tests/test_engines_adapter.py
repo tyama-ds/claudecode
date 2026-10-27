@@ -116,7 +116,7 @@ class TestRegistry:
         assert rc.engine_python == {"gpt-researcher": "/x/py"}
         assert create_config(provider="openai", openai_api_key="x").research.research_engine == "builtin"
         for bad, msg in [(dict(research_engine="nope"), "Unknown research_engine"),
-                         (dict(research_engine="mock-fast", source_mode="local"), "source_mode='web' only"),
+                         (dict(research_engine="mock-fast", source_mode="local"), "'web', 'urls' or 'urls_web' only"),
                          (dict(engine_max_time_seconds=5), "between 60 and 86400"),
                          (dict(engine_max_time_seconds="x"), "integer"),
                          (dict(engine_python="x"), "mapping"),
