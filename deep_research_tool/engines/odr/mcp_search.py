@@ -31,6 +31,7 @@ result and reported to the run as ``search`` / ``source_found`` events.
 from __future__ import annotations
 
 import hmac
+import inspect
 import json
 import secrets
 import threading
@@ -86,8 +87,17 @@ class SearchBackend:
     def search(self, query: str, max_results: int) -> List[Dict[str, Any]]:
         raise NotImplementedError
 
-    def fetch(self, url: str) -> tuple:
+    def fetch(self, url: str, timeout: Optional[float] = None) -> tuple:
         raise NotImplementedError
+
+
+def _accepts_timeout(fn) -> bool:
+    """Whether a callable takes a ``timeout`` keyword (or **kwargs)."""
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.name == "timeout" or p.kind is inspect.Parameter.VAR_KEYWORD for p in params)
 
 
 class ClientSearchBackend(SearchBackend):
@@ -96,6 +106,9 @@ class ClientSearchBackend(SearchBackend):
     def __init__(self, search_client, name: str = "duckduckgo"):
         self.client = search_client
         self.name = name
+        # DuckDuckGoSearch.get_page_content honours timeout= (permit wait,
+        # socket and body deadline); plain stand-ins may not take it
+        self._page_timeout_ok = _accepts_timeout(getattr(search_client, "get_page_content", None))
 
     def search(self, query: str, max_results: int) -> List[Dict[str, Any]]:
         results = self.client.search(query, max_results=max_results) or []
@@ -111,8 +124,11 @@ class ClientSearchBackend(SearchBackend):
                 break
         return out
 
-    def fetch(self, url: str) -> tuple:
-        page = self.client.get_page_content(url)
+    def fetch(self, url: str, timeout: Optional[float] = None) -> tuple:
+        if timeout is not None and self._page_timeout_ok:
+            page = self.client.get_page_content(url, timeout=max(0.5, float(timeout)))
+        else:
+            page = self.client.get_page_content(url)
         if page is None:
             raise RuntimeError("no content")
         # the tool's clients never raise on a failed fetch: they return a
@@ -138,6 +154,7 @@ class SearxSearchBackend(SearchBackend):
         self.endpoint = endpoint.rstrip("/")
         self.timeout = float(timeout or 20.0)
         self.client = search_client
+        self._client_backend = ClientSearchBackend(search_client) if search_client is not None else None
 
     def search(self, query: str, max_results: int) -> List[Dict[str, Any]]:
         import requests
@@ -148,11 +165,12 @@ class SearxSearchBackend(SearchBackend):
         resp.raise_for_status()
         return format_searx_items(resp.json(), max_results)
 
-    def fetch(self, url: str) -> tuple:
-        if self.client is not None:
-            return ClientSearchBackend(self.client).fetch(url)
+    def fetch(self, url: str, timeout: Optional[float] = None) -> tuple:
+        if self._client_backend is not None:
+            return self._client_backend.fetch(url, timeout=timeout)
         import requests
-        resp = requests.get(url, timeout=self.timeout, headers={"User-Agent": "Mozilla/5.0"})
+        resp = requests.get(url, timeout=float(timeout or self.timeout),
+                            headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
         return "", resp.text
 
@@ -201,13 +219,36 @@ class SearchTools:
         self.on_event = on_event
         self.fetch_workers = max(1, int(fetch_workers))
         self.lock = threading.Lock()
+        # one long-lived pool for page reads (excerpts and fetch_page): the
+        # search client's per-thread sessions are reused instead of one new
+        # session per request; 1 worker for a serial client (browser)
+        self._fetch_pool = ThreadPoolExecutor(max_workers=self.fetch_workers,
+                                              thread_name_prefix="drt-mcp-fetch")
+        self._fetch_timeout_ok = _accepts_timeout(getattr(backend, "fetch", None))
+        # set when the run is over: no new backend work, no more events
+        self.closed = threading.Event()
         self.log: Dict[str, Any] = {"searches": 0, "search_errors": 0, "results": 0,
                                     "fetches": 0, "fetch_errors": 0, "urls": {},
                                     "queries": []}
 
+    def close(self) -> None:
+        """The run is over: stop starting searches / fetches and emitting
+        events (calls already inside the backend still finish)."""
+        self.closed.set()
+        self._fetch_pool.shutdown(wait=False, cancel_futures=True)
+
+    def snapshot_log(self) -> Dict[str, Any]:
+        with self.lock:
+            out = dict(self.log)
+            for k in ("urls", "failed_urls"):
+                if isinstance(out.get(k), dict):
+                    out[k] = dict(out[k])
+            out["queries"] = list(out.get("queries") or [])
+            return out
+
     # --- events ---
     def _emit(self, type_: str, payload: Dict[str, Any]) -> None:
-        if self.on_event is None:
+        if self.on_event is None or self.closed.is_set():
             return
         try:
             self.on_event(type_, payload)
@@ -234,6 +275,8 @@ class SearchTools:
         started = time.monotonic()
         blocks: List[str] = []
         for query in list(queries)[:MAX_QUERIES_PER_CALL]:
+            if self.closed.is_set():
+                break
             if not isinstance(query, str) or not query.strip():
                 continue
             query = query.strip()
@@ -242,10 +285,12 @@ class SearchTools:
                 continue
             blocks.append(self._search_one(query, limit, started))
         if not blocks:
-            return "(no valid queries)"
+            return "(search server stopped)" if self.closed.is_set() else "(no valid queries)"
         return "\n\n---\n\n".join(blocks)
 
     def _search_one(self, query: str, limit: int, started: float) -> str:
+        if self.closed.is_set():
+            return f'Search results for "{query}":\n\n(skipped: search server stopped)'
         with self.lock:
             self.log["searches"] += 1
             self.log["queries"].append(query)
@@ -291,26 +336,39 @@ class SearchTools:
 
     def _excerpts(self, urls: Sequence[str], budget: float) -> Dict[str, str]:
         """Page excerpts for the top results, fetched in parallel within
-        the time budget; a page that fails or is slow simply has none."""
-        if not urls or self.excerpt_top <= 0 or self.excerpt_chars <= 0:
+        the time budget; a page that fails or is slow simply has none.
+        Each fetch is given the remaining time as its own timeout, so it
+        ends (and gives back its permit) around the deadline instead of
+        running on for the client's full fetch budget."""
+        if not urls or self.excerpt_top <= 0 or self.excerpt_chars <= 0 or self.closed.is_set():
             return {}
         budget = min(float(budget), EXCERPT_FETCH_SECONDS)
+        deadline = time.monotonic() + budget
         out: Dict[str, str] = {}
-        pool = ThreadPoolExecutor(max_workers=min(self.fetch_workers, len(urls)))
-        futures = {pool.submit(self._fetch_quiet, u): u for u in urls}
         try:
-            done, _ = wait(list(futures), timeout=budget)
-            for fut in done:
-                res = fut.result()
-                if res:
-                    out[futures[fut]] = _clip(res[1], self.excerpt_chars)
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)
+            futures = {self._fetch_pool.submit(self._fetch_quiet, u, deadline): u for u in urls}
+        except RuntimeError:            # pool shut down: the run is over
+            return {}
+        done, pending = wait(list(futures), timeout=budget)
+        for fut in pending:
+            fut.cancel()                 # not started yet: drop it
+        for fut in done:
+            res = fut.result()
+            if res:
+                out[futures[fut]] = _clip(res[1], self.excerpt_chars)
         return out
 
-    def _fetch_quiet(self, url: str):
+    def _fetch_quiet(self, url: str, deadline: Optional[float] = None):
+        if self.closed.is_set():
+            return None
         try:
-            title, text = self.backend.fetch(url)
+            if deadline is not None and self._fetch_timeout_ok:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.2:
+                    return None          # its turn came after the deadline
+                title, text = self.backend.fetch(url, timeout=remaining)
+            else:
+                title, text = self.backend.fetch(url)
         except Exception as e:  # noqa: BLE001
             with self.lock:
                 self.log["fetch_errors"] += 1
@@ -329,7 +387,12 @@ class SearchTools:
         url = str(url or "").strip()
         if not url.lower().startswith(("http://", "https://")):
             return "(invalid url: must start with http:// or https://)"
-        res = self._fetch_quiet(url)
+        if self.closed.is_set():
+            return "(search server stopped)"
+        try:
+            res = self._fetch_pool.submit(self._fetch_quiet, url).result()
+        except RuntimeError:            # pool shut down: the run is over
+            return "(search server stopped)"
         if res is None:
             return f"(could not fetch {url})"
         title, text = res
@@ -431,6 +494,10 @@ class McpSearchServer:
         return self
 
     def stop(self) -> None:
+        # handler threads are daemons and are not joined (a fetch may take
+        # a while): close the tools first so they start nothing new and
+        # stop reporting events once the run is over
+        self.tools.close()
         httpd, self._httpd = self._httpd, None
         if httpd is None:
             return

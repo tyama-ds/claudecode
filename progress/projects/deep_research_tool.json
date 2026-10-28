@@ -115,7 +115,7 @@
   "log": [
     {
       "date": "2026-10-27",
-      "summary": "調査エンジン Phase 3: Open Deep Research（open-deep-research 0.0.16）を移植（v1.9.0）。専用環境のワーカーを JSONL で駆動し、エンジンに無い DuckDuckGo / SearXNG 検索はツール側のプロセス内 MCP サーバー（標準ライブラリだけの streamable HTTP、web_search は上位結果のページ抜粋つき・fetch_page、指定 URL のみは fetch_page だけ）で貸し出す。最小構成の環境変数（Configuration のフィールド名・検索 API キーを遮断、NO_PROXY に localhost）、OpenAI 互換と Anthropic、カードの設定欄 4 項目、グラフのノード名を進捗に対応付け、出典は Sources 節（無ければ本文の URL）、検索ゼロ・結果ゼロはエラー。環境作成コマンドを -m 形式からスクリプトのパス形式に修正（素の 3.12 ではパッケージを読み込めないため）。本物の 0.0.16 で MCP クライアントの接続とグラフ全体（偽 OpenAI）の通しを確認。テスト 18 件"
+      "summary": "調査エンジン Phase 3: Open Deep Research（open-deep-research 0.0.16）を移植（v1.9.0）。専用環境のワーカーを JSONL で駆動し、エンジンに無い DuckDuckGo / SearXNG 検索はツール側のプロセス内 MCP サーバー（標準ライブラリだけの streamable HTTP、web_search は上位結果のページ抜粋つき・fetch_page、指定 URL のみは fetch_page だけ）で貸し出す。最小構成の環境変数（Configuration のフィールド名・検索 API キーを遮断、NO_PROXY に localhost）、OpenAI 互換と Anthropic、カードの設定欄 4 項目、グラフのノード名を進捗に対応付け、出典は Sources 節（無ければ本文の URL）、検索ゼロ・結果ゼロはエラー。環境作成コマンドを -m 形式からスクリプトのパス形式に修正（素の 3.12 ではパッケージを読み込めないため）。本物の 0.0.16 で MCP クライアントの接続とグラフ全体（偽 OpenAI）の通しを確認。マージ前レビュー（5 観点・指摘ごとに反証検証）で確定した 16 件を修正（MCP サーバーの実行ごとトークン・Host/Origin 検査・無通信切断、検索時間の上限をクライアントの実際の 300 秒に合わせて各検索も打ち切り、取得失敗ページを本文扱いしない、指定 URL を調査員のシステムプロンプトに、トークン数を LLM 呼び出しごとのコールバックで集計、content block の本文連結、イベントは asyncio ループ経由、取得用スレッドプールの使い回しと終了時の停止、ネットワークに触れるテストの修正など）。テスト 27 件"
     },
     {
       "date": "2026-10-27",
@@ -242,5 +242,5 @@
       "summary": "初版"
     }
   ],
-  "updated": "2026-10-27"
+  "updated": "2026-10-28"
 }

@@ -385,4 +385,6 @@ class TestRealVirtualenv:
         assert proc.returncode == 0, proc.stderr[-800:]
         assert proc.stdout.strip() == "0.16.0"
         venv_mod.clear_check_cache()
-        assert venv_mod.engine_health("gpt-researcher")["health"] == "available"
+        # the interpreter just inspected (DRT_ENGINE_PYTHON_* may point elsewhere)
+        assert venv_mod.engine_health("gpt-researcher",
+                                      {"gpt-researcher": str(VENV_PY)})["health"] == "available"

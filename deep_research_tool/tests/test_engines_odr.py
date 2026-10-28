@@ -375,6 +375,74 @@ class TestMcpSearchServer:
         out = t2.web_search(["a", "b"])
         assert out.count("skipped: time budget exhausted") == 1 and t2.log["searches"] == 1
 
+    def test_fetch_pool_timeouts_and_close(self):
+        """Page reads run on one long-lived pool (the client's per-thread
+        sessions are reused), excerpt fetches get the remaining time as
+        their timeout, and close() stops every new search / fetch / event."""
+        import threading as _th
+
+        class TimedClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.timeouts, self.threads = [], set()
+
+            def get_page_content(self, url, timeout=None, **kw):
+                self.timeouts.append(timeout)
+                self.threads.add(_th.current_thread().name)
+                return super().get_page_content(url)
+        c = TimedClient()
+        events = []
+        tools = SearchTools(backend_for("duckduckgo", search_client=c), max_results=3,
+                            on_event=lambda t, p: events.append(t), fetch_workers=2)
+        for i in range(4):
+            tools.web_search([f"q{i}"])
+            tools.fetch_page(f"https://ex.test/page{i}")
+        assert len(c.fetched) == 4 * 3 + 4
+        assert all(n.startswith("drt-mcp-fetch") for n in c.threads) and len(c.threads) <= 2
+        excerpt_timeouts = [t for t in c.timeouts if t is not None]
+        assert len(excerpt_timeouts) == 12 and all(0 < t <= mcp_search.EXCERPT_FETCH_SECONDS for t in excerpt_timeouts)
+        assert c.timeouts.count(None) == 4                     # fetch_page: the client's own budget
+        n_events, n_search = len(events), len(c.searches)
+        tools.close()
+        assert tools.web_search(["after"]) == "(search server stopped)"
+        assert tools.fetch_page("https://ex.test/after") == "(search server stopped)"
+        assert tools._search_one("x", 3, 0.0).endswith("(skipped: search server stopped)")
+        assert tools._excerpts(["https://ex.test/z"], 5) == {} and tools._fetch_quiet("https://ex.test/z") is None
+        tools._emit("search", {"query": "late"})
+        assert len(events) == n_events and len(c.searches) == n_search
+        assert tools.log["fetch_errors"] == 0                  # stopping is not a fetch error
+        # stopping the server closes its tools
+        t2 = SearchTools(backend_for("duckduckgo", search_client=FakeClient()))
+        McpSearchServer(t2).start().stop()
+        assert t2.closed.is_set()
+        snap = tools.snapshot_log()
+        snap["urls"]["x"] = "y"
+        assert "x" not in tools.log["urls"]                     # a copy, safe to keep after the run
+
+    def test_serial_client_gets_one_fetch_worker(self, tmp_path):
+        class SerialClient(FakeClient):
+            requires_serial_access = True
+        seen = {}
+        orig = odr.SearchTools
+
+        def spy(*a, **kw):
+            seen.update(kw)
+            return orig(*a, **kw)
+        w = tmp_path / "stub_worker.py"
+        w.write_text(STUB_OK, encoding="utf-8")
+        import unittest.mock as um
+        with um.patch.object(odr, "SearchTools", side_effect=spy):
+            eng = odr.OpenDeepResearchEngine(python_path=sys.executable, worker=str(w),
+                                             search_client=SerialClient())
+            asyncio.run(eng.run(RunContext("r1", _req(search=SearchRunConfig(provider="selenium")))))
+        assert seen["fetch_workers"] == 1
+        seen.clear()
+        with um.patch.object(odr, "SearchTools", side_effect=spy):
+            eng = odr.OpenDeepResearchEngine(python_path=sys.executable, worker=str(w),
+                                             search_client=FakeClient())
+            asyncio.run(eng.run(RunContext("r1", _req())))
+        assert seen["fetch_workers"] == 4
+
     def test_idle_connections_are_closed(self, monkeypatch):
         import socket
         monkeypatch.setattr(mcp_search._Handler, "timeout", 0.5)
@@ -562,11 +630,7 @@ class TestEngineWithStandInWorker:
             asyncio.run(eng.run(RunContext("r1", _req())))
         msg = str(ei.value)
         assert "検索ツールを一度も呼ばずに終了し" in msg and "Error loading MCP tools" in msg
-        # searches happened but every one came back empty
-        eng = self._engine(tmp_path, STUB_NO_SEARCH, client=FakeClient(results=0))
-        eng.search_client = FakeClient(results=0)
-        with pytest.raises(RuntimeError, match="検索ツールを一度も呼ばずに"):
-            asyncio.run(eng.run(RunContext("r1", _req())))
+        # (searched but every result empty: test_empty_results_message_names_the_search)
 
     def test_urls_only_with_every_fetch_failing_names_the_pages(self, tmp_path):
         eng = self._engine(tmp_path, STUB_FETCH_ONLY, client=FakeClient(fail_fetch=True))
@@ -578,7 +642,7 @@ class TestEngineWithStandInWorker:
         assert "ページの取得を 2 回試みましたが 1 件も読めず" in msg
         assert "https://a.example/x（RuntimeError: boom）" in msg and "MCP 接続" not in msg
 
-    def test_empty_results_message_names_the_search(self, tmp_path):
+    def test_empty_results_message_names_the_search(self, tmp_path, monkeypatch):
         """The stub searches (STUB_OK) but the client returns nothing and
         the report cites no URL → the message points at the search."""
         code = STUB_OK.replace('body = "# T\\n\\n## 概要\\n\\n本文 [1]。\\n\\n## Sources\\n[1] T q1: " + url_seen + "\\n"',
@@ -587,10 +651,15 @@ class TestEngineWithStandInWorker:
         eng = self._engine(tmp_path, code, client=FakeClient(results=0))
         with pytest.raises(RuntimeError, match="検索結果が空で.*DuckDuckGo"):
             asyncio.run(eng.run(RunContext("r1", _req())))
+        # no request to a real SearXNG: the backend answers with no results
+        searx_queries = []
+        monkeypatch.setattr(mcp_search.SearxSearchBackend, "search",
+                            lambda self, query, max_results: searx_queries.append(query) or [])
         eng = self._engine(tmp_path, code, client=FakeClient(results=0))
         with pytest.raises(RuntimeError, match="SearXNG の URL"):
             asyncio.run(eng.run(RunContext("r1", _req(
                 search=SearchRunConfig(provider="searxng", endpoint="http://s:8080")))))
+        assert searx_queries == ["q1"]
 
     def test_through_the_adapter(self, tmp_path):
         eng = self._engine(tmp_path, STUB_OK)
@@ -856,7 +925,9 @@ class TestRealVirtualenv:
         assert proc.returncode == 0, proc.stderr[-800:]
         assert proc.stdout.strip() == "0.0.16"
         venv_mod.clear_check_cache()
-        assert venv_mod.engine_health("open-deep-research")["health"] == "available"
+        # the interpreter just inspected (DRT_ENGINE_PYTHON_* may point elsewhere)
+        assert venv_mod.engine_health("open-deep-research",
+                                      {"open-deep-research": str(VENV_PY)})["health"] == "available"
 
     def test_the_engines_mcp_client_talks_to_our_server(self, tmp_path):
         """langchain-mcp-adapters (what open-deep-research uses) lists and

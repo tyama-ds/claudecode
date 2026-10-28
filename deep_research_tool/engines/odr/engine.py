@@ -411,9 +411,12 @@ class OpenDeepResearchEngine(Engine):
                     except Exception:   # noqa: BLE001 - a progress hiccup must not surface as a loop error
                         pass
 
+                # a browser client serves one page at a time: one fetch worker
+                serial = bool(getattr(self.search_client, "requires_serial_access", False))
                 tools_impl = SearchTools(
                     backend, max_results=search.max_results,
-                    on_event=lambda t, p: loop.call_soon_threadsafe(_emit_on_loop, t, p))
+                    on_event=lambda t, p: loop.call_soon_threadsafe(_emit_on_loop, t, p),
+                    fetch_workers=1 if serial else 4)
                 tool_names = mcp_tools_for(request)
                 server = McpSearchServer(tools_impl, enabled_tools=tool_names).start()
                 mcp_url = server.url
@@ -436,8 +439,10 @@ class OpenDeepResearchEngine(Engine):
             )
         finally:
             if server is not None:
-                server.stop()
-            self.last_search_log = dict(tools_impl.log) if tools_impl is not None else {}
+                server.stop()              # also closes the tools
+            elif tools_impl is not None:
+                tools_impl.close()
+            self.last_search_log = tools_impl.snapshot_log() if tools_impl is not None else {}
 
         try:
             result = result_from_worker_payload(result_payload)
