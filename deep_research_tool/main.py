@@ -172,6 +172,15 @@ def build_search_client(config: Config):
     )
 
 
+def locals_for_revise(scope: Dict[str, Any]) -> Dict[str, Any]:
+    """revise_report's arguments, forwarded to _revise_report."""
+    keys = ("parent_session_path", "feedback", "mode", "reference_session_paths",
+            "parent_job_id", "progress_callback", "plan_review_callback", "live_sink",
+            "cancel_event", "external_reports", "external_fetch_urls",
+            "external_body_as_evidence")
+    return {k: scope[k] for k in keys}
+
+
 class DeepResearchTool:
     """
     Main interface for the Deep Research Tool.
@@ -718,8 +727,20 @@ class DeepResearchTool:
         plan_review_callback: Callable = None,
         live_sink=None,
         cancel_event: Optional[threading.Event] = None,
+        external_reports: Optional[List[Dict[str, Any]]] = None,
+        external_fetch_urls: bool = True,
+        external_body_as_evidence: bool = True,
     ) -> Dict[str, Any]:
         """A NEW version of a finished report from the reader's feedback.
+
+        ``external_reports`` = [{label?, path? | text?}]: research produced
+        elsewhere (OpenAI Deep Research …). It is compared with the report
+        topic by topic and the comparison joins the feedback (conflict →
+        revise that chapter, external-only topic → add a chapter, agreement
+        → record only); its chapters become secondary-information documents
+        (``external_body_as_evidence``) and the URLs it cites are fetched as
+        primary sources (``external_fetch_urls``). The feedback text may be
+        empty when external material is given.
 
         add / revise: the LLM turns the feedback into a per-chapter plan
         (keep / revise / add) — shown through ``plan_review_callback`` when
@@ -731,15 +752,39 @@ class DeepResearchTool:
         starts from scratch. The original session is never modified.
         Returns run()'s result plus ``kind="revision"`` and ``revision``
         (per-chapter actions, counts, acknowledged remarks)."""
+        # the warnings recorded before the inner run() (unreadable material,
+        # planner fallback, cited URLs not fetched) must reach the result:
+        # without a job-bound collector run() would reset them
+        if ResearchWarnings.current() is None:
+            ResearchWarnings.reset_if_idle()
+            ResearchWarnings.bind(ResearchWarnings.get_instance())
+            try:
+                return self._revise_report(**locals_for_revise(locals()))
+            finally:
+                ResearchWarnings.unbind()
+        return self._revise_report(**locals_for_revise(locals()))
+
+    def _revise_report(self, *, parent_session_path, feedback, mode, reference_session_paths,
+                       parent_job_id, progress_callback, plan_review_callback, live_sink,
+                       cancel_event, external_reports, external_fetch_urls,
+                       external_body_as_evidence) -> Dict[str, Any]:
         from .revision import (MODES, build_revised_session, evidence_path_for,
                                plan_revision, reference_documents,
                                reference_summaries, review_plan_for, revision_summary,
                                seed_locker)
+        from . import external_reports as ext
         if mode not in MODES:
             raise ValueError(f"unknown revision mode: {mode} (add / revise / full)")
         feedback = (feedback or "").strip()
-        if not feedback:
-            raise ValueError("フィードバックの本文が空です")
+        materials = ext.load_external_reports(external_reports or [])
+        usable_materials = [m for m in materials if not m.error]
+        for m in materials:
+            if m.error:
+                ResearchWarnings.get_instance().add(
+                    "MEDIUM", "External", f"外部の調査資料「{m.label}」を読めませんでした（{m.error}）")
+        if not feedback and not usable_materials:
+            raise ValueError("フィードバックの本文が空です（外部の調査資料も読めませんでした）"
+                             if materials else "フィードバックの本文が空です")
         parent_path = Path(parent_session_path)
         if not parent_path.is_file():
             raise ValueError(f"元の調査のセッションが見つかりません: {parent_path}")
@@ -757,15 +802,80 @@ class DeepResearchTool:
         _progress("過去の調査の根拠を読み込んでいます" if ref_paths else "フィードバックを読み込んでいます", 1)
         ref_docs, ref_info = reference_documents(ref_paths)
         ref_notes = reference_summaries(ref_paths)
-        feedback_context = f"【読者からのフィードバック（第 {parent.session_id} 版への意見）】\n{feedback}"
         external_engine = str(getattr(rc, "research_engine", "builtin") or "builtin") != "builtin"
+        planner_llm = (getattr(self, "stage_llm_clients", None) or {}).get("planning") or self.llm_client
+
+        # --- external research material: compare, then material + cited URLs
+        comparison = ext.Comparison(topics=[], source="none")
+        ext_docs: List[Dict[str, Any]] = []
+        cited_docs: List[Dict[str, Any]] = []
+        cited: List[str] = []
+        cited_report: Optional[Dict[str, Any]] = None
+        if usable_materials:
+            _progress(f"外部の調査資料 {len(usable_materials)} 件を本レポートと照合しています", 1)
+            comparison = ext.compare_reports(planner_llm, parent, usable_materials,
+                                             language=rc.language)
+            if external_body_as_evidence and not external_engine:
+                ext_docs = ext.external_documents(usable_materials)
+            if external_fetch_urls:
+                already = set(rc.source_urls or [])
+                cited = [u for u in ext.cited_urls(usable_materials) if u not in already]
+            if cited and external_engine:
+                # an external engine reads the pages itself (input_urls)
+                from .research.url_sources import MAX_URLS
+                rc.source_urls = list(dict.fromkeys(list(rc.source_urls or []) + cited))[:MAX_URLS]
+                if rc.source_mode == ResearchSourceMode.WEB:
+                    rc.source_mode = ResearchSourceMode.URLS_WEB
+            elif cited:
+                from .research.url_sources import fetch_url_documents
+                _progress(f"外部資料が引用する URL {len(cited)} 件を取得しています", 1)
+
+                def _cancel_check():
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise RunCancelled("cancelled by user")
+                cited_docs, cited_report = fetch_url_documents(
+                    cited, self.search_client, crawl_depth=0, max_pages=len(cited),
+                    parallel_max_workers=rc.parallel_max_workers, cancel_check=_cancel_check)
+                for d in cited_docs:
+                    d.setdefault("metadata", {})["cited_by_external"] = True
+                failed = cited_report.get("failed") or []
+                if failed:
+                    ResearchWarnings.get_instance().add(
+                        "MEDIUM", "External",
+                        f"外部資料が引用する URL のうち {len(failed)} 件を取得できず、根拠にしていません: "
+                        + "、".join(f["url"] for f in failed[:5]) + ("…" if len(failed) > 5 else ""))
+        comparison_text = ext.comparison_instructions(comparison, "add" if mode == "full" else mode)
+        effective_feedback = "\n\n".join(x for x in (feedback, comparison_text) if x)
+        if not effective_feedback:
+            effective_feedback = "外部の調査資料を踏まえて、内容を一次資料で確認・補強する。"
+        writing_rule = ext.WRITING_RULE if ext_docs else ""
+        feedback_context = f"【読者からのフィードバック（第 {parent.session_id} 版への意見）】\n{effective_feedback}"
+        extra_docs = ref_docs + ext_docs + cited_docs
+
+        def _external_result(result_rev: Dict[str, Any]) -> None:
+            if not materials:
+                return
+            locker = self.researcher.get_evidence_locker() if getattr(self, "researcher", None) else None
+            url_report = cited_report or getattr(getattr(self, "researcher", None), "url_source_report", None)
+            summary = ext.external_summary(
+                materials, comparison, locker=locker, revision=result_rev, cited=cited,
+                url_report=url_report, body_as_evidence=bool(ext_docs),
+                fetch_cited=external_fetch_urls)
+            result_rev["external"] = summary
+            for sid in summary["external_only_sections"]:
+                ResearchWarnings.get_instance().add(
+                    "MEDIUM", "External",
+                    f"第{sid}章は外部の調査資料（二次情報）だけを根拠にしています。"
+                    "一次資料で確認してください")
 
         if mode == "full" or external_engine:
-            rp = plan_revision(self.llm_client, parent, feedback, "full", language=rc.language)
+            rp = plan_revision(self.llm_client, parent, effective_feedback, "full", language=rc.language)
             requirements = parent.requirements or ""
             requirements = (requirements + "\n\n" if requirements else "") + \
-                f"【追加要件（フィードバック）】{feedback[:2000]}"
-            self._revision_reference_docs = ref_docs if not external_engine else []
+                f"【追加要件（フィードバック）】{effective_feedback[:3000]}"
+            if writing_rule:
+                requirements += f"\n【出典の書き方】{writing_rule}"
+            self._revision_reference_docs = extra_docs if not external_engine else []
             try:
                 result = self.run(query=parent.query, requirements=requirements,
                                   additional_context=feedback_context,
@@ -781,21 +891,28 @@ class DeepResearchTool:
                 if getattr(self, "researcher", None) else None,
                 parent_job_id=parent_job_id, feedback=feedback, references=ref_info)
             result["revision"]["engine_rerun"] = external_engine
+            _external_result(result["revision"])
             return result
 
         _progress("フィードバックから修正計画を作成しています", 2)
-        planner_llm = (getattr(self, "stage_llm_clients", None) or {}).get("planning") or self.llm_client
         k = max(1, int(rc.max_queries_per_iteration or 3))
-        holder = {"rp": plan_revision(planner_llm, parent, feedback, mode, language=rc.language,
-                                      k=k, reference_summaries=ref_notes)}
+        preview = ext.comparison_preview(comparison)
+
+        def _review_plan(rp_):
+            plan_ = review_plan_for(rp_, parent)
+            if preview:
+                plan_.summary = (plan_.summary + "\n" if plan_.summary else "") + preview
+            return plan_
+        holder = {"rp": plan_revision(planner_llm, parent, effective_feedback, mode,
+                                      language=rc.language, k=k, reference_summaries=ref_notes)}
         if plan_review_callback is not None:
             def revise_fn(_current, instructions):
-                holder["rp"] = plan_revision(planner_llm, parent, feedback, mode,
+                holder["rp"] = plan_revision(planner_llm, parent, effective_feedback, mode,
                                              language=rc.language, k=k,
                                              extra_instructions=instructions,
                                              reference_summaries=ref_notes)
-                return review_plan_for(holder["rp"], parent)
-            plan_review_callback(review_plan_for(holder["rp"], parent), revise_fn)
+                return _review_plan(holder["rp"])
+            plan_review_callback(_review_plan(holder["rp"]), revise_fn)
         rp = holder["rp"]
         if not rp.changes:
             raise ValueError("フィードバックから修正すべき章が見つかりませんでした"
@@ -803,7 +920,12 @@ class DeepResearchTool:
 
         out_dir = Path(self.config.report.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        session = build_revised_session(parent, rp, k=k, feedback=feedback)
+        session = build_revised_session(parent, rp, k=k, feedback=effective_feedback)
+        if writing_rule:
+            session.requirements = (session.requirements + "\n" if session.requirements else "") + \
+                f"【出典の書き方】{writing_rule}"
+        if materials:
+            session.run_config["external_reports"] = [m.info() for m in materials]
         locker = seed_locker(parent_evidence, session.session_id, out_dir)
         parent_evidence_ids = {e.id for e in locker.get_all_evidence()}
         session_path = out_dir / f"session_{session.session_id}.json"
@@ -819,7 +941,7 @@ class DeepResearchTool:
         _progress(f"修正計画: 直す {len(rp.by_action('revise'))} 章・追加 "
                   f"{len(rp.by_action('add'))} 章・そのまま {len(rp.by_action('keep'))} 章", 3)
 
-        self._revision_reference_docs = ref_docs
+        self._revision_reference_docs = extra_docs
         try:
             result = self.run(query=parent.query, requirements=session.requirements,
                               additional_context=feedback_context,
@@ -835,6 +957,7 @@ class DeepResearchTool:
             parent_job_id=parent_job_id, feedback=feedback, references=ref_info,
             parent_evidence_ids=parent_evidence_ids)
         result["revision"]["engine_rerun"] = False
+        _external_result(result["revision"])
         return result
 
     def _create_engine_researcher(self, engine_id: str, raw_progress,

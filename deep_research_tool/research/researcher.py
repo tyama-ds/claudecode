@@ -543,7 +543,8 @@ class Researcher:
         if self.reference_documents:
             docs.extend(self.reference_documents)
             self._report_progress(
-                f"Registering {len(self.reference_documents)} page(s) from earlier research...", 3)
+                f"Registering {len(self.reference_documents)} reference document(s) "
+                "(earlier research / external reports)...", 3)
         return docs
 
     def _report_progress(self, message: str, percentage: float) -> None:
@@ -612,7 +613,7 @@ class Researcher:
 
         # Register local documents for local/hybrid/URL/reference retrieval
         if additional_documents and (self.source_mode.uses_local_store
-                                     or any((d.get("metadata") or {}).get("source") in ("url", "reference")
+                                     or any((d.get("metadata") or {}).get("source") in ("url", "reference", "external")
                                             for d in additional_documents)):
             for doc in additional_documents:
                 self.local_store.add_document(
@@ -642,7 +643,7 @@ class Researcher:
                     # own URL), and the fetch report lists the page.
                     full_content = doc.get("content", "")
                     doc_meta = doc.get("metadata", {}) or {}
-                    if doc_meta.get("source") not in ("url", "reference"):
+                    if doc_meta.get("source") not in ("url", "reference", "external"):
                         self.evidence_locker.add_evidence(
                             url=doc.get("path", ""),
                             title=doc.get("title", Path(doc.get("path", "")).name),
@@ -1636,13 +1637,15 @@ class Researcher:
         for chunk, extracted in zip(chunks, extracted_all):
             if extracted.relevance_score >= 0.2:
                 chunk_meta = dict(getattr(chunk, 'metadata', {}) or {})
-                origin = chunk_meta.get("source")          # url | reference | None
+                origin = chunk_meta.get("source")          # url | reference | external | None
                 from_url = origin == "url"
                 from_ref = origin == "reference"
-                if from_url or from_ref:
+                from_ext = origin == "external"
+                if from_url or from_ref or from_ext:
                     # a page the user named (ranked ahead of search results,
-                    # see _score_importance) or one an earlier research read:
-                    # cited by its real URL
+                    # see _score_importance), one an earlier research read
+                    # (cited by its real URL) or a chapter of an external
+                    # research report (secondary information, capped)
                     extracted.metadata["source"] = origin
                     extracted.metadata["seed_url"] = chunk_meta.get("seed_url")
                 parts.append(extracted)
@@ -1654,10 +1657,12 @@ class Researcher:
                     evidence_type=(EvidenceType.WEB_PAGE if (from_url or from_ref)
                                    else EvidenceType.USER_PROVIDED),
                     search_query=("source_urls" if from_url else
-                                  "reference_research" if from_ref else "local_documents"),
+                                  "reference_research" if from_ref else
+                                  "external_report" if from_ext else "local_documents"),
                     section_reference=section.section,
                     relevance_score=extracted.relevance_score,
-                    access_method=("url" if from_url else "reference" if from_ref else "local"),
+                    access_method=("url" if from_url else "reference" if from_ref else
+                                   "external" if from_ext else "local"),
                     metadata={**chunk_meta,
                               'source_spans': extracted.metadata.get('source_spans', []),
                               'document_path': chunk.doc_path,
@@ -1668,6 +1673,8 @@ class Researcher:
     # 指定 URL を重視: a page the user named outranks search results unless
     # the editor scored it as clearly peripheral
     URL_SOURCE_MIN_IMPORTANCE = 0.8
+    # 外部の調査資料 (feedback re-research): secondary information
+    EXTERNAL_MAX_IMPORTANCE = 0.5
 
     def _queries_with_preferred_domains(self, queries: List[str]) -> List[str]:
         """urls_web: search the preferred hosts first (one site: query per
@@ -1834,6 +1841,10 @@ Output JSON only:"""
                 pass        # the editor found the named page peripheral: keep that
             elif (part.metadata or {}).get("source") == "url":
                 part.importance_score = max(part.importance_score, self.URL_SOURCE_MIN_IMPORTANCE)
+            elif (part.metadata or {}).get("source") == "external":
+                # an external research report is secondary information:
+                # it never outranks a primary page
+                part.importance_score = min(part.importance_score, self.EXTERNAL_MAX_IMPORTANCE)
             if self.evidence_locker:
                 self.evidence_locker.update_importance_by_url(
                     url=part.source_url,
@@ -2209,7 +2220,8 @@ Return as JSON:
         self.session = ResearchSession.load(session_path)
         # a revised session carries its lineage (parent, revision plan,
         # feedback); the checkpoint writes this run's config, so keep those
-        for key in ("parent_session_id", "revision_mode", "revision", "feedback", "revised_at"):
+        for key in ("parent_session_id", "revision_mode", "revision", "feedback", "revised_at",
+                    "external_reports"):
             if key in (self.session.run_config or {}) and key not in self.run_config:
                 self.run_config[key] = self.session.run_config[key]
 
