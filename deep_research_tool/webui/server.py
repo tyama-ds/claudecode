@@ -1330,6 +1330,9 @@ class JobManager:
                     reference_session_paths=spec.get("reference_session_paths") or [],
                     parent_job_id=spec.get("parent_job_id"),
                     progress_callback=job.update,
+                    external_reports=spec.get("external_reports") or [],
+                    external_fetch_urls=bool(spec.get("external_fetch_urls", True)),
+                    external_body_as_evidence=bool(spec.get("external_body_as_evidence", True)),
                     plan_review_callback=plan_cb if params.get("plan_review") else None,
                     live_sink=job.live_sink,
                 )
@@ -1451,11 +1454,13 @@ class WebUIHandler(BaseHTTPRequestHandler):
 
     def _safe_output_path(self, raw: str) -> Optional[Path]:
         """Resolve a path and require it under the output directory."""
+        if not isinstance(raw, (str, Path)) or not str(raw).strip():
+            return None
         try:
             path = Path(raw).resolve()
             path.relative_to(self._output_dir())
             return path if path.is_file() else None
-        except (ValueError, OSError):
+        except (ValueError, OSError, TypeError):
             return None
 
     def log_message(self, fmt, *args):  # quiet default logging
@@ -1748,7 +1753,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                "/api/resume", "/api/regenerate",
                                "/api/verify", "/api/engines", "/api/feedback",
                                "/api/history/forget", "/api/fermi",
-                               "/api/llm-parallel-test", "/api/precheck-urls"):
+                               "/api/llm-parallel-test", "/api/precheck-urls",
+                               "/api/precheck-external"):
             self._send_json({"error": "not found"}, 404)
             return
 
@@ -1791,6 +1797,33 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e), "field": e.field}, 400)
             except Exception as e:  # noqa: BLE001 - reported, never a crash
                 self._send_json({"error": f"確認に失敗しました: {e}"}, 400)
+            return
+
+        if parsed.path == "/api/precheck-external":
+            # read the external research material before the run: chapters,
+            # size, cited URLs (no LLM, nothing kept)
+            from ..external_reports import load_external_reports
+            raw_items = params.get("external_reports") or []
+            if not isinstance(raw_items, list):
+                self._send_json({"error": "external_reports は配列で指定してください",
+                                 "field": "feedback_external"}, 400)
+                return
+            items = []
+            for item in raw_items[:10]:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("path"):
+                    safe = self._safe_output_path(item["path"])
+                    items.append({"label": item.get("label"), "path": str(safe) if safe else
+                                  str(self._output_dir() / "uploads" / "__missing__")})
+                elif str(item.get("text") or "").strip():
+                    items.append({"label": item.get("label"), "text": str(item["text"])})
+            try:
+                reports = load_external_reports(items)
+            except ValueError as e:
+                self._send_json({"error": str(e), "field": "feedback_external"}, 400)
+                return
+            self._send_json({"materials": [r.info() for r in reports]})
             return
 
         if parsed.path == "/api/llm-parallel-test":
@@ -1917,8 +1950,45 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                  "field": "feedback_text"}, 404)
                 return
             text = (params.get("feedback") or params.get("feedback_text") or "").strip()
-            if not text:
-                self._send_json({"error": "フィードバックを入力してください",
+            # external research material: uploaded files (under the output
+            # directory) or pasted text
+            from ..external_reports import FILE_SUFFIXES, MAX_EXTERNAL_CHARS, MAX_EXTERNAL_REPORTS
+            externals = []
+            raw_ext = params.get("external_reports") or []
+            if not isinstance(raw_ext, list):
+                self._send_json({"error": "external_reports は配列で指定してください",
+                                 "field": "feedback_external"}, 400)
+                return
+            # validate everything first; pasted text is written to disk only
+            # once the whole request is accepted (just before the job starts)
+            pasted_texts = []
+            for item in raw_ext:
+                if not isinstance(item, dict):
+                    continue
+                label = " ".join(str(item.get("label") or "").split())[:80]
+                if item.get("path"):
+                    safe = self._safe_output_path(item["path"]) if isinstance(item["path"], str) else None
+                    if safe is None:
+                        self._send_json({"error": "外部資料のファイルが見つかりません（先にアップロードしてください）",
+                                         "field": "feedback_external"}, 400)
+                        return
+                    if safe.suffix.lower() not in FILE_SUFFIXES:
+                        self._send_json({"error": f"外部資料の形式 {safe.suffix} は使えません"
+                                                  "（md / txt / docx / pdf / html）",
+                                         "field": "feedback_external"}, 400)
+                        return
+                    externals.append({"label": label, "path": str(safe)})
+                elif str(item.get("text") or "").strip():
+                    externals.append({"label": label, "pasted_index": len(pasted_texts)})
+                    pasted_texts.append(str(item["text"])[:MAX_EXTERNAL_CHARS + 1000])
+                if len(externals) > MAX_EXTERNAL_REPORTS:
+                    break
+            if len(externals) > MAX_EXTERNAL_REPORTS:
+                self._send_json({"error": f"外部の調査資料は {MAX_EXTERNAL_REPORTS} 件までです",
+                                 "field": "feedback_external"}, 400)
+                return
+            if not text and not externals:
+                self._send_json({"error": "フィードバックを入力するか、外部の調査資料を指定してください",
                                  "field": "feedback_text"}, 400)
                 return
             mode = str(params.get("mode") or "add")
@@ -1936,7 +2006,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
             control = {"job_id", "session_path", "feedback", "feedback_text", "mode", "urls",
                        "reference_jobs", "preferred_domains", "query", "local_documents",
                        "resume_from", "verify", "fermi", "regenerate", "parent_job_id",
-                       "source_urls", "source_mode"}
+                       "source_urls", "source_mode", "external_reports", "external_fetch_urls",
+                       "external_body_as_evidence"}
             base_params = {k: v for k, v in dict((rec or {}).get("params_summary") or {}).items()
                            if k not in control}
             base_params.update({k: v for k, v in params.items() if k not in control})
@@ -1956,6 +2027,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 "text": text, "mode": mode,
                 "reference_session_paths": ref_paths,
                 "reference_job_ids": ref_ids,
+                "external_reports": externals,
+                "external_fetch_urls": bool(params.get("external_fetch_urls", True)),
+                "external_body_as_evidence": bool(params.get("external_body_as_evidence", True)),
             }
             try:
                 build_config_kwargs(base_params)
@@ -1971,6 +2045,18 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 return
             if str(base_params.get("research_engine") or "builtin") != "builtin":
                 base_params["plan_review"] = False
+            if pasted_texts:
+                # pasted text goes to a file: the job ledger and the job list
+                # keep the path, never the whole text
+                paste_dir = self._output_dir() / "uploads" / ("paste_" + uuid.uuid4().hex[:10])
+                paste_dir.mkdir(parents=True, exist_ok=True)
+                for n, e in enumerate(externals, 1):
+                    if "pasted_index" not in e:
+                        continue
+                    dest = paste_dir / f"pasted_{n}.md"
+                    dest.write_text(pasted_texts[e.pop("pasted_index")], encoding="utf-8")
+                    e.update({"label": e.get("label") or f"貼り付けた資料{n}",
+                              "path": str(dest), "pasted": True})
             job = manager.start(base_params)
             self._send_json({"job_id": job.job_id, "state": job.state}, 202)
             return

@@ -453,6 +453,8 @@ input.invalid, textarea.invalid, select.invalid { border-color: var(--error, #b9
 .badge.warn { background:#fef3c7; color:#92400e; border-color:#fcd34d; }
 .badge.bad { background:#fee2e2; color:#991b1b; border-color:#fca5a5; }
 .badge.muted { background:#f1f5f9; color:#475569; }
+.badge.info { background:#e0f2fe; color:#075985; border-color:#7dd3fc; }
+.badge.error { background:#fee2e2; color:#991b1b; border-color:#fca5a5; }
 
 /* ==================== ✨ eye-candy layer (purely decorative) ==================== */
 /* everything below is cosmetic: it never changes what the UI does, and it is
@@ -639,6 +641,10 @@ body.fx-off button.primary::before, body.fx-off .mode-card.sel::after, body.fx-o
 .act-spark-label { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
 #llmSpark { display: block; width: 100%; height: 52px; }
 body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-off .hg-flow2, body.fx-off .hg-pulse, body.fx-off .hg-docs rect { animation: none !important; }
+.ext-block { border: 1.5px dashed var(--border, #cbd5e1); border-radius: 10px; padding: 10px 12px; margin: 8px 0; }
+.ext-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 4px; }
+.ext-table th, .ext-table td { text-align: left; padding: 4px 6px; border-top: 1px solid var(--border, #e2e8f0); vertical-align: top; }
+.ext-table-wrap { overflow-x: auto; }
 </style>
 </head>
 <body>
@@ -1567,8 +1573,25 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
         <div class="tab-pane" data-pane="feedback" style="display:none">
           <div id="feedbackPane">
             <p class="hint" id="feedbackHint" style="margin:0 0 6px">このレポートへの意見・URL・過去の調査をもとに修正計画を作り、指摘された章だけを調べ直して新しい版（別のジョブ）を作ります。元の版は変更しません。</p>
-            <label for="feedback_text">意見・指摘（章や文を引いて書くと、その章が対象になります）</label>
+            <label for="feedback_text">意見・指摘（章や文を引いて書くと、その章が対象になります。外部の調査資料だけでも開始できます）</label>
             <textarea id="feedback_text" placeholder="例: 第2章の市場規模は2023年の数字で古い。2025年の経産省の資料で更新してほしい。&#10;第3章は東レだけでなく帝人・三菱ケミカルの戦略も比較してほしい（表にする）。&#10;航空機向け需要の回復の話は妥当。リサイクル炭素繊維の章を追加してほしい。"></textarea>
+            <div class="ext-block" id="feedbackExtBlock">
+              <label style="margin-top:0">外部の調査資料（任意・最大 5 件。OpenAI Deep Research などの結果）</label>
+              <p class="hint" style="margin:0 0 6px">本レポートと話題ごとに照合し、食い違う章を直し、外部資料にだけある話題を章として足します。外部資料が引用する URL は取得して一次資料に、本文は「二次情報」として根拠にします（一次資料が見つからない主張は要確認事項に出ます）。</p>
+              <input type="file" id="feedback_ext_files" multiple accept=".md,.markdown,.txt,.docx,.pdf,.html,.htm">
+              <div id="feedbackExtList" class="doclist"></div>
+              <label for="feedback_ext_text" style="margin-top:6px">または本文を貼り付け（Markdown 可）</label>
+              <textarea id="feedback_ext_text" placeholder="# 炭素繊維市場の調査&#10;## 1. 市場規模&#10;..."></textarea>
+              <div style="display:flex;flex-wrap:wrap;gap:8px 14px;align-items:flex-end;margin-top:6px">
+                <div style="flex:1 1 240px"><label for="feedback_ext_label">貼り付けた資料の出所の名前（根拠一覧と本文の出典表記に使います）</label><input type="text" id="feedback_ext_label" placeholder="OpenAI Deep Research 2026-10-27"></div>
+                <button type="button" class="secondary" id="feedbackExtCheckBtn" style="margin:0">読み取りを確認</button>
+              </div>
+              <div id="feedbackExtCheck" class="doclist"></div>
+              <div style="display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:6px">
+                <label class="check" style="margin:0"><input type="checkbox" id="feedback_ext_fetch" checked> 引用 URL を取得して一次資料として根拠にする（最大 30 件）</label>
+                <label class="check" style="margin:0"><input type="checkbox" id="feedback_ext_body" checked> 本文も根拠にする（「二次情報」と明示）</label>
+              </div>
+            </div>
             <label for="feedback_urls">追加する URL・推奨資料（1 行 1 つ・任意。指定 URL と同じ取り込み）</label>
             <textarea id="feedback_urls" placeholder="https://www.example.go.jp/report/2025.pdf"></textarea>
             <label>踏まえる過去の調査（任意。根拠ページを資料として登録し、同じ URL は再取得しません）</label>
@@ -3239,8 +3262,94 @@ function renderRevision(r) {
     ${(r.acknowledged || []).length ? `<p class="hint">記録のみ（章は変更なし）: ${r.acknowledged.map(a => escapeHtml(a)).join(' / ')}</p>` : ''}
     ${r.requirements_addendum ? `<p class="hint">追加要件: ${escapeHtml(r.requirements_addendum)}</p>` : ''}
     ${refs ? `<p class="hint">参照した過去の調査: ${refs}</p>` : ''}
+    ${renderExternal(r.external)}
     <details style="margin-top:4px"><summary class="hint" style="cursor:pointer">送ったフィードバック</summary><pre class="hint" style="white-space:pre-wrap;margin:4px 0">${escapeHtml(r.feedback || '')}</pre></details>`;
 }
+
+const EXT_STATUS = {conflict: ['warn', '食い違い'], external_only: ['info', '外部のみ'],
+  agree: ['ok', '一致'], report_only: ['muted', '本レポートのみ']};
+function renderExternal(x) {
+  if (!x || !(x.materials || []).length) return '';
+  const mats = x.materials.map(m => `<div class="doc-row"><span class="badge ${m.error ? 'error' : 'info'}">${m.error ? '読めず' : (m.origin === 'file' ? 'ファイル' : '貼り付け')}</span>
+    <span class="nm">${escapeHtml(m.label)}${m.file ? '（' + escapeHtml(m.file) + '）' : ''}</span>
+    <span class="hint" style="margin:0">${m.error ? escapeHtml(m.error) : `${m.sections} 章・${(m.chars || 0).toLocaleString()} 文字・引用 URL ${m.cited_urls} 件${m.truncated ? '・上限で切り詰め' : ''}`}</span></div>`).join('');
+  const rows = (x.topics || []).map(t => {
+    const [cls, label] = EXT_STATUS[t.status] || ['muted', t.status];
+    return `<tr><td>${escapeHtml(t.topic)}</td><td><span class="badge ${cls}">${label}</span></td><td>${t.section ? '第' + escapeHtml(t.section) + '章' : '—'}</td>
+      <td>${escapeHtml(t.report || '')}</td><td>${escapeHtml(t.external || '')}${t.label ? `<br><span class="hint" style="margin:0">${escapeHtml(t.label)}</span>` : ''}</td><td>${escapeHtml(t.outcome || '')}</td></tr>`;
+  }).join('');
+  const c = x.counts || {};
+  const cited = (x.cited_urls || []).length
+    ? `外部資料の引用 URL ${x.cited_urls.length} 件${x.cited_fetched !== null && x.cited_fetched !== undefined ? `（取得 ${x.cited_fetched} 件${(x.cited_failed || []).length ? `・取得できず ${x.cited_failed.length} 件` : ''}）` : ''}`
+    : (x.fetch_cited ? '外部資料の引用 URL はありません' : '引用 URL は取得していません');
+  return `<label style="margin-top:8px">📎 外部の調査資料との照合${x.comparison_source === 'fallback' ? ' <span class="badge warn">規則による照合（LLM の答えが使えず）</span>' : ''}</label>
+    <div class="doclist" style="margin-top:4px">${mats}</div>
+    <p class="hint">食い違い <b>${c.conflict || 0}</b>・外部のみ <b>${c.external_only || 0}</b>・一致 <b>${c.agree || 0}</b>・本レポートのみ <b>${c.report_only || 0}</b>　${escapeHtml(cited)}　本文の根拠化: ${x.body_as_evidence ? 'あり（二次情報）' : 'なし'}</p>
+    ${rows ? `<div class="ext-table-wrap"><table class="ext-table"><tr><th>話題</th><th>照合</th><th>章</th><th>本レポート</th><th>外部資料</th><th>再調査後</th></tr>${rows}</table></div>` : ''}
+    ${(x.external_only_sections || []).length ? `<p class="hint"><span class="badge warn">要確認</span> 第${x.external_only_sections.map(escapeHtml).join('・')}章は外部資料（二次情報）だけを根拠にしています。</p>` : ''}`;
+}
+
+// ---- 外部の調査資料（フィードバック欄） ----
+let feedbackExtFiles = [];   // [{name, path, label}]
+function renderFeedbackExtList() {
+  const box = $('feedbackExtList');
+  if (!box) return;
+  box.innerHTML = feedbackExtFiles.map((f, i) => `<div class="doc-row"><span class="badge info">${escapeHtml((f.name.split('.').pop() || '').toLowerCase())}</span>
+    <span class="nm">${escapeHtml(f.name)}</span>
+    <input type="text" data-ext-label="${i}" value="${escapeHtml(f.label)}" placeholder="出所の名前" style="flex:0 1 220px;margin:0">
+    <button type="button" class="secondary" data-ext-remove="${i}" style="padding:2px 8px;font-size:11px;margin:0">外す</button></div>`).join('');
+}
+async function uploadExternalFiles(files) {
+  const list = [...(files || [])];
+  if (!list.length) return;
+  const err = $('feedbackError');
+  if (feedbackExtFiles.length + list.length > 5) { err.className = 'banner error'; err.textContent = '外部の調査資料は 5 件までです'; return; }
+  const fd = new FormData();
+  list.forEach(f => fd.append('files', f, f.name));
+  try {
+    const res = await fetch('/api/upload', {method: 'POST', body: fd});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'upload failed');
+    (data.files || []).forEach(e => {
+      const name = (e.path || '').split(/[\\/]/).pop();
+      feedbackExtFiles.push({name, path: e.path, label: name.replace(/\.[^.]+$/, '')});
+    });
+    renderFeedbackExtList();
+  } catch (e) {
+    err.className = 'banner error'; err.textContent = '外部資料をアップロードできませんでした: ' + e.message;
+  }
+}
+function collectExternalReports() {
+  const out = feedbackExtFiles.map(f => ({label: f.label, path: f.path}));
+  const text = ($('feedback_ext_text').value || '').trim();
+  if (text) out.push({label: ($('feedback_ext_label').value || '').trim(), text});
+  return out;
+}
+$('feedback_ext_files').addEventListener('change', () => { uploadExternalFiles($('feedback_ext_files').files); $('feedback_ext_files').value = ''; });
+$('feedbackExtList').addEventListener('input', (e) => {
+  const i = e.target.dataset && e.target.dataset.extLabel;
+  if (i !== undefined && feedbackExtFiles[+i]) feedbackExtFiles[+i].label = e.target.value;
+});
+$('feedbackExtList').addEventListener('click', (e) => {
+  const i = e.target.dataset && e.target.dataset.extRemove;
+  if (i !== undefined) { feedbackExtFiles.splice(+i, 1); renderFeedbackExtList(); }
+});
+$('feedbackExtCheckBtn').addEventListener('click', async () => {
+  const box = $('feedbackExtCheck');
+  const items = collectExternalReports();
+  if (!items.length) { box.innerHTML = '<p class="hint" style="margin:0">ファイルを選ぶか本文を貼り付けてください</p>'; return; }
+  box.innerHTML = '<p class="hint" style="margin:0">読み取っています…</p>';
+  try {
+    const res = await fetch('/api/precheck-external', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({external_reports: items})});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'failed');
+    box.innerHTML = (data.materials || []).map(m => `<div class="doc-row"><span class="badge ${m.error ? 'error' : 'ok'}">${m.error ? '❌ 読めず' : '✅ 読み取り可'}</span>
+      <span class="nm">${escapeHtml(m.label)}</span>
+      <span class="hint" style="margin:0">${m.error ? escapeHtml(m.error) : `${m.sections} 章・${(m.chars || 0).toLocaleString()} 文字・引用 URL ${m.cited_urls} 件${m.truncated ? '・30 万文字で切り詰め' : ''}${(m.section_titles || []).length ? '（' + m.section_titles.slice(0, 6).map(escapeHtml).join(' / ') + (m.section_titles.length > 6 ? ' …' : '') + '）' : ''}`}</span></div>`).join('');
+  } catch (e) {
+    box.innerHTML = `<p class="hint" style="margin:0">確認できませんでした: ${escapeHtml(e.message)}</p>`;
+  }
+});
 
 function renderFeedbackRefs() {
   const box = $('feedbackRefs');
@@ -3273,7 +3382,8 @@ function renderFeedbackPane(result, saved) {
 async function startFeedback() {
   const err = $('feedbackError');
   const text = $('feedback_text').value.trim();
-  if (!text) { err.className = 'banner error'; err.textContent = '意見・指摘を入力してください'; $('feedback_text').focus(); return; }
+  const externals = collectExternalReports();
+  if (!text && !externals.length) { err.className = 'banner error'; err.textContent = '意見・指摘を入力するか、外部の調査資料を指定してください'; $('feedback_text').focus(); return; }
   const jobId = resultJobId || selectedJobId;
   if (!jobId) { err.className = 'banner error'; err.textContent = '対象の調査が選ばれていません'; return; }
   const refs = [...document.querySelectorAll('#feedbackRefs input[data-ref]:checked')].map(i => i.dataset.ref);
@@ -3282,6 +3392,9 @@ async function startFeedback() {
     job_id: jobId, feedback: text, mode: $('feedback_mode').value,
     urls: $('feedback_urls').value.split('\n').map(s => s.trim()).filter(Boolean),
     reference_jobs: refs,
+    external_reports: externals,
+    external_fetch_urls: $('feedback_ext_fetch').checked,
+    external_body_as_evidence: $('feedback_ext_body').checked,
     preferred_domains: $('feedback_domains').value.split(/[,\n]/).map(s => s.trim()).filter(Boolean),
     plan_review: $('feedback_plan_review').checked,
     plan_review_timeout: ($('plan_review_mode') && $('plan_review_mode').value === 'auto60') ? 60 : 0,
@@ -3303,6 +3416,8 @@ async function startFeedback() {
     selectedJobId = data.job_id;
     seenStates[data.job_id] = data.state;
     $('feedback_text').value = '';
+    $('feedback_ext_text').value = '';
+    feedbackExtFiles = []; renderFeedbackExtList(); $('feedbackExtCheck').innerHTML = '';
     setView('run', {user: true});
     pollJobs();
   } catch (e) {
