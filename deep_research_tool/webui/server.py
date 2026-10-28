@@ -1454,11 +1454,13 @@ class WebUIHandler(BaseHTTPRequestHandler):
 
     def _safe_output_path(self, raw: str) -> Optional[Path]:
         """Resolve a path and require it under the output directory."""
+        if not isinstance(raw, (str, Path)) or not str(raw).strip():
+            return None
         try:
             path = Path(raw).resolve()
             path.relative_to(self._output_dir())
             return path if path.is_file() else None
-        except (ValueError, OSError):
+        except (ValueError, OSError, TypeError):
             return None
 
     def log_message(self, fmt, *args):  # quiet default logging
@@ -1801,8 +1803,13 @@ class WebUIHandler(BaseHTTPRequestHandler):
             # read the external research material before the run: chapters,
             # size, cited URLs (no LLM, nothing kept)
             from ..external_reports import load_external_reports
+            raw_items = params.get("external_reports") or []
+            if not isinstance(raw_items, list):
+                self._send_json({"error": "external_reports は配列で指定してください",
+                                 "field": "feedback_external"}, 400)
+                return
             items = []
-            for item in (params.get("external_reports") or [])[:10]:
+            for item in raw_items[:10]:
                 if not isinstance(item, dict):
                     continue
                 if item.get("path"):
@@ -1952,12 +1959,15 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "external_reports は配列で指定してください",
                                  "field": "feedback_external"}, 400)
                 return
+            # validate everything first; pasted text is written to disk only
+            # once the whole request is accepted (just before the job starts)
+            pasted_texts = []
             for item in raw_ext:
                 if not isinstance(item, dict):
                     continue
                 label = " ".join(str(item.get("label") or "").split())[:80]
                 if item.get("path"):
-                    safe = self._safe_output_path(item["path"])
+                    safe = self._safe_output_path(item["path"]) if isinstance(item["path"], str) else None
                     if safe is None:
                         self._send_json({"error": "外部資料のファイルが見つかりません（先にアップロードしてください）",
                                          "field": "feedback_external"}, 400)
@@ -1969,14 +1979,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
                         return
                     externals.append({"label": label, "path": str(safe)})
                 elif str(item.get("text") or "").strip():
-                    # pasted text goes to a file: the job ledger and the job
-                    # list keep the path, never the whole text
-                    paste_dir = self._output_dir() / "uploads" / ("paste_" + uuid.uuid4().hex[:10])
-                    paste_dir.mkdir(parents=True, exist_ok=True)
-                    dest = paste_dir / f"pasted_{len(externals) + 1}.md"
-                    dest.write_text(str(item["text"])[:MAX_EXTERNAL_CHARS + 1000], encoding="utf-8")
-                    externals.append({"label": label or f"貼り付けた資料{len(externals) + 1}",
-                                      "path": str(dest), "pasted": True})
+                    externals.append({"label": label, "pasted_index": len(pasted_texts)})
+                    pasted_texts.append(str(item["text"])[:MAX_EXTERNAL_CHARS + 1000])
+                if len(externals) > MAX_EXTERNAL_REPORTS:
+                    break
             if len(externals) > MAX_EXTERNAL_REPORTS:
                 self._send_json({"error": f"外部の調査資料は {MAX_EXTERNAL_REPORTS} 件までです",
                                  "field": "feedback_external"}, 400)
@@ -2039,6 +2045,18 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 return
             if str(base_params.get("research_engine") or "builtin") != "builtin":
                 base_params["plan_review"] = False
+            if pasted_texts:
+                # pasted text goes to a file: the job ledger and the job list
+                # keep the path, never the whole text
+                paste_dir = self._output_dir() / "uploads" / ("paste_" + uuid.uuid4().hex[:10])
+                paste_dir.mkdir(parents=True, exist_ok=True)
+                for n, e in enumerate(externals, 1):
+                    if "pasted_index" not in e:
+                        continue
+                    dest = paste_dir / f"pasted_{n}.md"
+                    dest.write_text(pasted_texts[e.pop("pasted_index")], encoding="utf-8")
+                    e.update({"label": e.get("label") or f"貼り付けた資料{n}",
+                              "path": str(dest), "pasted": True})
             job = manager.start(base_params)
             self._send_json({"job_id": job.job_id, "state": job.state}, 202)
             return

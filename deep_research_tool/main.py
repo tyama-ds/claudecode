@@ -775,6 +775,15 @@ class DeepResearchTool:
         from . import external_reports as ext
         if mode not in MODES:
             raise ValueError(f"unknown revision mode: {mode} (add / revise / full)")
+        # one cancel event for the whole call: request_cancel() (the Web UI's
+        # 中止) reaches the preparation (comparison, cited-URL fetch) and the
+        # inner run() alike
+        cancel_event = cancel_event or threading.Event()
+        self.cancel_event = cancel_event
+
+        def _cancel_check():
+            if cancel_event.is_set():
+                raise RunCancelled("cancelled by user")
         feedback = (feedback or "").strip()
         materials = ext.load_external_reports(external_reports or [])
         usable_materials = [m for m in materials if not m.error]
@@ -812,9 +821,11 @@ class DeepResearchTool:
         cited: List[str] = []
         cited_report: Optional[Dict[str, Any]] = None
         if usable_materials:
+            _cancel_check()
             _progress(f"外部の調査資料 {len(usable_materials)} 件を本レポートと照合しています", 1)
             comparison = ext.compare_reports(planner_llm, parent, usable_materials,
                                              language=rc.language)
+            _cancel_check()
             if external_body_as_evidence and not external_engine:
                 ext_docs = ext.external_documents(usable_materials)
             if external_fetch_urls:
@@ -829,10 +840,6 @@ class DeepResearchTool:
             elif cited:
                 from .research.url_sources import fetch_url_documents
                 _progress(f"外部資料が引用する URL {len(cited)} 件を取得しています", 1)
-
-                def _cancel_check():
-                    if cancel_event is not None and cancel_event.is_set():
-                        raise RunCancelled("cancelled by user")
                 cited_docs, cited_report = fetch_url_documents(
                     cited, self.search_client, crawl_depth=0, max_pages=len(cited),
                     parallel_max_workers=rc.parallel_max_workers, cancel_check=_cancel_check)
@@ -852,6 +859,8 @@ class DeepResearchTool:
         feedback_context = f"【読者からのフィードバック（第 {parent.session_id} 版への意見）】\n{effective_feedback}"
         extra_docs = ref_docs + ext_docs + cited_docs
 
+        parent_ev_ids: Dict[str, Any] = {"ids": None}
+
         def _external_result(result_rev: Dict[str, Any]) -> None:
             if not materials:
                 return
@@ -860,7 +869,7 @@ class DeepResearchTool:
             summary = ext.external_summary(
                 materials, comparison, locker=locker, revision=result_rev, cited=cited,
                 url_report=url_report, body_as_evidence=bool(ext_docs),
-                fetch_cited=external_fetch_urls)
+                fetch_cited=external_fetch_urls, parent_evidence_ids=parent_ev_ids["ids"])
             result_rev["external"] = summary
             for sid in summary["external_only_sections"]:
                 ResearchWarnings.get_instance().add(
@@ -913,6 +922,7 @@ class DeepResearchTool:
                                              reference_summaries=ref_notes)
                 return _review_plan(holder["rp"])
             plan_review_callback(_review_plan(holder["rp"]), revise_fn)
+        _cancel_check()
         rp = holder["rp"]
         if not rp.changes:
             raise ValueError("フィードバックから修正すべき章が見つかりませんでした"
@@ -924,10 +934,13 @@ class DeepResearchTool:
         if writing_rule:
             session.requirements = (session.requirements + "\n" if session.requirements else "") + \
                 f"【出典の書き方】{writing_rule}"
+        # never inherit an earlier revision's material list
+        session.run_config.pop("external_reports", None)
         if materials:
             session.run_config["external_reports"] = [m.info() for m in materials]
         locker = seed_locker(parent_evidence, session.session_id, out_dir)
         parent_evidence_ids = {e.id for e in locker.get_all_evidence()}
+        parent_ev_ids["ids"] = parent_evidence_ids
         session_path = out_dir / f"session_{session.session_id}.json"
         saved: Dict[str, str] = {"session": str(session_path)}
         try:

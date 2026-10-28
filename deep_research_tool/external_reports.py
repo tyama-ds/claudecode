@@ -51,8 +51,13 @@ WRITING_RULE = ("外部調査資料（二次情報）だけが根拠の文は「
                 "数値・固有の主張は一次資料（公的統計・企業の公表資料・原典のページ）を優先する。"
                 "外部資料と一次資料が食い違うときは両方を根拠つきで示す")
 
-_URL_RE = re.compile(r"https?://[^\s<>\)\]\"'｝」』、。]+")
-_MD_LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
+# a URL ends at whitespace, ASCII / Japanese brackets and Japanese
+# punctuation; one level of balanced parentheses stays inside
+# (https://en.wikipedia.org/wiki/Foo_(bar))
+_URL_STOP = "\\s<>()\\[\\]\"'（）【】「」『』〔〕《》｛｝，；：、。！？　"
+_URL_RE = re.compile(r"https?://(?:[^" + _URL_STOP + r"]|\([^\s()]*\))+")
+_MD_LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://(?:[^()\s]|\([^()\s]*\))+)\)")
+_URL_TRAIL = ".,;:!?"
 # numbers worth keeping in a digest: amounts with units, percentages, years
 _FIGURE_RE = re.compile(
     r"(?:約|およそ)?\d[\d,，.．]*\s*(?:兆|億|万|千)?\s*(?:円|ドル|USD|米ドル|ユーロ|元|t|トン|件|社|人|台|%|％|倍|GW|MW|kWh)"
@@ -96,6 +101,7 @@ def html_to_markdown(raw: str) -> Tuple[str, str]:
     class _P(HTMLParser):
         BLOCK = {"p", "div", "section", "article", "li", "tr", "br", "ul", "ol", "table",
                  "blockquote", "pre", "header", "footer", "main"}
+        HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
         SKIP = {"script", "style", "noscript", "svg", "nav"}
 
         def __init__(self):
@@ -106,17 +112,42 @@ def html_to_markdown(raw: str) -> Tuple[str, str]:
             self._skip = 0
             self._href: Optional[str] = None
             self._link_text: List[str] = []
+            self._heading: Optional[int] = None       # level while inside h1-h6
+            self._heading_text: List[str] = []
+
+        def _flush_link(self) -> None:
+            """Write an open <a> (also when the page never closes it)."""
+            if self._href is None:
+                return
+            text = " ".join("".join(self._link_text).split()) or self._href
+            self._write(f"[{text}]({self._href})")
+            self._href, self._link_text = None, []
+
+        def _write(self, text: str) -> None:
+            (self._heading_text if self._heading is not None else self.out).append(text)
+
+        def _flush_heading(self) -> None:
+            if self._heading is None:
+                return
+            level, text = self._heading, " ".join("".join(self._heading_text).split())
+            self._heading, self._heading_text = None, []
+            if text:
+                self.out.append("\n\n" + "#" * level + " " + text + "\n")
 
         def handle_starttag(self, tag, attrs):
             if tag in self.SKIP:
                 self._skip += 1
             elif tag == "title":
                 self._in_title = True
-            elif tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
-                self.out.append("\n\n" + "#" * int(tag[1]) + " ")
+            elif tag in self.HEADINGS:
+                self._flush_link()
+                self._flush_heading()
+                self._heading, self._heading_text = int(tag[1]), []
             elif tag in self.BLOCK:
-                self.out.append("\n")
+                self._flush_link()
+                self._write(" " if self._heading is not None else "\n")
             elif tag == "a":
+                self._flush_link()
                 href = dict(attrs).get("href") or ""
                 if href.startswith(("http://", "https://")):
                     self._href, self._link_text = href, []
@@ -126,12 +157,14 @@ def html_to_markdown(raw: str) -> Tuple[str, str]:
                 self._skip = max(0, self._skip - 1)
             elif tag == "title":
                 self._in_title = False
-            elif tag in ("h1", "h2", "h3", "h4", "h5", "h6") or tag in self.BLOCK:
-                self.out.append("\n")
-            elif tag == "a" and self._href:
-                text = " ".join("".join(self._link_text).split()) or self._href
-                self.out.append(f"[{text}]({self._href})")
-                self._href = None
+            elif tag in self.HEADINGS:
+                self._flush_link()
+                self._flush_heading()
+            elif tag in self.BLOCK:
+                self._flush_link()
+                self._write(" " if self._heading is not None else "\n")
+            elif tag == "a":
+                self._flush_link()
 
         def handle_data(self, data):
             if self._skip:
@@ -141,10 +174,16 @@ def html_to_markdown(raw: str) -> Tuple[str, str]:
             elif self._href is not None:
                 self._link_text.append(data)
             else:
-                self.out.append(data)
+                self._write(data)
+
+        def close(self):
+            super().close()
+            self._flush_link()
+            self._flush_heading()
 
     parser = _P()
     parser.feed(raw)
+    parser.close()
     text = "".join(parser.out)
     lines = [" ".join(l.split()) if not l.lstrip().startswith("#") else l.strip() for l in text.split("\n")]
     text = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
@@ -179,7 +218,7 @@ def extract_cited_urls(text: str, limit: int = MAX_CITED_URLS) -> List[Dict[str,
     seen = set()
 
     def _add(url: str, title: Optional[str]) -> None:
-        url = url.rstrip(".,;:）)")
+        url = url.rstrip(_URL_TRAIL)
         key = canonicalize_url(url)
         if not key or key in seen or len(out) >= limit:
             return
@@ -504,16 +543,29 @@ def _is_external(ev) -> bool:
 def external_summary(reports: Sequence[ExternalReport], comparison: Comparison, *,
                      locker=None, revision: Optional[Dict[str, Any]] = None,
                      cited: Sequence[str] = (), url_report: Optional[Dict[str, Any]] = None,
-                     body_as_evidence: bool = True, fetch_cited: bool = True) -> Dict[str, Any]:
+                     body_as_evidence: bool = True, fetch_cited: bool = True,
+                     parent_evidence_ids: Optional[set] = None) -> Dict[str, Any]:
     """Materials, the comparison with the outcome per topic, and the
-    chapters whose new text rests on the external material alone."""
+    chapters whose new text rests on the external material alone.
+
+    Only the evidence THIS run gathered counts (``parent_evidence_ids`` =
+    the original report's evidence copied into the new locker). In full
+    mode the new report has its own chapter numbering: every topic is
+    matched to a new chapter by title, never by the original number."""
+    full = bool(revision) and (revision.get("mode") == "full")
+    sec_rows = list((revision or {}).get("sections") or [])
     changed = set()
     if revision:
         changed = set(revision.get("revised") or []) | set(revision.get("added") or [])
+        if full:
+            changed = {str(r.get("section")) for r in sec_rows}
+    skip_ids = set(parent_evidence_ids or ())
     per_section: Dict[str, Dict[str, int]] = {}
     if locker is not None:
         try:
             for ev in locker.get_all_evidence():
+                if getattr(ev, "id", None) in skip_ids:
+                    continue
                 sid = str(getattr(ev, "section_reference", "") or "")
                 if not sid:
                     continue
@@ -521,44 +573,53 @@ def external_summary(reports: Sequence[ExternalReport], comparison: Comparison, 
                 c["external" if _is_external(ev) else "primary"] += 1
         except Exception:
             per_section = {}
-    # an external-only topic has no chapter of the report: the chapter the
-    # plan added (or revised) for it is found by its title
-    sec_rows = list((revision or {}).get("sections") or [])
-
-    def _chapter_for(topic: str) -> Optional[str]:
+    # an external-only topic has no chapter of the report (and in full mode
+    # no number survives): the chapter for it is found by its title. The
+    # overlap is measured against the LONGER title and must exceed half,
+    # so a shared word ("メーカーの") does not make a match
+    def _chapter_for(topic: str, any_action: bool) -> Optional[str]:
         best, score = None, 0.0
         tg = _bigrams(topic)
         for r in sec_rows:
-            if r.get("action") not in ("add", "revise"):
+            if not any_action and r.get("action") not in ("add", "revise"):
                 continue
             title = str(r.get("title") or "")
-            if topic and (topic in title or title in topic):
+            if topic and title and (topic in title or title in topic):
                 return str(r.get("section"))
             g = _bigrams(title)
             if tg and g:
-                sc = len(tg & g) / max(1, min(len(tg), len(g)))
+                sc = len(tg & g) / max(len(tg), len(g))
                 if sc > score:
                     best, score = str(r.get("section")), sc
-        return best if score >= 0.5 else None
+        return best if score > 0.5 else None
 
     rows = []
     for t in comparison.topics:
         row = t.to_dict()
         section = t.section
-        if t.status == "external_only" and not section:
-            section = _chapter_for(t.topic)
+        if full and t.status in ("conflict", "external_only"):
+            section = _chapter_for(t.topic, any_action=True)
+            row["matched_section"] = section
+        elif t.status == "external_only" and not section:
+            section = _chapter_for(t.topic, any_action=False)
             if section:
                 row["matched_section"] = section
         counts = per_section.get(str(section or ""), {})
         if t.status in ("conflict", "external_only") and section in changed:
-            prefix = f"第{section}章を追加・" if (section != t.section and section in set(
-                (revision or {}).get("added") or [])) else ""
+            if full:
+                prefix = f"全面再調査・第{section}章・"
+            elif section != t.section and section in set((revision or {}).get("added") or []):
+                prefix = f"第{section}章を追加・"
+            else:
+                prefix = ""
             if counts.get("primary"):
                 row["outcome"] = f"{prefix}一次資料 {counts['primary']} 件で再調査"
             elif counts.get("external"):
                 row["outcome"] = f"{prefix}一次資料なし（外部資料のみ・要確認）"
             else:
                 row["outcome"] = f"{prefix}再調査（根拠の記録なし）"
+        elif full and t.status in ("conflict", "external_only"):
+            row["outcome"] = "全面再調査（対応する章を特定できず）"
         elif t.status == "agree":
             row["outcome"] = "一致（そのまま）"
         elif t.status == "report_only":
