@@ -18,7 +18,7 @@ import re
 import unicodedata
 from typing import Any, Callable, Dict, List, Optional
 
-from .data_layer import _raw_numbers, parse_unit
+from .data_layer import _jp_compounds, _raw_numbers, parse_unit
 
 QUOTED_BASIS = ("公表", "二次", "換算")
 VALUE_NOT_IN_QUOTE = "value_not_in_quote"
@@ -30,9 +30,12 @@ PROBLEM_TEXT = {
 
 
 def _norm(text: str) -> str:
-    """NFKC, lower case, no spaces, no thousands separators."""
+    """NFKC, lower case, no thousands separators, no spaces — except that
+    the space between two numbers (a table row '1,100  1,200  1,350')
+    becomes '|' so the numbers do not fuse into one."""
     s = unicodedata.normalize("NFKC", str(text or "")).lower()
     s = re.sub(r"(?<=\d)[,，](?=\d{3})", "", s)
+    s = re.sub(r"(?<=[\d.%])\s+(?=\d)", "|", s)
     return re.sub(r"\s+", "", s)
 
 
@@ -46,6 +49,14 @@ def value_in_quote(value: float, unit: str, raw_text: str) -> bool:
     (3.1 in 10億ドル for '約31億ドル')."""
     v = abs(float(value))
     base, factor, _label = parse_unit(unit)
+    text = unicodedata.normalize("NFKC", str(raw_text or ""))
+    if base == "%":
+        # 3割 / 3割5分 are 30 % / 35 %
+        for m in re.finditer(r"([0-9]+(?:\.[0-9]+)?)\s*割(?:\s*([0-9])\s*分)?", text):
+            if _close(v, float(m.group(1)) * 10 + (float(m.group(2)) if m.group(2) else 0.0)):
+                return True
+    elif any(_close(v * factor, total) for total in _jp_compounds(text)):
+        return True                     # 1兆2,000億円 / 3億5,000万円
     for n, f, w in _raw_numbers(raw_text):
         if f != f:                      # compound scale (千万): not comparable
             continue

@@ -132,9 +132,44 @@ _RAW_SCALES: Tuple[Tuple[str, float], ...] = (
     ("bn", 1e9), ("mn", 1e6), ("tn", 1e12),
     ("兆", 1e12), ("億", 1e8), ("百万", 1e6), ("万", 1e4), ("千", 1e3),
 )
+# English scale words only as whole words ('BNPL', 'MNOs', 'billionaires'
+# are not scales)
 _RAW_NUMBER = re.compile(
     r"([0-9]+(?:[,，][0-9]{3})*(?:[.．][0-9]+)?)\s*"
-    r"(trillion|billion|million|thousand|bn|mn|tn|兆|億|百万|万|千)?", re.I)
+    r"(trillion(?![a-z])|billion(?![a-z])|million(?![a-z])|thousand(?![a-z])|bn(?![a-z])|mn(?![a-z])"
+    r"|tn(?![a-z])|兆|億|百万|万|千)?", re.I)
+# Japanese compound numbers: 1兆2,000億 / 3億5,000万 / 1万2500 / 3千万 / 1千億
+_JP_UNITS = (("兆", 1e12), ("千億", 1e11), ("百億", 1e10), ("十億", 1e9), ("億", 1e8),
+             ("千万", 1e7), ("百万", 1e6), ("十万", 1e5), ("万", 1e4), ("千", 1e3))
+_JP_PART = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?\s*(?:" + "|".join(u for u, _f in _JP_UNITS) + ")"
+_JP_COMPOUND = re.compile(r"(?:%s\s*)+(?:[0-9]+(?:,[0-9]{3})*(?![0-9.,]*\s*[A-Za-z]))?" % _JP_PART)
+# 'bn' / 'mn' / 'tn' rebuilt into a unit must be a word parse_unit knows
+_SCALE_WORD = {"bn": "billion", "mn": "million", "tn": "trillion"}
+
+
+def _jp_compounds(text: str) -> List[float]:
+    """Totals of Japanese compound numbers ('1兆2,000億' = 1.2e12)."""
+    out = []
+    for m in _JP_COMPOUND.finditer(text):
+        chunk = m.group(0)
+        parts = re.findall(r"([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\s*(" + "|".join(u for u, _f in _JP_UNITS) + ")?",
+                           chunk)
+        units = dict(_JP_UNITS)
+        if sum(1 for _n, u in parts if u) < 1 or len(parts) < 2 and not any(
+                u in ("千万", "千億", "百億", "十億", "十万") for _n, u in parts):
+            continue                    # a plain '50億' is handled as a single number
+        total, last = 0.0, float("inf")
+        ok = True
+        for n, u in parts:
+            f = units.get(u, 1.0)
+            if f >= last:               # scales must go down: '1兆2,000億'
+                ok = False
+                break
+            total += float(n.replace(",", "")) * f
+            last = f
+        if ok:
+            out.append(total)
+    return out
 
 
 def _raw_numbers(raw_text: str) -> List[Tuple[float, float, str]]:
@@ -191,9 +226,10 @@ def repair_scale(value: Any, raw_text: str, unit: str) -> Tuple[str, bool]:
             return unit, False
         if not base:
             # the unit is a scale word alone ('billion'): the text's scale word
-            return word, True
+            return _SCALE_WORD.get(word, word), True
         if re.fullmatch(r"[a-z]+", word):
             # English scale word: keep the unit's original currency spelling
+            word = _SCALE_WORD.get(word, word)
             cur = re.sub(r"(?i)\b(trillion|billion|million|thousand|bn|mn|tn)\b|兆|億|百万|万|千", "",
                          unicodedata.normalize("NFKC", str(unit or ""))).strip() or base
             return f"{word} {cur}", True

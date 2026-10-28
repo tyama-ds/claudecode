@@ -133,6 +133,17 @@ def _create_report_generator(
         return generator, "v1"
 
 
+def _report_titles(session) -> list:
+    """Text a renderer prints around the body that is not part of it: the
+    report title (the plan's, else the query) and the session id."""
+    if session is None:
+        return []
+    plan = getattr(session, "research_plan", None)
+    out = [getattr(plan, "title", "") if plan else "", getattr(session, "query", ""),
+           getattr(session, "session_id", "")]
+    return [str(t) for t in out if t]
+
+
 # RunCancelled lives in utils.cancellation so the researcher/crawlers can
 # raise it without importing main; re-exported here for existing callers.
 from .utils.cancellation import RunCancelled  # noqa: E402
@@ -1898,6 +1909,7 @@ class DeepResearchTool:
         fig_generator = None
         figures_embedded = False       # V1 PDF / HTML and V2 HTML place the figures while rendering
         v2_figures_placed = 0
+        v2_tables: list = []
         if self.config.report.auto_figures:
             self.progress_plan.enter("figures")
             figures_dir = Path(self.config.report.output_dir) / "reports" / "figures"
@@ -1951,6 +1963,8 @@ class DeepResearchTool:
                 research_plan=session.research_plan,
                 section_contents=session.section_contents,
             )
+            # the generated title is printed above the body (not part of it)
+            self._report_titles = [getattr(getattr(result, "context", None), "report_title", "") or ""]
 
             # Finalization loop: verify the final candidate body — with
             # Fermi / glossary / warnings / FIGURE SEMANTICS already IN
@@ -2020,6 +2034,8 @@ class DeepResearchTool:
                 research_plan=session.research_plan,
                 section_contents=session.section_contents,
             )
+            # the generated title is printed above the body (not part of it)
+            self._report_titles = [getattr(getattr(result, "context", None), "report_title", "") or ""]
 
             # Finalization loop: verify the final candidate body — with
             # Fermi / glossary / warnings already IN it — act on
@@ -2086,14 +2102,18 @@ class DeepResearchTool:
             # insertion could not edit V2's HTML: the report had no figures)
             fmt_value = str(getattr(self.config.report.format, "value",
                                     self.config.report.format)).lower()
+            # the tables reach the page through the verified 図表一覧 when there
+            # is one; without verification they are inserted here
+            v2_tables = [] if (figure_collection is None or extras_flags.get("figures_key")) \
+                else list(figure_collection.tables)
             v2_html_figures = (fmt_value == "html" and figure_collection is not None
                                and fig_generator is not None
-                               and bool(figure_collection.figures or figure_collection.charts))
+                               and bool(figure_collection.figures or figure_collection.charts or v2_tables))
             if v2_html_figures:
                 from .report.figure_table_generator import FigureTableCollection
-                # tables already reach the page through the verified 図表一覧
                 final_doc = fig_generator.add_figures_to_markdown(final_doc, FigureTableCollection(
-                    figures=list(figure_collection.figures), charts=list(figure_collection.charts)))
+                    figures=list(figure_collection.figures), charts=list(figure_collection.charts),
+                    tables=v2_tables))
 
             # Save to file in the configured format (DOCX/PDF/HTML/MD)
             output_dir = self.config.report.output_dir / "reports"
@@ -2110,7 +2130,8 @@ class DeepResearchTool:
                     page = Path(report_path).read_text(encoding="utf-8")
                     page = fig_generator._embed_images_in_html(page, figure_collection)
                     Path(report_path).write_text(page, encoding="utf-8")
-                    v2_figures_placed = page.count('src="data:image')
+                    v2_figures_placed = page.count('src="data:image') + sum(
+                        1 for t in v2_tables if t.title and t.title in page)
                 except Exception as e:
                     print(f"[AutoFigures] embedding figures in the V2 HTML failed: {e}")
         else:
@@ -2205,7 +2226,8 @@ class DeepResearchTool:
         figures_report_path = None
         if figures_embedded:
             if version_tag == "v2":
-                n_items = len(figure_collection.figures) + len(figure_collection.charts)
+                n_items = (len(figure_collection.figures) + len(figure_collection.charts)
+                           + len(v2_tables))
                 placed = v2_figures_placed
             else:
                 n_items = (len(figure_collection.figures) + len(figure_collection.tables)
@@ -2213,10 +2235,13 @@ class DeepResearchTool:
                 placed = int(getattr(generator, "figures_inserted", 0) or 0)
             print(f"[AutoFigures] {placed}/{n_items} figure(s)/table(s) placed by the "
                   f"{Path(report_path).suffix.lstrip('.').upper()} renderer")
-            if n_items and not placed:
+            dropped = getattr(generator, "pdf_figures_dropped", None)
+            if n_items and (placed < n_items or dropped):
+                why = (f"PDF のレイアウトに失敗したため、図の画像を外し表を文章の形で入れ直しました（{dropped}）"
+                       if dropped else "読めない画像などは入れていません")
                 ResearchWarnings.get_instance().add(
                     ResearchWarnings.MEDIUM, "AutoFigures",
-                    f"{n_items}件の図表を生成しましたが、レポート本体に入りませんでした"
+                    f"{n_items}件の図表のうち、レポート本体に入ったのは{placed}件です。{why}"
                     f"（画像ファイルは figures/ に保存されています）。")
             try:
                 figures_dir = Path(getattr(fig_generator, "output_dir", "")) if fig_generator else None
@@ -2347,7 +2372,7 @@ class DeepResearchTool:
             # audit item D: the check must also REBUILD from the actual
             # saved artifact — not only re-hash the in-memory object
             semantic_artifact_check = self._check_semantics_in_artifact(
-                active_report_path, evidence_locker=evidence_locker)
+                active_report_path, evidence_locker=evidence_locker, session=session)
 
         # Live report: deliver the VERIFIED final body (replaces drafts,
         # removes watermarks, appends references) and release the sinks.
@@ -2711,7 +2736,7 @@ class DeepResearchTool:
              if not sid.startswith("_") and sd.get("content")},
             None, semantic_freeze_hash, extras=extras)
         semantic_artifact_check = self._check_semantics_in_artifact(
-            report_out, evidence_locker=evidence_locker)
+            report_out, evidence_locker=evidence_locker, session=session)
         drift = bool(semantic_freeze_hash and semantic_output_hash
                      and semantic_output_hash != semantic_freeze_hash)
         if hasattr(self.search_client, "close"):
@@ -3292,12 +3317,12 @@ class DeepResearchTool:
             )
         return digest
 
-    def _artifact_allowed_extras(self, evidence_locker=None) -> list:
+    def _artifact_allowed_extras(self, evidence_locker=None, session=None) -> list:
         """Deterministic artifact content that is NOT semantic body:
         references (from the locker), the report title, standard section
         headings. Anything else that appears only in the artifact is an
         unverified post-freeze ADDITION and fails the check."""
-        extras = []
+        extras = list(_report_titles(session)) + list(getattr(self, "_report_titles", None) or [])
         if evidence_locker is not None:
             try:
                 for ev in evidence_locker.get_all_evidence():
@@ -3314,7 +3339,7 @@ class DeepResearchTool:
         return [e for e in extras if e]
 
     def _check_semantics_in_artifact(self, report_path,
-                                     evidence_locker=None) -> str:
+                                     evidence_locker=None, session=None) -> str:
         """Audit item D: verify the frozen semantics inside the ACTUAL
         saved artifact — TWO-WAY (missing frozen content AND unverified
         post-freeze additions both fail). Re-hashing the in-memory
@@ -3326,7 +3351,7 @@ class DeepResearchTool:
         mismatching artifact is never a normal completion.
         """
         from .report.semantic_manifest import (
-            extract_artifact_text, verify_frozen_in_artifact)
+            addition_floor, extract_artifact_text, verify_frozen_in_artifact)
         manifest = getattr(self, "semantic_manifest", None)
         if not manifest:
             return "skipped:no_manifest"
@@ -3344,7 +3369,8 @@ class DeepResearchTool:
             return "skipped:unreadable_format"
         result = verify_frozen_in_artifact(
             manifest, artifact_text,
-            allowed_extras=self._artifact_allowed_extras(evidence_locker))
+            allowed_extras=self._artifact_allowed_extras(evidence_locker, session),
+            min_addition_chars=addition_floor(report_path))
         if result["ok"]:
             print(f"[Freeze] artifact check passed "
                   f"({result['checked']} fragments verified in "
@@ -4732,7 +4758,8 @@ Output only the text (no JSON, no heading):"""
         page_sections: list = []
         no_chart: list = []            # chapters with series but no chart, and why
         ungrounded: list = []          # panels with values the source text does not hold
-        replaced: list = []            # judgments that contradicted the data
+        replaced: list = []            # judgments that contradicted the data (enhanced: replaced)
+        conflicts: list = []           # the same in classic (reported, never rewritten)
         for sid, title, valid, rejected, error, info in results:
             cat, _sd = catalogs[sid]
             y = chart_yield["chapters"].setdefault(str(sid), {})
@@ -4780,6 +4807,8 @@ Output only the text (no JSON, no heading):"""
                 # warnings only for charts that are actually in the report
                 if fx.get("judgment_replaced"):
                     replaced.append((sid, panel, fx["judgment_replaced"]))
+                elif fx.get("conflict"):
+                    conflicts.append((sid, panel, fx["conflict"]))
                 if g["issues"]:
                     ungrounded.append((sid, panel, g["issues"]))
                 src = next((s.get("url") for ser in panel.get("series", [])
@@ -4843,6 +4872,13 @@ Output only the text (no JSON, no heading):"""
                 ResearchWarnings.LOW, "AutoFigures",
                 f"データと矛盾する「見るべき点」を {len(replaced)} 件、数値から作った文に差し替えました（"
                 + "／".join(parts) + ("…" if len(replaced) > 3 else "") + "）。")
+        if conflicts:
+            parts = [f"「{p.get('title', '')}」の「{c['judgment'][:40]}」: {c['reason']}"
+                     for _s, p, c in conflicts[:3]]
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.LOW, "AutoFigures",
+                f"データと食い違う可能性のある「見るべき点」が {len(conflicts)} 件あります（文はそのまま"
+                f"にしています。要確認: " + "／".join(parts) + ("…" if len(conflicts) > 3 else "") + "）。")
         if FONT_STATE.get("japanese_missing") and language == "ja" and figures:
             ResearchWarnings.get_instance().add(
                 ResearchWarnings.LOW, "AutoFigures",
@@ -6198,7 +6234,10 @@ def run_manual_research(
         manifest = build_semantic_manifest(chapters_now, figure_collection)
         semantic_freeze_hash = manifest_hash(manifest)
         check = check_artifact(manifest, report_path,
-                               evidence_locker=evidence_locker)
+                               evidence_locker=evidence_locker,
+                               extra_allowed=_report_titles(session) + (
+                                   [getattr(getattr(result, "context", None), "report_title", "") or ""]
+                                   if version_tag != "v1" else []))
         semantic_artifact_check = check["status"]
         if check["status"] == "fail":
             run_status = "failed_semantic_check"

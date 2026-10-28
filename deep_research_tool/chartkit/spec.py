@@ -194,6 +194,7 @@ def _check_series_names(q: Dict[str, Any]) -> None:
 
 _CURRENCY_BASES = set(_CURRENCY_WORDS.values())
 _TITLE_UNIT = re.compile(r"[（(]([^（）()]{1,16})[）)]\s*$")
+_ANY_PAREN = re.compile(r"[（(]([^（）()]{1,16})[）)]")
 
 
 def fix_title_unit(title: str, unit: str, append: bool = False) -> str:
@@ -205,22 +206,37 @@ def fix_title_unit(title: str, unit: str, append: bool = False) -> str:
     unit = str(unit or "")
     if not unit:
         return title
-    m = _TITLE_UNIT.search(title)
-    if m:
-        inner = m.group(1).strip()
+    ub, u_f, _l2 = parse_unit(unit)
+
+    def unit_check(inner: str):
+        """(is a unit, needs replacing) for one parenthesis."""
         if inner == unit:
-            return title
+            return True, False
         ib, i_f, _l = parse_unit(inner)
-        ub, u_f, _l2 = parse_unit(unit)
         # only a parenthesis that IS a unit is replaced: '（2024年）',
         # '（前年比）', '（主要5社）' are kept even over a '%' series
         inner_is_unit = ib == ub or ib == "%" or ib in _CURRENCY_BASES or i_f != 1.0
         related = (ib == ub) or (ib in _CURRENCY_BASES and ub in _CURRENCY_BASES) \
             or "%" in (ib, ub)
-        if inner_is_unit and related and (ib, i_f) != (ub, u_f):
+        return inner_is_unit and related, inner_is_unit and related and (ib, i_f) != (ub, u_f)
+
+    m = _TITLE_UNIT.search(title)
+    if m:
+        is_unit, wrong = unit_check(m.group(1).strip())
+        if wrong:
             return title[:m.start(1)] + unit + title[m.end(1):]
+        if is_unit or not append:
+            return title
+    if not append:
         return title
-    return f"{title}（{unit}）" if append else title
+    # a unit already in a parenthesis inside the title ('売上（億円）の推移')
+    for mid in _ANY_PAREN.finditer(title):
+        is_unit, wrong = unit_check(mid.group(1).strip())
+        if wrong:
+            return title[:mid.start(1)] + unit + title[mid.end(1):]
+        if is_unit:
+            return title
+    return f"{title}（{unit}）"
 
 
 def _to_xy(q: Dict[str, Any], s: Dict[str, Any]) -> None:

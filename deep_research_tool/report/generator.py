@@ -71,6 +71,9 @@ class ReportGenerator:
         # (Markdown / Word get theirs from FigureTableGenerator afterwards)
         self.figure_collection = None
         self.figures_inserted = 0
+        # set when the PDF had to be rebuilt without figure images
+        self.pdf_figures_dropped = None
+        self._pdf_safe_mode = False
 
     def generate_report(
         self,
@@ -845,7 +848,23 @@ class ReportGenerator:
                     story.append(Paragraph(f"{i}. [Citation formatting error]", body_style))
 
         # Build PDF
-        doc.build(story)
+        try:
+            doc.build(story)
+        except Exception as e:
+            # a layout failure must not lose the whole report: rebuild once
+            # with every table as row text and without figure images
+            if self._pdf_safe_mode:
+                raise
+            print(f"[ReportGenerator] PDF layout failed ({type(e).__name__}: {e}); "
+                  f"rebuilding with tables as text and without figure images")
+            self._pdf_safe_mode = True
+            try:
+                path = self._generate_pdf(session, evidence_locker, verification_result, filename,
+                                          filtered_evidence)
+            finally:
+                self._pdf_safe_mode = False
+            self.pdf_figures_dropped = f"{type(e).__name__}: {e}"[:300]
+            return path
 
         return filepath
 
@@ -1274,9 +1293,11 @@ class ReportGenerator:
             try:
                 if kind == "image":
                     path = Path(obj.image_path) if obj.image_path else None
-                    if path is None or not path.exists():
+                    if path is None or not path.exists() or self._pdf_safe_mode:
                         continue
-                    iw, ih = ImageReader(str(path)).getSize()
+                    reader = ImageReader(str(path))
+                    reader.getRGBData()         # decode now: a cut-off file fails HERE, not in doc.build
+                    iw, ih = reader.getSize()
                     # the width Word uses (5.5 in), never wider than the frame
                     w = min(5.5 * inch, avail_width)
                     h = w * ih / max(1, iw)
@@ -1301,17 +1322,25 @@ class ReportGenerator:
                 print(f"[ReportGenerator] figure skipped in PDF: {e}")
         return out
 
-    @staticmethod
-    def _pdf_table(header, rows, avail_width, body_style, esc, colors, Table, TableStyle,
+    def _pdf_table(self, header, rows, avail_width, body_style, esc, colors, Table, TableStyle,
                    Paragraph) -> list:
         """A table for the PDF: equal column widths (without them one long
         cell squeezed the others below zero and the whole build failed);
-        a table with a cell taller than a page is set as one paragraph per
+        a table with a cell taller than a page (or any table, when the PDF
+        is being rebuilt after a layout failure) is set as one paragraph per
         row instead (a row cannot split across pages)."""
         ncols = max([len(header)] + [len(r) for r in rows]) or 1
         col_w = avail_width / ncols
-        per_line = max(4, int(col_w / max(1.0, float(body_style.fontSize))))
-        too_tall = any(len("" if c is None else str(c)) / per_line > 40 for r in [header] + rows for c in r)
+        # characters per line INSIDE the cell padding (6 pt each side), and
+        # the row height that gives: a row taller than ~600 pt cannot be laid
+        # out, and a column narrower than the padding cannot hold a cell
+        inner = col_w - 12
+        fs = max(1.0, float(body_style.fontSize))
+        lead = float(getattr(body_style, "leading", 0) or fs * 1.2)
+        per_line = int(inner / fs) if inner > 0 else 0
+        too_tall = per_line < 2 or any(
+            (len("" if c is None else str(c)) / per_line + 1) * lead > 600
+            for r in [header] + rows for c in r) or self._pdf_safe_mode
         if too_tall:
             out = []
             for r in rows:

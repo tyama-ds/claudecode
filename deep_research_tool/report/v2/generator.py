@@ -1474,13 +1474,36 @@ ul, ol {{ padding-left: 1.5em; }}
     @staticmethod
     def _markdown_to_html(markdown_text: str) -> str:
         """Simple markdown to HTML conversion."""
+        import html as _html
         lines = markdown_text.split("\n")
         html_lines = []
         in_list = False
         list_type = None
+        table: list = []                 # pipe-table rows being collected
+
+        def flush_table():
+            if not table:
+                return
+            rows = [[_html.escape(c.strip()) for c in r.strip().strip("|").split("|")] for r in table]
+            rows = [r for r in rows if not all(re.fullmatch(r":?-{2,}:?", c) for c in r if c)]
+            if rows:
+                head, *body = rows
+                html_lines.append("<table><tr>" + "".join(f"<th>{c}</th>" for c in head) + "</tr>"
+                                  + "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>"
+                                            for r in body) + "</table>")
+            table.clear()
 
         for line in lines:
             stripped = line.strip()
+            # Markdown pipe tables (inserted tables, the figure appendix)
+            if stripped.startswith("|") and stripped.endswith("|") and len(stripped) > 1:
+                if in_list:
+                    html_lines.append(f"</{list_type}>")
+                    in_list = False
+                    list_type = None
+                table.append(stripped)
+                continue
+            flush_table()
 
             if not stripped:
                 if in_list:
@@ -1532,11 +1555,10 @@ ul, ol {{ padding-left: 1.5em; }}
                 in_list = False
                 list_type = None
             # An image on its own line (inserted figures and charts)
-            img_match = re.match(r'^!\[([^\]]*)\]\(([^)\s]+)\)$', stripped)
+            img_match = re.match(r'^!\[(.*)\]\((.+)\)$', stripped)
             if img_match:
-                import html as _html
                 html_lines.append(
-                    f'<figure><img src="{_html.escape(img_match.group(2))}" '
+                    f'<figure><img src="{_html.escape(img_match.group(2).strip())}" '
                     f'alt="{_html.escape(img_match.group(1))}" style="max-width:100%"></figure>')
                 continue
             # Apply inline formatting
@@ -1544,6 +1566,7 @@ ul, ol {{ padding-left: 1.5em; }}
             formatted = re.sub(r'\*([^*]+)\*', r'<em>\1</em>', formatted)
             html_lines.append(f"<p>{formatted}</p>")
 
+        flush_table()
         if in_list:
             html_lines.append(f"</{list_type}>")
 
