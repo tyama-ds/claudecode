@@ -1896,6 +1896,7 @@ class DeepResearchTool:
         # are only INSERTED deterministically.
         figure_collection = None
         fig_generator = None
+        figures_embedded = False       # V1 PDF / HTML place the figures while rendering
         if self.config.report.auto_figures:
             self.progress_plan.enter("figures")
             figures_dir = Path(self.config.report.output_dir) / "reports" / "figures"
@@ -2139,6 +2140,14 @@ class DeepResearchTool:
             # targets are only applied on the unverified path.
             self.progress_plan.enter("writing")
             quiet_progress("Generating report...", 0)
+            # PDF / HTML: the renderer places the frozen figures under
+            # their chapters itself (the post-render insertion only knows
+            # Markdown and Word)
+            fmt_value = str(getattr(self.config.report.format, "value",
+                                    self.config.report.format)).lower()
+            if figure_collection is not None and fmt_value in ("pdf", "html"):
+                generator.figure_collection = figure_collection
+                figures_embedded = True
             report_path = self.stage_timings.call("writing", generator.generate_report,
                 session=session,
                 evidence_locker=evidence_locker,
@@ -2170,7 +2179,25 @@ class DeepResearchTool:
         # generate_and_save). The collection was generated and verified
         # BEFORE the freeze; no LLM runs here.
         figures_report_path = None
-        if figure_collection is not None and version_tag != "v3":
+        if figures_embedded:
+            n_items = (len(figure_collection.figures) + len(figure_collection.tables)
+                       + len(figure_collection.charts))
+            placed = int(getattr(generator, "figures_inserted", 0) or 0)
+            print(f"[AutoFigures] {placed}/{n_items} figure(s)/table(s) placed by the "
+                  f"{Path(report_path).suffix.lstrip('.').upper()} renderer")
+            if n_items and not placed:
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.MEDIUM, "AutoFigures",
+                    f"{n_items}件の図表を生成しましたが、レポート本体に入りませんでした"
+                    f"（画像ファイルは figures/ に保存されています）。")
+            try:
+                figures_dir = Path(getattr(fig_generator, "output_dir", "")) if fig_generator else None
+                if figures_dir:
+                    fig_generator.export_collection(figure_collection,
+                                                    figures_dir / "figures_tables.json")
+            except Exception as e:
+                print(f"[AutoFigures] Failed to export collection metadata: {e}")
+        elif figure_collection is not None and version_tag != "v3":
             # after a (possibly cancelled) verification: never a checkpoint
             quiet_progress("Inserting figures and tables...", 40)
             try:
@@ -4462,6 +4489,8 @@ Output only the text (no JSON, no heading):"""
         if collection is None or generator is None:
             return None
         figures_dir = generator.output_dir
+        n_items = (len(collection.figures) + len(collection.tables)
+                   + len(collection.charts))
 
         # Step 6: Read the report content (text formats only — .docx/.pdf are
         # binary and their insertion paths below don't need the raw text)
@@ -4504,12 +4533,21 @@ Output only the text (no JSON, no heading):"""
                     ResearchWarnings.get_instance().add(
                         ResearchWarnings.MEDIUM,
                         "AutoFigures",
-                        f"{total}件の図表を生成しましたが、DOCXへの挿入に失敗"
+                        f"{n_items}件の図表を生成しましたが、DOCXへの挿入に失敗"
                         f"しました。図表ファイル自体は {figures_dir} に保存"
                         f"されています。",
                     )
                     return None
-            elif suffix in ('.pdf', '.html'):
+            elif suffix == '.pdf':
+                # a finished PDF cannot be edited here (the old path rebuilt
+                # it from EMPTY text: a file holding only the figures). V1
+                # places them while rendering; anything else says so.
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.MEDIUM, "AutoFigures",
+                    f"PDF には図表を挿入できませんでした（{n_items}件）。画像ファイルは "
+                    f"{figures_dir} に保存されています。")
+                return None
+            elif suffix == '.html':
                 updated_path = generator.add_figures_to_pdf(
                     markdown_content=content,
                     collection=collection,
@@ -4552,7 +4590,10 @@ Output only the text (no JSON, no heading):"""
         import re as _re
         from .chartkit import (build_section_catalog, build_messages, panel_semantics,
                                parse_panels, render_html, render_png, validate_panels)
-        from .chartkit.data_layer import DEFAULT_PRIMARY_DOMAINS
+        from .chartkit.data_layer import DEFAULT_PRIMARY_DOMAINS, SourcePolicy
+        from .chartkit.facts import apply_facts
+        from .chartkit.grounding import PROBLEM_TEXT, ground_panel
+        from .chartkit.render_png import FONT_STATE
         from .report.figure_table_generator import Figure, FigureType
         from .utils.concurrency import ContextThreadPoolExecutor
 
@@ -4561,7 +4602,10 @@ Output only the text (no JSON, no heading):"""
         figures_dir = Path(figures_dir)
         figures_dir.mkdir(parents=True, exist_ok=True)
         max_panels = max(1, int(getattr(rp, "chart_max_per_section", 6) or 6))
+        # classic keeps the v1.5 look; enhanced = the recommended changes
+        style = str(getattr(rp, "chart_style", "classic") or "classic")
         primary = tuple(DEFAULT_PRIMARY_DOMAINS) + tuple(getattr(rp, "chart_primary_domains", None) or [])
+        policy = SourcePolicy.for_style(style, primary)
         llm = self.stage_llm_clients.get("evaluation", self.llm_client)
         cancel = getattr(self, "_cancel_checkpoint", lambda: None)
 
@@ -4580,15 +4624,28 @@ Output only the text (no JSON, no heading):"""
             except Exception:
                 return []
 
+        # yield: how many points / series / panels survived each step, and
+        # why the rest did not (figures/chart_yield.json)
+        chart_yield = {"style": style, "data_points": len(store.data_points), "chapters": {}}
+        claimed_ids: set = set()
         catalogs = {}
         for sid, sd in sections:
-            cat = build_section_catalog(store.data_points, sid, _evidence_ids(sid),
-                                        primary_domains=primary)
+            ev_ids = _evidence_ids(sid)
+            claimed_ids.update(ev_ids)
+            cat = build_section_catalog(store.data_points, sid, ev_ids,
+                                        primary_domains=policy)
+            chart_yield["chapters"][str(sid)] = {"catalog": dict(cat.stats)}
             if not cat.is_empty():
                 catalogs[sid] = (cat, sd)
-        print(f"[AutoFigures] chart spec: {len(catalogs)}/{len(sections)} chapters have "
+        section_ids = {str(sid) for sid, _sd in sections}
+        chart_yield["points_without_chapter"] = sum(
+            1 for dp in store.data_points
+            if str(getattr(dp, "section_id", "") or "") not in section_ids
+            and str(getattr(dp, "evidence_id", "") or "") not in claimed_ids)
+        print(f"[AutoFigures] chart spec ({style}): {len(catalogs)}/{len(sections)} chapters have "
               f"plottable series; up to {max_panels} panels each")
         if not catalogs:
+            self._write_chart_yield(figures_dir, chart_yield)
             return []
 
         def _spec_for(sid):
@@ -4603,7 +4660,8 @@ Output only the text (no JSON, no heading):"""
                                       max_panels=max_panels, language=language,
                                       research_topic=getattr(session, "query", "") or "")
                 resp = llm.generate(msgs["user"], system_prompt=msgs["system"])
-                panels = parse_panels(getattr(resp, "content", "") or "")
+                status: dict = {}
+                panels = parse_panels(getattr(resp, "content", "") or "", status)
                 safe_sid = _re.sub(r"[^0-9a-z]", "_", str(sid).lower())
                 used_ids: set = set()
                 for i, p in enumerate(panels):
@@ -4614,29 +4672,51 @@ Output only the text (no JSON, no heading):"""
                         n += 1
                     used_ids.add(pid)
                     p["id"] = f"s{safe_sid}_{pid}"
-                valid, rejected = validate_panels(panels, cat.to_data(), max_panels=max_panels)
-                return sid, title, valid, [(p.get("id") if p else None, r) for p, r in rejected], None
+                vstats: dict = {}
+                valid, rejected = validate_panels(panels, cat.to_data(), max_panels=max_panels,
+                                                  stats=vstats)
+                info = {"parsed": bool(status.get("ok")), "proposed": len(panels),
+                        "over_limit": vstats.get("over_limit", 0)}
+                return sid, title, valid, [(p.get("id") if p else None, r) for p, r in rejected], None, info
             except Exception as e:            # one chapter never breaks the others
                 if isinstance(e, RunCancelled):
                     raise
-                return sid, sd.get("title") or sid, [], [], f"{type(e).__name__}: {e}"
+                return sid, sd.get("title") or sid, [], [], f"{type(e).__name__}: {e}", {}
 
         workers = max(1, min(int(rp.figure_max_workers or 1), int(rc.parallel_max_workers or 1)))
         results = []
         with ContextThreadPoolExecutor(max_workers=workers) as ex:
             results = list(ex.map(_spec_for, list(catalogs)))
 
+        def _source_text(evidence_id, url):
+            ev = None
+            try:
+                ev = (evidence_locker.get_evidence(evidence_id) if evidence_id else None) \
+                    or (evidence_locker.get_by_url(url) if url else None)
+            except Exception:
+                ev = None
+            if ev is None:
+                return None
+            return (getattr(ev, "extracted_text", "") or "") or (getattr(ev, "content_excerpt", "") or "")
+
         figures: list = []
         page_panels: list = []
         page_sections: list = []
-        for sid, title, valid, rejected, error in results:
+        no_chart: list = []            # chapters with series but no chart, and why
+        ungrounded: list = []          # panels with values the source text does not hold
+        replaced: list = []            # judgments that contradicted the data
+        for sid, title, valid, rejected, error, info in results:
             cat, _sd = catalogs[sid]
+            y = chart_yield["chapters"].setdefault(str(sid), {})
+            y.update({"series": len(cat.series), **info, "valid": len(valid),
+                      "rejected": [{"id": pid, "reason": r} for pid, r in rejected]})
             try:
                 (figures_dir / f"chart_data_{sid}.json").write_text(
                     json.dumps(cat.to_data(), ensure_ascii=False, indent=1), encoding="utf-8")
             except Exception:
                 pass
             if error:
+                y["error"] = error
                 print(f"[AutoFigures] chart spec failed for {sid}: {error}")
                 ResearchWarnings.get_instance().add(
                     ResearchWarnings.LOW, "AutoFigures",
@@ -4645,11 +4725,33 @@ Output only the text (no JSON, no heading):"""
                 print(f"[AutoFigures] {sid}: {len(rejected)} panel(s) rejected: "
                       + "; ".join(f"{pid}: {r}" for pid, r in rejected[:4]))
             ids = []
+            render_failed = 0
             for panel in valid:
+                if panel.get("name_fixes"):
+                    print(f"[AutoFigures] {panel['id']}: legend names fixed: "
+                          + "; ".join(panel["name_fixes"]))
                 try:
-                    path = render_png(panel, figures_dir / f"chart_{panel['id']}.png", language=language)
+                    g = ground_panel(panel, _source_text)
+                except Exception as e:
+                    g = {"checked": 0, "issues": [], "error": str(e)}
+                panel["grounding"] = g
+                try:
+                    fx = apply_facts(panel, style)
+                except Exception as e:
+                    fx = {"error": str(e)}
+                if fx.get("judgment_replaced"):
+                    replaced.append((sid, panel, fx["judgment_replaced"]))
+                if g["issues"]:
+                    ungrounded.append((sid, panel, g["issues"]))
+                    if style == "enhanced":
+                        panel["caption"] = (str(panel.get("caption") or "").rstrip()
+                                            + f"　※{len(g['issues'])}点の値は出典本文で確認できませんでした（要確認）。")
+                try:
+                    path = render_png(panel, figures_dir / f"chart_{panel['id']}.png", language=language,
+                                      style=style)
                 except Exception as e:
                     print(f"[AutoFigures] PNG render failed for {panel.get('id')}: {e}")
+                    render_failed += 1
                     continue
                 src = next((s.get("url") for ser in panel.get("series", [])
                             for s in (ser.get("sources") or []) if s and s.get("url")), None)
@@ -4668,8 +4770,53 @@ Output only the text (no JSON, no heading):"""
                 ))
                 page_panels.append(panel)
                 ids.append(panel["id"])
+            y.update({"rendered": len(ids), "render_failed": render_failed,
+                      "panels": [{"id": p["id"], "form": p.get("form"),
+                                  "form_rendered": p.get("form_rendered"),
+                                  "name_fixes": p.get("name_fixes") or [],
+                                  "grounding": p.get("grounding")} for p in valid]})
             if ids:
                 page_sections.append({"title": f"{sid}. {title}", "panel_ids": ids})
+            elif not error:
+                if not info.get("parsed"):
+                    why = "チャート設計の応答を JSON として読めませんでした"
+                elif not info.get("proposed"):
+                    why = "LLM が描く価値のあるパネルなしと判断しました"
+                elif rejected:
+                    why = f"提案 {info['proposed']} 件がすべて検証で不採用（{rejected[0][1][:60]}）"
+                else:
+                    why = "描画に失敗しました"
+                y["no_chart_reason"] = why
+                no_chart.append(f"第{sid}章: {why}")
+        if no_chart:
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.LOW, "AutoFigures",
+                f"数値の系列はあるのにチャートが出なかった章が {len(no_chart)} 件あります（"
+                + "／".join(no_chart[:4]) + ("…" if len(no_chart) > 4 else "") + "）。")
+        if ungrounded:
+            parts = []
+            for sid, panel, issues in ungrounded[:4]:
+                it = issues[0]
+                parts.append(f"「{panel.get('title', '')}」{it.get('label')}={it.get('value')}: "
+                             f"{PROBLEM_TEXT.get(it['problem'], it['problem'])}")
+            n = sum(len(i) for _s, _p, i in ungrounded)
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.LOW, "AutoFigures",
+                f"チャートの {n} 点の値が出典本文で確認できませんでした（図は表示しています。"
+                f"要確認: " + "／".join(parts) + ("…" if len(ungrounded) > 4 else "") + "）。")
+        if replaced:
+            parts = [f"「{p.get('title', '')}」: {r['reason']}" for _s, p, r in replaced[:3]]
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.LOW, "AutoFigures",
+                f"データと矛盾する「見るべき点」を {len(replaced)} 件、数値から作った文に差し替えました（"
+                + "／".join(parts) + ("…" if len(replaced) > 3 else "") + "）。")
+        if FONT_STATE.get("japanese_missing") and language == "ja" and figures:
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.LOW, "AutoFigures",
+                "日本語フォントが見つからないため、チャート画像の日本語が□で表示される可能性が"
+                "あります（fonts-noto-cjk などを導入してください）。")
+        chart_yield["charts"] = len(figures)
+        self._write_chart_yield(figures_dir, chart_yield)
         try:
             page = render_html(page_panels, title=f"{getattr(session, 'query', '') or ''} — チャート",
                                subtitle="数値はデータ層から。斜線＝換算・導出・推定・二次。各パネルに出所と見るべき点。",
@@ -4681,6 +4828,14 @@ Output only the text (no JSON, no heading):"""
             print(f"[AutoFigures] charts.html failed: {e}")
         print(f"[AutoFigures] chart spec: {len(figures)} chart(s) across {len(page_sections)} chapter(s)")
         return figures
+
+    @staticmethod
+    def _write_chart_yield(figures_dir: Path, chart_yield: dict) -> None:
+        try:
+            (Path(figures_dir) / "chart_yield.json").write_text(
+                json.dumps(chart_yield, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+        except Exception as e:
+            print(f"[AutoFigures] chart_yield.json failed: {e}")
 
     def _numerical_store_for(self, session: ResearchSession,
                              evidence_locker: EvidenceLocker) -> NumericalDataStore:

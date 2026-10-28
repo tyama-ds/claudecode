@@ -72,6 +72,7 @@ _CONFIG_PARAM_MAP = {
     "auto_figures": "auto_figures",
     "chart_max_per_section": "chart_max_per_section",
     "chart_engine": "chart_engine",
+    "chart_style": "chart_style",
     "enable_verification": "enable_verification",
     "plan_review": "plan_review",
     "plan_review_timeout": "plan_review_timeout",
@@ -194,6 +195,14 @@ def _profile(value, name):
     return v
 
 
+def _chart_style_param(value, key=None):
+    """'classic' | 'enhanced' (how spec charts are made and shown)."""
+    v = str(value or "classic").strip().lower()
+    if v not in ("classic", "enhanced"):
+        raise ValueError("chart_style must be 'classic' or 'enhanced'")
+    return v
+
+
 def _local_llm_role(value, name):
     v = str(value).strip().lower()
     if v not in ("off", "verify", "draft", "all"):
@@ -288,6 +297,7 @@ _PARAM_CONVERTERS = {
     "local_concurrency": _int_range(1, 16),
     "llm_retry_attempts": _int_range(0, 10),
     "chart_max_per_section": _int_range(1, 12),
+    "chart_style": _chart_style_param,
     "ai_crawl_max_pages": _int_range(1, 200),
     "ai_crawl_site_depth": _int_range(0, 10),      # 0 = seeds only
     "gap_fill_rounds": _int_range(0, 10),

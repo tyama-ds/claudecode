@@ -45,6 +45,21 @@ DEFAULT_PRIMARY_DOMAINS: Tuple[str, ...] = (
     "who.int", "e-stat.go.jp", "sec.gov", "edinet-fsa.go.jp",
     "prtimes.jp", "jpx.co.jp",
 )
+# enhanced style: hosts whose numbers are 二次 even on an IR-looking path
+# (market research firms publish their own estimates; PR wires carry
+# whatever the sender wrote)
+SECONDARY_DOMAINS: Tuple[str, ...] = (
+    "prtimes.jp", "prnewswire.com", "businesswire.com", "globenewswire.com",
+    "einpresswire.com", "openpr.com", "newswire.com", "atpress.ne.jp", "dreamnews.jp",
+    "marketsandmarkets.com", "grandviewresearch.com", "imarcgroup.com",
+    "researchandmarkets.com", "fortunebusinessinsights.com", "mordorintelligence.com",
+    "precedenceresearch.com", "alliedmarketresearch.com", "persistencemarketresearch.com",
+    "skyquestt.com", "technavio.com", "statista.com", "marketresearchfuture.com",
+    "transparencymarketresearch.com", "factmr.com", "futuremarketinsights.com",
+    "verifiedmarketresearch.com", "databridgemarketresearch.com", "coherentmarketinsights.com",
+    "reportlinker.com", "giiresearch.com", "gii.co.jp", "yano.co.jp", "fuji-keizai.co.jp",
+    "seedplanning.co.jp",
+)
 PRIMARY_PATH_HINTS: Tuple[str, ...] = (
     "/ir/", "/investor", "/investors", "/press-release", "/press_release",
     "/pressrelease", "/news-release", "/newsroom", "/earnings", "/results",
@@ -111,22 +126,114 @@ def parse_unit(unit: Optional[str]) -> Tuple[str, float, str]:
     return base, factor, label
 
 
+# scale words as they appear next to a number in the ORIGINAL text
+_RAW_SCALES: Tuple[Tuple[str, float], ...] = (
+    ("trillion", 1e12), ("billion", 1e9), ("million", 1e6), ("thousand", 1e3),
+    ("bn", 1e9), ("mn", 1e6), ("tn", 1e12),
+    ("兆", 1e12), ("億", 1e8), ("百万", 1e6), ("万", 1e4), ("千", 1e3),
+)
+_RAW_NUMBER = re.compile(
+    r"([0-9]+(?:[,，][0-9]{3})*(?:[.．][0-9]+)?)\s*"
+    r"(trillion|billion|million|thousand|bn|mn|tn|兆|億|百万|万|千)?", re.I)
+
+
+def _raw_numbers(raw_text: str) -> List[Tuple[float, float, str]]:
+    """(number, scale factor, scale word) for every number in a text."""
+    text = unicodedata.normalize("NFKC", str(raw_text or ""))
+    out = []
+    for m in _RAW_NUMBER.finditer(text):
+        try:
+            num = float(m.group(1).replace(",", "").replace("，", "").replace("．", "."))
+        except ValueError:
+            continue
+        word = (m.group(2) or "").lower()
+        # a compound like 千万 / 百億 is not a plain scale: leave it alone
+        nxt = text[m.end():m.end() + 1]
+        if word in ("千", "百万") and nxt in ("万", "億"):
+            word = "?"
+        factor = dict(_RAW_SCALES).get(word, 1.0) if word != "?" else float("nan")
+        out.append((num, factor, word))
+    return out
+
+
+def repair_scale(value: Any, raw_text: str, unit: str) -> Tuple[str, bool]:
+    """Fix a unit whose SCALE contradicts the original text.
+
+    The LLM sometimes copies the number of '50億ドル' (value 50) but writes
+    the unit of a different scale ('billion USD'), which plots the value
+    10x off. When value × unit scale already equals a number × scale of
+    the original text, the point is consistent (a correct conversion such
+    as 5 billion USD for 50億ドル stays as it is). When the value equals a
+    number of the text but the unit's scale is not that number's scale
+    word, the unit is rebuilt with the text's scale word. Anything else is
+    left alone. Returns (unit, changed)."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return unit, False
+    if not raw_text or v == 0:
+        return unit, False
+    base, unit_factor, _label = parse_unit(unit)
+    nums = _raw_numbers(raw_text)
+    if not nums:
+        return unit, False
+
+    def close(a: float, b: float) -> bool:
+        return abs(a - b) <= 0.005 * max(abs(a), abs(b))
+    if any(f == f and close(v * unit_factor, n * f) for n, f, _w in nums):
+        return unit, False                          # consistent (or a correct conversion)
+    for n, f, word in nums:
+        if f != f or not word or not close(v, n):   # NaN: compound scale; no word: nothing to fix
+            continue
+        if f == unit_factor:
+            return unit, False
+        if not base or base in ("%",):
+            return unit, False
+        if re.fullmatch(r"[a-z]+", word):
+            # English scale word: keep the unit's original currency spelling
+            cur = re.sub(r"(?i)\b(trillion|billion|million|thousand|bn|mn|tn)\b|兆|億|百万|万|千", "",
+                         unicodedata.normalize("NFKC", str(unit or ""))).strip() or base
+            return f"{word} {cur}", True
+        return f"{word}{base}", True
+    return unit, False
+
+
+def coerce_year(value: Any) -> Optional[int]:
+    """A year as int (2024, '2024', '2024年', 'FY2024') or None."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 1900 <= value <= 2100 else None
+    m = re.search(r"(19|20)\d{2}", str(value))
+    return int(m.group(0)) if m else None
+
+
+def _host_in(host: str, domains: Sequence[str]) -> bool:
+    for dom in domains:
+        d = dom.lower().lstrip(".")
+        # label boundary: "oecd.org" matches "www.oecd.org", not "notoecd.org"
+        if host == d or host.endswith("." + d):
+            return True
+    return False
+
+
 def classify_source_basis(url: Optional[str],
-                          primary_domains: Sequence[str] = DEFAULT_PRIMARY_DOMAINS) -> str:
-    """公表 for a primary source, 二次 for everything else (no URL = 二次)."""
+                          primary_domains: Sequence[str] = DEFAULT_PRIMARY_DOMAINS,
+                          secondary_domains: Sequence[str] = ()) -> str:
+    """公表 for a primary source, 二次 for everything else (no URL = 二次).
+    A host in ``secondary_domains`` is 二次 whatever the other rules say."""
     if not url:
         return BASIS_SECONDARY
     try:
         parsed = urlparse(url if "://" in url else "http://" + url)
     except Exception:
         return BASIS_SECONDARY
-    host = (parsed.netloc or "").lower()
+    host = (parsed.netloc or "").lower().split(":")[0]
     path = (parsed.path or "").lower()
-    for dom in primary_domains:
-        d = dom.lower().lstrip(".")
-        # label boundary: "oecd.org" matches "www.oecd.org", not "notoecd.org"
-        if host == d or host.endswith("." + d):
-            return BASIS_PUBLISHED
+    if secondary_domains and _host_in(host, secondary_domains):
+        return BASIS_SECONDARY
+    if _host_in(host, primary_domains):
+        return BASIS_PUBLISHED
     if any(h in path for h in PRIMARY_PATH_HINTS):
         return BASIS_PUBLISHED
     return BASIS_SECONDARY
@@ -166,6 +273,11 @@ class Series:
     def to_data(self) -> Dict[str, Any]:
         return {
             "unit": self.unit,
+            # what this series is (the legend name check uses it)
+            "name": self.name,
+            "kind": self.kind,
+            "entity": self.entity,
+            "year": self.year,
             "labels_ref": self.labels_ref,     # the label array these values belong to
             "values": list(self.values),
             "basis": list(self.basis),
@@ -181,6 +293,8 @@ class SectionCatalog:
     labels: Dict[str, List[str]] = field(default_factory=dict)
     series: Dict[str, Series] = field(default_factory=dict)
     dropped: List[str] = field(default_factory=list)      # why points were left out
+    # yield counters: why the chapter's points did (not) become series
+    stats: Dict[str, int] = field(default_factory=dict)
 
     def is_empty(self) -> bool:
         return not self.series
@@ -220,13 +334,38 @@ class SectionCatalog:
 # building
 # ----------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class SourcePolicy:
+    """How a point's source is judged. classic: the v1.5 rules; enhanced:
+    research firms / PR wires are 二次 and an actual value wins over a
+    forecast for the same year."""
+    primary_domains: Tuple[str, ...] = DEFAULT_PRIMARY_DOMAINS
+    secondary_domains: Tuple[str, ...] = ()
+    prefer_actual: bool = False
+
+    @classmethod
+    def for_style(cls, style: str, primary_domains: Sequence[str] = DEFAULT_PRIMARY_DOMAINS
+                  ) -> "SourcePolicy":
+        if style == "enhanced":
+            return cls(tuple(primary_domains), SECONDARY_DOMAINS, True)
+        return cls(tuple(primary_domains))
+
+
+def _policy(primary_domains) -> SourcePolicy:
+    if isinstance(primary_domains, SourcePolicy):
+        return primary_domains
+    return SourcePolicy(tuple(primary_domains))
+
+
 def _point_basis(dp, primary_domains) -> str:
     raw_text = str(getattr(dp, "raw_text", "") or "")
     if getattr(dp, "is_derived", False):
         if raw_text.lower().startswith("interpolated"):
             return BASIS_ESTIMATED
         return BASIS_DERIVED
-    return classify_source_basis(getattr(dp, "source_url", ""), primary_domains)
+    pol = _policy(primary_domains)
+    return classify_source_basis(getattr(dp, "source_url", ""), pol.primary_domains,
+                                 pol.secondary_domains)
 
 
 _BASIS_RANK = {BASIS_PUBLISHED: 0, BASIS_SECONDARY: 1, BASIS_CONVERTED: 1,
@@ -271,13 +410,17 @@ def _display_unit(base_unit: str, scale_label: str) -> str:
 
 def _choose(points: List[Any], primary_domains) -> Any:
     """Best point for one (entity, metric, year, unit): primary source,
-    then not derived, then higher confidence, then earlier insertion."""
+    then not derived, then higher confidence, then earlier insertion
+    (enhanced: an actual value before any forecast for that year)."""
+    pol = _policy(primary_domains)
+
     def rank(dp):
-        basis = _point_basis(dp, primary_domains)
+        basis = _point_basis(dp, pol)
         conf = float(getattr(dp, "combined_confidence", 0.0) or 0.0)
+        forecast = 1 if (pol.prefer_actual and getattr(dp, "is_forecast", False)) else 0
         # the URL breaks ties so the choice never depends on the
         # (parallel) extraction order
-        return (_BASIS_RANK.get(basis, 9), -conf, str(getattr(dp, "source_url", "") or ""))
+        return (forecast, _BASIS_RANK.get(basis, 9), -conf, str(getattr(dp, "source_url", "") or ""))
     return sorted(points, key=rank)[0]
 
 
@@ -293,21 +436,27 @@ def _labels_ref_for(cat: "SectionCatalog", labels: List[str], default: str) -> s
 
 def build_section_catalog(points: Iterable[Any], section_id: str,
                           section_evidence_ids: Optional[Iterable[str]] = None,
-                          primary_domains: Sequence[str] = DEFAULT_PRIMARY_DOMAINS,
+                          primary_domains: Any = DEFAULT_PRIMARY_DOMAINS,
                           min_points_time: int = 2,
                           min_entities: int = 2,
                           max_series: int = 60) -> SectionCatalog:
     """Turn the store's points that belong to ``section_id`` into labelled
     series. ``section_evidence_ids`` (the locker's section map) also claims
-    points whose section was not resolved at extraction time."""
+    points of a document that several chapters use: extraction records
+    only the FIRST chapter that cited the page, the locker knows them all.
+    ``primary_domains`` is a domain list or a :class:`SourcePolicy`."""
+    primary_domains = _policy(primary_domains)
     evidence_ids = set(section_evidence_ids or [])
     cat = SectionCatalog(section_id=section_id)
     mine = []
     for dp in points:
         sid = str(getattr(dp, "section_id", "") or "")
         eid = str(getattr(dp, "evidence_id", "") or "")
-        if sid == section_id or (sid == "" and eid and eid in evidence_ids):
+        if sid == section_id or (eid and eid in evidence_ids):
             mine.append(dp)
+    st = cat.stats
+    st.update({"points": len(mine), "no_metric": 0, "time_too_short": 0,
+               "comparison_too_few": 0, "series": 0, "capped": 0})
     if not mine:
         return cat
 
@@ -317,6 +466,7 @@ def build_section_catalog(points: Iterable[Any], section_id: str,
         metric = canon(getattr(dp, "metric_name", ""))
         if not metric:
             cat.dropped.append(f"{getattr(dp, 'raw_text', '')!r}: 指標名なし")
+            st["no_metric"] += 1
             continue
         base_unit, _f, _lab = parse_unit(getattr(dp, "unit", ""))
         entity = canon(getattr(dp, "subject", "")) or ""
@@ -329,6 +479,7 @@ def build_section_catalog(points: Iterable[Any], section_id: str,
         for entity, by_time in sorted(by_entity.items()):
             labels = sorted(t for t in by_time if t)
             if len(labels) < min_points_time:
+                st["time_too_short"] += 1
                 continue
             chosen = {t: _choose(by_time[t], primary_domains) for t in labels}
             scale = _pick_display_scale([(0.0, parse_unit(getattr(c, "unit", ""))[2]) for c in chosen.values()])
@@ -340,7 +491,9 @@ def build_section_catalog(points: Iterable[Any], section_id: str,
             series.key, series.labels_ref = key, labels_ref
             series.name = _display_name(entity, metric, "")
             cat.series[key] = series
+            st["series"] = len(cat.series)
             if len(cat.series) >= max_series:
+                st["capped"] = 1
                 return cat
         # ---- comparisons: one per time label with >= min_entities entities
         by_time_all: Dict[Optional[str], Dict[str, List[Any]]] = {}
@@ -351,6 +504,7 @@ def build_section_catalog(points: Iterable[Any], section_id: str,
                 by_time_all.setdefault(tl, {}).setdefault(entity, []).extend(pts)
         for tl, by_entity2 in sorted(by_time_all.items(), key=lambda kv: (kv[0] is None, str(kv[0]))):
             if len(by_entity2) < min_entities:
+                st["comparison_too_few"] += 1
                 continue
             chosen = {e: _choose(pts, primary_domains) for e, pts in by_entity2.items()}
             scale = _pick_display_scale([(0.0, parse_unit(getattr(c, "unit", ""))[2]) for c in chosen.values()])
@@ -370,7 +524,9 @@ def build_section_catalog(points: Iterable[Any], section_id: str,
             series.year = int(tl[:4]) if tl else None
             series.name = _display_name("", metric, tl or "")
             cat.series[key] = series
+            st["series"] = len(cat.series)
             if len(cat.series) >= max_series:
+                st["capped"] = 1
                 return cat
     return cat
 
@@ -415,6 +571,7 @@ def _series_from(chosen: Dict[str, Any], labels: List[str], *, kind: str, metric
             "title": getattr(dp, "source_title", "") or "",
             "evidence_id": getattr(dp, "evidence_id", "") or "",
             "raw_text": getattr(dp, "raw_text", "") or "",
+            "forecast": bool(getattr(dp, "is_forecast", False)),
         })
     return Series(
         key="", kind=kind, labels_ref="", name="", metric=metric, base_unit=base_unit,

@@ -139,7 +139,8 @@ def normalize_semantic_text(text: str) -> str:
     text = _MD_LINK_RE.sub(r"\1", text)
     text = _TAG_RE.sub("", text)
     text = _CITATION_RE.sub("", text)
-    text = _re.sub(r"[*_`>#|\\-]+", "", text)
+    # "•" is the PDF renderer's bullet for a markdown "- " item
+    text = _re.sub(r"[*_`>#|\\\-•]+", "", text)
     text = _re.sub(r"[：:]\s*$", "", text)
     return _re.sub(r"\s+", "", text)
 
@@ -161,8 +162,12 @@ def extract_artifact_text(path) -> Optional[str]:
         return p.read_text(encoding="utf-8", errors="replace")
     if suffix in (".html", ".htm"):
         import html as _htmlmod
-        return _htmlmod.unescape(
-            p.read_text(encoding="utf-8", errors="replace"))
+        raw = p.read_text(encoding="utf-8", errors="replace")
+        # the page's own stylesheet / scripts / comments are not report
+        # text (the CSS rules used to count as unverified additions, so
+        # every verified HTML report failed this check)
+        raw = _re.sub(r"(?is)<(style|script)\b[^>]*>.*?</\1\s*>|<!--.*?-->", "", raw)
+        return _htmlmod.unescape(raw)
     if suffix == ".docx":
         try:
             import docx

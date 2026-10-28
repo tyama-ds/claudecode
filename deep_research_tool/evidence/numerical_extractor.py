@@ -18,6 +18,12 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+
+def _int_year(value):
+    """A stored year as int (older stores kept the LLM's string)."""
+    from ..chartkit.data_layer import coerce_year
+    return coerce_year(value)
+
 class DataType(str, Enum):
     """Types of numerical data."""
     CURRENCY = "currency"           # Money values ($100M, ¥10億)
@@ -165,7 +171,7 @@ class NumericalDataPoint:
             subject=data.get("subject", ""),
             data_type=DataType(data.get("data_type", "other")),
             category=MetricCategory(data.get("category", "other")),
-            year=data.get("year"),
+            year=_int_year(data.get("year")),
             quarter=data.get("quarter"),
             date_context=data.get("date_context", ""),
             is_forecast=data.get("is_forecast", False),
@@ -1493,7 +1499,7 @@ JSON配列形式で出力してください。数値データがない場合は�
   {{
     "value": 50,
     "raw_text": "50億ドル",
-    "unit": "billion USD",
+    "unit": "億ドル",
     "metric_name": "市場規模",
     "subject": "半導体市場",
     "year": 2024,
@@ -1587,6 +1593,13 @@ Output format:
                 try:
                     raw_unit = item.get("unit", "")
                     raw_value = float(item.get("value", 0))
+                    # a unit whose scale contradicts the original text
+                    # ('50億ドル' as value 50 + 'billion USD') would plot the
+                    # value 10x off: rebuild the unit from the text
+                    from ..chartkit.data_layer import coerce_year, repair_scale
+                    raw_unit, _repaired = repair_scale(raw_value, item.get("raw_text", ""), raw_unit)
+                    if _repaired:
+                        self.scale_repairs = getattr(self, "scale_repairs", 0) + 1
                     data_type_str = item.get("data_type", "other")
                     category_str = item.get("category", "other")
 
@@ -1631,7 +1644,9 @@ Output format:
                         subject=item.get("subject", ""),
                         data_type=data_type,
                         category=category,
-                        year=item.get("year"),
+                        # an int (or None): a string year broke the derived
+                        # metrics' sort and the store's JSON export
+                        year=coerce_year(item.get("year")),
                         date_context=str(item.get("year", "")) if item.get("year") else "",
                         is_forecast=item.get("is_forecast", False),
                         source_url=source_url,

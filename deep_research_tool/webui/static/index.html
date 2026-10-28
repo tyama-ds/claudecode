@@ -933,6 +933,14 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
           <span class="feat-sub">1 パネル＝1 つの問い。既定 6</span></div>
         <input type="number" id="feat_chart_max" value="6" min="1" max="12" style="width:80px">
       </div>
+      <div class="feat-row" data-tip="チャートの描き方です。コア維持版（既定）は今までの見た目と作り方のまま、不具合（マイナス値が描けない・ラベルの重なり・桁の取り違え・図と矛盾する「見るべき点」など）だけを直します。改良版は、Word / PDF に貼る実寸（5.5 インチ）で描いて文字を縮めない、項目が多い棒グラフは横棒にする、桁区切り、出所・確度・予測値の注記をデータから付ける、調査会社・PR 配信の数値は「二次」扱い、同じ年なら実績を予測より優先、などの推奨の変更を加えます。">
+        <div class="feat-info"><span class="feat-name">🎨 チャートのスタイル</span>
+          <span class="feat-sub">コア維持版＝今の見た目 ／ 改良版＝推奨の変更</span></div>
+        <select id="feat_chart_style" style="width:200px">
+          <option value="classic" selected>コア維持版（既定）</option>
+          <option value="enhanced">改良版（推奨の変更）</option>
+        </select>
+      </div>
 
       <label style="margin-top:14px;font-weight:700">🔌 調査エンジン（外部エンジンの環境）</label>
       <p class="hint">GPT Researcher / Open Deep Research は専用の Python 環境（3.12 以上）で動きます。リポジトリのフォルダで <code>python3.12 deep_research_tool/scripts/setup_engine_venv.py &lt;engine-id&gt;</code>（Windows は <code>py -3.12 …</code>）を実行して作成すると自動で見つかります。別の場所に作った場合はここにパスを入力してください（保存後に「新規調査」のカードが更新されます）。</p>
@@ -1879,6 +1887,7 @@ function loadSettings() {
   }
   if (saved.figure_max_workers) $('feat_fig_workers').value = saved.figure_max_workers;
   if (saved.chart_max_per_section && $('feat_chart_max')) $('feat_chart_max').value = saved.chart_max_per_section;
+  if ($('feat_chart_style') && ['classic', 'enhanced'].includes(saved.chart_style)) $('feat_chart_style').value = saved.chart_style;
   if (saved.deep_think_max_workers) $('feat_dt_workers').value = saved.deep_think_max_workers;
   if (Array.isArray(saved.search_languages)) setSelectedLangs(saved.search_languages);
   if (Array.isArray(saved.search_regions)) setSelectedRegions(saved.search_regions);
@@ -1898,6 +1907,7 @@ function saveSettings() {
   }
   s.figure_max_workers = parseInt($('feat_fig_workers').value) || 8;
   if ($('feat_chart_max')) s.chart_max_per_section = parseInt($('feat_chart_max').value) || 6;
+  if ($('feat_chart_style')) s.chart_style = $('feat_chart_style').value || 'classic';
   s.deep_think_max_workers = parseInt($('feat_dt_workers').value) || 4;
   s.search_languages = selectedLangs();
   s.search_regions = selectedRegions();
@@ -1930,6 +1940,7 @@ function settingsParams() {
   }
   p.figure_max_workers = Math.min(16, Math.max(1, parseInt($('feat_fig_workers').value) || 8));
   if ($('feat_chart_max')) p.chart_max_per_section = Math.min(12, Math.max(1, parseInt($('feat_chart_max').value) || 6));
+  if ($('feat_chart_style')) p.chart_style = $('feat_chart_style').value || 'classic';
   p.deep_think_max_workers = Math.min(8, Math.max(1, parseInt($('feat_dt_workers').value) || 4));
   // engine interpreter paths travel as one {engine_id: path} object
   const enginePython = engineSettingsPython();
