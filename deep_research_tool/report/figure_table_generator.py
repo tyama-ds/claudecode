@@ -2815,11 +2815,12 @@ em {{ color: #7f8c8d; font-size: 0.9em; }}
         """Replace image file paths with base64 embedded images in HTML."""
         all_figures = collection.figures + collection.charts
         for fig in all_figures:
-            if fig.image_path and fig.image_path.exists():
+            path = Path(fig.image_path) if fig.image_path else None   # a str after a restore
+            if path and path.exists():
                 try:
-                    with open(fig.image_path, 'rb') as f:
+                    with open(path, 'rb') as f:
                         img_data = base64.b64encode(f.read()).decode('utf-8')
-                    ext = fig.image_path.suffix.lstrip('.')
+                    ext = path.suffix.lstrip('.').lower()
                     if ext == 'jpg':
                         ext = 'jpeg'
                     data_uri = f"data:image/{ext};base64,{img_data}"

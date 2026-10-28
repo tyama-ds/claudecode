@@ -212,9 +212,12 @@ def fix_title_unit(title: str, unit: str, append: bool = False) -> str:
             return title
         ib, i_f, _l = parse_unit(inner)
         ub, u_f, _l2 = parse_unit(unit)
-        unit_like = (ib == ub) or (ib in _CURRENCY_BASES and ub in _CURRENCY_BASES) \
+        # only a parenthesis that IS a unit is replaced: '（2024年）',
+        # '（前年比）', '（主要5社）' are kept even over a '%' series
+        inner_is_unit = ib == ub or ib == "%" or ib in _CURRENCY_BASES or i_f != 1.0
+        related = (ib == ub) or (ib in _CURRENCY_BASES and ub in _CURRENCY_BASES) \
             or "%" in (ib, ub)
-        if unit_like and (ib, i_f) != (ub, u_f):
+        if inner_is_unit and related and (ib, i_f) != (ub, u_f):
             return title[:m.start(1)] + unit + title[m.end(1):]
         return title
     return f"{title}（{unit}）" if append else title
@@ -317,6 +320,11 @@ def validate(panels: List[Dict[str, Any]]) -> None:
             raise SpecError(f"{pid}: 系列数は 1〜{MAX_SERIES} です（{len(series)}）")
         if form.startswith("stacked") and not 2 <= len(series) <= 4:
             raise SpecError(f"{pid}: stacked_* の系列は 2〜4 本です")
+        if form.startswith("stacked") and any(
+                isinstance(v, (int, float)) and not isinstance(v, bool) and v < 0
+                for s in series for v in (s.get("values") or [])):
+            # a negative part cannot be stacked (the segment would vanish)
+            raise SpecError(f"{pid}: 積み上げ形式に負の値は描けません")
         if sum(1 for s in series if s.get("role") == "emphasis") > 1:
             raise SpecError(f"{pid}: emphasis は 1 系列までです")
         for s in series:

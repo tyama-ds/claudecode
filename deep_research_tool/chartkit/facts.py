@@ -18,11 +18,24 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 _TIME_LABEL = re.compile(r"^(19|20)\d{2}(\s*Q[1-4])?$", re.I)
-_UP = ("増加", "拡大", "伸び", "上昇", "成長", "増え", "伸長", "右肩上がり", "増収", "増益", "高ま")
-_DOWN = ("減少", "縮小", "低下", "下落", "落ち込", "減り", "減収", "減益", "右肩下がり", "目減り")
+_UP = ("増加", "拡大", "伸び", "上昇", "成長", "増え", "伸長", "右肩上がり", "増収", "増益", "高ま",
+       "回復", "持ち直", "反発", "上向")
+_DOWN = ("減少", "縮小", "低下", "下落", "落ち込", "減り", "減収", "減益", "右肩下がり", "目減り",
+         "反落", "下向", "頭打ち")
 _MAX = ("最大", "最高", "ピーク", "トップ", "首位", "最も多", "最も大き")
 _MIN = ("最小", "最低", "最も少な", "最も小さ")
-_NEG = ("ない", "せず", "ず、", "止ま", "とどま", "鈍化")
+# negated / softened claims are not checked
+_NEG = ("ない", "せず", "ず、", "止ま", "とどま", "鈍化", "伸び悩", "横ばい", "一服")
+# losses and deficits: 縮小 of a negative amount is a rise of the value
+_LOSS = ("赤字", "損失", "欠損", "純損", "マイナス")
+# a claim about the CHANGE, not about the plotted level
+_CHANGE = ("前年比", "前期比", "前月比", "伸び率", "増加率", "減少率", "成長率", "増減", "変化",
+           "伸び幅", "落ち込み幅", "増加幅", "減少幅", "差")
+# '2018年以降 増加' / '2018年比で増加' / 'その後減少': from that label to the end
+_SPAN = ("以降", "以後", "以来", "から", "その後", "比", "より")
+# '前年比' etc.: against the period before the named label (checked first)
+_PREV = ("前年比", "前期比", "前月比", "前年同期比", "前年から", "前年より", "前期から", "前期より")
+_RANGE = ("から", "→", "〜", "～", "にかけて")
 
 
 def _num(v: Any) -> Optional[float]:
@@ -95,41 +108,71 @@ def _direction_words(text: str) -> Optional[str]:
     return "up" if up else "down"
 
 
+def _material(a: float, b: float, unit: str) -> bool:
+    return abs(b - a) >= (1.0 if unit == "%" else 0.05 * max(abs(a), abs(b), 1e-9))
+
+
+def _move(a: float, b: float, unit: str) -> str:
+    if not _material(a, b, unit):
+        return "flat"
+    return "up" if b > a else "down"
+
+
 def judgment_conflict(judgment: str, facts: Dict[str, Any]) -> Optional[str]:
-    """Why the judgment contradicts the data, or None. Only plain claims
-    are checked: one direction word (about the one label it names, or the
-    whole span), 最大 / 最小 on the one label it names."""
+    """Why the judgment contradicts the data, or None.
+
+    Conservative on purpose (a TRUE sentence must never be replaced):
+    only plain claims are checked — one direction word, not negated, not
+    about a loss or a change rate — over the whole span, from one named
+    label onwards ('以降', '比', 'その後'), between two named labels joined
+    by 'から' / '→', or for one named label against the period before;
+    and 最大 / 最小 on the one label it names. A difference below 5 %
+    (1 pt for '%') is never a contradiction."""
     text = str(judgment or "")
     if not text or facts.get("kind") not in ("time", "comparison"):
         return None
+    unit = facts.get("unit") or ""
     pts: List[Tuple[str, float]] = facts["points"]
+    if any(w in text for w in _LOSS) or (unit != "%" and any(v < 0 for _l, v in pts)):
+        return None
     named = [i for i, (lab, _v) in enumerate(pts) if lab and lab in text]
-    if len(named) == 1:
-        lab = pts[named[0]][0]
-        if any(w in text for w in _MAX) and not any(w in text for w in _MIN) \
-                and pts[named[0]][1] < facts["max"][1]:
-            return f"「{lab}」が最大とされていますが、最大は「{facts['max'][0]}」です"
-        if any(w in text for w in _MIN) and not any(w in text for w in _MAX) \
-                and pts[named[0]][1] > facts["min"][1]:
-            return f"「{lab}」が最小とされていますが、最小は「{facts['min'][0]}」です"
+    if len(named) == 1 and not any(w in text for w in _CHANGE):
+        i = named[0]
+        lab, v = pts[i]
+        has_max, has_min = any(w in text for w in _MAX), any(w in text for w in _MIN)
+        top, bottom = facts["max"], facts["min"]
+        if has_max and not has_min and v < top[1] and _material(v, top[1], unit):
+            return f"「{lab}」が最大とされていますが、最大は「{top[0]}」です"
+        if has_min and not has_max and v > bottom[1] and _material(bottom[1], v, unit):
+            return f"「{lab}」が最小とされていますが、最小は「{bottom[0]}」です"
     if facts["kind"] != "time":
         return None
     said = _direction_words(text)
     if said is None:
         return None
-    if len(named) == 1 and named[0] > 0:
-        # a claim about one period: its change from the period before
-        (lab, v), (_plab, pv) = pts[named[0]], pts[named[0] - 1]
-        real = "up" if v > pv else ("down" if v < pv else "flat")
-        if real != "flat" and real != said:
-            return f"「{lab}」は{'増加' if real == 'up' else '減少'}ですが、逆の方向で書かれています"
+    if not named:
+        (fl, fv), (ll, lv) = facts["first"], facts["last"]
+    elif len(named) == 1:
+        i = named[0]
+        if any(w in text for w in _PREV):
+            if i == 0:
+                return None
+            (fl, fv), (ll, lv) = pts[i - 1], pts[i]
+        elif any(w in text for w in _SPAN):
+            if i == len(pts) - 1:
+                return None
+            (fl, fv), (ll, lv) = pts[i], pts[-1]
+        elif i > 0:
+            (fl, fv), (ll, lv) = pts[i - 1], pts[i]
+        else:
+            return None
+    elif len(named) == 2 and any(w in text for w in _RANGE):
+        (fl, fv), (ll, lv) = pts[named[0]], pts[named[1]]
+    else:
         return None
-    if len(named) > 1:
-        return None
-    real = facts["direction"]
+    real = _move(fv, lv, unit)
     if real != "flat" and real != said:
-        return (f"{facts['first'][0]}→{facts['last'][0]}は{'増加' if real == 'up' else '減少'}ですが、"
-                f"逆の方向で書かれています")
+        return f"{fl}→{ll}は{'増加' if real == 'up' else '減少'}ですが、逆の方向で書かれています"
     return None
 
 

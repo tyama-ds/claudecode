@@ -1896,7 +1896,8 @@ class DeepResearchTool:
         # are only INSERTED deterministically.
         figure_collection = None
         fig_generator = None
-        figures_embedded = False       # V1 PDF / HTML place the figures while rendering
+        figures_embedded = False       # V1 PDF / HTML and V2 HTML place the figures while rendering
+        v2_figures_placed = 0
         if self.config.report.auto_figures:
             self.progress_plan.enter("figures")
             figures_dir = Path(self.config.report.output_dir) / "reports" / "figures"
@@ -2080,6 +2081,20 @@ class DeepResearchTool:
                 language = getattr(self.config.research, "language", "en")
                 final_doc += warnings_collector.to_report_section(language)
 
+            # V2 HTML: the charts and images go into the markdown before it
+            # is converted, then are embedded in the page (the post-render
+            # insertion could not edit V2's HTML: the report had no figures)
+            fmt_value = str(getattr(self.config.report.format, "value",
+                                    self.config.report.format)).lower()
+            v2_html_figures = (fmt_value == "html" and figure_collection is not None
+                               and fig_generator is not None
+                               and bool(figure_collection.figures or figure_collection.charts))
+            if v2_html_figures:
+                from .report.figure_table_generator import FigureTableCollection
+                # tables already reach the page through the verified 図表一覧
+                final_doc = fig_generator.add_figures_to_markdown(final_doc, FigureTableCollection(
+                    figures=list(figure_collection.figures), charts=list(figure_collection.charts)))
+
             # Save to file in the configured format (DOCX/PDF/HTML/MD)
             output_dir = self.config.report.output_dir / "reports"
             report_path = self.stage_timings.call("rendering", generator.save_report,
@@ -2089,6 +2104,15 @@ class DeepResearchTool:
                 format=self.config.report.format,
                 strict_format=self.config.report.strict_format,
             )
+            if v2_html_figures and Path(report_path).suffix.lower() == ".html":
+                figures_embedded = True        # the post-render insertion must not run again
+                try:
+                    page = Path(report_path).read_text(encoding="utf-8")
+                    page = fig_generator._embed_images_in_html(page, figure_collection)
+                    Path(report_path).write_text(page, encoding="utf-8")
+                    v2_figures_placed = page.count('src="data:image')
+                except Exception as e:
+                    print(f"[AutoFigures] embedding figures in the V2 HTML failed: {e}")
         else:
             # V1: common finalization on the session sections BEFORE the
             # deterministic render. The Fermi section joins the body
@@ -2180,9 +2204,13 @@ class DeepResearchTool:
         # BEFORE the freeze; no LLM runs here.
         figures_report_path = None
         if figures_embedded:
-            n_items = (len(figure_collection.figures) + len(figure_collection.tables)
-                       + len(figure_collection.charts))
-            placed = int(getattr(generator, "figures_inserted", 0) or 0)
+            if version_tag == "v2":
+                n_items = len(figure_collection.figures) + len(figure_collection.charts)
+                placed = v2_figures_placed
+            else:
+                n_items = (len(figure_collection.figures) + len(figure_collection.tables)
+                           + len(figure_collection.charts))
+                placed = int(getattr(generator, "figures_inserted", 0) or 0)
             print(f"[AutoFigures] {placed}/{n_items} figure(s)/table(s) placed by the "
                   f"{Path(report_path).suffix.lstrip('.').upper()} renderer")
             if n_items and not placed:
@@ -4739,13 +4767,9 @@ Output only the text (no JSON, no heading):"""
                     fx = apply_facts(panel, style)
                 except Exception as e:
                     fx = {"error": str(e)}
-                if fx.get("judgment_replaced"):
-                    replaced.append((sid, panel, fx["judgment_replaced"]))
-                if g["issues"]:
-                    ungrounded.append((sid, panel, g["issues"]))
-                    if style == "enhanced":
-                        panel["caption"] = (str(panel.get("caption") or "").rstrip()
-                                            + f"　※{len(g['issues'])}点の値は出典本文で確認できませんでした（要確認）。")
+                if g["issues"] and style == "enhanced":
+                    panel["caption"] = (str(panel.get("caption") or "").rstrip()
+                                        + f"　※{len(g['issues'])}点の値は出典本文で確認できませんでした（要確認）。")
                 try:
                     path = render_png(panel, figures_dir / f"chart_{panel['id']}.png", language=language,
                                       style=style)
@@ -4753,6 +4777,11 @@ Output only the text (no JSON, no heading):"""
                     print(f"[AutoFigures] PNG render failed for {panel.get('id')}: {e}")
                     render_failed += 1
                     continue
+                # warnings only for charts that are actually in the report
+                if fx.get("judgment_replaced"):
+                    replaced.append((sid, panel, fx["judgment_replaced"]))
+                if g["issues"]:
+                    ungrounded.append((sid, panel, g["issues"]))
                 src = next((s.get("url") for ser in panel.get("series", [])
                             for s in (ser.get("sources") or []) if s and s.get("url")), None)
                 caption = str(panel.get("caption") or "")
@@ -4774,7 +4803,8 @@ Output only the text (no JSON, no heading):"""
                       "panels": [{"id": p["id"], "form": p.get("form"),
                                   "form_rendered": p.get("form_rendered"),
                                   "name_fixes": p.get("name_fixes") or [],
-                                  "grounding": p.get("grounding")} for p in valid]})
+                                  "grounding": p.get("grounding"),
+                                  "rendered": p["id"] in ids} for p in valid]})
             if ids:
                 page_sections.append({"title": f"{sid}. {title}", "panel_ids": ids})
             elif not error:
@@ -4782,6 +4812,9 @@ Output only the text (no JSON, no heading):"""
                     why = "チャート設計の応答を JSON として読めませんでした"
                 elif not info.get("proposed"):
                     why = "LLM が描く価値のあるパネルなしと判断しました"
+                elif render_failed:
+                    why = (f"合格した {len(valid)} 件の画像の描画に失敗しました"
+                           + (f"（ほか {len(rejected)} 件は検証で不採用）" if rejected else ""))
                 elif rejected:
                     why = f"提案 {info['proposed']} 件がすべて検証で不採用（{rejected[0][1][:60]}）"
                 else:
@@ -6130,6 +6163,11 @@ def run_manual_research(
                 verification_result = outcome["verdict"]
                 verification_html = outcome["html_path"]
 
+        # PDF / HTML place the figures under their chapters while rendering
+        # (the same as run())
+        fmt_value = str(getattr(config.report.format, "value", config.report.format)).lower()
+        if figure_collection is not None and fmt_value in ("pdf", "html"):
+            generator.figure_collection = figure_collection
         report_path = generator.generate_report(
             session=session,
             evidence_locker=evidence_locker,

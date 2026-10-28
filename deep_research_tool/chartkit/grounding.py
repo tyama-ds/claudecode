@@ -46,10 +46,19 @@ def value_in_quote(value: float, unit: str, raw_text: str) -> bool:
     (3.1 in 10億ドル for '約31億ドル')."""
     v = abs(float(value))
     base, factor, _label = parse_unit(unit)
-    for n, f, _w in _raw_numbers(raw_text):
-        if _close(v, n):
+    for n, f, w in _raw_numbers(raw_text):
+        if f != f:                      # compound scale (千万): not comparable
+            continue
+        if base == "%":
+            if _close(v, n):
+                return True
+            continue
+        # the same quantity once both scales are applied; a number with a
+        # scale word must match WITH it (50 in 10億ドル is not '50億ドル'),
+        # a bare number (the scale is in a table header) matches as is
+        if _close(v * factor, n * f):
             return True
-        if f == f and base != "%" and _close(v * factor, n * f):
+        if not w and _close(v, n):
             return True
     return False
 
@@ -63,11 +72,15 @@ def quote_in_source(raw_text: str, source_text: str) -> bool:
     q, src = _norm(raw_text), _norm(source_text)
     if not q or not src:
         return False
-    if q in src:
+    # verbatim, but never inside a longer number ('3.5%' is not in '13.5%')
+    pat = (r"(?<![\d.])" if q[0].isdigit() else "") + re.escape(q) + \
+        (r"(?![\d]|\.\d)" if q[-1].isdigit() else "")
+    if re.search(pat, src):
         return True
     nums = re.findall(r"\d+(?:\.\d+)?", q)
     key = [n for n in nums if not _YEAR.match(n)] or nums
-    return bool(key) and all(n in src for n in key)
+    # whole numbers only: '50' is not in '2050' or '150'
+    return bool(key) and all(re.search(rf"(?<![\d.]){re.escape(n)}(?![\d]|\.\d)", src) for n in key)
 
 
 def ground_panel(panel: Dict[str, Any],
@@ -101,7 +114,12 @@ def ground_panel(panel: Dict[str, Any],
                 continue
             checked += 1
             problem = None
-            if not value_in_quote(float(v), unit, raw):
+            # the plotted value, or the extracted one before the display
+            # scale was applied (a bare '5,000' quote of 5 in 10億ドル)
+            orig = src.get("value")
+            if not value_in_quote(float(v), unit, raw) and not (
+                    isinstance(orig, (int, float)) and not isinstance(orig, bool)
+                    and value_in_quote(float(orig), str(src.get("unit") or ""), raw)):
                 problem = VALUE_NOT_IN_QUOTE
             else:
                 text = source_text(str(src.get("evidence_id") or ""), str(src.get("url") or ""))

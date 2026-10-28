@@ -124,7 +124,8 @@ import re as _re
 _CITATION_RE = _re.compile(r"\[(?:SOURCE:?\s*)?\^?\d+\]")
 _MD_IMAGE_RE = _re.compile(r"!\[[^\]]*\]\([^)]*\)")
 _MD_LINK_RE = _re.compile(r"\[([^\]]*)\]\([^)]*\)")
-_TAG_RE = _re.compile(r"<[^>]+>")
+# tag-shaped only: '伸び率が<1%' or 'a < b > c' in plain text is kept
+_TAG_RE = _re.compile(r"</?[A-Za-z][^<>]*>")
 
 
 def normalize_semantic_text(text: str) -> str:
@@ -167,6 +168,9 @@ def extract_artifact_text(path) -> Optional[str]:
         # text (the CSS rules used to count as unverified additions, so
         # every verified HTML report failed this check)
         raw = _re.sub(r"(?is)<(style|script)\b[^>]*>.*?</\1\s*>|<!--.*?-->", "", raw)
+        # tags go BEFORE entities are decoded: an escaped '&lt;1%' in the
+        # text must not turn into a '<' that swallows the text after it
+        raw = _TAG_RE.sub(" ", raw)
         return _htmlmod.unescape(raw)
     if suffix == ".docx":
         try:

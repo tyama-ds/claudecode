@@ -44,10 +44,12 @@ STYLES = ("classic", "enhanced")
 # classic: the v1.5 sizes; enhanced: drawn at the printed width (Word / PDF
 # place charts 5.5 in wide) so 8-11 pt text stays 8-11 pt on paper
 _LAYOUT = {
-    "classic": {"width": 10.0, "dpi": 150, "title": 12, "tick": 9, "value": 8, "caption": 8,
-                "judgment": 9, "legend": 9, "wrap": 70, "bar_h": 5.2},
-    "enhanced": {"width": 5.5, "dpi": 200, "title": 11, "tick": 8.5, "value": 7.5, "caption": 7.5,
-                 "judgment": 8, "legend": 8, "wrap": 46, "bar_h": 3.4},
+    # cat: category names on a horizontal chart; min_plot: the plot area
+    # never shrinks below this height (inches) under a long caption / legend
+    "classic": {"width": 10.0, "dpi": 150, "title": 12, "tick": 9, "cat": 10, "value": 8, "caption": 8,
+                "judgment": 9, "legend": 9, "wrap": 70, "bar_h": 5.2, "min_plot": 1.8, "cat_wrap": 30},
+    "enhanced": {"width": 5.5, "dpi": 200, "title": 11, "tick": 8.5, "cat": 8.5, "value": 7.5, "caption": 7.5,
+                 "judgment": 8, "legend": 8, "wrap": 46, "bar_h": 3.4, "min_plot": 1.9, "cat_wrap": 16},
 }
 
 _JP_FONT_HINTS = ("Noto Sans CJK JP", "Noto Sans JP", "NotoSansCJK", "NotoSansJP", "BIZ UDPGothic",
@@ -131,6 +133,17 @@ def _wrap(text: str, width: int) -> str:
         if tok.isspace():
             if cur:
                 cur += " "
+            continue
+        while len(tok) > width:                 # a URL longer than a line is cut, not overflowed
+            room = width - len(cur)
+            if room <= 0:
+                lines.append(cur.rstrip())
+                cur, room = "", width
+            cur += tok[:room]
+            tok = tok[room:]
+            lines.append(cur.rstrip())
+            cur = ""
+        if not tok:
             continue
         if len(cur) + len(tok) > width and cur.strip():
             if tok[0] in _NO_LINE_START:
@@ -236,10 +249,14 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
         lo, hi = _value_range(series, line)
 
         scale = L["width"] / 10.0
+        # a category name too long for the left margin is wrapped (it was cut
+        # off); each extra line adds to the row height
+        cat_labels = [_wrap(l, L["cat_wrap"]) for l in labels] if horiz else labels
+        rows_h = sum(1.0 + 0.6 * l.count("\n") for l in cat_labels) if horiz else len(labels)
         if seg_row:
-            fig_h = max(2.6 * scale + 0.6, 0.55 * scale * max(1, len(labels)) + 2.0 * scale + 0.4)
+            fig_h = max(2.6 * scale + 0.6, 0.55 * scale * max(1, rows_h) + 2.0 * scale + 0.4)
         elif horiz:
-            fig_h = max(3.2 * scale + 0.6, 0.45 * scale * max(1, len(labels)) * max(1, n_series) + 2.0 * scale + 0.6)
+            fig_h = max(3.2 * scale + 0.6, 0.45 * scale * max(1, rows_h) * max(1, n_series) + 2.0 * scale + 0.6)
         else:
             fig_h = L["bar_h"]
         if style == "enhanced":
@@ -251,6 +268,8 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
         point_labels: List[Any] = []
         value_labels: List[Any] = []
         seg_labels: List[Any] = []
+        label_rank: Dict[int, int] = {}     # id(text) -> 0 for the emphasised series
+        role_rank = {"emphasis": 0, "part": 1, "context": 2, "context2": 3}
 
         if line:
             for i, s in enumerate(series):
@@ -312,7 +331,7 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
             y_max = panel.get("y_max")
             ax.set_xlim(0, max(float(y_max) if isinstance(y_max, (int, float)) else 0.0, widest))
             if rows > 1:
-                ax.set_yticks(range(rows)); ax.set_yticklabels(labels, fontsize=L["tick"]); ax.invert_yaxis()
+                ax.set_yticks(range(rows)); ax.set_yticklabels(cat_labels, fontsize=L["cat"]); ax.invert_yaxis()
             else:
                 ax.set_yticks([])
             ax.set_xticks([])
@@ -358,15 +377,18 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
                         if horiz:
                             gap = 0.01 * span
                             if numeric[j] < 0:      # the label sits left of a negative bar
-                                value_labels.append(ax.text(numeric[j] - gap, pos[j], fmt(numeric[j]) + " ",
-                                                            va="center", ha="right", fontsize=L["value"], color=INK))
+                                t = ax.text(numeric[j] - gap, pos[j], fmt(numeric[j]) + " ",
+                                            va="center", ha="right", fontsize=L["value"], color=INK)
                             else:
-                                value_labels.append(ax.text(numeric[j] + gap, pos[j], " " + fmt(numeric[j]),
-                                                            va="center", ha="left", fontsize=L["value"], color=INK))
+                                t = ax.text(numeric[j] + gap, pos[j], " " + fmt(numeric[j]),
+                                            va="center", ha="left", fontsize=L["value"], color=INK)
                         else:
-                            value_labels.append(ax.text(pos[j], numeric[j], fmt(numeric[j]), ha="center",
-                                                        va="bottom" if numeric[j] >= 0 else "top",
-                                                        fontsize=L["value"], color=INK))
+                            t = ax.text(pos[j], numeric[j], fmt(numeric[j]), ha="center",
+                                        va="bottom" if numeric[j] >= 0 else "top",
+                                        fontsize=L["value"], color=INK)
+                        value_labels.append(t)
+                        # highlighted bars and the emphasised series keep their labels first
+                        label_rank[id(t)] = 0 if (hl and labels[j] in hl) else role_rank.get(role, 2)
                 if stacked:
                     bottoms = [bottoms[j] + (numeric[j] if present[j] else 0.0) for j in range(len(labels))]
                 handles.append(Patch(facecolor=base, label=s.get("name", "")))
@@ -382,7 +404,7 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
             if horiz:
                 # the unit is in the title; an x-axis label would sit where
                 # the legend goes
-                ax.set_yticks(idx); ax.set_yticklabels(labels, fontsize=L["tick"]); ax.invert_yaxis()
+                ax.set_yticks(idx); ax.set_yticklabels(cat_labels, fontsize=L["cat"]); ax.invert_yaxis()
                 ax.grid(axis="x", color=GRID)
                 if lo < 0:
                     ax.axvline(0, color="#b9b8b1", linewidth=0.8)
@@ -402,59 +424,76 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
             ax.set_axisbelow(True)
 
         if style == "enhanced" and not seg_row:
-            # thousands separators / significant digits on the value axis
+            # thousands separators on the value axis, as many decimals as
+            # the tick step needs (1.25 never prints as 1.2)
             axis = ax.xaxis if horiz else ax.yaxis
-            axis.set_major_formatter(mticker.FuncFormatter(
-                lambda v, _pos: _fmt(v, "" if unit == "%" else unit) if unit != "%" else f"{v:g}"))
+            axis.set_major_formatter(mticker.FuncFormatter(_step_formatter(axis)))
             ax.tick_params(labelsize=L["tick"])
 
         ax.set_title(str(panel.get("title", "")), fontsize=L["title"], loc="left", color="#0b0b0b", pad=10)
-        # Below the axes, bottom-up in FIGURE coordinates: judgment, caption,
-        # legend — then the axes bottom margin is set above all of them so
-        # tick labels, legend and text never overlap whatever the height.
-        line_h = (0.16 if style == "classic" else 0.14) / fig_h
+        # Below the axes, bottom-up, in INCHES: judgment, caption, legend —
+        # then the axes bottom margin is set above all of them so tick
+        # labels, legend and text never overlap; a long caption or legend
+        # makes the figure taller instead of squeezing the plot away.
+        line_in = 0.16 if style == "classic" else 0.14
+        text_x = 0.05 if style == "classic" else 0.02
         caption = _wrap(panel.get("caption", ""), L["wrap"])
-        judgment = _wrap(panel.get("judgment", ""), L["wrap"])
-        y = (0.4 if style == "classic" else 0.12) / fig_h
+        # the judgment line is larger type and carries its prefix: wrap the
+        # whole line to the width that is left (it ran past the edge)
+        judgment_chars = int((L["width"] * (1 - text_x) - 0.15) * 72 / L["judgment"])
+        judgment_text = str(panel.get("judgment", "") or "")
+        judgment = _wrap("見るべき点: " + judgment_text, judgment_chars) if judgment_text else ""
+        y_in = 0.4 if style == "classic" else 0.12
+        placed: List[Any] = []                       # (artist, y in inches)
         if judgment:
-            fig.text(0.05 if style == "classic" else 0.02, y, "見るべき点: " + judgment,
-                     fontsize=L["judgment"], color="#0b0b0b", va="bottom")
-            y += line_h * (judgment.count("\n") + 1) + line_h * 0.4
+            placed.append((fig.text(text_x, 0, judgment, fontsize=L["judgment"],
+                                    color="#0b0b0b", va="bottom"), y_in))
+            y_in += line_in * (judgment.count("\n") + 1) + line_in * 0.4
         if caption:
-            fig.text(0.05 if style == "classic" else 0.02, y, caption, fontsize=L["caption"],
-                     color="#898781", va="bottom")
-            y += line_h * (caption.count("\n") + 1) + line_h * 0.6
+            placed.append((fig.text(text_x, 0, caption, fontsize=L["caption"], color="#898781",
+                                    va="bottom"), y_in))
+            y_in += line_in * (caption.count("\n") + 1) + line_in * 0.6
+        legend = None
         if handles or any_striped:
             if any_striped:
                 handles.append(Patch(facecolor="white", edgecolor=INK, hatch="////", label=STRIPE_NOTE))
             ncol = min(4 if style == "classic" else 3, len(handles))
             renderer = fig.canvas.get_renderer()
             while True:
-                legend = fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, y),
+                legend = fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 0),
                                     ncol=ncol, frameon=False, fontsize=L["legend"])
                 # long series names: fewer columns rather than a legend cut at the edge
                 if ncol == 1 or legend.get_window_extent(renderer=renderer).width <= fig.bbox.width * 0.97:
                     break
                 legend.remove()
                 ncol -= 1
-            y += line_h * 1.3 * -(-len(handles) // ncol)   # legend rows
-        ticks = 0.0 if seg_row else 0.45 / fig_h          # tick labels under the axes
-        bottom = min(0.75, y + ticks + line_h * 0.5)
-        fig.subplots_adjust(bottom=bottom, top=0.86 if style == "classic" else 0.88,
+            legend_y = y_in
+            y_in += line_in * 1.3 * -(-len(handles) // ncol)   # legend rows
+        ticks_in = 0.0 if seg_row else 0.45                # tick labels under the axes
+        bottom_in = y_in + ticks_in + line_in * 0.5
+        top = 0.86 if style == "classic" else 0.88
+        if fig_h * top - bottom_in < L["min_plot"]:
+            fig_h = (bottom_in + L["min_plot"]) / top
+            fig.set_size_inches(L["width"], fig_h)
+        for artist, at in placed:
+            artist.set_y(at / fig_h)
+        if legend is not None:
+            legend.set_bbox_to_anchor((0.5, legend_y / fig_h), transform=fig.transFigure)
+        fig.subplots_adjust(bottom=bottom_in / fig_h, top=top,
                             left=0.09 if style == "classic" else 0.12, right=0.98)
 
         fig.canvas.draw()
         # close points: drop the labels that would print over each other
         _drop_overlapping(fig, point_labels)
-        if horiz:
-            _fit_left_margin(fig, ax)
+        _fit_left_margin(fig, ax)
+        _fit_title(fig, ax)
         if seg_labels:
             _fit_segment_labels(fig, ax, seg_labels)
         elif value_labels:
             _fit_value_labels(fig, ax, value_labels, horiz, bool(panel.get("y_max")))
         if not horiz:
             _rotate_crowded_ticks(fig, ax)
-        _drop_overlapping(fig, value_labels)
+        _drop_overlapping(fig, sorted(value_labels, key=lambda t: label_rank.get(id(t), 1)))
         if style == "enhanced":
             _qa_layout(fig, ax)
         if qa is not None:
@@ -466,18 +505,56 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
         return path
 
 
+def _step_formatter(axis):
+    """Tick text with thousands separators and the decimals the tick step
+    needs (0.25 steps print 1.25, 1,000 steps print 12,000)."""
+    def fmt(v, _pos=None):
+        locs = list(axis.get_majorticklocs())
+        steps = [abs(b - a) for a, b in zip(locs, locs[1:]) if b != a]
+        step = min(steps) if steps else (abs(v) or 1.0)
+        d = 0
+        while d < 6 and abs(step * 10 ** d - round(step * 10 ** d)) > 1e-6 * max(1.0, step * 10 ** d):
+            d += 1
+        text = f"{v:,.{d}f}"
+        return "0" if not text.strip("-0.,") else text      # never '-0'
+    return fmt
+
+
 def _fit_left_margin(fig, ax) -> None:
-    """Long category names on a horizontal chart set the left margin
-    (a fixed margin cut them off)."""
+    """Category names, value ticks ('12,345,678') and the unit label set
+    the left margin (a fixed margin cut them off at the image edge)."""
     renderer = fig.canvas.get_renderer()
-    widths = [t.get_window_extent(renderer=renderer).width for t in ax.get_yticklabels() if t.get_text()]
-    if not widths:
+    items = [t for t in ax.get_yticklabels() if t.get_visible() and t.get_text()]
+    if ax.yaxis.label.get_text():
+        items.append(ax.yaxis.label)
+    if not items:
         return
-    fig_w = fig.get_size_inches()[0] * fig.dpi
-    need = (max(widths) + 12) / fig_w
+    x0 = min(t.get_window_extent(renderer=renderer).x0 for t in items)
+    if x0 >= 4:
+        return
     sp = fig.subplotpars
-    if need > sp.left:
-        fig.subplots_adjust(left=min(0.45, need))
+    fig.subplots_adjust(left=min(0.5, sp.left + (4 - x0) / fig.bbox.width))
+    fig.canvas.draw()
+
+
+def _fit_title(fig, ax) -> None:
+    """A title wider than the image is wrapped (and the plot moves down)."""
+    renderer = fig.canvas.get_renderer()
+    title = ax.title
+    text = title.get_text()
+    if not text:
+        return
+    box = title.get_window_extent(renderer=renderer)
+    avail = fig.bbox.x1 - 6 - box.x0
+    if box.x1 <= fig.bbox.x1 - 2 or avail <= 0:
+        return
+    per_line = max(8, int(len(text) * avail / max(1.0, box.width)))
+    title.set_text(_wrap(text, per_line))
+    fig.canvas.draw()
+    box = title.get_window_extent(renderer=renderer)
+    if box.y1 > fig.bbox.y1 - 2:
+        sp = fig.subplotpars
+        fig.subplots_adjust(top=max(sp.bottom + 0.2, sp.top - (box.y1 - fig.bbox.y1 + 6) / fig.bbox.height))
         fig.canvas.draw()
 
 
@@ -599,7 +676,8 @@ def _layout_facts(fig, ax, horiz: bool, seg_row: bool, dpi: int) -> Dict[str, An
         elif _overlaps(a.get_window_extent(renderer=renderer),
                        b.get_window_extent(renderer=renderer), pad=-1.0):
             tick_overlaps += 1
-    texts = list(fig.texts) + labels + xt + yt
+    texts = list(fig.texts) + labels + xt + yt + [t for t in (ax.title, ax.xaxis.label, ax.yaxis.label)
+                                                  if t.get_visible() and t.get_text()]
     for leg in fig.legends:
         texts.extend(leg.get_texts())
     fb = fig.bbox
@@ -611,7 +689,8 @@ def _layout_facts(fig, ax, horiz: bool, seg_row: bool, dpi: int) -> Dict[str, An
     w, h = fig.get_size_inches()
     return {"value_lim": tuple(ax.get_xlim() if (horiz or seg_row) else ax.get_ylim()),
             "label_overlaps": overlaps, "tick_overlaps": tick_overlaps, "spill": spill,
-            "size_px": (round(w * dpi), round(h * dpi))}
+            "size_px": (round(w * dpi), round(h * dpi)),
+            "plot_in": round(ax.get_position().height * h, 3)}
 
 
 def layout_report(png_path: Path) -> Dict[str, Any]:

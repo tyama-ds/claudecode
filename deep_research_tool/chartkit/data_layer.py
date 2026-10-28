@@ -168,7 +168,7 @@ def repair_scale(value: Any, raw_text: str, unit: str) -> Tuple[str, bool]:
     word, the unit is rebuilt with the text's scale word. Anything else is
     left alone. Returns (unit, changed)."""
     try:
-        v = float(value)
+        v = abs(float(value))           # the text's numbers carry no sign
     except (TypeError, ValueError):
         return unit, False
     if not raw_text or v == 0:
@@ -187,8 +187,11 @@ def repair_scale(value: Any, raw_text: str, unit: str) -> Tuple[str, bool]:
             continue
         if f == unit_factor:
             return unit, False
-        if not base or base in ("%",):
+        if base == "%":
             return unit, False
+        if not base:
+            # the unit is a scale word alone ('billion'): the text's scale word
+            return word, True
         if re.fullmatch(r"[a-z]+", word):
             # English scale word: keep the unit's original currency spelling
             cur = re.sub(r"(?i)\b(trillion|billion|million|thousand|bn|mn|tn)\b|兆|億|百万|万|千", "",
@@ -228,7 +231,7 @@ def classify_source_basis(url: Optional[str],
         parsed = urlparse(url if "://" in url else "http://" + url)
     except Exception:
         return BASIS_SECONDARY
-    host = (parsed.netloc or "").lower().split(":")[0]
+    host = (parsed.hostname or "").lower()       # no login, no port
     path = (parsed.path or "").lower()
     if secondary_domains and _host_in(host, secondary_domains):
         return BASIS_SECONDARY
@@ -571,6 +574,9 @@ def _series_from(chosen: Dict[str, Any], labels: List[str], *, kind: str, metric
             "title": getattr(dp, "source_title", "") or "",
             "evidence_id": getattr(dp, "evidence_id", "") or "",
             "raw_text": getattr(dp, "raw_text", "") or "",
+            # as extracted, before the display scale (the grounding check)
+            "value": raw_value,
+            "unit": getattr(dp, "unit", "") or "",
             "forecast": bool(getattr(dp, "is_forecast", False)),
         })
     return Series(

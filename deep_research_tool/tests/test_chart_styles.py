@@ -614,3 +614,322 @@ def test_pipeline_style_grounding_facts_and_yield(tmp_path, style):
         assert "要確認" in sem["caption"]
     else:
         assert sem["caption"] == "出所: 統計"
+
+
+# --------------------------------------------------------------------------
+# regressions from the independent review
+# --------------------------------------------------------------------------
+
+class TestReviewRegressions:
+
+    def test_title_parenthesis_that_is_not_a_unit_is_kept_over_percent(self):
+        assert fix_title_unit("シェア（2024年）", "%") == "シェア（2024年）"
+        assert fix_title_unit("営業利益率（主要5社）", "%") == "営業利益率（主要5社）"
+        assert fix_title_unit("成長率（前年比）", "%") == "成長率（前年比）"
+        assert fix_title_unit("売上（億円）", "%") == "売上（%）"
+
+    def _line(self, vals, unit="億円", start=2017):
+        return panel_facts({"form": "line_xy", "unit": unit, "labels": [], "series": [
+            {"values": [{"x": float(start + i), "y": v} for i, v in enumerate(vals)]}]})
+
+    def test_true_judgments_are_never_flagged(self):
+        assert judgment_conflict("営業赤字は縮小が続いている", self._line([-120, -90, -60, -20])) is None
+        f = self._line([100, 90, 80, 85, 95, 110], start=2016)
+        assert judgment_conflict("2018年以降、増加が続いている", f) is None
+        assert judgment_conflict("2018年比で増加", f) is None
+        assert judgment_conflict("2022年は前年比の落ち込みが過去最大",
+                                 self._line([100, 120, 90, 130], start=2020)) is None
+        assert judgment_conflict("2021年にピークを迎え、その後減少",
+                                 self._line([100, 140, 120, 110], start=2020)) is None
+        assert judgment_conflict("2020年に落ち込んだが、その後回復",
+                                 self._line([5, -12, 8, 3, -2], unit="%", start=2019)) is None
+        assert judgment_conflict("2021年は増加、2022年も増加",
+                                 self._line([100, 110, 120, 115], start=2020)) is None
+        assert judgment_conflict("2023年は減少", self._line([100, 100, 101, 100.5], start=2020)) is None
+
+    def test_false_judgments_are_still_flagged(self):
+        f = self._line([100, 90, 80, 85, 95, 110], start=2016)
+        assert judgment_conflict("2018年以降、減少が続いている", f)
+        assert judgment_conflict("2022年は前年比で増加", self._line([100, 120, 90, 130], start=2020))
+        assert judgment_conflict("2019年から2023年にかけて減少",
+                                 self._line([100, 110, 120, 130, 140], start=2019))
+
+    def test_grounding_respects_the_scale(self):
+        assert not value_in_quote(50, "10億ドル", "市場規模は50億ドル")      # 10x
+        assert not value_in_quote(500, "億円", "500万円")                   # 10,000x
+        assert value_in_quote(1234, "百万円", "売上高 1,234")               # scale in a table header
+        assert not quote_in_source("売上高は50億円", "2050年に向けて150社")
+        assert not quote_in_source("3.5%", "13.5%")
+
+    def test_grounding_uses_the_extracted_value_for_a_bare_quote(self):
+        panel = {"labels": ["2024"], "unit": "10億ドル", "series": [{
+            "unit": "10億ドル", "values": [5.0], "basis": [PUB],
+            "sources": [{"raw_text": "5,000", "value": 5000, "unit": "百万ドル"}]}]}
+        assert ground_panel(panel, lambda e, u: None)["issues"] == []
+
+    def test_repair_scale_scale_only_unit_and_negative_values(self):
+        assert repair_scale(50, "50億ドル", "billion") == ("億", True)
+        assert repair_scale(-50, "-50億ドル", "billion USD") == ("億ドル", True)
+
+    def test_host_with_login_and_port(self):
+        assert classify_source_basis("https://user:pw@www.meti.go.jp/x") == "公表"
+        assert classify_source_basis("https://www.meti.go.jp:8443/x") == "公表"
+
+    def test_negative_parts_cannot_be_stacked(self):
+        data = {"cats": ["A", "B"], "a": _series([10, -5], "億円", labels_ref="cats"),
+                "b": _series([3, 4], "億円", labels_ref="cats")}
+        p = {"id": "s", "form": "stacked_bar", "title": "t", "labels_ref": "cats",
+             "series": [{"name": "a", "values_ref": "a", "role": "part"},
+                        {"name": "b", "values_ref": "b", "role": "part"}],
+             "caption": "c", "judgment": "j"}
+        valid, rej = validate_panels([p], data)
+        assert not valid and "負の値" in rej[0][1]
+
+    def test_wrap_cuts_a_token_longer_than_a_line(self):
+        from deep_research_tool.chartkit.render_png import _wrap
+        url = "https://www.meti.go.jp/" + "x" * 120
+        assert all(len(line) <= 46 for line in _wrap("出所: " + url, 46).split("\n"))
+
+    def test_classic_keeps_the_category_label_size(self):
+        from deep_research_tool.chartkit.render_png import _LAYOUT
+        assert _LAYOUT["classic"]["cat"] == 10 and _LAYOUT["classic"]["width"] == 10.0
+
+
+def _tick_texts(panel, style, tmp_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    seen = {}
+    orig = plt.Figure.savefig
+
+    def spy(self, *a, **k):
+        ax = self.axes[0]
+        lo, hi = ax.get_ylim()
+        seen["ticks"] = [(loc, t.get_text()) for loc, t in zip(ax.yaxis.get_ticklocs(), ax.get_yticklabels())
+                         if lo <= loc <= hi]
+        seen["texts"] = [t.get_text() for t in ax.texts if t.get_visible()]
+        seen["colors"] = {t.get_text(): t.get_position() for t in ax.texts}
+        return orig(self, *a, **k)
+    plt.Figure.savefig = spy
+    try:
+        render_png(copy.deepcopy(panel), tmp_path / f"t_{style}.png", style=style)
+    finally:
+        plt.Figure.savefig = orig
+    return seen
+
+
+def test_enhanced_ticks_print_the_tick_value(tmp_path):
+    pytest.importorskip("matplotlib")
+    data = {"cats": ["A", "B", "C"], "v": _series([0.5, 1.6, 1.9], "億円", labels_ref="cats")}
+    p = {"id": "x", "form": "bar", "title": "t", "labels_ref": "cats",
+         "series": [{"name": "v", "values_ref": "v", "role": "emphasis"}], "caption": "c", "judgment": "j"}
+    valid, _ = validate_panels([p], data)
+    ticks = _tick_texts(valid[0], "enhanced", tmp_path)["ticks"]
+    for loc, text in ticks:
+        assert abs(float(text.replace(",", "")) - loc) < 1e-9, (loc, text)
+
+
+@pytest.mark.parametrize("style", ["classic", "enhanced"])
+def test_big_values_and_long_names_stay_inside_the_image(tmp_path, style):
+    pytest.importorskip("matplotlib")
+    data = {"cats": ["A", "B", "C"], "long": ["非常に長いカテゴリ名の会社ホールディングス株式会社グループ全体の連結"] * 1
+            + ["B社", "C社"],
+            "big": _series([12_345_678, 23_456_789, 34_567_890], "億円", labels_ref="cats"),
+            "lv": _series([3, 2, 1], "億円", labels_ref="long")}
+    panels = [{"id": "big", "form": "bar", "title": "t", "labels_ref": "cats",
+               "series": [{"name": "big", "values_ref": "big", "role": "emphasis"}],
+               "caption": "c", "judgment": "j"},
+              {"id": "long", "form": "hbar", "title": "t", "labels_ref": "long",
+               "series": [{"name": "lv", "values_ref": "lv", "role": "emphasis"}],
+               "caption": "c", "judgment": "j"}]
+    valid, rej = validate_panels(panels, data)
+    assert not rej
+    for p in valid:
+        qa = {}
+        render_png(copy.deepcopy(p), tmp_path / f"{p['id']}.png", style=style, qa=qa)
+        assert qa["spill"] == [], (p["id"], qa["spill"])
+
+
+@pytest.mark.parametrize("style", ["classic", "enhanced"])
+def test_the_emphasised_series_keeps_its_value_labels(tmp_path, style):
+    pytest.importorskip("matplotlib")
+    labels = [f"20{i:02d}" for i in range(18, 25)]
+    data = {"years": labels}
+    for i in range(3):
+        data[f"s{i}"] = _series([12345.6 + 100 * i + 37 * j for j in range(7)], "億円",
+                                kind="time", labels_ref="years")
+    p = {"id": "x", "form": "bar", "title": "t", "labels_ref": "years",
+         "series": [{"name": "s0", "values_ref": "s0", "role": "context"},
+                    {"name": "s1", "values_ref": "s1", "role": "context2"},
+                    {"name": "s2", "values_ref": "s2", "role": "emphasis"}],
+         "caption": "c", "judgment": "j"}
+    valid, _ = validate_panels([p], data)
+    if style == "enhanced":
+        valid[0]["form"] = "bar"                       # keep it vertical (7 labels would turn it)
+    seen = _tick_texts(valid[0], style, tmp_path)
+    emphasised = {f"{12345.6 + 200 + 37 * j:,.1f}" for j in range(7)}
+    shown = {t.strip() for t in seen["texts"]}
+    assert emphasised <= shown, emphasised - shown
+
+
+@pytest.mark.parametrize("style", ["classic", "enhanced"])
+def test_a_long_caption_and_legend_never_squeeze_the_plot_away(tmp_path, style):
+    pytest.importorskip("matplotlib")
+    data = {"years": ["2020", "2021", "2022"]}
+    for i in range(8):
+        data[f"s{i}"] = _series([10 + i, 11 + i, 12 + i], "億円", kind="time", labels_ref="years")
+    p = {"id": "x", "form": "line_xy", "title": "t", "labels_ref": "years",
+         "series": [{"name": f"とても長い系列の名前その{i}", "values_ref": f"s{i}",
+                     "role": "emphasis" if i == 0 else "context"} for i in range(8)],
+         "caption": "出所と定義の注記。" * 30, "judgment": "見るべき点の説明。" * 12}
+    valid, _ = validate_panels([p], data)
+    qa = {}
+    render_png(valid[0], tmp_path / "x.png", style=style, qa=qa)
+    assert qa["spill"] == [] and qa["label_overlaps"] == 0
+    # the figure grows instead: at least the minimum plot height is left
+    from deep_research_tool.chartkit.render_png import _LAYOUT
+    assert qa["plot_in"] >= _LAYOUT[style]["min_plot"] - 0.6, qa     # (ticks / a wrapped title may take a little)
+
+
+class TestReportRegressions:
+
+    def _gen(self, tmp_path, coll):
+        from deep_research_tool.report.generator import ReportGenerator
+        from deep_research_tool.tests.test_finalization_integration import (
+            make_locker, make_plan, make_session)
+        ev = [("https://ex.com/a", "x " * 30)]
+        plan = make_plan([("1", "市場規模の推移", "d")])
+        session = make_session(plan, {"1": {"title": "市場規模の推移", "content": "本文 [1]", "evidence": ev}})
+        gen = ReportGenerator(output_dir=tmp_path / "reports", language="ja")
+        gen.figure_collection = coll
+        return gen, session, make_locker(tmp_path, ev)
+
+    def test_pdf_tables_with_long_cells_zero_values_and_no_title(self, tmp_path):
+        pypdf = pytest.importorskip("pypdf")
+        pytest.importorskip("reportlab")
+        from deep_research_tool.config import ReportFormat
+        from deep_research_tool.report.figure_table_generator import FigureTableCollection, TableData
+        long_cell = "長い説明文。" * 400                     # taller than a page
+        coll = FigureTableCollection(tables=[
+            TableData(table_id="t1", title=None, caption="", headers=["指標", 0],
+                      rows=[["A", 0], ["B", 0.0]], section_id="1"),
+            TableData(table_id="t2", title="長い表", caption="", headers=["項目", "説明"],
+                      rows=[["X", "短い"], ["Y", "中くらいの長さの説明" * 12]], section_id="1"),
+            TableData(table_id="t3", title="巨大なセル", caption="", headers=["項目", "説明"],
+                      rows=[["Z", long_cell]], section_id="1")])
+        gen, session, locker = self._gen(tmp_path, coll)
+        path = gen.generate_report(session=session, evidence_locker=locker,
+                                   format=ReportFormat.PDF, verification_result=None)
+        text = "".join(p.extract_text() for p in pypdf.PdfReader(str(path)).pages)
+        assert gen.figures_inserted == 3
+        compact = text.replace("\n", "").replace(" ", "")
+        assert "A0" in compact and "B0.0" in compact               # zero cells are values
+        assert compact.count("長い説明文。") >= 300                  # the giant cell is all there
+
+    def test_html_text_with_a_less_than_sign_passes_the_artifact_check(self, tmp_path):
+        from deep_research_tool.config import ReportFormat
+        from deep_research_tool.report.figure_table_generator import (
+            Figure, FigureTableCollection, FigureType)
+        from deep_research_tool.report.semantic_manifest import build_semantic_manifest, check_artifact
+        png = tmp_path / "c.png"
+        from PIL import Image
+        Image.new("RGB", (400, 250), "white").save(png)
+        coll = FigureTableCollection(charts=[Figure(
+            figure_id="c1", figure_type=FigureType.CHART, title="伸び率",
+            caption="伸び率が<1%の年は2回だけで、ほかは3%以上の伸びを続けた。", section_id="1",
+            image_path=png)])
+        gen, session, locker = self._gen(tmp_path, coll)
+        session.section_contents["1"]["content"] = "本文 [1]\n\n伸び率が<5%の年は少なく、全体として堅調に推移したと言える。"
+        path = gen.generate_report(session=session, evidence_locker=locker,
+                                   format=ReportFormat.HTML, verification_result=None)
+        manifest = build_semantic_manifest({"1": session.section_contents["1"]["content"]},
+                                           figure_collection=coll)
+        res = check_artifact(manifest, path, locker)
+        assert res["status"] == "pass", res
+
+    def test_v2_converter_renders_an_image_line(self):
+        from deep_research_tool.report.v2.generator import ReportGeneratorV2
+        html_text = ReportGeneratorV2._markdown_to_html("![図 \"1\"](/tmp/a b.png)\n\n![t](/tmp/c.png)")
+        assert '<img src="/tmp/c.png" alt="t"' in html_text
+
+
+def test_chart_warnings_only_for_rendered_charts(tmp_path, monkeypatch):
+    pytest.importorskip("matplotlib")
+    from types import SimpleNamespace
+    from deep_research_tool.config import create_config
+    from deep_research_tool.evidence.locker import EvidenceLocker
+    from deep_research_tool.main import DeepResearchTool
+    from deep_research_tool.utils.helpers import ResearchWarnings
+    import deep_research_tool.chartkit as ck
+
+    def boom(*a, **k):
+        raise RuntimeError("renderer down")
+    monkeypatch.setattr(ck, "render_png", boom)
+    cfg = create_config(provider="openai", openai_api_key="t", output_dir=str(tmp_path), auto_figures=True)
+    tool = DeepResearchTool.__new__(DeepResearchTool)
+    tool.config, tool.llm_client, tool.stage_llm_clients = cfg, _LLM(), {}
+    store = NumericalDataStore(research_topic="x")
+    for y, v in ((2021, 40), (2022, 50), (2023, 55)):
+        store.add(_dp("市場", "市場規模", y, v, "億円", "https://www.stat.go.jp/x", section_id="1",
+                      raw_text="無関係な記述"))
+    session = SimpleNamespace(query="x", research_plan=None,
+                              section_contents={"1": {"title": "市場規模", "content": "本文", "sources": []}})
+    collector = ResearchWarnings.bind()
+    try:
+        figs = tool._spec_charts(session, EvidenceLocker(research_id="r", output_dir=tmp_path / "ev"),
+                                 store, tmp_path / "figures")
+        msgs = [w["message"] for w in collector.to_dict_list()]
+    finally:
+        ResearchWarnings.unbind()
+    assert figs == []
+    assert not any("差し替え" in m or "図は表示しています" in m for m in msgs), msgs
+    assert any("描画に失敗" in m for m in msgs), msgs
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("fmt", ["markdown", "docx", "pdf", "html"])
+def test_run_places_figures_in_every_format(tmp_path, version, fmt):
+    """run() with a frozen figure collection: the report carries the chart
+    (or the warning says why not) and the artifact check passes."""
+    pytest.importorskip("reportlab")
+    from unittest.mock import patch
+    from PIL import Image
+    from deep_research_tool.report.figure_table_generator import (
+        Figure, FigureTableCollection, FigureTableGenerator, FigureType, TableData)
+    from deep_research_tool.report.semantic_manifest import extract_artifact_text
+    from deep_research_tool.tests import test_finalization_integration as T
+    from deep_research_tool.utils.helpers import ResearchWarnings
+    ResearchWarnings.reset()
+    png = tmp_path / "figs" / "chart.png"
+    png.parent.mkdir(parents=True)
+    Image.new("RGB", (800, 500), "white").save(png)
+    coll = FigureTableCollection(
+        charts=[Figure(figure_id="c1", figure_type=FigureType.CHART, title="シェアの推移",
+                       caption="A社のシェアの推移を示す図。出所: 統計", section_id="1", image_path=png)],
+        tables=[TableData(table_id="t1", title="主要企業のシェア", caption="出所: 各社IR",
+                          headers=["社名", "シェア"], rows=[["A社", "52%"], ["B社", "0"]], section_id="1")])
+    llm = T.make_llm()
+    if version == "v2":
+        llm.on("chapter", lambda p: T.long_body("1", "市場シェア", T.CLAIM_SENTENCE)
+               + "\n===CHAPTER_META===\n" + T.j({"key_points": [], "terms_used": [], "facts_stated": []}))
+    locker = T.make_locker(tmp_path, T.SUPPORTED_EVIDENCE)
+    tool = T.build_tool(tmp_path, llm, T.FakeSearch(), auto_figures=True, output_format=fmt,
+                        report_generator_version=version)
+    gen = FigureTableGenerator(llm_client=llm, output_dir=tmp_path / "figs")
+    base = T.Base()
+    base.tmp = tmp_path
+    with patch.object(type(tool), "_generate_figure_collection", lambda self, **kw: (coll, gen)):
+        res = T.run_tool(tool, base.default_session(), locker)
+    assert res["semantic_artifact_check"] == "pass", res.get("semantic_artifact_check")
+    path = Path(res["report_path"])
+    if path.suffix == ".html":
+        assert 'src="data:image/png;base64,' in path.read_text(encoding="utf-8")
+    elif path.suffix == ".pdf":
+        import pypdf
+        assert sum(len(p.images) for p in pypdf.PdfReader(str(path)).pages) >= 1
+    elif path.suffix == ".docx":
+        import docx
+        assert len(docx.Document(str(path)).inline_shapes) >= 1
+    else:
+        assert "chart.png" in path.read_text(encoding="utf-8")
+    assert "A社のシェアの推移を示す図" in (extract_artifact_text(path) or "")

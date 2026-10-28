@@ -1531,6 +1531,14 @@ ul, ol {{ padding-left: 1.5em; }}
                 html_lines.append(f"</{list_type}>")
                 in_list = False
                 list_type = None
+            # An image on its own line (inserted figures and charts)
+            img_match = re.match(r'^!\[([^\]]*)\]\(([^)\s]+)\)$', stripped)
+            if img_match:
+                import html as _html
+                html_lines.append(
+                    f'<figure><img src="{_html.escape(img_match.group(2))}" '
+                    f'alt="{_html.escape(img_match.group(1))}" style="max-width:100%"></figure>')
+                continue
             # Apply inline formatting
             formatted = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', stripped)
             formatted = re.sub(r'\*([^*]+)\*', r'<em>\1</em>', formatted)

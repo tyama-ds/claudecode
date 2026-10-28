@@ -677,7 +677,9 @@ class ReportGenerator:
         placed: set = set()
 
         def _esc_text(s):
-            return str(s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            # a numeric 0 / 0.0 cell is a value, not an empty cell
+            return ("" if s is None else str(s)).replace("&", "&amp;").replace(
+                "<", "&lt;").replace(">", "&gt;")
 
         def _figures(section_id):
             for flowable in self._pdf_figure_flowables(
@@ -779,16 +781,8 @@ class ReportGenerator:
                     elif kind == "h3":
                         story.append(Paragraph(_esc(payload), heading2_style))
                     elif kind == "table":
-                        ncols = max(len(r) for r in payload)
-                        rows = [[Paragraph(_esc(c), body_style) for c in r]
-                                + [""] * (ncols - len(r)) for r in payload]
-                        t = Table(rows)
-                        t.setStyle(TableStyle([
-                            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                            ('BACKGROUND', (0, 0), (-1, 0), colors.beige),
-                            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                        ]))
-                        story.append(t)
+                        story.extend(self._pdf_table(payload[0], payload[1:], doc.width, body_style,
+                                                     _esc, colors, Table, TableStyle, Paragraph))
                     else:
                         prefix = "• " if kind == "bullet" else ""
                         story.append(Paragraph(prefix + _esc(payload), body_style))
@@ -1295,24 +1289,44 @@ class ReportGenerator:
                     out.append(KeepTogether(block))
                     self.figures_inserted += 1
                 elif obj.headers:
-                    rows = [[Paragraph(esc(h), body_style) for h in obj.headers]]
-                    for r in obj.rows:
-                        cells = [Paragraph(esc(c), body_style) for c in list(r)[:len(obj.headers)]]
-                        rows.append(cells + [""] * (len(obj.headers) - len(cells)))
-                    t = Table(rows, repeatRows=1)
-                    t.setStyle(TableStyle([
-                        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                        ('BACKGROUND', (0, 0), (-1, 0), colors.beige),
-                        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                    ]))
-                    out.append(Paragraph(f"<b>{esc(obj.title)}</b>", body_style))
-                    out.append(t)
+                    out.append(Paragraph(f"<b>{esc(obj.title or '')}</b>", body_style))
+                    out.extend(self._pdf_table(list(obj.headers),
+                                               [list(r)[:len(obj.headers)] for r in obj.rows],
+                                               avail_width, body_style, esc, colors, Table,
+                                               TableStyle, Paragraph))
                     if obj.caption and obj.caption != obj.title:
                         out.append(Paragraph(esc(obj.caption), caption_style))
                     self.figures_inserted += 1
             except Exception as e:
                 print(f"[ReportGenerator] figure skipped in PDF: {e}")
         return out
+
+    @staticmethod
+    def _pdf_table(header, rows, avail_width, body_style, esc, colors, Table, TableStyle,
+                   Paragraph) -> list:
+        """A table for the PDF: equal column widths (without them one long
+        cell squeezed the others below zero and the whole build failed);
+        a table with a cell taller than a page is set as one paragraph per
+        row instead (a row cannot split across pages)."""
+        ncols = max([len(header)] + [len(r) for r in rows]) or 1
+        col_w = avail_width / ncols
+        per_line = max(4, int(col_w / max(1.0, float(body_style.fontSize))))
+        too_tall = any(len("" if c is None else str(c)) / per_line > 40 for r in [header] + rows for c in r)
+        if too_tall:
+            out = []
+            for r in rows:
+                pairs = [f"{esc(h)}: {esc(c)}" for h, c in zip(list(header) + [""] * len(r), r)]
+                out.append(Paragraph(" ／ ".join(pairs), body_style))
+            return out
+        cells = [[Paragraph(esc(c), body_style) for c in r] + [""] * (ncols - len(r))
+                 for r in [header] + rows]
+        t = Table(cells, colWidths=[col_w] * ncols, repeatRows=1)
+        t.setStyle(TableStyle([
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.beige),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ]))
+        return [t]
 
     def _html_figures(self, items) -> str:
         import base64
@@ -1333,10 +1347,13 @@ class ReportGenerator:
                         f'<figcaption>{_html.escape(self._figure_caption(obj))}</figcaption></figure>')
                     self.figures_inserted += 1
                 elif obj.headers:
-                    head = "".join(f"<th>{_html.escape(str(h))}</th>" for h in obj.headers)
-                    body = "".join("<tr>" + "".join(f"<td>{_html.escape(str(c))}</td>" for c in r)
-                                   + "</tr>" for r in obj.rows)
-                    cap = obj.title + (f" — {obj.caption}" if obj.caption and obj.caption != obj.title else "")
+                    head = "".join(f"<th>{_html.escape('' if h is None else str(h))}</th>"
+                                   for h in obj.headers)
+                    body = "".join("<tr>" + "".join(
+                        f"<td>{_html.escape('' if c is None else str(c))}</td>" for c in r)
+                        + "</tr>" for r in obj.rows)
+                    title = str(obj.title or "")
+                    cap = title + (f" — {obj.caption}" if obj.caption and obj.caption != title else "")
                     parts.append(f"<table class=\"report-table\"><caption>{_html.escape(cap)}</caption>"
                                  f"<tr>{head}</tr>{body}</table>")
                     self.figures_inserted += 1
