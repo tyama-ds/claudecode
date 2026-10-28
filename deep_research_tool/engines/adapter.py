@@ -47,6 +47,12 @@ STAGE_LABELS = {
     "report_completed": "レポート完成",
     "action:plan": "計画", "action:search": "検索", "action:scrape": "ページ取得",
     "action:write": "執筆",
+    # open-deep-research graph nodes (worker.py maps the node names)
+    "starting_mcp_server": "検索サーバー起動", "clarify": "質問の確認",
+    "brief": "調査方針の作成", "supervisor": "監督者が調査を割り当て",
+    "supervisor_tools": "監督者のツール実行", "researcher": "調査員が検索・読み込み",
+    "researcher_tools": "調査員のツール実行", "compress": "調査結果の圧縮",
+    "final_report": "最終レポートの執筆",
 }
 # where a stage sits in the engine's 10–85 progress band when the engine
 # reports no step / total (fractions of the band; the bar never moves back)
@@ -57,6 +63,9 @@ STAGE_FRACTION = {
     "reading": 0.45, "action:scrape": 0.45, "research_completed": 0.65,
     "write_report": 0.72, "writing_report": 0.75,
     "writing": 0.80, "action:write": 0.80, "finalizing": 0.95, "report_completed": 0.98,
+    "starting_mcp_server": 0.01, "clarify": 0.03, "brief": 0.08, "supervisor": 0.15,
+    "supervisor_tools": 0.18, "researcher": 0.30, "researcher_tools": 0.35,
+    "compress": 0.60, "final_report": 0.80,
 }
 
 ENGINE_PROGRESS_START = 10.0   # the research slice starts here (see ProgressPlan)

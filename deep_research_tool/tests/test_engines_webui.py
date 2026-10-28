@@ -47,9 +47,10 @@ class TestEngineCatalogApi:
         ids = [e["id"] for e in d["engines"]]
         assert ids == ["builtin", "gpt-researcher", "open-deep-research"]
         assert d["engines"][1]["health"] == "needs_setup"      # implemented, no venv here
-        assert d["engines"][1]["setup_command"].endswith("setup_engine_venv gpt-researcher")
+        assert d["engines"][1]["setup_command"].endswith("setup_engine_venv.py gpt-researcher")
         assert d["engines"][1]["options_schema"]["properties"]["report_type"]["enum"]
-        assert d["engines"][2]["health"] == "planned"
+        assert d["engines"][2]["health"] == "needs_setup"
+        assert d["engines"][2]["options_schema"]["properties"]["max_react_tool_calls"]["default"] == 5
         status, d = _get(web, "/api/engines?mocks=1")
         assert "mock-fast" in [e["id"] for e in d["engines"]]
         status, d = _post(web, "/api/engines", {"mocks": True, "engine_python": {"gpt-researcher": "/nope"}})
@@ -81,7 +82,7 @@ class TestEngineRequestValidation:
         assert engine_request_error({}) is None
         assert engine_request_error({"research_engine": "mock-fast"}) is None
         msg, field = engine_request_error({"research_engine": "open-deep-research"})
-        assert field == "research_engine" and "まだ使えません" in msg
+        assert field == "research_engine" and "Python 環境がありません" in msg
         msg, field = engine_request_error({"research_engine": "gpt-researcher"})
         assert field == "research_engine" and "Python 環境がありません" in msg
         msg, _ = engine_request_error({"research_engine": "gpt-researcher",

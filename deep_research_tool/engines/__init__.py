@@ -43,13 +43,15 @@ EXTERNAL_ENGINES: Dict[str, Dict[str, Any]] = {
     "open-deep-research": {
         "name": "Open Deep Research",
         "version": ENGINE_SPECS["open-deep-research"]["version"],
-        "implemented": False,
+        "implemented": True,
         "description": "LangChain Open Deep Research（別の Python 環境で実行）。監督者＋"
-                       "調査員の多段エージェントが書いた本文と出典を取り込みます。",
-        "needs": "LLM: 設定中のプロバイダ（OpenAI 互換 / Anthropic / ローカル） / "
-                 "検索: DuckDuckGo または SearXNG（MCP 経由）",
-        "flow": ["Open Deep Research が計画・検索・執筆", "本文と出典を取り込み",
-                 "出典ページを取得して根拠化", "検証（任意）", "出力"],
+                       "調査員の多段エージェントが書いた本文と出典を取り込みます。検索は"
+                       "このツールの検索設定を MCP 経由で貸し出します（埋め込みモデル不要）。",
+        "needs": "LLM: 設定中のプロバイダ（OpenAI 互換 / Anthropic / ローカル。ツール呼び出し対応が必要） / "
+                 "検索: ⚙設定の検索方法（DuckDuckGo / ブラウザ）または SearXNG を MCP 経由で提供",
+        "flow": ["調査方針の作成（Open Deep Research）", "監督者が調査員に割り当て、調査員が検索・読み込み",
+                 "圧縮 → 最終レポートの執筆", "本文と出典を取り込み", "出典ページを取得して根拠化",
+                 "検証（任意）", "出力"],
     },
 }
 
@@ -100,12 +102,14 @@ def engine_display_name(engine_id: str) -> str:
 
 
 def get_engine(engine_id: str, config=None,
-               engine_python: Optional[Dict[str, str]] = None) -> Engine:
+               engine_python: Optional[Dict[str, str]] = None,
+               search_client=None) -> Engine:
     """The Engine instance for an id, or EngineUnavailable with a reason
     the user can act on. The built-in engine is not an Engine (it is the
     Researcher itself) and raises too. ``engine_python`` overrides the
     config's interpreter map (the Web UI checks a request before it is
-    queued)."""
+    queued). ``search_client`` is the tool's search client, lent to the
+    engines that search through it (Open Deep Research's MCP server)."""
     if engine_id == BUILTIN_ID:
         raise EngineUnavailable("builtin は Engine ではありません（Researcher を使います）")
     if is_mock(engine_id):
@@ -126,7 +130,10 @@ def get_engine(engine_id: str, config=None,
     if engine_id == "gpt-researcher":
         from .gptr.engine import GptResearcherEngine
         return GptResearcherEngine(python_path=entry["python"])
-    raise EngineUnavailable(f"{spec['name']} の実装が登録されていません")   # Phase 3
+    if engine_id == "open-deep-research":
+        from .odr.engine import OpenDeepResearchEngine
+        return OpenDeepResearchEngine(python_path=entry["python"], search_client=search_client)
+    raise EngineUnavailable(f"{spec['name']} の実装が登録されていません")
 
 
 def _external_entry(engine_id: str, config=None,
@@ -147,6 +154,9 @@ def _external_entry(engine_id: str, config=None,
     if engine_id == "gpt-researcher":
         from .gptr.engine import GptResearcherEngine
         entry["options_schema"] = GptResearcherEngine().capabilities().options_schema
+    elif engine_id == "open-deep-research":
+        from .odr.engine import OpenDeepResearchEngine
+        entry["options_schema"] = OpenDeepResearchEngine().capabilities().options_schema
     configured: Dict[str, str] = {}
     if config is not None:
         configured = dict(getattr(config.research, "engine_python", None) or {})

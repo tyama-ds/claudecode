@@ -854,7 +854,9 @@ class DeepResearchTool:
             raise ValueError(
                 f"{name} は手元の資料（source_mode={rc.source_mode.value}）を扱えません。"
                 "使用する資料を「Web」か「指定 URL」にするか、内蔵エンジンを選んでください")
-        engine = get_engine(engine_id, self.config)      # EngineUnavailable (ValueError)
+        # EngineUnavailable (ValueError); the search client is lent to the
+        # engines that search through this tool (Open Deep Research → MCP)
+        engine = get_engine(engine_id, self.config, search_client=self.search_client)
         if self.config.report.generator_version != ReportGeneratorVersion.V1:
             old = self.config.report.generator_version.value
             ResearchWarnings.get_instance().add(

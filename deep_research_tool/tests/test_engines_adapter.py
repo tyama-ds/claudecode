@@ -79,9 +79,9 @@ class TestRegistry:
             assert e["version"] == EXTERNAL_ENGINES[e["id"]]["version"]
         # GPT Researcher is implemented: without its virtualenv it needs setup
         assert cat[1]["id"] == "gpt-researcher" and cat[1]["health"] == "needs_setup"
-        assert "setup_engine_venv gpt-researcher" in cat[1]["reason"]
-        assert cat[2]["id"] == "open-deep-research" and cat[2]["health"] == "planned"
-        assert "未実装" in cat[2]["reason"]
+        assert "setup_engine_venv.py gpt-researcher" in cat[1]["reason"]
+        assert cat[2]["id"] == "open-deep-research" and cat[2]["health"] == "needs_setup"
+        assert "setup_engine_venv.py open-deep-research" in cat[2]["reason"]
         with_mocks = engine_catalog(include_mocks=True)
         mocks = [e for e in with_mocks if e["kind"] == "mock"]
         assert {m["id"] for m in mocks} == {"mock-fast", "mock-slow", "mock-fail",
@@ -98,11 +98,11 @@ class TestRegistry:
             get_engine("zzz")
         with pytest.raises(EngineUnavailable, match="使えません: .*Python 環境がありません"):
             get_engine("gpt-researcher")
-        with pytest.raises(EngineUnavailable, match="まだ使えません"):
+        with pytest.raises(EngineUnavailable, match="使えません: .*Python 環境がありません"):
             get_engine("open-deep-research")
         assert check_engine_selectable("builtin") is None
         assert check_engine_selectable("mock-fast") is None
-        assert "まだ使えません" in check_engine_selectable("open-deep-research")
+        assert "Python 環境がありません" in check_engine_selectable("open-deep-research")
         assert "Python 環境がありません" in check_engine_selectable("gpt-researcher")
 
     def test_create_config_validates_engine_fields(self):
@@ -149,7 +149,8 @@ class TestVenv:
         assert venv_mod.resolve_engine_python(
             "gpt-researcher", {"gpt-researcher": str(tmp_path / "missing")})[1] == "config-missing"
         assert venv_mod.env_var_name("open-deep-research") == "DRT_ENGINE_PYTHON_OPEN_DEEP_RESEARCH"
-        assert "setup_engine_venv gpt-researcher" in venv_mod.setup_command("gpt-researcher")
+        assert "setup_engine_venv.py gpt-researcher" in venv_mod.setup_command("gpt-researcher")
+        assert " -m " not in venv_mod.setup_command("gpt-researcher")
 
     def test_health_and_interpreter_check(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DRT_ENGINES_VENV_DIR", str(tmp_path / "venvs"))
@@ -491,7 +492,7 @@ class TestToolIntegration:
         tool = build_tool(tmp_path / "u", FakeLLM(), FakeSearchClient(),
                           research_engine="mock-fast", enable_verification=False)
         tool.config.research.research_engine = "open-deep-research"
-        with pytest.raises(ValueError, match="まだ使えません"):
+        with pytest.raises(ValueError, match="Python 環境がありません"):
             tool.run(query="x")
         tool.config.research.research_engine = "gpt-researcher"
         with pytest.raises(ValueError, match="Python 環境がありません"):
