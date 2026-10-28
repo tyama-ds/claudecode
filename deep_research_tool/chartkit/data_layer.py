@@ -68,6 +68,15 @@ PRIMARY_PATH_HINTS: Tuple[str, ...] = (
 
 # scale words inside a unit string → (factor, canonical scale label)
 _SCALES: Tuple[Tuple[str, float, str], ...] = (
+    # compound Japanese scales first ('千億円' is 1e11 yen, not 億 + '千円')
+    ("千億", 1e11, "千億"),
+    ("百億", 1e10, "百億"),
+    ("100億", 1e10, "百億"),
+    ("1000万", 1e7, "千万"),
+    ("千万", 1e7, "千万"),
+    ("100万", 1e6, "百万"),
+    ("十万", 1e5, "十万"),
+    ("10万", 1e5, "十万"),
     ("兆", 1e12, "兆"),
     ("trillion", 1e12, "兆"),
     ("十億", 1e9, "10億"),
@@ -82,8 +91,8 @@ _SCALES: Tuple[Tuple[str, float, str], ...] = (
     ("千", 1e3, "千"),
     ("万", 1e4, "万"),
 )
-_SCALE_LABEL_FACTOR = {"兆": 1e12, "10億": 1e9, "億": 1e8, "百万": 1e6,
-                       "万": 1e4, "千": 1e3, "": 1.0}
+_SCALE_LABEL_FACTOR = {"兆": 1e12, "千億": 1e11, "百億": 1e10, "10億": 1e9, "億": 1e8,
+                       "千万": 1e7, "百万": 1e6, "十万": 1e5, "万": 1e4, "千": 1e3, "": 1.0}
 _CURRENCY_WORDS = {
     "usd": "ドル", "us$": "ドル", "$": "ドル", "dollar": "ドル", "dollars": "ドル",
     "ドル": "ドル", "米ドル": "ドル", "jpy": "円", "yen": "円", "円": "円", "¥": "円",
@@ -129,7 +138,7 @@ def parse_unit(unit: Optional[str]) -> Tuple[str, float, str]:
 # scale words as they appear next to a number in the ORIGINAL text
 _RAW_SCALES: Tuple[Tuple[str, float], ...] = (
     ("trillion", 1e12), ("billion", 1e9), ("million", 1e6), ("thousand", 1e3),
-    ("bn", 1e9), ("mn", 1e6), ("tn", 1e12),
+    ("bn", 1e9), ("mn", 1e6), ("tn", 1e12), ("b", 1e9), ("m", 1e6), ("k", 1e3),
     ("兆", 1e12), ("億", 1e8), ("百万", 1e6), ("万", 1e4), ("千", 1e3),
 )
 # English scale words only as whole words ('BNPL', 'MNOs', 'billionaires'
@@ -144,7 +153,8 @@ _JP_UNITS = (("兆", 1e12), ("千億", 1e11), ("百億", 1e10), ("十億", 1e9),
 _JP_PART = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?\s*(?:" + "|".join(u for u, _f in _JP_UNITS) + ")"
 _JP_COMPOUND = re.compile(r"(?:%s\s*)+(?:[0-9]+(?:,[0-9]{3})*(?![0-9.,]*\s*[A-Za-z]))?" % _JP_PART)
 # 'bn' / 'mn' / 'tn' rebuilt into a unit must be a word parse_unit knows
-_SCALE_WORD = {"bn": "billion", "mn": "million", "tn": "trillion"}
+_SCALE_WORD = {"bn": "billion", "mn": "million", "tn": "trillion", "b": "billion", "m": "million",
+               "k": "thousand"}
 
 
 def _jp_compounds(text: str) -> List[float]:
@@ -186,6 +196,13 @@ def _raw_numbers(raw_text: str) -> List[Tuple[float, float, str]]:
         nxt = text[m.end():m.end() + 1]
         if word in ("千", "百万") and nxt in ("万", "億"):
             word = "?"
+        if not word:
+            # '$1.2B' / 'US$450M' / '1.5k': a scale letter stuck to the number
+            # (B / M / K only after a currency sign: '3M' may be a company)
+            letter, after = text[m.end(1):m.end(1) + 1], text[m.end(1) + 1:m.end(1) + 2]
+            if letter and not (after.isascii() and after.isalpha()):
+                if letter == "k" or (letter in "BMK" and re.search(r"[$¥€£]\s*$", text[max(0, m.start() - 4):m.start()])):
+                    word = {"b": "b", "m": "m", "k": "k"}[letter.lower()]
         factor = dict(_RAW_SCALES).get(word, 1.0) if word != "?" else float("nan")
         out.append((num, factor, word))
     return out

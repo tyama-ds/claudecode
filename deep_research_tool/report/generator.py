@@ -28,6 +28,15 @@ class ReportFormat(str, Enum):
     HTML = "html"
 
 
+_MD_LINK = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
+
+
+def _pdf_links(escaped: str) -> str:
+    """A Markdown link prints as its text, linked ('[統計](https://…)' was
+    printed raw and wrapped mid-URL)."""
+    return _MD_LINK.sub(lambda m: f'<a href="{m.group(2)}" color="#1a5fb4">{m.group(1)}</a>', escaped)
+
+
 class ReportGenerator:
     """
     Generate research reports in various formats.
@@ -628,7 +637,13 @@ class ReportGenerator:
 
         # Register Japanese fonts if language is Japanese
         japanese_font = None
-        if self.language == "ja":
+        # a Japanese font also for an English report that quotes Japanese
+        # titles or text (Helvetica printed them as blocks)
+        cjk = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
+        if self.language == "ja" or any(
+                cjk.search(str(v.get("content", "") if isinstance(v, dict) else v))
+                for v in renumbered_contents.values()) or any(
+                cjk.search(str(getattr(e, "citation_text", "") or "")) for e in evidence_list):
             japanese_font = self._register_japanese_fonts()
 
         # Determine fonts to use
@@ -746,7 +761,8 @@ class ReportGenerator:
                     for para in content.split("\n\n"):
                         if para.strip():
                             # Escape special characters for reportlab
-                            safe_para = para.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                            safe_para = _pdf_links(
+                                para.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
                             try:
                                 story.append(Paragraph(safe_para, body_style))
                             except Exception:
@@ -761,13 +777,18 @@ class ReportGenerator:
                         heading2_style
                     ))
                     if sub_content:
-                        safe_content = self._strip_citations(
-                            sub_content.get("content", "")
-                        ).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                        try:
-                            story.append(Paragraph(safe_content[:2000], body_style))
-                        except Exception:
-                            story.append(Paragraph("Content unavailable", body_style))
+                        # every paragraph, as for a chapter (it was cut at 2,000
+                        # characters, so the PDF lost the rest of the subsection)
+                        sub_text = self._strip_citations(sub_content.get("content", ""))
+                        for para in sub_text.split("\n\n"):
+                            if not para.strip():
+                                continue
+                            safe_para = _pdf_links(
+                                para.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+                            try:
+                                story.append(Paragraph(safe_para, body_style))
+                            except Exception:
+                                story.append(Paragraph(para[:500] + "...", body_style))
                     _figures(str(sub.section))
 
         # Chapters outside the plan (e.g. the verified figure appendix)
@@ -1337,15 +1358,18 @@ class ReportGenerator:
         inner = col_w - 12
         fs = max(1.0, float(body_style.fontSize))
         lead = float(getattr(body_style, "leading", 0) or fs * 1.2)
-        per_line = int(inner / fs) if inner > 0 else 0
-        too_tall = per_line < 2 or any(
+        per_line = max(1, int(inner / fs)) if inner > 0 else 0
+        # a grid only when a column can hold a character and no row is taller
+        # than a page (a 14-column year table keeps its grid)
+        too_tall = inner < fs or any(
             (len("" if c is None else str(c)) / per_line + 1) * lead > 600
             for r in [header] + rows for c in r) or self._pdf_safe_mode
         if too_tall:
-            out = []
+            # one line per row, cells separated by ' | ' (the same text as
+            # the table, so the verified content still matches)
+            out = [Paragraph("<b>" + " | ".join(esc(h) for h in header) + "</b>", body_style)]
             for r in rows:
-                pairs = [f"{esc(h)}: {esc(c)}" for h, c in zip(list(header) + [""] * len(r), r)]
-                out.append(Paragraph(" ／ ".join(pairs), body_style))
+                out.append(Paragraph(" | ".join(esc(c) for c in r), body_style))
             return out
         cells = [[Paragraph(esc(c), body_style) for c in r] + [""] * (ncols - len(r))
                  for r in [header] + rows]

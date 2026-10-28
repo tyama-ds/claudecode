@@ -141,6 +141,14 @@ def _report_titles(session) -> list:
     plan = getattr(session, "research_plan", None)
     out = [getattr(plan, "title", "") if plan else "", getattr(session, "query", ""),
            getattr(session, "session_id", "")]
+    # the chapter headings and table-of-contents lines (V1 bodies do not
+    # carry their own titles)
+    try:
+        for item in plan.table_of_contents.get_flat_sections() if plan else []:
+            out.append(f"{item.section}. {item.title}")
+            out.append(str(item.title))
+    except Exception:
+        pass
     return [str(t) for t in out if t]
 
 
@@ -4758,8 +4766,7 @@ Output only the text (no JSON, no heading):"""
         page_sections: list = []
         no_chart: list = []            # chapters with series but no chart, and why
         ungrounded: list = []          # panels with values the source text does not hold
-        replaced: list = []            # judgments that contradicted the data (enhanced: replaced)
-        conflicts: list = []           # the same in classic (reported, never rewritten)
+        conflicts: list = []           # judgments that contradict the data (reported, never rewritten)
         for sid, title, valid, rejected, error, info in results:
             cat, _sd = catalogs[sid]
             y = chart_yield["chapters"].setdefault(str(sid), {})
@@ -4805,9 +4812,7 @@ Output only the text (no JSON, no heading):"""
                     render_failed += 1
                     continue
                 # warnings only for charts that are actually in the report
-                if fx.get("judgment_replaced"):
-                    replaced.append((sid, panel, fx["judgment_replaced"]))
-                elif fx.get("conflict"):
+                if fx.get("conflict"):
                     conflicts.append((sid, panel, fx["conflict"]))
                 if g["issues"]:
                     ungrounded.append((sid, panel, g["issues"]))
@@ -4866,12 +4871,6 @@ Output only the text (no JSON, no heading):"""
                 ResearchWarnings.LOW, "AutoFigures",
                 f"チャートの {n} 点の値が出典本文で確認できませんでした（図は表示しています。"
                 f"要確認: " + "／".join(parts) + ("…" if len(ungrounded) > 4 else "") + "）。")
-        if replaced:
-            parts = [f"「{p.get('title', '')}」: {r['reason']}" for _s, p, r in replaced[:3]]
-            ResearchWarnings.get_instance().add(
-                ResearchWarnings.LOW, "AutoFigures",
-                f"データと矛盾する「見るべき点」を {len(replaced)} 件、数値から作った文に差し替えました（"
-                + "／".join(parts) + ("…" if len(replaced) > 3 else "") + "）。")
         if conflicts:
             parts = [f"「{p.get('title', '')}」の「{c['judgment'][:40]}」: {c['reason']}"
                      for _s, p, c in conflicts[:3]]

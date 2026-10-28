@@ -35,12 +35,37 @@ def _norm(text: str) -> str:
     becomes '|' so the numbers do not fuse into one."""
     s = unicodedata.normalize("NFKC", str(text or "")).lower()
     s = re.sub(r"(?<=\d)[,，](?=\d{3})", "", s)
+    s = re.sub(r"(\d\.\d*?)0+(?![\d])", r"\1", s)           # 12.50 → 12.5
+    s = re.sub(r"(\d)\.(?![\d])", r"\1", s)                  # 12. → 12
     s = re.sub(r"(?<=[\d.%])\s+(?=\d)", "|", s)
     return re.sub(r"\s+", "", s)
 
 
 def _close(a: float, b: float) -> bool:
-    return abs(a - b) <= max(0.01 * max(abs(a), abs(b)), 1e-9)
+    # 0.5 %: rounding of a converted value, never 1,234 for '1,243'
+    return abs(a - b) <= max(0.005 * max(abs(a), abs(b)), 1e-9)
+
+
+_KANJI_DIGIT = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def _percent_forms(text: str) -> List[float]:
+    """Percentages written as 割 / 分の / 人に: '3割5分' 35, '約三割' 30,
+    '3分の1' 33.3, '4人に1人' 25."""
+    out = []
+    for m in re.finditer(r"([0-9]+(?:\.[0-9]+)?|[一二三四五六七八九十])\s*割(?:\s*([0-9一二三四五六七八九])\s*分)?", text):
+        a = m.group(1)
+        w = float(a) if a[0].isdigit() else float(_KANJI_DIGIT[a])
+        b = m.group(2)
+        f = (float(b) if b and b.isdigit() else float(_KANJI_DIGIT.get(b, 0))) if b else 0.0
+        out.append(w * 10 + f)
+    for m in re.finditer(r"([0-9]+)\s*分の\s*([0-9]+)", text):
+        if float(m.group(1)):
+            out.append(float(m.group(2)) / float(m.group(1)) * 100)
+    for m in re.finditer(r"([0-9]+)\s*(人|社|件|台|世帯|店|校)に\s*([0-9]+)\s*\2", text):
+        if float(m.group(1)):
+            out.append(float(m.group(3)) / float(m.group(1)) * 100)
+    return out
 
 
 def value_in_quote(value: float, unit: str, raw_text: str) -> bool:
@@ -51,17 +76,20 @@ def value_in_quote(value: float, unit: str, raw_text: str) -> bool:
     base, factor, _label = parse_unit(unit)
     text = unicodedata.normalize("NFKC", str(raw_text or ""))
     if base == "%":
-        # 3割 / 3割5分 are 30 % / 35 %
-        for m in re.finditer(r"([0-9]+(?:\.[0-9]+)?)\s*割(?:\s*([0-9])\s*分)?", text):
-            if _close(v, float(m.group(1)) * 10 + (float(m.group(2)) if m.group(2) else 0.0)):
-                return True
+        # 3割 / 3割5分 / 3分の1 / 4人に1人 are percentages
+        if any(_close(v, p) for p in _percent_forms(text)):
+            return True
+        # a number that is part of '3割' / '3分の1' is not '3 %'
+        text = re.sub(r"[0-9一二三四五六七八九十]+(?:\.[0-9]+)?\s*割(?:\s*[0-9一二三四五六七八九]\s*分)?"
+                      r"|[0-9]+\s*分の\s*[0-9]+|[0-9]+\s*(人|社|件|台|世帯|店|校)に\s*[0-9]+\s*\1", " ", text)
     elif any(_close(v * factor, total) for total in _jp_compounds(text)):
         return True                     # 1兆2,000億円 / 3億5,000万円
-    for n, f, w in _raw_numbers(raw_text):
+    for n, f, w in _raw_numbers(text):
         if f != f:                      # compound scale (千万): not comparable
             continue
         if base == "%":
-            if _close(v, n):
+            # a percentage is a plain number: '50万人' is not 50 %
+            if not w and _close(v, n):
                 return True
             continue
         # the same quantity once both scales are applied; a number with a
@@ -91,7 +119,20 @@ def quote_in_source(raw_text: str, source_text: str) -> bool:
     nums = re.findall(r"\d+(?:\.\d+)?", q)
     key = [n for n in nums if not _YEAR.match(n)] or nums
     # whole numbers only: '50' is not in '2050' or '150'
-    return bool(key) and all(re.search(rf"(?<![\d.]){re.escape(n)}(?![\d]|\.\d)", src) for n in key)
+    if key and all(re.search(rf"(?<![\d.]){re.escape(n)}(?![\d]|\.\d)", src) for n in key):
+        return True
+    # the same quantities written another way ('1.2兆円' for '1兆2,000億円')
+    want = _quantities(raw_text)
+    have = _quantities(source_text)
+    return bool(want) and all(any(_close(w, h) for h in have) for w in want)
+
+
+def _quantities(text: str) -> List[float]:
+    """Every scaled quantity of a text (years left out)."""
+    t = unicodedata.normalize("NFKC", str(text or ""))
+    out = [n * f for n, f, w in _raw_numbers(t) if f == f and (w or not _YEAR.match(f"{n:g}"))]
+    out.extend(_jp_compounds(t))
+    return out
 
 
 def ground_panel(panel: Dict[str, Any],

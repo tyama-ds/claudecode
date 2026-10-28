@@ -129,20 +129,23 @@ _NO_LINE_START = set("、。，．・：；？！）］｝〕〉》」』】ー�
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.,%％'’\-/:+]*|\s+|.", re.S)
 
 
+_ASCII_WS = re.compile(r"([ \t\n\r\f\v]+)")
+
+
 def _wrap(text: str, width: int) -> str:
-    """Wrap to ``width`` characters without breaking inside a number or a
-    Latin word ('6億缶' and '1.5' stay whole) and without starting a line
-    with closing punctuation."""
+    """Wrap to ``width`` characters the way v1.5's textwrap did — break at
+    spaces when the next word fits on a line of its own, fill the line
+    with a word longer than a line — except that a number or a Latin word
+    is never split ('6億缶' and '1.5' stay whole) and a line never starts
+    with closing punctuation. A full-width space is text, as in textwrap."""
     text = str(text or "")
     if not text:
         return ""
     lines: List[str] = []
     cur = ""
-    for tok in _TOKEN.findall(text):
-        if tok.isspace():
-            if cur:
-                cur += " "
-            continue
+
+    def put_token(tok: str) -> None:
+        nonlocal cur
         while len(tok) > width:                 # a URL longer than a line is cut, not overflowed
             room = width - len(cur)
             if room <= 0:
@@ -153,22 +156,31 @@ def _wrap(text: str, width: int) -> str:
             lines.append(cur.rstrip())
             cur = ""
         if not tok:
-            continue
+            return
         if len(cur) + len(tok) > width and cur.strip():
             if tok[0] in _NO_LINE_START:
                 cur += tok                      # keep closing punctuation on this line
-                continue
-            # break at the last space of the line when the rest fits ('生産能力
-            # 2026年末' → '生産能力' / '2026年末', as textwrap did in v1.5)
-            sp = cur.rfind(" ")
-            if not cur.endswith(" ") and sp > 0 and len(cur) - sp - 1 + len(tok) <= width:
-                lines.append(cur[:sp].rstrip())
-                cur = cur[sp + 1:] + tok
-                continue
+                return
             lines.append(cur.rstrip())
             cur = tok
         else:
             cur += tok
+
+    for chunk in _ASCII_WS.split(text):
+        if not chunk:
+            continue
+        if _ASCII_WS.fullmatch(chunk):
+            if cur:
+                cur += " " * len(chunk.replace("\r\n", "\n"))   # spaces kept, as textwrap did
+            continue
+        if len(cur) + len(chunk) <= width:
+            cur += chunk
+        elif cur.strip() and len(chunk) <= width and chunk[0] not in _NO_LINE_START:
+            lines.append(cur.rstrip())          # the word goes to the next line whole
+            cur = chunk
+        else:
+            for tok in _TOKEN.findall(chunk):   # a word longer than a line fills it
+                put_token(tok)
     if cur.strip():
         lines.append(cur.rstrip())
     return "\n".join(lines)
@@ -190,7 +202,8 @@ def _drop_overlapping(fig, texts: List[Any]) -> int:
     dropped = 0
     for t in texts:
         bb = t.get_window_extent(renderer=renderer)
-        if any(_overlaps(bb, k) for k in kept):
+        # boxes that only touch are still readable (v1.5 kept them)
+        if any(_overlaps(bb, k, pad=-0.5) for k in kept):
             t.remove()
             dropped += 1
         else:
@@ -282,8 +295,10 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
             if seg_row:
                 fig_h = max(2.6 * scale + 0.6, 0.55 * scale * max(1, rows_h) + 2.0 * scale + 0.4)
             elif horiz:
-                fig_h = max(3.2 * scale + 0.6,
-                            0.45 * scale * max(1, rows_h) * max(1, n_series) + 2.0 * scale + 0.6)
+                # several series side by side: a category is at most 0.6 in
+                # tall (bars get thinner) so the chart stays within a page
+                per_cat = min(0.45 * scale * max(1, n_series), 0.6)
+                fig_h = max(3.2 * scale + 0.6, per_cat * max(1, rows_h) + 2.0 * scale + 0.6)
             else:
                 fig_h = L["bar_h"]
             # room for the legend / caption / judgment lines under the plot
@@ -483,17 +498,23 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
             wrap_judgment = lambda w: _wrap("見るべき点: " + judgment_text, w) if judgment_text else ""  # noqa: E731
             j_width = int((L["width"] * (1 - text_x) - 0.15) * 72 / L["judgment"]) - 2
         y_in = 0.4 if style == "classic" else 0.12
-        placed: List[Any] = []                       # (artist, y in inches)
+        # classic also keeps the v1.5 arithmetic in figure fractions, so an
+        # unchanged layout lands on exactly the same pixels
+        line_f = 0.16 / fig_h
+        y_f = 0.4 / fig_h
+        placed: List[Any] = []                       # (artist, y in inches, v1.5 y fraction)
         if judgment_text:
             t = fig.text(text_x, 0, "", fontsize=L["judgment"], color="#0b0b0b", va="bottom")
             judgment = _fit_text_width(fig, t, wrap_judgment, j_width)
-            placed.append((t, y_in))
+            placed.append((t, y_in, y_f))
             y_in += line_in * (judgment.count("\n") + 1) + line_in * 0.4
+            y_f += line_f * (judgment.count("\n") + 1) + line_f * 0.4
         if caption_text:
             t = fig.text(text_x, 0, "", fontsize=L["caption"], color="#898781", va="bottom")
             caption = _fit_text_width(fig, t, lambda w: _wrap(caption_text, w), L["wrap"])
-            placed.append((t, y_in))
+            placed.append((t, y_in, y_f))
             y_in += line_in * (caption.count("\n") + 1) + line_in * 0.6
+            y_f += line_f * (caption.count("\n") + 1) + line_f * 0.6
         legend = None
         if handles or any_striped:
             if any_striped:
@@ -522,25 +543,29 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
                 for h in handles:
                     h.set_label(_wrap(h.get_label(), per_line))
                 wrapped_names = True
-            legend_y = y_in
+            legend_y, legend_f = y_in, y_f
             rows = -(-len(handles) // ncol)
             extra = sum(h.get_label().count("\n") for h in handles) // max(1, ncol)
             y_in += line_in * 1.3 * (rows + extra)   # legend rows
+            y_f += line_f * 1.3 * (rows + extra)
         ticks_in = 0.0 if seg_row else 0.45                # tick labels under the axes
         bottom_in = y_in + ticks_in + line_in * 0.5
+        bottom_f = y_f + (0.0 if seg_row else 0.45 / fig_h) + line_f * 0.5
         top = 0.86 if style == "classic" else 0.88
         # classic grows only where v1.5 hit its cap (bottom margin > 75 %:
         # the legend ran into the tick labels); enhanced keeps a minimum plot
-        squeezed = (bottom_in > 0.75 * fig_h) if style == "classic" \
+        squeezed = (bottom_f > 0.75) if style == "classic" \
             else (fig_h * top - bottom_in < L["min_plot"])
         if squeezed:
             fig_h = max(fig_h, (bottom_in + L["min_plot"]) / top)
             fig.set_size_inches(L["width"], fig_h)
-        for artist, at in placed:
-            artist.set_y(at / fig_h)
+        as_v15 = style == "classic" and not squeezed
+        for artist, at, at_f in placed:
+            artist.set_y(at_f if as_v15 else at / fig_h)
         if legend is not None:
-            legend.set_bbox_to_anchor((0.5, legend_y / fig_h), transform=fig.transFigure)
-        fig.subplots_adjust(bottom=bottom_in / fig_h, top=top,
+            legend.set_bbox_to_anchor((0.5, legend_f if as_v15 else legend_y / fig_h),
+                                      transform=fig.transFigure)
+        fig.subplots_adjust(bottom=min(0.75, bottom_f) if as_v15 else bottom_in / fig_h, top=top,
                             left=0.09 if style == "classic" else 0.12, right=0.98)
 
         fig.canvas.draw()
@@ -558,6 +583,9 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
         if not horiz:
             _rotate_crowded_ticks(fig, ax)
         _fit_axis_edges(fig, ax)
+        _fit_left_margin(fig, ax)                    # ticks may have widened meanwhile
+        # the plot may have narrowed: labels that touch now are dropped too
+        _drop_overlapping(fig, sorted(point_labels, key=lambda t: label_rank.get(id(t), 1)))
         _drop_overlapping(fig, sorted(value_labels, key=lambda t: label_rank.get(id(t), 1)))
         _qa_layout(fig, ax, style)
         if qa is not None:
@@ -685,8 +713,9 @@ def _fit_value_labels(fig, ax, labels: List[Any], horiz: bool, fixed_max: bool) 
             else:
                 x1 += (x1 - x0) * (over_r + 4) / max(1.0, box.width - over_r - 4)
             changed = True
-        # left: over the category names / value ticks (a negative bar's label)
-        under_l = box.x0 - min(b.x0 for b in ends)
+        # left: over the category names / value ticks (a negative bar's label,
+        # kept 4 px clear of the axis so its tick does not read as a minus)
+        under_l = (box.x0 + (4 if horiz else 0)) - min(b.x0 for b in ends)
         if under_l > 1:
             x0 -= (x1 - x0) * (under_l + 4) / max(1.0, box.width - under_l - 4)
             changed = True
@@ -758,7 +787,8 @@ def _fit_segment_labels(fig, ax, labels: List[Any]) -> None:
     dropped when even that does not fit (the legend still names it)."""
     renderer = fig.canvas.get_renderer()
     for t, x0, x1, short in labels:
-        width = abs(ax.transData.transform((x1, 0))[0] - ax.transData.transform((x0, 0))[0]) - 4
+        # (a label that just fits its segment, as v1.5 drew it, stays)
+        width = abs(ax.transData.transform((x1, 0))[0] - ax.transData.transform((x0, 0))[0]) + 2
         if t.get_window_extent(renderer=renderer).width <= width:
             continue
         t.set_text(short)

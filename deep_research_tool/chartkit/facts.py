@@ -3,22 +3,20 @@ Facts of a panel, computed from its values (never from the LLM), and the
 check of the LLM's judgment against them.
 
 The LLM writes the judgment ("what to look at") without seeing a single
-value, so it can call a falling line 一貫して増加 or name the wrong label
-as the largest. ``judgment_conflict`` finds only PLAIN contradictions —
-a sentence a reader would read as one unambiguous claim:
+value. Its sentence is NEVER rewritten: free-form Japanese ('2020年は最も
+大きく落ち込んだ', '首位を奪われた', '原料高が毎年上昇し…') cannot be checked
+reliably by rules, and replacing a true sentence is worse than leaving a
+wrong one. Instead
 
-- 'A社が最大。' / '2024年が過去最高' / 'B社が最も低い': the named label
-  directly followed by が / は and a maximum / minimum word (not 最大手,
-  最大の…, a drop being 最大, a forecast year being higher);
-- '一貫して増加' / '年々減少' / '右肩上がり': a whole-span trend word with
-  one direction, no negation, no loss, no cause ('…により', '…ため').
+- enhanced appends the computed facts ('データ: 2019→2023で…') so the
+  reader sees the numbers next to the sentence;
+- ``judgment_conflict`` reports (要確認事項, both styles) only the one
+  claim shape that rules can read: a category named as the subject and
+  directly called the largest / smallest, ending there — 'A社が最大。',
+  '2024年が過去最高。', 'B社が最も低い。'.
 
-Anything else is not checked: a missed contradiction costs less than a
-true sentence called wrong. classic never rewrites the judgment (the
-contradiction is reported in 要確認事項); enhanced replaces a contradicted
-judgment with ``template_judgment`` and appends the computed fact to the
-others. ``source_line`` is the data's own account of the sources,
-certainty and forecasts (enhanced prints it under the chart).
+``source_line`` is the data's own account of the sources, certainty and
+forecasts (enhanced prints it under the chart).
 """
 
 from __future__ import annotations
@@ -27,26 +25,18 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 _TIME_LABEL = re.compile(r"^(19|20)\d{2}(\s*Q[1-4])?$", re.I)
-_UP = ("増加", "拡大", "伸び", "上昇", "成長", "増え", "伸長", "右肩上がり", "増収", "増益", "高ま",
-       "回復", "持ち直", "反発", "上向")
-_DOWN = ("減少", "縮小", "低下", "下落", "落ち込", "減り", "減収", "減益", "右肩下がり", "目減り",
-         "反落", "下向", "頭打ち")
-# a claim about the WHOLE plotted span
-_TREND = ("一貫して", "一貫した", "年々", "毎年", "継続的に", "継続して", "右肩上がり", "右肩下がり",
-          "期間を通じて", "期間中一貫", "一本調子")
-# negated / softened claims are not checked
-_NEG = ("ない", "せず", "ず、", "止ま", "とどま", "鈍化", "伸び悩", "横ばい", "一服", "限定的", "遅れ")
-# losses and deficits: 縮小 of a negative amount is a rise of the value
-_LOSS = ("赤字", "損失", "欠損", "純損", "マイナス")
-# a cause or another subject in the sentence: the direction may not be the series'
-_CAUSE = ("により", "によって", "ため", "ので", "を受け", "背景", "影響", "に伴", "につれ", "から")
 _MAX_WORDS = ("過去最高", "過去最大", "最高", "最大", "最多", "首位", "トップ", "1位", "一位",
-              "最も多", "最も大き", "最も高")
-_MIN_WORDS = ("過去最低", "過去最小", "最低", "最小", "最少", "最下位", "最も少な", "最も小さ", "最も低")
-# what may follow the max / min word for it to describe the subject itself
-# ('A社が最大。', '最高水準', '首位を維持'); '最大手', '最大の成長余地' are not
-_AFTER = (r"(?=$|[。、，,．.）)」』]|である|だ|で(?!は)|い|く|水準|値|額"
-          r"|を(?:維持|保|守|堅持|占め|記録|更新|奪)|に(?:なっ|なる|立|躍|浮上|返り咲)|と(?:なっ|なる))")
+              "最も多い", "最も大きい", "最も高い")
+_MIN_WORDS = ("過去最低", "過去最小", "最低", "最小", "最少", "最下位", "最も少ない", "最も小さい", "最も低い")
+# a period is never 'ranked' (2021年に首位 = a company's rank that year)
+_RANK = ("首位", "トップ", "1位", "一位", "最下位")
+# the claim must END at the max / min word: 'A社が最大。' — not '最大手',
+# '最大の…', '最も大きく落ち込んだ', '首位を奪われ', '過去最高だった2019年'
+_END = r"(?:です|である|だ|となった|になった)?(?=$|[。．.！!？?」』）)]|、|，|,)"
+# a negation anywhere in the sentence: not a plain claim
+_NEG = ("ない", "なかった", "ず", "れず", "外れ", "陥落", "転落", "譲", "奪われ", "落とし", "後退")
+# losses and deficits: '最大' of a negative amount is ambiguous
+_LOSS = ("赤字", "損失", "欠損", "純損", "マイナス")
 
 
 def _num(v: Any) -> Optional[float]:
@@ -77,11 +67,13 @@ def _points(panel: Dict[str, Any], s: Dict[str, Any]) -> List[Tuple[str, float, 
 
 
 def _natural(v: float, unit: str) -> Tuple[float, str]:
-    """A display unit that starts with a number reads naturally: 5 in
-    '10億ドル' is '50億ドル' (glued, it read '510億ドル')."""
-    m = re.match(r"^(\d+)(\D.*)$", unit or "")
+    """A display unit that starts with a number times a scale reads
+    naturally: 5 in '10億ドル' is '50億ドル' (glued, it read '510億ドル').
+    Other units that start with a number ('2015年=100', '100世帯当たり台')
+    are not scales and stay as they are."""
+    m = re.match(r"^(\d+)(兆|億|万|千|百万|十億)(.*)$", unit or "")
     if m:
-        return v * int(m.group(1)), m.group(2)
+        return v * int(m.group(1)), m.group(2) + m.group(3)
     return v, unit
 
 
@@ -93,6 +85,8 @@ def _fmt(v: float, unit: str) -> str:
         s = f"{v:.3g}"
     else:
         s = f"{v:,.1f}"
+    if unit[:1].isdigit():
+        return f"{s}（{unit}）"           # '98.5（2015年=100）', never '98.52015年=100'
     return s + ("%" if unit == "%" else unit)
 
 
@@ -120,7 +114,9 @@ def panel_facts(panel: Dict[str, Any]) -> Dict[str, Any]:
         "first": first, "last": last,
         "direction": _move(first[1], last[1], unit),
         "change": change,
-        "change_pct": (change / abs(first[1]) * 100.0) if first[1] and unit != "%" else None,
+        # no percentage across zero or from a negative base (−120→−20 is not +83 %)
+        "change_pct": (change / first[1] * 100.0)
+        if unit != "%" and first[1] > 0 and last[1] >= 0 else None,
         "max": max(pts, key=lambda p: p[1]),
         "min": min(pts, key=lambda p: p[1]),
         "max_actual": max(actual, key=lambda p: p[1]),
@@ -139,43 +135,36 @@ def _move(a: float, b: float, unit: str) -> str:
 
 
 def _names(label: str, text: str) -> List[re.Match]:
-    """Where the label is named as a subject: 'A社が' / '2024年は' (not
-    inside '2020年代' or '12024')."""
-    lead = r"(?<![0-9０-９A-Za-z])" if label[:1].isalnum() else ""
-    tail = r"(?:年度|年)?(?:が|は|には|に)" if _TIME_LABEL.match(label) else r"(?:が|は)"
+    """Where the label is the subject: 'A社が' / '2024年は' — not inside a
+    longer word ('京都' in '東京都', '2020' in '2020年代' or '12020')."""
+    lead = r"(?<![0-9０-９A-Za-z\u4e00-\u9fff\u30a0-\u30ff])"
+    tail = r"(?:年度|年)?(?:が|は)" if _TIME_LABEL.match(label) else r"(?:が|は)"
     return list(re.finditer(lead + re.escape(label) + tail, text))
 
 
-# a period is never 'ranked' (2021年に首位 = a company's rank that year)
-_RANK = ("首位", "トップ", "1位", "一位", "最下位")
-# 'に' names a period only together with an explicit record word
-_RECORD = ("過去最高", "過去最大", "過去最低", "過去最小")
-
-
 def judgment_conflict(judgment: str, facts: Dict[str, Any]) -> Optional[str]:
-    """Why the judgment plainly contradicts the data, or None (see the
-    module docstring for what counts as a plain claim). A difference
-    below 5 % (1 pt for '%') is never a contradiction."""
+    """Why the judgment plainly contradicts the data, or None: only
+    '<label>が/は <max|min word>' ending there (see the module docstring),
+    with no negation or loss in the sentence. A difference below 5 % (1 pt
+    for '%') is never a contradiction; a rank chart ('位') is not checked
+    (a smaller number is the better rank)."""
     text = str(judgment or "")
     if not text or facts.get("kind") not in ("time", "comparison"):
         return None
     unit = facts.get("unit") or ""
     pts: List[Tuple[str, float]] = facts["points"]
-    if any(w in text for w in _LOSS) or (unit != "%" and any(v < 0 for _l, v in pts)):
+    if "位" in unit or any(w in text for w in _LOSS) or any(w in text for w in _NEG) \
+            or (unit != "%" and any(v < 0 for _l, v in pts)):
         return None
     forecast = facts.get("forecast") or set()
-    # 1. 'X が 最大 / 最小'
     for lab, v in pts:
         period = bool(_TIME_LABEL.match(lab))
         for m in _names(lab, text):
             rest = text[m.end():]
             words_max = [w for w in _MAX_WORDS if not (period and w in _RANK)]
             words_min = [w for w in _MIN_WORDS if not (period and w in _RANK)]
-            if m.group(0).endswith("に"):
-                words_max = [w for w in words_max if w in _RECORD]
-                words_min = [w for w in words_min if w in _RECORD]
-            is_max = any(re.match(re.escape(w) + _AFTER, rest) for w in words_max)
-            is_min = any(re.match(re.escape(w) + _AFTER, rest) for w in words_min)
+            is_max = any(re.match(re.escape(w) + _END, rest) for w in words_max)
+            is_min = any(re.match(re.escape(w) + _END, rest) for w in words_min)
             # a forecast year is not part of 'the highest so far' for an actual one
             top = facts["max"] if lab in forecast else facts["max_actual"]
             bottom = facts["min"] if lab in forecast else facts["min_actual"]
@@ -183,30 +172,19 @@ def judgment_conflict(judgment: str, facts: Dict[str, Any]) -> Optional[str]:
                 return f"「{lab}」が最大とされていますが、最大は「{top[0]}」です"
             if is_min and v > bottom[1] and _material(bottom[1], v, unit):
                 return f"「{lab}」が最小とされていますが、最小は「{bottom[0]}」です"
-    # 2. a whole-span trend
-    if facts["kind"] != "time" or not any(w in text for w in _TREND):
-        return None
-    if any(w in text for w in _NEG) or any(w in text for w in _CAUSE):
-        return None
-    if any(_names(lab, text) or re.search(r"(?<![0-9])" + re.escape(lab) + r"(?![0-9])", text)
-           for lab, _v in pts):
-        return None                       # a named period: not the whole span
-    up, down = any(w in text for w in _UP), any(w in text for w in _DOWN)
-    if up == down:
-        return None
-    said = "up" if up else "down"
-    real = facts["direction"]
-    if real != "flat" and real != said:
-        (fl, _fv), (ll, _lv) = facts["first"], facts["last"]
-        return f"{fl}→{ll}は{'増加' if real == 'up' else '減少'}ですが、逆の方向で書かれています"
     return None
 
 
 def fact_sentence(facts: Dict[str, Any]) -> str:
     """One sentence of computed facts ('' for a multi-series panel)."""
     unit = facts.get("unit") or ""
+    forecast = facts.get("forecast") or set()
+
+    def mark(label: str) -> str:
+        return f"{label}（予測）" if label in forecast else label
     if facts.get("kind") == "time":
         (fl, fv), (ll, lv) = facts["first"], facts["last"]
+        fl, ll = mark(fl), mark(ll)
         word = {"up": "増加", "down": "減少", "flat": "ほぼ横ばい"}[facts["direction"]]
         pct = facts.get("change_pct")
         extra = ""
@@ -218,13 +196,10 @@ def fact_sentence(facts: Dict[str, Any]) -> str:
         return f"{fl}→{ll}で{_fmt(fv, unit)}→{_fmt(lv, unit)}（{word}{extra}）"
     if facts.get("kind") == "comparison":
         (ml, mv), (nl, nv) = facts["max"], facts["min"]
+        if "位" in unit:                         # a rank: the smallest number is the top
+            return f"最上位は{nl}（{_fmt(nv, unit)}）、最下位は{ml}（{_fmt(mv, unit)}）"
         return f"最大は{ml}（{_fmt(mv, unit)}）、最小は{nl}（{_fmt(nv, unit)}）"
     return ""
-
-
-def template_judgment(facts: Dict[str, Any]) -> str:
-    s = fact_sentence(facts)
-    return f"{s}。" if s else ""
 
 
 def source_line(panel: Dict[str, Any], max_names: int = 3) -> str:
@@ -260,7 +235,7 @@ def source_line(panel: Dict[str, Any], max_names: int = 3) -> str:
     more = f" ほか{len(names) - max_names}件" if len(names) > max_names else ""
     order = ("公表", "換算", "導出", "推定", "二次")
     tags = "・".join(f"{b}{counts[b]}" for b in order if counts.get(b))
-    line = f"出所: {'、'.join(short)}{more}" + (f"（{tags}）" if tags else "") + "。"
+    line = f"出所（データ）: {'、'.join(short)}{more}" + (f"（{tags}）" if tags else "") + "。"
     if forecast:
         line += f"予測値: {'・'.join(forecast[:6])}{'…' if len(forecast) > 6 else ''}。"
     return line
@@ -272,13 +247,12 @@ def _host(url: Any) -> str:
 
 
 def apply_facts(panel: Dict[str, Any], style: str = "classic") -> Dict[str, Any]:
-    """Check a RESOLVED panel in place; returns what was found / changed.
+    """Check a RESOLVED panel in place; returns what was found / added.
 
-    classic: nothing is rewritten — a plain contradiction is only returned
-    (``conflict``) for 要確認事項. enhanced: a contradicted judgment is
-    replaced by the computed sentence (``judgment_replaced``), the
-    computed fact is appended to the others, the data's source / certainty
-    / forecast line to the caption and the unit to a title without one."""
+    The judgment is never rewritten. Both styles: a plain contradiction is
+    returned (``conflict``) for 要確認事項. enhanced also appends the
+    computed fact to the judgment, the data's source / certainty /
+    forecast line to the caption and the unit to a title without one."""
     from .spec import fix_title_unit
 
     record: Dict[str, Any] = {}
@@ -289,19 +263,14 @@ def apply_facts(panel: Dict[str, Any], style: str = "classic") -> Dict[str, Any]
         record["conflict"] = {"judgment": judgment, "reason": reason}
     if style != "enhanced":
         return record
-    if reason:
-        new = template_judgment(facts)
-        if new:
-            record["judgment_replaced"] = {"from": judgment, "to": new, "reason": reason}
-            panel["judgment"] = judgment = new
     fact = fact_sentence(facts)
-    if fact and not reason:
+    if fact:
         shown = [_fmt(p[1], facts.get("unit") or "") for p in (facts.get("last"), facts.get("max")) if p]
         nums = [re.sub(r"[^0-9.]", "", n) for n in shown]
         plain = judgment.replace(",", "")
         # the judgment already quotes the number (as a whole number: '2' is not in '2020')
         if not any(n and re.search(r"(?<![0-9.])" + re.escape(n) + r"(?![0-9])", plain) for n in nums):
-            judgment = judgment.rstrip().rstrip("。.") + f"。データ: {fact}。"
+            judgment = (judgment.rstrip().rstrip("。.") + "。" if judgment.strip() else "") + f"データ: {fact}。"
             panel["judgment"] = judgment
             record["fact_added"] = fact
     line = source_line(panel)

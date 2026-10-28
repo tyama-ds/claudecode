@@ -148,8 +148,10 @@ def normalize_semantic_text(text: str) -> str:
     text = _MD_LINK_RE.sub(r"\1", text)
     text = _TAG_RE.sub("", text)
     text = _CITATION_RE.sub("", text)
-    # "•" is the PDF renderer's bullet for a markdown "- " item
-    text = _re.sub(r"[*_`>#|\\\-•]+", "", text)
+    # "•" is the PDF renderer's bullet for a markdown "- " item; box
+    # drawing ('───' rules), control characters (a bullet read back by
+    # pypdf as \x7f) and zero-width spaces are not text either
+    text = _re.sub(r"[*_`>#|\\\-•\u2500-\u257f\x00-\x08\x0b-\x1f\x7f\u200b]+", "", text)
     text = _re.sub(r"[：:]\s*$", "", text)
     return _re.sub(r"\s+", "", text)
 
@@ -246,7 +248,11 @@ def verify_frozen_in_artifact(manifest: Dict[str, Any],
         checked += 1
         needles.append(needle)
         if needle not in haystack:
-            missing.append(fragment.strip()[:120])
+            # a numbered list item whose number the renderer draws itself
+            # ('1. …' as a Word / HTML list) is there without its '1.'
+            m = _re.match(r"\d{1,3}[.)](.+)$", needle)
+            if not (m and m.group(1) in haystack):
+                missing.append(fragment.strip()[:120])
 
     chapter_titles: List[str] = []
     # every frozen text as one continuous string (a printed PDF line or an
@@ -305,10 +311,9 @@ def verify_frozen_in_artifact(manifest: Dict[str, Any],
             for line in para.split("\n"):
                 # footnote definitions / numbered reference lines are
                 # citation plumbing, not semantic additions
-                if _re.match(r"\s*\[\^?\d+\]\s*[:：]", line) or \
-                        _re.match(r"\s*\d+\.\s+(?:\[[^\]]{0,12}\]\s*)?\S*https?://", line) or \
-                        _re.match(r"\s*\d+\.\s+\[[^\]]{0,12}\]\s", line):
-                    continue
+                # a footnote / reference prefix ('[^1]:', '3. [B] ') is
+                # plumbing; the text after it is checked like any line
+                line = _re.sub(r"^\s*(?:\[\^?\d+\]\s*[:：]|\d+\.\s+(?:\[[^\]]{0,12}\]\s*)?)", "", line)
                 norm = normalize_semantic_text(line)
                 if len(norm) < min_addition_chars:    # short boilerplate is structural
                     continue

@@ -316,38 +316,36 @@ def _line(values, judgment, forecast_last=False):
 
 class TestFacts:
 
-    def test_direction_and_maximum_claims(self):
+    def test_only_plain_max_min_claims_are_checked(self):
         f = panel_facts(_line([5, -12, 8, 3, -2], ""))
         assert f["kind"] == "time" and f["direction"] == "down"
-        assert judgment_conflict("一貫して増加している。", f)               # a whole-span trend
-        assert judgment_conflict("2020年に大きく落ち込んだ。", f) is None     # true of 2020
-        # one period's change is not checked (too easy to misread: 前年比 / その後 / ピークに)
-        assert judgment_conflict("2020年に増加した。", f) is None
-        assert judgment_conflict("2020年に落ち込んだが2021年に回復。", f) is None
-        assert judgment_conflict("一貫した増加は見られない。", f) is None      # negated
+        # direction words cannot be read reliably (subject, cause, rate…): never checked
+        for t in ("一貫して増加している。", "2020年に大きく落ち込んだ。", "2020年に増加した。",
+                  "2020年に落ち込んだが2021年に回復。", "一貫した増加は見られない。"):
+            assert judgment_conflict(t, f) is None, t
         bar = {"form": "bar", "unit": "億円", "labels": ["A社", "B社", "C社"],
                "series": [{"values": [300, 120, 50]}]}
         fb = panel_facts(bar)
         assert judgment_conflict("B社が最大。", fb) and judgment_conflict("A社が最大。", fb) is None
 
-    def test_classic_never_rewrites_and_enhanced_replaces_a_contradiction(self):
+    def test_the_judgment_is_never_rewritten(self):
         ok = _line([5, -12, 8, 3, -2], "2020年に大きく落ち込んだ。")
         assert apply_facts(ok, "classic") == {} and ok["judgment"] == "2020年に大きく落ち込んだ。"
         assert ok["caption"] == "業界団体" and ok["title"] == "成長率"
-        bad = _line([5, -12, 8, 3, -2], "一貫して増加している。")
+        bad = _line([5, -12, 8, 3, -2], "2019年が過去最高。")      # 2021 is higher
         rec = apply_facts(bad, "classic")
-        assert rec["conflict"]["judgment"] == "一貫して増加している。" and "judgment_replaced" not in rec
-        assert bad["judgment"] == "一貫して増加している。"              # classic: reported only
-        bad2 = _line([5, -12, 8, 3, -2], "一貫して増加している。")
+        assert rec["conflict"]["judgment"] == "2019年が過去最高。" and bad["judgment"] == "2019年が過去最高。"
+        bad2 = _line([5, -12, 8, 3, -2], "2019年が過去最高。")
         rec2 = apply_facts(bad2, "enhanced")
-        assert rec2["judgment_replaced"]["from"] == "一貫して増加している。"
-        assert bad2["judgment"].startswith("2019→2023で5%→-2%（減少")
+        assert rec2["conflict"] and "judgment_replaced" not in rec2
+        # enhanced: the sentence stays, the computed facts follow it
+        assert bad2["judgment"].startswith("2019年が過去最高。データ: 2019→2023で5%→-2%（減少")
 
     def test_enhanced_adds_fact_source_line_and_unit(self):
         p = _line([5, -12, 8, 3, -2], "2020年に大きく落ち込んだ。", forecast_last=True)
         rec = apply_facts(p, "enhanced")
-        assert p["judgment"] == "2020年に大きく落ち込んだ。データ: 2019→2023で5%→-2%（減少、-7pt）。"
-        assert "出所: 業界団体（公表5）" in p["caption"] and "予測値: 2023" in p["caption"]
+        assert p["judgment"] == "2020年に大きく落ち込んだ。データ: 2019→2023（予測）で5%→-2%（減少、-7pt）。"
+        assert "出所（データ）: 業界団体（公表5）" in p["caption"] and "予測値: 2023" in p["caption"]
         assert p["title"] == "成長率（%）" and rec["source_line"]
 
     def test_source_line_counts_and_truncates(self):
@@ -355,7 +353,7 @@ class TestFacts:
         panel = {"labels": list("abcde"),
                  "series": [{"values": [1, 2, 3, 4, 5], "basis": [PUB, PUB, "二次", "換算", "二次"],
                              "sources": srcs}]}
-        assert source_line(panel) == "出所: 資料0、資料1、資料2 ほか2件（公表2・換算1・二次2）。"
+        assert source_line(panel) == "出所（データ）: 資料0、資料1、資料2 ほか2件（公表2・換算1・二次2）。"
 
 
 # --------------------------------------------------------------------------
@@ -571,7 +569,7 @@ class _LLM:
             "id": "p1", "form": "bar", "title": f"{it['name']}（{it['unit']}）",
             "labels_ref": it["labels_ref"],
             "series": [{"name": it["name"], "values_ref": it["values_ref"], "role": "emphasis"}],
-            "caption": "出所: 統計", "judgment": "一貫して減少している。"}], ensure_ascii=False))
+            "caption": "出所: 統計", "judgment": "2021年が過去最高。"}], ensure_ascii=False))
 
 
 @pytest.mark.parametrize("style", ["classic", "enhanced"])
@@ -605,12 +603,13 @@ def test_pipeline_style_grounding_facts_and_yield(tmp_path, style):
         ResearchWarnings.unbind()
     assert len(figs) == 1
     sem = figs[0].chart_data
+    # the judgment is never rewritten; the contradiction is reported in both styles
+    assert sem["judgment"].startswith("2021年が過去最高。")
+    assert any("食い違う可能性" in m for m in msgs)
     if style == "enhanced":
-        assert sem["judgment"].startswith("2021→2024で40億円→60億円（増加")   # replaced
-        assert any("見るべき点" in m and "差し替え" in m for m in msgs)
+        assert "データ: 2021→2024で40億円→60億円（増加" in sem["judgment"]
     else:
-        assert sem["judgment"] == "一貫して減少している。"                # classic never rewrites
-        assert any("食い違う可能性" in m for m in msgs)
+        assert sem["judgment"] == "2021年が過去最高。"
     assert any("出典本文で確認できません" in m for m in msgs)
     y = json.loads((tmp_path / "figures" / "chart_yield.json").read_text(encoding="utf-8"))
     assert y["style"] == style and y["charts"] == 1
@@ -619,7 +618,7 @@ def test_pipeline_style_grounding_facts_and_yield(tmp_path, style):
     assert ch["panels"][0]["grounding"]["issues"][0]["label"] == "2024"
     assert y["chapters"]["2"]["catalog"]["points"] == 0
     if style == "enhanced":
-        assert "出所: www.stat.go.jp" in sem["caption"] or "出所: stat.go.jp" in sem["caption"]
+        assert "出所（データ）: www.stat.go.jp" in sem["caption"] or "出所（データ）: stat.go.jp" in sem["caption"]
         assert "要確認" in sem["caption"]
     else:
         assert sem["caption"] == "出所: 統計"
@@ -658,10 +657,8 @@ class TestReviewRegressions:
 
     def test_plain_false_judgments_are_flagged(self):
         rising = self._line([100, 110, 120, 130, 140], start=2019)
-        assert judgment_conflict("一貫して減少している", rising)
-        assert judgment_conflict("市場は右肩下がり", rising)
         assert judgment_conflict("2020年が過去最高", rising)
-        assert judgment_conflict("2021年に過去最高を記録", rising)
+        assert judgment_conflict("2020年は過去最高です。", rising)
         bar = panel_facts({"form": "bar", "unit": "億円", "labels": ["A社", "B社", "C社"],
                            "series": [{"values": [300, 120, 50]}]})
         assert judgment_conflict("B社が首位", bar) and judgment_conflict("A社が最も低い", bar)
@@ -1202,3 +1199,174 @@ class TestR2Reports:
             "| 社名 | シェア |\n|---|---|\n| A社 | 52% |\n\n![題 [注]](/tmp/My Reports/c.png)")
         assert "<td>A社</td><td>52%</td>" in page
         assert '<img src="/tmp/My Reports/c.png" alt="題 [注]"' in page
+
+
+# --------------------------------------------------------------------------
+# regressions from the third review round
+# --------------------------------------------------------------------------
+
+def test_r3_wrap_matches_v15_textwrap():
+    import textwrap
+    from deep_research_tool.chartkit.render_png import _wrap
+    for text, width in [("生産能力 2026年末", 10), ("2026 出荷 年率換算", 10), ("日本 市場規模 2025年", 10),
+                        ("Global market size", 10), ("出典: " + "あ" * 79, 70),
+                        ("出典：…「工業統計」　各社決算資料　（2024年）", 70), ("a  b   c", 10)]:
+        assert _wrap(text, width) == "\n".join(textwrap.wrap(text, width)), text
+    # where textwrap had a defect the wrap differs on purpose
+    assert "1.\n6" not in _wrap("26Q1の実売ベースは1Q'25基準1.6億缶×実売+10%からの推定。" * 2, 70)
+
+
+def test_r3_segment_label_that_fits_keeps_its_name(tmp_path):
+    pytest.importorskip("matplotlib")
+    panel = _panel("stacked_hbar", ["2022年", "2023年", "2024年"],
+                   [([55, 50, 46], "part"), ([30, 32, 35], "part"), ([10, 12, 13], "part"), ([5, 6, 6], "part")],
+                   unit="%", y_max=100, name0="鉄鋼", name1="化学", name2="機械", name3="食品")
+    texts = {t.strip() for t in _tick_texts(panel, "classic", tmp_path)["texts"]}
+    assert "鉄鋼 55%" in texts and "機械 10%" in texts
+
+
+def test_r3_enhanced_multi_series_hbar_fits_a_page(tmp_path):
+    pytest.importorskip("matplotlib")
+    panel = _panel("hbar", [f"C{i}" for i in range(10)],
+                   [([i + j for i in range(10)], "emphasis" if j == 0 else "context") for j in range(8)])
+    qa = _qa(panel, "enhanced", tmp_path)
+    assert qa["size_px"][1] <= 10.5 * 200 and qa["spill"] == []
+
+
+class TestR3Facts:
+
+    def _line(self, vals, unit="億円", start=2019, forecast=()):
+        return {"form": "line_xy", "unit": unit, "labels": [], "title": "t", "caption": "", "judgment": "",
+                "series": [{"name": "s", "unit": unit, "basis": [PUB] * len(vals),
+                            "values": [{"x": float(start + i), "y": v} for i, v in enumerate(vals)],
+                            "sources": [{"forecast": (start + i) in forecast} for i in range(len(vals))]}]}
+
+    def test_true_sentences_are_never_flagged(self):
+        line = panel_facts(self._line([100, 72, 85, 95, 104]))
+        for t in ("2020年は最も大きく落ち込んだ", "2021年は最も大きく伸びた", "2021年は過去最高を更新できなかった",
+                  "2023年は過去最高だった2019年の約8割まで回復した", "2020年は過去最大となる落ち込みを記録した",
+                  "市場は毎年拡大を続けている", "原材料費が毎年上昇し、利益率を圧迫している",
+                  "需要はコロナ禍後、一貫して回復している"):
+            assert judgment_conflict(t, line) is None, t
+        bar = panel_facts({"form": "bar", "unit": "億円", "labels": ["A社", "B社", "C社"],
+                           "series": [{"values": [320, 300, 150]}]})
+        for t in ("B社は首位を奪われ、2位に後退した", "B社はトップを維持できなかった", "B社は首位に立てなかった"):
+            assert judgment_conflict(t, bar) is None, t
+        city = panel_facts({"form": "bar", "unit": "万人泊", "labels": ["東京", "京都"],
+                            "series": [{"values": [5800, 1900]}]})
+        assert judgment_conflict("延べ宿泊者数は東京都が最多", city) is None
+        rank = panel_facts({"form": "bar", "unit": "位", "labels": ["シンガポール", "日本"],
+                            "series": [{"values": [1, 38]}]})
+        assert judgment_conflict("シンガポールが1位", rank) is None
+
+    def test_data_sentence_numbers_and_units(self):
+        from deep_research_tool.chartkit.facts import fact_sentence
+        idx = panel_facts(self._line([98.5, 102, 105, 108.9], unit="2015年=100", start=2020))
+        assert "98.5（2015年=100）→108.9（2015年=100）" in fact_sentence(idx)
+        loss = panel_facts(self._line([-120, -90, -60, -20], start=2020))
+        assert "%" not in fact_sentence(loss).split("（")[-1]           # no '+83%' across a negative base
+        fc = panel_facts(self._line([100, 150, 200, 260], start=2022, forecast=(2025,)))
+        assert "2022→2025（予測）" in fact_sentence(fc)
+        rank = panel_facts({"form": "bar", "unit": "位", "labels": ["シンガポール", "日本"],
+                            "series": [{"values": [1, 38]}]})
+        assert fact_sentence(rank).startswith("最上位はシンガポール（1位）")
+
+
+class TestR3Grounding:
+
+    def test_scale_errors_are_flagged(self):
+        assert not value_in_quote(3, "%", "シェアは約3割")                 # 30 %, not 3 %
+        assert not value_in_quote(5, "%", "3割5分")
+        assert not value_in_quote(5.2, "億ドル", "$5.2B")                  # 52 億ドル
+        assert not value_in_quote(450, "億ドル", "US$450M")
+        assert not value_in_quote(50, "%", "利用者は50万人")
+        assert not value_in_quote(1234, "億円", "1,243億円")
+
+    def test_more_written_forms_are_read(self):
+        assert value_in_quote(30, "%", "約三割") and value_in_quote(35, "%", "3割5分")
+        assert value_in_quote(33.3, "%", "3分の1") and value_in_quote(25, "%", "4人に1人")
+        assert value_in_quote(12, "億ドル", "$1.2B") and value_in_quote(4.5, "億ドル", "US$450M")
+        assert value_in_quote(1.5, "千", "1.5k units")
+        assert quote_in_source("12.5%", "伸び率は12.50%") and quote_in_source("1.2兆円", "市場は1兆2,000億円")
+
+    def test_compound_units_parse(self):
+        from deep_research_tool.chartkit.data_layer import parse_unit
+        assert parse_unit("千億円")[:2] == ("円", 1e11) and parse_unit("100万台")[:2] == ("台", 1e6)
+        assert value_in_quote(3, "千億円", "2030年に3千億円") and value_in_quote(1.2, "100万台", "120万台")
+
+
+class TestR3Artifact:
+
+    def _gen(self, tmp_path, coll=None, plan_items=(("1", "市場規模の推移", "d"),)):
+        from deep_research_tool.report.generator import ReportGenerator
+        from deep_research_tool.tests.test_finalization_integration import (
+            make_locker, make_plan, make_session)
+        ev = [("https://ex.com/a", "x " * 30)]
+        plan = make_plan(list(plan_items))
+        session = make_session(plan, {sid: {"title": t, "content": "本文 [1]", "evidence": ev}
+                                      for sid, t, _d in plan_items})
+        gen = ReportGenerator(output_dir=tmp_path / "reports", language="ja")
+        gen.figure_collection = coll
+        return gen, session, make_locker(tmp_path, ev)
+
+    def test_wide_table_keeps_its_grid_and_passes(self, tmp_path):
+        pytest.importorskip("reportlab")
+        from deep_research_tool.config import ReportFormat
+        from deep_research_tool.report.figure_table_generator import FigureTableCollection, TableData
+        from deep_research_tool.report.semantic_manifest import (build_semantic_manifest, check_artifact,
+                                                                 figure_semantics_markdown)
+        from deep_research_tool.main import _report_titles
+        coll = FigureTableCollection(tables=[TableData(
+            table_id="w", title="年次推移", caption="", headers=["メーカー"] + [str(y) for y in range(2011, 2024)],
+            rows=[["A社"] + [str(10 + i) for i in range(13)]], section_id="1")])
+        gen, session, locker = self._gen(tmp_path, coll)
+        app = figure_semantics_markdown(coll, language="ja", section_id="付録D")
+        session.section_contents["付録D"] = {"title": "付録D", "content": app, "sources": [], "extracted_content": []}
+        path = gen.generate_report(session=session, evidence_locker=locker, format=ReportFormat.PDF,
+                                   verification_result=None)
+        manifest = build_semantic_manifest({"1": "本文 [1]", "付録D": app}, figure_collection=coll)
+        assert check_artifact(manifest, path, locker, extra_allowed=_report_titles(session))["status"] == "pass"
+
+    @pytest.mark.parametrize("fmt", ["markdown", "html", "pdf"])
+    def test_long_chapter_titles_and_reference_prefixes(self, tmp_path, fmt):
+        pytest.importorskip("reportlab")
+        from deep_research_tool.config import ReportFormat
+        from deep_research_tool.report.semantic_manifest import build_semantic_manifest, check_artifact
+        from deep_research_tool.main import _report_titles
+        long_title = "国内炭素繊維市場における主要メーカーの競争環境と市場シェア分析および今後の見通し"
+        gen, session, locker = self._gen(tmp_path, plan_items=(("1", long_title, "d"),))
+        body = "本文 [1]\n\n国内市場は堅調に拡大しており、主要メーカーは増産投資を進めている状況にある。"
+        session.section_contents["1"]["content"] = body
+        manifest = build_semantic_manifest({"1": body})
+        path = gen.generate_report(session=session, evidence_locker=locker, format=ReportFormat(fmt),
+                                   verification_result=None)
+        extra = _report_titles(session)
+        assert check_artifact(manifest, path, locker, extra_allowed=extra)["status"] == "pass"
+        for injected in ("[9]: 競合他社の売上高は2030年までに三倍に急増し、今後も高い成長が確実視されていると経営陣が表明した。",
+                         "1. [注] 競合他社の売上高は2030年までに三倍に急増し、今後も高い成長が確実視されていると経営陣が表明した。"):
+            session.section_contents["1"]["content"] = body + "\n\n" + injected
+            p2 = gen.generate_report(session=session, evidence_locker=locker, format=ReportFormat(fmt),
+                                     verification_result=None)
+            assert check_artifact(manifest, p2, locker, extra_allowed=extra)["status"] == "fail", injected
+
+    def test_rules_bullets_and_numbered_lists_normalise(self):
+        from deep_research_tool.report.semantic_manifest import normalize_semantic_text, verify_frozen_in_artifact
+        assert normalize_semantic_text("─" * 60) == "" and normalize_semantic_text("\x7f 本文") == "本文"
+        manifest = {"chapters": {"1": "1. 国内市場は堅調に拡大しており主要メーカーは増産投資を進めている。"}}
+        res = verify_frozen_in_artifact(manifest, "国内市場は堅調に拡大しており主要メーカーは増産投資を進めている。")
+        assert res["ok"], res
+
+    def test_pdf_subsection_is_not_cut(self, tmp_path):
+        pytest.importorskip("reportlab")
+        pypdf = pytest.importorskip("pypdf")
+        from deep_research_tool.config import ReportFormat
+        gen, session, locker = self._gen(tmp_path, plan_items=(("1", "市場", "d"), ("1.1", "詳細", "d")))
+        session.research_plan.table_of_contents.items[0].subsections = [
+            i for i in session.research_plan.table_of_contents.get_flat_sections() if i.section == "1.1"]
+        session.research_plan.table_of_contents.items = session.research_plan.table_of_contents.items[:1]
+        long_text = "詳細な説明が続く。" * 300 + "最後の文はここにある。"
+        session.section_contents["1.1"]["content"] = long_text
+        path = gen.generate_report(session=session, evidence_locker=locker, format=ReportFormat.PDF,
+                                   verification_result=None)
+        text = "".join(p.extract_text() for p in pypdf.PdfReader(str(path)).pages).replace("\n", "")
+        assert "最後の文はここにある。" in text
