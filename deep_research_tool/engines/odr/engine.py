@@ -26,6 +26,7 @@ LLM: OpenAI-compatible (``openai:<model>``) or Anthropic
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -233,7 +234,11 @@ def build_mcp_prompt(tools: List[str], run_input: RunInput) -> str:
                 f"`{TOOL_FETCH}` tool. Do not look for other sources; if a page does not cover "
                 "a point, say so. Cite the URLs you used.")
     if run_input.input_urls:
-        text += " Read every starting URL before writing."
+        # the researcher only sees its system prompt (where mcp_prompt is
+        # formatted in) and the supervisor's research_topic — not the
+        # first user message — so the URLs must be listed here
+        text += (" Read every starting URL before writing. Starting URLs:\n"
+                 + "\n".join(f"  - {u}" for u in run_input.input_urls))
     return text
 
 
@@ -395,8 +400,20 @@ class OpenDeepResearchEngine(Engine):
                                           timeout=search.timeout_seconds)
                 except ValueError as e:
                     raise EngineConfigError(str(e)) from e
-                tools_impl = SearchTools(backend, max_results=search.max_results,
-                                         on_event=lambda t, p: ctx.emit(t, p))
+                # the tools run on the server's handler / fetch-pool threads;
+                # their events are handed to this loop so that ctx.emit (and
+                # the progress callback behind it) only ever runs here
+                loop = asyncio.get_running_loop()
+
+                def _emit_on_loop(type_: str, payload: Dict[str, Any]) -> None:
+                    try:
+                        ctx.emit(type_, payload)
+                    except Exception:   # noqa: BLE001 - a progress hiccup must not surface as a loop error
+                        pass
+
+                tools_impl = SearchTools(
+                    backend, max_results=search.max_results,
+                    on_event=lambda t, p: loop.call_soon_threadsafe(_emit_on_loop, t, p))
                 tool_names = mcp_tools_for(request)
                 server = McpSearchServer(tools_impl, enabled_tools=tool_names).start()
                 mcp_url = server.url
@@ -439,11 +456,20 @@ class OpenDeepResearchEngine(Engine):
             # no source at all: the engine wrote from nothing it could cite
             hints = [line.strip() for line in stderr_tail
                      if "error" in line.lower() or "exception" in line.lower()][-3:]
-            if log.get("searches", 0) == 0 and log.get("fetches", 0) == 0:
+            fetch_errors = int(log.get("fetch_errors") or 0)
+            if log.get("searches", 0) == 0 and log.get("fetches", 0) == 0 and fetch_errors == 0:
                 raise RuntimeError(
                     f"{ENGINE_NAME} は検索ツールを一度も呼ばずに終了し、出典がありません"
                     "（MCP 接続・LLM のツール呼び出し対応を確認してください）"
                     + (f"。ワーカーの出力: {' / '.join(hints)[:600]}" if hints else ""))
+            if log.get("searches", 0) == 0 and log.get("fetches", 0) == 0:
+                # fetch_page was called (指定 URL のみ) but no page could be read
+                failed = list((log.get("failed_urls") or {}).items())[:3]
+                detail = " / ".join(f"{u}（{why}）" for u, why in failed)
+                raise RuntimeError(
+                    f"{ENGINE_NAME} はページの取得を {fetch_errors} 回試みましたが 1 件も読めず、"
+                    "出典がありません（指定 URL への到達・プロキシ・アクセス制限・PDF 等の解析を"
+                    "確認してください）" + (f"。取得できなかったページ: {detail[:600]}" if detail else ""))
             if log.get("results", 0) == 0 and log.get("fetches", 0) == 0:
                 where = ("SearXNG の URL" if request.search and request.search.provider == "searxng"
                          else "DuckDuckGo への到達（プロキシ・社内ネットワークの制限）")
@@ -461,6 +487,7 @@ class OpenDeepResearchEngine(Engine):
                 "search_errors": log.get("search_errors"),
                 "queries": list(log.get("queries") or [])[:50],
                 "urls": dict(list((log.get("urls") or {}).items())[:200]),
+                "failed_urls": dict(log.get("failed_urls") or {}),
             }
             # titles the search saw, for sources the report lists without one
             titles = log.get("urls") or {}

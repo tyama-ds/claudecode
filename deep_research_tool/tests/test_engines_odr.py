@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 import types
 import urllib.error
 import urllib.request
@@ -187,6 +188,8 @@ class TestWorkerEnv:
         assert payload["configurable"]["mcp_config"]["tools"] == ["fetch_page"]
         assert "Use ONLY these URLs" in payload["prompt"]
         assert "ONLY the pages listed" in payload["configurable"]["mcp_prompt"]
+        # the researcher sees only its system prompt: the URLs are listed in mcp_prompt
+        assert "  - https://a.example/x" in payload["configurable"]["mcp_prompt"]
         # documents are refused with a warning; search_api none is noted
         req2 = _req(options={"search_api": "none"}, documents=[{"name": "a", "text": "b"}])
         payload, warnings = odr.build_worker_payload(req2, None)
@@ -208,6 +211,7 @@ class TestMcpSearchServer:
         with McpSearchServer(tools) as srv:
             url = srv.mcp_url
             assert srv.url.startswith("http://127.0.0.1:") and url.endswith("/mcp")
+            assert url == f"http://127.0.0.1:{srv.port}/{srv.token}/mcp" and len(srv.token) >= 24
             st, ct, body = rpc(url, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
                                      "params": {"protocolVersion": "2025-06-18", "capabilities": {},
                                                 "clientInfo": {"name": "t", "version": "1"}}})
@@ -262,7 +266,24 @@ class TestMcpSearchServer:
             with pytest.raises(urllib.error.HTTPError) as ei:
                 rpc(srv.url + "/other", {"jsonrpc": "2.0", "id": 1, "method": "ping"})
             assert ei.value.code == 404
+            # only the run's own worker: no token → 404, foreign Host / browser Origin → 403
+            with pytest.raises(urllib.error.HTTPError) as ei:
+                rpc(f"http://127.0.0.1:{srv.port}/mcp", {"jsonrpc": "2.0", "id": 1, "method": "ping"})
+            assert ei.value.code == 404
+            for headers in ({"Host": "evil.example:80"}, {"Origin": "http://evil.example"},
+                            {"Origin": "null"}):
+                req = urllib.request.Request(url, data=b'{"jsonrpc":"2.0","id":1,"method":"ping"}',
+                                             headers={"Content-Type": "application/json", **headers})
+                with pytest.raises(urllib.error.HTTPError) as ei:
+                    urllib.request.urlopen(req, timeout=5)
+                assert ei.value.code == 403, headers
+            req = urllib.request.Request(url, data=b'{"jsonrpc":"2.0","id":1,"method":"ping"}',
+                                         headers={"Content-Type": "application/json",
+                                                  "Origin": f"http://localhost:{srv.port}"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                assert r.status == 200
             assert srv.requests_seen["tools/call"] == 4 and srv.requests_seen["initialize"] == 2
+        assert srv.requests_seen["ping"] == 3                 # forbidden / unknown paths never dispatched
         log = tools.log
         assert log["searches"] == 2 and log["results"] == 4 and log["fetches"] == 5
         assert log["queries"] == ["炭素繊維 市場規模", "q2"]
@@ -306,6 +327,71 @@ class TestMcpSearchServer:
                                   "params": {"name": "web_search", "arguments": {"queries": ["q"]}}})
         assert err["error"]["code"] == -32602
         assert srv.handle_message({"id": 1})["error"]["code"] == -32600
+
+    def test_failed_fetches_and_slow_searches(self, monkeypatch):
+        """A page the client could not read comes back as a page titled
+        "Error" with metadata.error: it is a failed fetch, not page text.
+        A backend search that runs past its bound is answered as timed out."""
+        class ErrorPageClient(FakeClient):
+            def get_page_content(self, url, **kw):
+                return SimpleNamespace(url=url, title="Error", metadata={"error": "Read timed out"},
+                                       text_content="Failed to extract content: Read timed out")
+        tools = SearchTools(backend_for("duckduckgo", search_client=ErrorPageClient()), max_results=1)
+        out = tools.web_search(["q"])
+        assert "Page excerpt" not in out and "Failed to extract" not in out
+        assert tools.fetch_page("https://x.test/a") == "(could not fetch https://x.test/a)"
+        assert tools.log["fetches"] == 0 and tools.log["fetch_errors"] == 2
+        assert "Error" not in tools.log["urls"].values()
+        assert tools.log["failed_urls"]["https://x.test/a"] == "RuntimeError: Read timed out"
+
+        import threading as _th
+        release = _th.Event()
+
+        class Slow(SearchBackend):
+            name = "slow"
+
+            def search(self, query, max_results):
+                release.wait(5)
+                return [{"title": "late", "url": "https://late.test/", "snippet": ""}]
+
+            def fetch(self, url):
+                raise RuntimeError("no")
+        monkeypatch.setattr(mcp_search, "PER_QUERY_SEARCH_SECONDS", 0.2)
+        t = SearchTools(Slow())
+        import time as _time
+        t0 = _time.monotonic()
+        out = t.web_search(["a", "b"])
+        assert _time.monotonic() - t0 < 3
+        assert out.count("(search timed out after") == 2 and t.log["search_errors"] == 2
+        release.set()
+        # the overall budget: no new query once it is spent
+        class SlowClient(FakeClient):
+            def search(self, query, max_results=None, **kw):
+                _time.sleep(0.3)
+                return super().search(query, max_results, **kw)
+        monkeypatch.setattr(mcp_search, "PER_QUERY_SEARCH_SECONDS", 5.0)
+        monkeypatch.setattr(mcp_search, "SEARCH_BUDGET_SECONDS", 0.2)
+        t2 = SearchTools(backend_for("duckduckgo", search_client=SlowClient()), excerpt_top=0)
+        out = t2.web_search(["a", "b"])
+        assert out.count("skipped: time budget exhausted") == 1 and t2.log["searches"] == 1
+
+    def test_idle_connections_are_closed(self, monkeypatch):
+        import socket
+        monkeypatch.setattr(mcp_search._Handler, "timeout", 0.5)
+        with McpSearchServer(SearchTools(backend_for("duckduckgo", search_client=FakeClient()))) as srv:
+            for first in (b"", b"POST /x/mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 1000\r\n\r\n{"):
+                s = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+                try:
+                    if first:
+                        s.sendall(first)
+                    t0 = time.monotonic()
+                    data = b"x"
+                    while data:
+                        data = s.recv(1024)          # the server closes after its idle timeout
+                    assert time.monotonic() - t0 < 4
+                    assert srv.requests_seen == {}  # nothing was dispatched
+                finally:
+                    s.close()
 
     def test_backends(self):
         with pytest.raises(ValueError, match="検索クライアントがありません"):
@@ -367,6 +453,22 @@ STUB_NO_SEARCH = textwrap.dedent(r'''
     print("Error loading MCP tools: connection refused", file=sys.stderr)
     emit.write(json.dumps({"kind":"result","output_kind":"report","summary":"s",
       "report_markdown":"# T\n\n出典なしの本文。\n","claims":[],"sources":[],"metrics":{},"warnings":[],"raw":{}}) + "\n")
+''')
+
+STUB_FETCH_ONLY = textwrap.dedent(r'''
+    import json, os, sys, urllib.request
+    emit_fd = os.dup(1); os.dup2(2, 1); sys.stdout = sys.stderr
+    emit = os.fdopen(emit_fd, "w", buffering=1)
+    payload = json.load(sys.stdin)
+    url = payload["configurable"]["mcp_config"]["url"].rstrip("/") + "/mcp"
+    def rpc(msg):
+        req = urllib.request.Request(url, data=json.dumps(msg).encode(), headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            b = r.read(); return json.loads(b) if b else None
+    for u in ("https://a.example/x", "https://a.example/y"):
+        rpc({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fetch_page","arguments":{"url":u}}})
+    emit.write(json.dumps({"kind":"result","output_kind":"report","summary":"s",
+      "report_markdown":"# T\n\n## 概要\n\n読めなかった。\n","claims":[],"sources":[],"metrics":{},"warnings":[],"raw":{}}) + "\n")
 ''')
 
 STUB_FATAL = textwrap.dedent(r'''
@@ -466,6 +568,16 @@ class TestEngineWithStandInWorker:
         with pytest.raises(RuntimeError, match="検索ツールを一度も呼ばずに"):
             asyncio.run(eng.run(RunContext("r1", _req())))
 
+    def test_urls_only_with_every_fetch_failing_names_the_pages(self, tmp_path):
+        eng = self._engine(tmp_path, STUB_FETCH_ONLY, client=FakeClient(fail_fetch=True))
+        req = _req(options={"complement_source_urls": False},
+                   input_urls=["https://a.example/x", "https://a.example/y"])
+        with pytest.raises(RuntimeError) as ei:
+            asyncio.run(eng.run(RunContext("r1", req)))
+        msg = str(ei.value)
+        assert "ページの取得を 2 回試みましたが 1 件も読めず" in msg
+        assert "https://a.example/x（RuntimeError: boom）" in msg and "MCP 接続" not in msg
+
     def test_empty_results_message_names_the_search(self, tmp_path):
         """The stub searches (STUB_OK) but the client returns nothing and
         the report cites no URL → the message points at the search."""
@@ -505,28 +617,50 @@ class TestEngineWithStandInWorker:
 # the worker's own logic (stubbed graph)
 # ----------------------------------------------------------------------
 
-def _load_worker(monkeypatch, updates):
+def _llm_result(usage):
+    """An LLMResult-shaped object: one ChatGeneration whose message carries usage."""
+    return SimpleNamespace(generations=[[SimpleNamespace(message=_AI("x", usage))]])
+
+
+def _load_worker(monkeypatch, updates, llm_usages=()):
     """worker.py imported by path with stub langchain_core / open_deep_research
-    modules whose graph streams ``updates``."""
+    modules whose graph streams ``updates``; every entry of ``llm_usages`` is
+    reported to the config's callbacks as one LLM call (as LangChain does for
+    each model call, subgraphs included)."""
     class HumanMessage:
         def __init__(self, content):
             self.content = content
+
+    class BaseCallbackHandler:
+        def __init__(self):
+            pass
 
     class Graph:
         async def astream(self, inputs, config=None, stream_mode=None, subgraphs=False):
             assert stream_mode == "updates" and subgraphs is True
             assert inputs["messages"][0].content.startswith("Research topic")
+            handlers = (config or {}).get("callbacks") or []
+            assert handlers and all(isinstance(h, BaseCallbackHandler) for h in handlers)
+            for usage in llm_usages:
+                for h in handlers:
+                    h.on_llm_end(_llm_result(usage), run_id=None)
             for u in updates:
                 yield u
     msgs = types.ModuleType("langchain_core.messages")
     msgs.HumanMessage = HumanMessage
+    cb_base = types.ModuleType("langchain_core.callbacks.base")
+    cb_base.BaseCallbackHandler = BaseCallbackHandler
+    cbs = types.ModuleType("langchain_core.callbacks")
+    cbs.base = cb_base
     core = types.ModuleType("langchain_core")
     core.messages = msgs
+    core.callbacks = cbs
     dr = types.ModuleType("open_deep_research.deep_researcher")
     dr.deep_researcher = Graph()
     pkg = types.ModuleType("open_deep_research")
     pkg.deep_researcher = dr
     for name, mod in (("langchain_core", core), ("langchain_core.messages", msgs),
+                      ("langchain_core.callbacks", cbs), ("langchain_core.callbacks.base", cb_base),
                       ("open_deep_research", pkg), ("open_deep_research.deep_researcher", dr)):
         monkeypatch.setitem(sys.modules, name, mod)
     spec = importlib.util.spec_from_file_location("odr_worker_under_test", WORKER)
@@ -554,12 +688,18 @@ class TestWorkerLogic:
             {"compress_research": {"compressed_research": "c"}},
             ((), {"final_report_generation": {"final_report": report, "messages": [_AI(report)]}}),
         ]
-        worker = _load_worker(monkeypatch, updates)
+        # usage comes from the per-call callback: the AIMessages carried in
+        # the updates (counted twice / not at all by walking chunks) are ignored
+        worker = _load_worker(monkeypatch, updates,
+                              llm_usages=[{"input_tokens": 10, "output_tokens": 5},
+                                          {"input_tokens": 3, "output_tokens": 2},
+                                          None, {"input_tokens": "x"}])
         emitted = []
         monkeypatch.setattr(worker, "_emit", lambda obj: emitted.append(obj))
         payload = {"prompt": "Research topic: x", "language": "ja",
                    "configurable": {"search_api": "none"}, "recursion_limit": 30}
         result = asyncio.run(worker._research(payload))
+        assert result["raw"]["llm_calls"] == 4
         assert result["kind"] == "result" and result["report_markdown"] == report
         assert [s["url"] for s in result["sources"]] == ["https://meti.example/a", "https://toray.example/ir"]
         assert [s["title"] for s in result["sources"]] == ["経産省", "東レ IR"]
@@ -592,6 +732,14 @@ class TestWorkerLogic:
         monkeypatch.setattr(worker, "_emit", lambda obj: None)
         res = asyncio.run(worker._research({"prompt": "Research topic: x", "configurable": {}}))
         assert res["sources"] == [] and any("出典は空です" in w for w in res["warnings"])
+        # a content-block list (Responses-API OpenAI models, Anthropic multi-block)
+        blocks = [{"type": "text", "text": "# R\n\n本文 https://c.example/z ", "annotations": []},
+                  {"type": "reasoning", "summary": []}, {"type": "text", "text": "続き。\n"}]
+        worker = _load_worker(monkeypatch, [{"final_report_generation": {"final_report": blocks}}])
+        monkeypatch.setattr(worker, "_emit", lambda obj: None)
+        res = asyncio.run(worker._research({"prompt": "Research topic: x", "configurable": {}}))
+        assert res["report_markdown"] == "# R\n\n本文 https://c.example/z 続き。\n"
+        assert [s["url"] for s in res["sources"]] == ["https://c.example/z"]
         worker = _load_worker(monkeypatch, [{"write_research_brief": {"research_brief": "b"}}])
         monkeypatch.setattr(worker, "_emit", lambda obj: None)
         with pytest.raises(RuntimeError, match="final_report が生成されませんでした"):
@@ -603,8 +751,16 @@ class TestWorkerLogic:
             asyncio.run(worker._research({"prompt": "Research topic: x", "configurable": {}}))
 
     def test_pure_helpers(self):
-        from deep_research_tool.engines.odr.worker import (extract_usage, find_state_value,
-                                                           parse_sources_section, urls_in_body)
+        from deep_research_tool.engines.odr.worker import (content_text, extract_usage,
+                                                           find_state_value, parse_sources_section,
+                                                           urls_in_body, usage_from_llm_result)
+        assert content_text("a") == "a" and content_text(None) is None and content_text(3) is None
+        assert content_text([{"type": "text", "text": "x", "citations": [{}]}, "y",
+                             {"type": "tool_use", "id": "t"}, {"type": "text", "text": "z"}]) == "xyz"
+        assert content_text([]) == ""
+        assert usage_from_llm_result(_llm_result({"input_tokens": 7, "output_tokens": 2})) == (7, 2)
+        assert usage_from_llm_result(SimpleNamespace(generations=[[SimpleNamespace(text="no message")]])) == (0, 0)
+        assert usage_from_llm_result(None) == (0, 0)
         md = ("## 出典\n- [1] A: https://a.example/1.\n* 2. B - https://b.example/2\n"
               "[3] https://a.example/1\n\n## 付録\nhttps://c.example/not-a-source\n")
         src = parse_sources_section(md)
@@ -748,7 +904,12 @@ class TestRealVirtualenv:
             httpd.shutdown()
         assert result.report_markdown.startswith("# 国内の炭素繊維市場の動向")
         assert len(result.sources) >= 2 and all(s.url.startswith("https://ex.test/") for s in result.sources)
-        assert result.metrics.total_tokens and result.metrics.searches == 2     # two queries in one call
+        assert result.metrics.searches == 2     # two queries in one call
+        # every LLM call counted exactly once (the fake answers 100 / 50 each)
+        n_calls = len(fake.CALLS)
+        assert result.raw["llm_calls"] == n_calls >= 6
+        assert result.metrics.prompt_tokens == 100 * n_calls
+        assert result.metrics.completion_tokens == 50 * n_calls
         stages = [e.payload["stage"] for e in ctx.events if e.type == "stage"]
         for st in ("starting_mcp_server", "starting_worker", "brief", "supervisor", "researcher",
                    "compress", "final_report"):

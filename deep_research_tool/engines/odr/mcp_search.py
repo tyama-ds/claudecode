@@ -8,10 +8,16 @@ free port, a daemon thread inside the tool's process) and the engine is
 told ``search_api="none"`` plus ``mcp_config={"url": ..., "tools": [...]}``.
 
 The server speaks the stateless subset of MCP's streamable HTTP transport
-(JSON-RPC 2.0 over POST ``/mcp``; ``initialize``, ``notifications/
+(JSON-RPC 2.0 over POST ``/<token>/mcp``; ``initialize``, ``notifications/
 initialized``, ``ping``, ``tools/list``, ``tools/call``) with the standard
 library only — no ``mcp`` dependency on the tool's side — and verified
-against the real ``mcp`` 1.28 client (see tests). The tools:
+against the real ``mcp`` 1.28 client (see tests). Only the run's own
+worker can use it: the path carries a random per-run token (the engine is
+given ``http://127.0.0.1:<port>/<token>`` and appends ``/mcp``), the Host
+header must be the server's own address and a browser Origin other than
+localhost is refused — so another local process or a web page cannot use
+the tool's search client (its proxy and network position) as an open
+fetcher. Idle connections are closed after a minute. The tools:
 
 - ``web_search(queries, max_results?)``  the search the tool is configured
   for (DuckDuckGo / browser) or SearXNG, with a short page excerpt per
@@ -24,12 +30,17 @@ result and reported to the run as ``search`` / ``source_found`` events.
 
 from __future__ import annotations
 
+import hmac
 import json
+import secrets
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
+from concurrent.futures import wait
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, List, Optional, Sequence
+from urllib.parse import urlsplit
 
 from ... import __version__
 
@@ -46,10 +57,18 @@ DEFAULT_MAX_RESULTS = 8
 EXCERPT_CHARS = 1500          # page excerpt per search result
 FETCH_CHARS = 8000            # fetch_page text limit
 SNIPPET_CHARS = 400
-# the MCP client (langchain-mcp-adapters → mcp) waits 30 s for a tools/call
-# response by default; every call stays well under that
-SEARCH_BUDGET_SECONDS = 22.0
+# The MCP client open-deep-research uses (langchain-mcp-adapters 0.3 → mcp
+# 1.28) waits for a tools/call response under an httpx read timeout of
+# 300 s and has no session-level timeout. A web_search call starts no new
+# query after SEARCH_BUDGET_SECONDS, bounds each backend search by the
+# remaining budget (at most PER_QUERY_SEARCH_SECONDS) and the page excerpts
+# by EXCERPT_FETCH_SECONDS, so the reply is back well inside that limit
+# (worst case ≈ 120 + 60 + 10 s) instead of the client giving up while
+# the search keeps running.
+SEARCH_BUDGET_SECONDS = 120.0
+PER_QUERY_SEARCH_SECONDS = 60.0
 EXCERPT_FETCH_SECONDS = 10.0
+HANDLER_IDLE_TIMEOUT = 60.0     # a client silent this long is disconnected
 EXCERPT_FETCH_TOP = 5          # results whose page is read for an excerpt
 MAX_BODY_BYTES = 4 * 1024 * 1024
 
@@ -96,6 +115,12 @@ class ClientSearchBackend(SearchBackend):
         page = self.client.get_page_content(url)
         if page is None:
             raise RuntimeError("no content")
+        # the tool's clients never raise on a failed fetch: they return a
+        # page titled "Error" / "Blocked" whose metadata carries the error
+        # (the same test ingest.py and the researcher apply)
+        meta = getattr(page, "metadata", None) or {}
+        if isinstance(meta, dict) and meta.get("error"):
+            raise RuntimeError(str(meta["error"])[:300])
         text = getattr(page, "text_content", None) or getattr(page, "content", None) or ""
         title = getattr(page, "title", None) or ""
         if not str(text).strip():
@@ -225,12 +250,25 @@ class SearchTools:
             self.log["searches"] += 1
             self.log["queries"].append(query)
         self._emit("search", {"query": query})
+        # the backend's own retries / query simplification can run for
+        # minutes on a slow or blackholed network: bound it (the thread
+        # cannot be cancelled, but the reply no longer waits for it)
+        remaining = max(1.0, min(PER_QUERY_SEARCH_SECONDS,
+                                 SEARCH_BUDGET_SECONDS - (time.monotonic() - started)))
+        pool = ThreadPoolExecutor(max_workers=1)
         try:
-            items = self.backend.search(query, limit)
+            items = pool.submit(self.backend.search, query, limit).result(timeout=remaining)
+        except FutureTimeout:
+            with self.lock:
+                self.log["search_errors"] += 1
+            return f'Search results for "{query}":\n\n(search timed out after {remaining:.0f} s)'
         except Exception as e:  # noqa: BLE001 - one failed query is reported, not fatal
             with self.lock:
                 self.log["search_errors"] += 1
             return f'Search results for "{query}":\n\n(search failed: {type(e).__name__}: {e})'
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        items = list(items or [])
         with self.lock:
             self.log["results"] += len(items)
         for it in items:
@@ -273,9 +311,12 @@ class SearchTools:
     def _fetch_quiet(self, url: str):
         try:
             title, text = self.backend.fetch(url)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             with self.lock:
                 self.log["fetch_errors"] += 1
+                failed = self.log.setdefault("failed_urls", {})
+                if len(failed) < 50:
+                    failed[url] = f"{type(e).__name__}: {e}"[:200]
             return None
         with self.lock:
             self.log["fetches"] += 1
@@ -353,6 +394,9 @@ class McpSearchServer:
         self.host = host
         self._port = int(port)
         self.enabled_tools = [t for t in enabled_tools if t in TOOL_DEFINITIONS] or list(ALL_TOOLS)
+        # per-run secret in the URL path: only the worker that was handed
+        # the URL can call the tools
+        self.token = secrets.token_urlsafe(24)
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self.requests_seen: Dict[str, int] = {}
@@ -366,8 +410,9 @@ class McpSearchServer:
 
     @property
     def url(self) -> str:
-        """The base URL the engine is given (it appends ``/mcp``)."""
-        return f"http://{self.host}:{self.port}"
+        """The base URL the engine is given (it appends ``/mcp``); the path
+        carries the per-run token."""
+        return f"http://{self.host}:{self.port}/{self.token}"
 
     @property
     def mcp_url(self) -> str:
@@ -453,6 +498,9 @@ class McpSearchServer:
 class _Handler(BaseHTTPRequestHandler):
     server_ref: McpSearchServer = None  # type: ignore[assignment]
     protocol_version = "HTTP/1.1"
+    # StreamRequestHandler.setup() applies it with settimeout(): a client
+    # that stays silent (or sends half a body) no longer pins a thread / fd
+    timeout = HANDLER_IDLE_TIMEOUT
 
     def log_message(self, format, *args):  # noqa: A002 - silence the default stderr log
         pass
@@ -467,11 +515,27 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
         if body:
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                # the client gave up (its own timeout); nothing to answer
+                self.close_connection = True
 
     def _path_ok(self) -> bool:
         path = self.path.split("?", 1)[0].rstrip("/")
-        return path in ("/mcp", "")
+        return hmac.compare_digest(path, f"/{type(self).server_ref.token}/mcp")
+
+    def _caller_ok(self) -> bool:
+        """Host must be our own address (no DNS rebinding) and a browser
+        Origin, when present, must be localhost."""
+        server = type(self).server_ref
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host not in (f"{server.host}:{server.port}", f"localhost:{server.port}"):
+            return False
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin:          # only browsers send it ("null" from sandboxed pages too)
+            return (urlsplit(origin).hostname or "").lower() in ("127.0.0.1", "localhost", "::1")
+        return True
 
     def do_GET(self):  # noqa: N802
         # no server-initiated stream in the stateless subset
@@ -481,7 +545,12 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(405, b"", extra={"Allow": "POST"})
 
     def do_POST(self):  # noqa: N802
+        if not self._caller_ok():
+            self.close_connection = True
+            self._send(403, b'{"error":"forbidden"}')
+            return
         if not self._path_ok():
+            self.close_connection = True
             self._send(404, b'{"error":"not found"}')
             return
         try:

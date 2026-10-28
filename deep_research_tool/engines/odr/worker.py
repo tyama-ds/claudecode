@@ -164,6 +164,40 @@ def find_state_value(obj: Any, key: str, _depth: int = 0) -> Any:
     return None
 
 
+def content_text(value: Any) -> Optional[str]:
+    """AIMessage.content as text: a str as is; a content-block list (OpenAI
+    Responses API models, Anthropic multi-block / cited replies) → its text
+    blocks joined (as langchain-core's AIMessage.text does); else None."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = []
+        for b in value:
+            if isinstance(b, str):
+                parts.append(b)
+            elif isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str):
+                parts.append(b["text"])
+        return "".join(parts)
+    return None
+
+
+def usage_from_llm_result(response: Any) -> Tuple[int, int]:
+    """(input, output) tokens of one LLM call's result (LLMResult with
+    ChatGenerations carrying AIMessage.usage_metadata)."""
+    total_in = total_out = 0
+    for gens in getattr(response, "generations", None) or []:
+        for g in gens or []:
+            u = getattr(getattr(g, "message", None), "usage_metadata", None) or {}
+            if not isinstance(u, dict):
+                continue
+            try:
+                total_in += int(u.get("input_tokens") or 0)
+                total_out += int(u.get("output_tokens") or 0)
+            except (TypeError, ValueError):
+                pass
+    return total_in, total_out
+
+
 def _summary_from_report(report: str, limit: int = 400) -> Optional[str]:
     for block in (report or "").split("\n\n"):
         block = block.strip()
@@ -197,19 +231,38 @@ def emit_event(type_: str, payload: Dict[str, Any]) -> None:
 
 async def _research(payload: Dict[str, Any]) -> Dict[str, Any]:
     started = time.monotonic()
-    from langchain_core.messages import HumanMessage  # noqa: PLC0415 (engine env only)
+    from langchain_core.callbacks.base import BaseCallbackHandler  # noqa: PLC0415 (engine env only)
+    from langchain_core.messages import HumanMessage  # noqa: PLC0415
     from open_deep_research.deep_researcher import deep_researcher  # noqa: PLC0415
 
+    class _UsageCounter(BaseCallbackHandler):
+        """Token usage of EVERY LLM call, subgraphs included. Walking the
+        "updates" chunks misses the researcher's calls (its subgraph only
+        outputs compressed_research / raw_notes) and the structured-output
+        / compression calls, and counts the supervisor's twice."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.input = 0
+            self.output = 0
+            self.calls = 0
+
+        def on_llm_end(self, response, **kwargs) -> None:
+            i, o = usage_from_llm_result(response)
+            self.input += i
+            self.output += o
+            self.calls += 1
+
+    counter = _UsageCounter()
     config: Dict[str, Any] = {
         "configurable": payload["configurable"],
         "recursion_limit": int(payload.get("recursion_limit", 50)),
+        "callbacks": [counter],
     }
     inputs = {"messages": [HumanMessage(content=payload["prompt"])]}
 
     final_report: Optional[str] = None
     research_brief: Optional[str] = None
-    usage_in = 0
-    usage_out = 0
     node_counts: Dict[str, int] = {}
 
     async for chunk in deep_researcher.astream(inputs, config=config,
@@ -226,17 +279,15 @@ async def _research(payload: Dict[str, Any]) -> Dict[str, Any]:
             emit_event("stage", {"stage": stage, "node": str(node),
                                  "namespace": [str(n) for n in namespace],
                                  "count": node_counts[stage]})
-            i, o = extract_usage(delta)
-            usage_in += i
-            usage_out += o
-            fr = find_state_value(delta, "final_report")
-            if isinstance(fr, str) and fr.strip():
+            fr = content_text(find_state_value(delta, "final_report"))
+            if fr and fr.strip():
                 final_report = fr
-            rb = find_state_value(delta, "research_brief")
-            if isinstance(rb, str) and rb.strip() and rb != research_brief:
+            rb = content_text(find_state_value(delta, "research_brief"))
+            if rb and rb.strip() and rb != research_brief:
                 research_brief = rb
                 emit_event("log", {"message": "調査方針: " + " ".join(rb.split())[:300]})
 
+    usage_in, usage_out = counter.input, counter.output
     got_usage = bool(usage_in or usage_out)
     if got_usage:
         emit_event("token_usage", {"prompt_tokens": usage_in, "completion_tokens": usage_out})
@@ -286,6 +337,7 @@ async def _research(payload: Dict[str, Any]) -> Dict[str, Any]:
             "engine_version": ENGINE_VERSION,
             "research_brief": research_brief,
             "node_counts": node_counts,
+            "llm_calls": counter.calls,
         },
     }
 
