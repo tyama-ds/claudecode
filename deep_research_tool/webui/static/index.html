@@ -1640,6 +1640,44 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
 
 <script>
 const $ = (id) => document.getElementById(id);
+// An error while the page starts used to stop the rest of this script with
+// no sign of it: the buttons did nothing, 履歴 stayed empty and 調査を開始
+// sent nothing (a saved 検証 OFF did this from v1.7.0 on). Show it, with a
+// way out; pageReady is set at the end of this script.
+let pageReady = false;
+// a hash typed / linked by the user (setView writes one during start-up)
+const openedWithHash = !!location.hash;
+let initError = null;
+function showInitError(err) {
+  if (document.getElementById('initErrorBanner')) return;
+  const msg = (err && (err.message || String(err))) || '不明なエラー';
+  const box = document.createElement('div');
+  box.id = 'initErrorBanner';
+  box.setAttribute('role', 'alert');
+  box.style.cssText = 'position:sticky;top:0;z-index:9999;background:#fdecea;color:#611a15;border-bottom:2px solid #d93025;padding:10px 16px;font-size:14px';
+  box.innerHTML = '<b>画面の初期化中にエラーが発生したため、一部のボタンや履歴が動かない可能性があります。</b>'
+    + '<div style="margin-top:4px;font-size:12px;word-break:break-all"></div>'
+    + '<div style="margin-top:6px"><button type="button" id="initErrorReset">保存した設定をリセットして再読み込み</button> '
+    + '<button type="button" id="initErrorReload">再読み込み</button>'
+    + ' <span style="font-size:12px">（APIキーと履歴は消えません）</span></div>';
+  box.children[1].textContent = msg;
+  document.body.prepend(box);
+  document.getElementById('initErrorReset').onclick = () => {
+    // every saved screen value of this page — never the API keys
+    try {
+      for (const k of Object.keys(localStorage)) {
+        if (k.startsWith('drt_') && k !== 'drt_secrets_persist') localStorage.removeItem(k);
+      }
+    } catch (e) {}
+    location.reload();
+  };
+  document.getElementById('initErrorReload').onclick = () => location.reload();
+}
+// remember the first error while starting; the banner shows only if this
+// script then really stopped (pageReady still false once the page is
+// parsed) — an extension's own error must not raise it
+window.addEventListener('error', (ev) => { if (!pageReady && !initError) initError = ev.error || ev.message; });
+document.addEventListener('DOMContentLoaded', () => { if (!pageReady) showInitError(initError); });
 let logLength = 0;
 let logSeq = -1;
 // client-side log buffer: the server sends only its last 50 entries per poll,
@@ -1872,6 +1910,7 @@ const FEATURE_FIELDS = {
 function loadSettings() {
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem('drt_settings') || '{}'); } catch (e) {}
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
   saved = migrateLegacySecrets(saved);
   for (const [el, key] of Object.entries(SETTINGS_FIELDS)) {
     if (saved[key] !== undefined) $(el).value = saved[key];
@@ -1880,8 +1919,8 @@ function loadSettings() {
   for (const [el, key] of Object.entries(SECRET_FIELDS)) {
     if (secrets[key] !== undefined) $(el).value = secrets[key];
   }
-  $('set_persist_keys').checked =
-    !!localStorage.getItem(SECRETS_PERSIST_KEY);
+  // storage blocked by the browser: the saved settings are just not there
+  try { $('set_persist_keys').checked = !!localStorage.getItem(SECRETS_PERSIST_KEY); } catch (e) {}
   for (const [el, key] of Object.entries(FEATURE_FIELDS)) {
     if (saved[key] !== undefined) $(el).checked = !!saved[key];
   }
@@ -1911,7 +1950,7 @@ function saveSettings() {
   s.deep_think_max_workers = parseInt($('feat_dt_workers').value) || 4;
   s.search_languages = selectedLangs();
   s.search_regions = selectedRegions();
-  localStorage.setItem('drt_settings', JSON.stringify(s));
+  try { localStorage.setItem('drt_settings', JSON.stringify(s)); } catch (e) { /* storage unavailable */ }
   return s;
 }
 
@@ -2043,13 +2082,18 @@ $('settingsModal').addEventListener('change', () => renderDelegationNotice());
 $('settingsModal').addEventListener('click', (e) => {
   if (e.target === $('settingsModal')) { $('settingsModal').style.display = 'none'; renderDelegationNotice(); }
 });
-loadSettings();
+try { loadSettings(); } catch (e) { console.error('saved settings not restored', e); }
 // a saved 機能 → 検証 OFF is the run mode 調査のみ: the cards decide at run
-// time, so they must show the saved choice (and not silently verify)
-if ($('feat_verification') && !$('feat_verification').checked && radioValue('run_mode') !== 'verify_only') {
-  setRadio('run_mode', 'research_only');
-  syncModeCards('run_mode');
-  applyModeVisibility();
+// time, so they must show the saved choice (and not silently verify). It
+// runs at the END of this script: applyModeVisibility reaches state
+// declared further down (engineOptionsFor, ENGINE_HEALTH), and calling it
+// here stopped the whole page for anyone who had saved 検証 OFF.
+function syncSavedRunMode() {
+  if ($('feat_verification') && !$('feat_verification').checked && radioValue('run_mode') !== 'verify_only') {
+    setRadio('run_mode', 'research_only');
+    syncModeCards('run_mode');
+    applyModeVisibility();
+  }
 }
 
 // ==================== 調査エンジン（内蔵 / 外部エンジン / モック） ====================
@@ -3607,7 +3651,7 @@ async function loadResultBody(result) {
       const res = await fetch(`/api/report-file?path=${encodeURIComponent(result.report_path)}`);
       if (res.ok) {
         const text = await res.text();
-        if (jobAtRequest !== selectedJobId) return;
+        if (jobAtRequest !== (resultJobId || selectedJobId)) return;
         $('resultBody').innerHTML = liveMd(text);
         return;
       }
@@ -3619,14 +3663,14 @@ async function loadResultBody(result) {
 }
 
 async function loadResultEvidence(result) {
-  const jobAtRequest = selectedJobId;
+  const jobAtRequest = resultJobId || selectedJobId;   // the job the 結果 view shows
   const parts = [];
   if (result.evidence_json) {
     try {
       const res = await fetch(`/api/report-file?path=${encodeURIComponent(result.evidence_json)}`);
       if (res.ok) {
         const data = await res.json();
-        if (jobAtRequest !== selectedJobId) return;
+        if (jobAtRequest !== (resultJobId || selectedJobId)) return;
         const items = data.evidence || [];
         parts.push(`<div class="hint">収集した根拠 ${items.length} 件（${escapeHtml(String(result.evidence_json).split(/[\\/]/).pop())}）</div>`);
         const bySection = data.section_evidence || {};
@@ -3650,7 +3694,7 @@ async function loadResultEvidence(result) {
   try {
     const res = await fetch(`/api/live-report?job_id=${encodeURIComponent(jobAtRequest)}`);
     const data = await res.json();
-    if (jobAtRequest !== selectedJobId) return;
+    if (jobAtRequest !== (resultJobId || selectedJobId)) return;
     if (data.available && (data.references || []).length) {
       parts.push('<label style="margin-top:8px">参考文献</label>');
       data.references.forEach((r, i) => parts.push(`<div style="font-size:12px">${i + 1}. ${linkify(r)}</div>`));
@@ -3813,7 +3857,7 @@ async function pollJobs() {
     // already chose a tab or opened one through the hash)
     if (!initialRunSwitchDone) {
       initialRunSwitchDone = true;
-      if (!userPickedView && !location.hash
+      if (!userPickedView && !openedWithHash
           && jobs.some(j => ['running', 'queued', 'plan_review'].includes(j.state))) setView('run');
     }
   } catch (e) { /* server briefly unavailable; keep polling */ }
@@ -4423,10 +4467,16 @@ async function loadHistory() {
   try {
     const res = await fetch('/api/history');
     const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     historyCache = data.history || [];
     renderHistory(historyCache);
     renderVerifyHistoryOptions(historyCache);
-  } catch (e) { /* server briefly unavailable */ }
+  } catch (e) {
+    // the list keeps what it showed; with nothing shown yet, say why
+    if (!historyCache || !historyCache.length) {
+      $('historyList').innerHTML = `<p class="hint">履歴を読み込めませんでした（${escapeHtml(e.message || String(e))}）。サーバーが起動しているか確認してください。10 秒ごとに再試行します。</p>`;
+    }
+  }
 }
 setInterval(loadHistory, 10000);
 
@@ -4474,7 +4524,9 @@ function applySnapshot(s) {
 }
 
 function loadFormPresets() {
-  try { return JSON.parse(localStorage.getItem(FORM_PRESETS_KEY) || '{}'); } catch (e) { return {}; }
+  let presets = {};
+  try { presets = JSON.parse(localStorage.getItem(FORM_PRESETS_KEY) || '{}'); } catch (e) { return {}; }
+  return presets && typeof presets === 'object' && !Array.isArray(presets) ? presets : {};
 }
 function renderFormPresetOptions() {
   const presets = loadFormPresets();
@@ -5140,10 +5192,12 @@ document.addEventListener('pointerleave', () => document.querySelectorAll('.mode
   setTimeout(step, 300);
 })();
 
+try { syncSavedRunMode(); } catch (e) { console.error('saved run mode not applied', e); }
 // initial load: pick up any jobs already running on the server
 pollJobs();
 // the 調査エンジン cards (availability is checked by the server)
 loadEngines();
+pageReady = true;
 </script>
 </body>
 </html>
