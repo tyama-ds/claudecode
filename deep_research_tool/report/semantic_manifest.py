@@ -122,9 +122,19 @@ import re as _re
 # [SOURCE 1] / [SOURCE: 1] editing tags, [1] display numbers and [^1]
 # footnote markers are all citation plumbing, not semantic text
 _CITATION_RE = _re.compile(r"\[(?:SOURCE:?\s*)?\^?\d+\]")
-_MD_IMAGE_RE = _re.compile(r"!\[[^\]]*\]\([^)]*\)")
-_MD_LINK_RE = _re.compile(r"\[([^\]]*)\]\([^)]*\)")
-_TAG_RE = _re.compile(r"<[^>]+>")
+# a URL may hold one level of parentheses ('…/ビール_(日本)'): the link
+# ends at its own ')', not at the first one
+_MD_IMAGE_RE = _re.compile(r"!\[[^\]]*\]\((?:[^()]|\([^()]*\))*\)")
+_MD_LINK_RE = _re.compile(r"\[([^\]]*)\]\((?:[^()]|\([^()]*\))*\)")
+# tag-shaped only: '伸び率が<1%' or 'a < b > c' in plain text is kept
+_TAG_RE = _re.compile(r"</?[A-Za-z][^<>]*>")
+# '<!-- Chart not found: … -->' left by the Markdown insertion is not text
+_HTML_COMMENT_RE = _re.compile(r"<!--.*?-->", _re.S)
+# block-level tags end a line: a paragraph added after the freeze must be
+# a line of its own, not glued to a frozen one
+_BLOCK_TAG_RE = _re.compile(
+    r"(?i)<br\s*/?>|</?(?:p|li|ul|ol|h[1-6]|tr|table|caption|figcaption|figure|div|section|"
+    r"blockquote|pre|header|footer|nav|article|aside|dt|dd)\b[^<>]*>")
 
 
 def normalize_semantic_text(text: str) -> str:
@@ -135,11 +145,15 @@ def normalize_semantic_text(text: str) -> str:
     equal exactly when the words are the same.
     """
     text = text or ""
+    text = _HTML_COMMENT_RE.sub("", text)
     text = _MD_IMAGE_RE.sub("", text)
     text = _MD_LINK_RE.sub(r"\1", text)
     text = _TAG_RE.sub("", text)
     text = _CITATION_RE.sub("", text)
-    text = _re.sub(r"[*_`>#|\\-]+", "", text)
+    # "•" is the PDF renderer's bullet for a markdown "- " item; box
+    # drawing ('───' rules), control characters (a bullet read back by
+    # pypdf as \x7f) and zero-width spaces are not text either
+    text = _re.sub(r"[*_`>#|\\\-•\u2500-\u257f\x00-\x08\x0b-\x1f\x7f\u200b]+", "", text)
     text = _re.sub(r"[：:]\s*$", "", text)
     return _re.sub(r"\s+", "", text)
 
@@ -161,8 +175,16 @@ def extract_artifact_text(path) -> Optional[str]:
         return p.read_text(encoding="utf-8", errors="replace")
     if suffix in (".html", ".htm"):
         import html as _htmlmod
-        return _htmlmod.unescape(
-            p.read_text(encoding="utf-8", errors="replace"))
+        raw = p.read_text(encoding="utf-8", errors="replace")
+        # the page's own stylesheet / scripts / comments are not report
+        # text (the CSS rules used to count as unverified additions, so
+        # every verified HTML report failed this check)
+        raw = _re.sub(r"(?is)<(style|script)\b[^>]*>.*?</\1\s*>|<!--.*?-->", "", raw)
+        raw = _BLOCK_TAG_RE.sub("\n", raw)
+        # tags go BEFORE entities are decoded: an escaped '&lt;1%' in the
+        # text must not turn into a '<' that swallows the text after it
+        raw = _TAG_RE.sub(" ", raw)
+        return _htmlmod.unescape(raw)
     if suffix == ".docx":
         try:
             import docx
@@ -196,6 +218,7 @@ def verify_frozen_in_artifact(manifest: Dict[str, Any],
                               min_fragment_chars: int = 24,
                               allowed_extras: Optional[List[str]] = None,
                               check_additions: bool = True,
+                              min_addition_chars: int = 40,
                               ) -> Dict[str, Any]:
     """Two-way, FAIL-CLOSED check between the frozen manifest and the
     ACTUAL saved artifact.
@@ -227,15 +250,28 @@ def verify_frozen_in_artifact(manifest: Dict[str, Any],
         checked += 1
         needles.append(needle)
         if needle not in haystack:
-            missing.append(fragment.strip()[:120])
+            # a numbered list item whose number the renderer draws itself
+            # ('1. …' as a Word / HTML list) is there without its '1.' — a
+            # list number is followed by a space ('1. 2030年…'); '12.5%…'
+            # or '1.5兆円…' is a number, not item 1
+            m = _re.match(r"\s*\d{1,3}[.)]\s+(.+)$", fragment or "", _re.S)
+            if not (m and normalize_semantic_text(m.group(1)) in haystack):
+                missing.append(fragment.strip()[:120])
 
     chapter_titles: List[str] = []
+    # every frozen text as one continuous string (a printed PDF line or an
+    # HTML paragraph can span two frozen lines) and every frozen line of
+    # 6+ characters (pieces that may cover part of an artifact line)
+    frozen_concat: List[str] = []
+    frozen_pieces: List[str] = []
     for text in (manifest.get("chapters") or {}).values():
+        frozen_concat.append(normalize_semantic_text(text or ""))
         for para in (text or "").split("\n\n"):
             for line in para.split("\n"):
                 if line.strip().startswith("#"):
                     chapter_titles.append(line)
                 _check(line)
+                frozen_pieces.append(normalize_semantic_text(line))
     for item in manifest.get("figures") or []:
         _check(item.get("title", ""), min_chars=2)
         _check(item.get("caption", ""), min_chars=2)
@@ -269,20 +305,34 @@ def verify_frozen_in_artifact(manifest: Dict[str, Any],
         allowed_norm = [normalize_semantic_text(e)
                         for e in [*(allowed_extras or []), *chapter_titles]]
         allowed_norm = [a for a in allowed_norm if len(a) >= 6]
+        # pieces that may vouch for PART of a line: frozen lines, fragments
+        # and allowed extras of 6+ characters (a one-character table cell
+        # such as '0' must not vouch for '…2030年までに三倍…'), longest first
+        covers = sorted({n for n in needles + frozen_pieces if len(n) >= 6} | set(allowed_norm),
+                        key=len, reverse=True)
+        frozen_concat.extend(n for n in needles if len(n) >= 6)
         for para in _re.split(r"\n\s*\n", artifact_text or ""):
             for line in para.split("\n"):
                 # footnote definitions / numbered reference lines are
                 # citation plumbing, not semantic additions
-                if _re.match(r"\s*\[\^?\d+\]\s*[:：]", line) or \
-                        _re.match(r"\s*\d+\.\s+\S*https?://", line):
-                    continue
+                # a footnote / reference prefix ('[^1]:', '3. [B] ') is
+                # plumbing; the text after it is checked like any line
+                line = _re.sub(r"^\s*(?:\[\^?\d+\]\s*[:：]|\d+\.\s+(?:\[[^\]]{0,12}\]\s*)?)", "", line)
                 norm = normalize_semantic_text(line)
-                if len(norm) < 40:      # short boilerplate is structural
+                if len(norm) < min_addition_chars:    # short boilerplate is structural
                     continue
-                if norm in frozen_blob or \
-                        any(norm in n or n in norm for n in needles):
+                if norm in frozen_blob or any(norm in n for n in needles) \
+                        or any(norm in fc for fc in frozen_concat):
+                    continue                          # frozen text (or a wrapped part of it)
+                if any(norm in a for a in allowed_norm):
                     continue
-                if any(a in norm or norm in a for a in allowed_norm):
+                # a line made of frozen / allowed pieces: what is left over
+                # must be separators, not a sentence added after the freeze
+                rest = norm
+                for c in covers:
+                    if c in rest:
+                        rest = rest.replace(c, "")
+                if len(rest) < 20:
                     continue
                 additions.append(line.strip()[:120])
 
@@ -311,8 +361,16 @@ def default_allowed_extras(evidence_locker=None) -> List[str]:
     return [e for e in extras if e]
 
 
+def addition_floor(report_path) -> int:
+    """The line length below which an artifact line is structural. A PDF
+    line is one printed line (an 11 pt Japanese line is ~39 characters),
+    so its floor is lower than a paragraph's."""
+    from pathlib import Path
+    return 28 if Path(str(report_path)).suffix.lower() == ".pdf" else 40
+
+
 def check_artifact(manifest: Dict[str, Any], report_path,
-                   evidence_locker=None) -> Dict[str, Any]:
+                   evidence_locker=None, extra_allowed: Optional[List[str]] = None) -> Dict[str, Any]:
     """One-call artifact verification shared by run()/manual/CLI paths.
 
     Returns {"status": "pass"|"fail"|"skipped:<reason>",
@@ -327,7 +385,8 @@ def check_artifact(manifest: Dict[str, Any], report_path,
                 "missing": [], "additions": []}
     result = verify_frozen_in_artifact(
         manifest, artifact_text,
-        allowed_extras=default_allowed_extras(evidence_locker))
+        allowed_extras=default_allowed_extras(evidence_locker) + list(extra_allowed or []),
+        min_addition_chars=addition_floor(report_path))
     result["status"] = "pass" if result["ok"] else "fail"
     return result
 

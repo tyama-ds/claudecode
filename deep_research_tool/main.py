@@ -133,6 +133,25 @@ def _create_report_generator(
         return generator, "v1"
 
 
+def _report_titles(session) -> list:
+    """Text a renderer prints around the body that is not part of it: the
+    report title (the plan's, else the query) and the session id."""
+    if session is None:
+        return []
+    plan = getattr(session, "research_plan", None)
+    out = [getattr(plan, "title", "") if plan else "", getattr(session, "query", ""),
+           getattr(session, "session_id", "")]
+    # the chapter headings and table-of-contents lines (V1 bodies do not
+    # carry their own titles)
+    try:
+        for item in plan.table_of_contents.get_flat_sections() if plan else []:
+            out.append(f"{item.section}. {item.title}")
+            out.append(str(item.title))
+    except Exception:
+        pass
+    return [str(t) for t in out if t]
+
+
 # RunCancelled lives in utils.cancellation so the researcher/crawlers can
 # raise it without importing main; re-exported here for existing callers.
 from .utils.cancellation import RunCancelled  # noqa: E402
@@ -1896,6 +1915,9 @@ class DeepResearchTool:
         # are only INSERTED deterministically.
         figure_collection = None
         fig_generator = None
+        figures_embedded = False       # V1 PDF / HTML and V2 HTML place the figures while rendering
+        v2_figures_placed = 0
+        v2_tables: list = []
         if self.config.report.auto_figures:
             self.progress_plan.enter("figures")
             figures_dir = Path(self.config.report.output_dir) / "reports" / "figures"
@@ -1949,6 +1971,8 @@ class DeepResearchTool:
                 research_plan=session.research_plan,
                 section_contents=session.section_contents,
             )
+            # the generated title is printed above the body (not part of it)
+            self._report_titles = [getattr(getattr(result, "context", None), "report_title", "") or ""]
 
             # Finalization loop: verify the final candidate body — with
             # Fermi / glossary / warnings / FIGURE SEMANTICS already IN
@@ -2018,6 +2042,8 @@ class DeepResearchTool:
                 research_plan=session.research_plan,
                 section_contents=session.section_contents,
             )
+            # the generated title is printed above the body (not part of it)
+            self._report_titles = [getattr(getattr(result, "context", None), "report_title", "") or ""]
 
             # Finalization loop: verify the final candidate body — with
             # Fermi / glossary / warnings already IN it — act on
@@ -2079,6 +2105,24 @@ class DeepResearchTool:
                 language = getattr(self.config.research, "language", "en")
                 final_doc += warnings_collector.to_report_section(language)
 
+            # V2 HTML: the charts and images go into the markdown before it
+            # is converted, then are embedded in the page (the post-render
+            # insertion could not edit V2's HTML: the report had no figures)
+            fmt_value = str(getattr(self.config.report.format, "value",
+                                    self.config.report.format)).lower()
+            # the tables reach the page through the verified 図表一覧 when there
+            # is one; without verification they are inserted here
+            v2_tables = [] if (figure_collection is None or extras_flags.get("figures_key")) \
+                else list(figure_collection.tables)
+            v2_html_figures = (fmt_value == "html" and figure_collection is not None
+                               and fig_generator is not None
+                               and bool(figure_collection.figures or figure_collection.charts or v2_tables))
+            if v2_html_figures:
+                from .report.figure_table_generator import FigureTableCollection
+                final_doc = fig_generator.add_figures_to_markdown(final_doc, FigureTableCollection(
+                    figures=list(figure_collection.figures), charts=list(figure_collection.charts),
+                    tables=v2_tables))
+
             # Save to file in the configured format (DOCX/PDF/HTML/MD)
             output_dir = self.config.report.output_dir / "reports"
             report_path = self.stage_timings.call("rendering", generator.save_report,
@@ -2088,6 +2132,16 @@ class DeepResearchTool:
                 format=self.config.report.format,
                 strict_format=self.config.report.strict_format,
             )
+            if v2_html_figures and Path(report_path).suffix.lower() == ".html":
+                figures_embedded = True        # the post-render insertion must not run again
+                try:
+                    page = Path(report_path).read_text(encoding="utf-8")
+                    page = fig_generator._embed_images_in_html(page, figure_collection)
+                    Path(report_path).write_text(page, encoding="utf-8")
+                    v2_figures_placed = page.count('src="data:image') + sum(
+                        1 for t in v2_tables if t.title and t.title in page)
+                except Exception as e:
+                    print(f"[AutoFigures] embedding figures in the V2 HTML failed: {e}")
         else:
             # V1: common finalization on the session sections BEFORE the
             # deterministic render. The Fermi section joins the body
@@ -2139,6 +2193,14 @@ class DeepResearchTool:
             # targets are only applied on the unverified path.
             self.progress_plan.enter("writing")
             quiet_progress("Generating report...", 0)
+            # PDF / HTML: the renderer places the frozen figures under
+            # their chapters itself (the post-render insertion only knows
+            # Markdown and Word)
+            fmt_value = str(getattr(self.config.report.format, "value",
+                                    self.config.report.format)).lower()
+            if figure_collection is not None and fmt_value in ("pdf", "html"):
+                generator.figure_collection = figure_collection
+                figures_embedded = True
             report_path = self.stage_timings.call("writing", generator.generate_report,
                 session=session,
                 evidence_locker=evidence_locker,
@@ -2170,7 +2232,33 @@ class DeepResearchTool:
         # generate_and_save). The collection was generated and verified
         # BEFORE the freeze; no LLM runs here.
         figures_report_path = None
-        if figure_collection is not None and version_tag != "v3":
+        if figures_embedded:
+            if version_tag == "v2":
+                n_items = (len(figure_collection.figures) + len(figure_collection.charts)
+                           + len(v2_tables))
+                placed = v2_figures_placed
+            else:
+                n_items = (len(figure_collection.figures) + len(figure_collection.tables)
+                           + len(figure_collection.charts))
+                placed = int(getattr(generator, "figures_inserted", 0) or 0)
+            print(f"[AutoFigures] {placed}/{n_items} figure(s)/table(s) placed by the "
+                  f"{Path(report_path).suffix.lstrip('.').upper()} renderer")
+            dropped = getattr(generator, "pdf_figures_dropped", None)
+            if n_items and (placed < n_items or dropped):
+                why = (f"PDF のレイアウトに失敗したため、図の画像を外し表を文章の形で入れ直しました（{dropped}）"
+                       if dropped else "読めない画像などは入れていません")
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.MEDIUM, "AutoFigures",
+                    f"{n_items}件の図表のうち、レポート本体に入ったのは{placed}件です。{why}"
+                    f"（画像ファイルは figures/ に保存されています）。")
+            try:
+                figures_dir = Path(getattr(fig_generator, "output_dir", "")) if fig_generator else None
+                if figures_dir:
+                    fig_generator.export_collection(figure_collection,
+                                                    figures_dir / "figures_tables.json")
+            except Exception as e:
+                print(f"[AutoFigures] Failed to export collection metadata: {e}")
+        elif figure_collection is not None and version_tag != "v3":
             # after a (possibly cancelled) verification: never a checkpoint
             quiet_progress("Inserting figures and tables...", 40)
             try:
@@ -2292,7 +2380,7 @@ class DeepResearchTool:
             # audit item D: the check must also REBUILD from the actual
             # saved artifact — not only re-hash the in-memory object
             semantic_artifact_check = self._check_semantics_in_artifact(
-                active_report_path, evidence_locker=evidence_locker)
+                active_report_path, evidence_locker=evidence_locker, session=session)
 
         # Live report: deliver the VERIFIED final body (replaces drafts,
         # removes watermarks, appends references) and release the sinks.
@@ -2656,7 +2744,7 @@ class DeepResearchTool:
              if not sid.startswith("_") and sd.get("content")},
             None, semantic_freeze_hash, extras=extras)
         semantic_artifact_check = self._check_semantics_in_artifact(
-            report_out, evidence_locker=evidence_locker)
+            report_out, evidence_locker=evidence_locker, session=session)
         drift = bool(semantic_freeze_hash and semantic_output_hash
                      and semantic_output_hash != semantic_freeze_hash)
         if hasattr(self.search_client, "close"):
@@ -3237,12 +3325,12 @@ class DeepResearchTool:
             )
         return digest
 
-    def _artifact_allowed_extras(self, evidence_locker=None) -> list:
+    def _artifact_allowed_extras(self, evidence_locker=None, session=None) -> list:
         """Deterministic artifact content that is NOT semantic body:
         references (from the locker), the report title, standard section
         headings. Anything else that appears only in the artifact is an
         unverified post-freeze ADDITION and fails the check."""
-        extras = []
+        extras = list(_report_titles(session)) + list(getattr(self, "_report_titles", None) or [])
         if evidence_locker is not None:
             try:
                 for ev in evidence_locker.get_all_evidence():
@@ -3259,7 +3347,7 @@ class DeepResearchTool:
         return [e for e in extras if e]
 
     def _check_semantics_in_artifact(self, report_path,
-                                     evidence_locker=None) -> str:
+                                     evidence_locker=None, session=None) -> str:
         """Audit item D: verify the frozen semantics inside the ACTUAL
         saved artifact — TWO-WAY (missing frozen content AND unverified
         post-freeze additions both fail). Re-hashing the in-memory
@@ -3271,7 +3359,7 @@ class DeepResearchTool:
         mismatching artifact is never a normal completion.
         """
         from .report.semantic_manifest import (
-            extract_artifact_text, verify_frozen_in_artifact)
+            addition_floor, extract_artifact_text, verify_frozen_in_artifact)
         manifest = getattr(self, "semantic_manifest", None)
         if not manifest:
             return "skipped:no_manifest"
@@ -3289,7 +3377,8 @@ class DeepResearchTool:
             return "skipped:unreadable_format"
         result = verify_frozen_in_artifact(
             manifest, artifact_text,
-            allowed_extras=self._artifact_allowed_extras(evidence_locker))
+            allowed_extras=self._artifact_allowed_extras(evidence_locker, session),
+            min_addition_chars=addition_floor(report_path))
         if result["ok"]:
             print(f"[Freeze] artifact check passed "
                   f"({result['checked']} fragments verified in "
@@ -3790,6 +3879,14 @@ class DeepResearchTool:
         )
         print(f"[Resume] figures: {len(collection.figures)} figure(s), "
               f"{len(collection.tables)} table(s), {len(collection.charts)} chart(s) reused")
+        # the chart checks of that attempt (contradicted judgments, values not
+        # found in their sources) are shown again with the reused charts
+        try:
+            yld = json.loads((figures_dir / "chart_yield.json").read_text(encoding="utf-8"))
+            for message in yld.get("warnings") or []:
+                ResearchWarnings.get_instance().add(ResearchWarnings.LOW, "AutoFigures", str(message))
+        except Exception:
+            pass
         return collection, generator
 
     def _restore_finalization(self, session, result=None, evidence_locker=None) -> bool:
@@ -4462,6 +4559,8 @@ Output only the text (no JSON, no heading):"""
         if collection is None or generator is None:
             return None
         figures_dir = generator.output_dir
+        n_items = (len(collection.figures) + len(collection.tables)
+                   + len(collection.charts))
 
         # Step 6: Read the report content (text formats only — .docx/.pdf are
         # binary and their insertion paths below don't need the raw text)
@@ -4504,12 +4603,21 @@ Output only the text (no JSON, no heading):"""
                     ResearchWarnings.get_instance().add(
                         ResearchWarnings.MEDIUM,
                         "AutoFigures",
-                        f"{total}件の図表を生成しましたが、DOCXへの挿入に失敗"
+                        f"{n_items}件の図表を生成しましたが、DOCXへの挿入に失敗"
                         f"しました。図表ファイル自体は {figures_dir} に保存"
                         f"されています。",
                     )
                     return None
-            elif suffix in ('.pdf', '.html'):
+            elif suffix == '.pdf':
+                # a finished PDF cannot be edited here (the old path rebuilt
+                # it from EMPTY text: a file holding only the figures). V1
+                # places them while rendering; anything else says so.
+                ResearchWarnings.get_instance().add(
+                    ResearchWarnings.MEDIUM, "AutoFigures",
+                    f"PDF には図表を挿入できませんでした（{n_items}件）。画像ファイルは "
+                    f"{figures_dir} に保存されています。")
+                return None
+            elif suffix == '.html':
                 updated_path = generator.add_figures_to_pdf(
                     markdown_content=content,
                     collection=collection,
@@ -4552,7 +4660,10 @@ Output only the text (no JSON, no heading):"""
         import re as _re
         from .chartkit import (build_section_catalog, build_messages, panel_semantics,
                                parse_panels, render_html, render_png, validate_panels)
-        from .chartkit.data_layer import DEFAULT_PRIMARY_DOMAINS
+        from .chartkit.data_layer import DEFAULT_PRIMARY_DOMAINS, SourcePolicy
+        from .chartkit.facts import apply_facts
+        from .chartkit.grounding import PROBLEM_TEXT, ground_panel
+        from .chartkit.render_png import FONT_STATE
         from .report.figure_table_generator import Figure, FigureType
         from .utils.concurrency import ContextThreadPoolExecutor
 
@@ -4561,7 +4672,10 @@ Output only the text (no JSON, no heading):"""
         figures_dir = Path(figures_dir)
         figures_dir.mkdir(parents=True, exist_ok=True)
         max_panels = max(1, int(getattr(rp, "chart_max_per_section", 6) or 6))
+        # classic keeps the v1.5 look; enhanced = the recommended changes
+        style = str(getattr(rp, "chart_style", "classic") or "classic")
         primary = tuple(DEFAULT_PRIMARY_DOMAINS) + tuple(getattr(rp, "chart_primary_domains", None) or [])
+        policy = SourcePolicy.for_style(style, primary)
         llm = self.stage_llm_clients.get("evaluation", self.llm_client)
         cancel = getattr(self, "_cancel_checkpoint", lambda: None)
 
@@ -4580,15 +4694,28 @@ Output only the text (no JSON, no heading):"""
             except Exception:
                 return []
 
+        # yield: how many points / series / panels survived each step, and
+        # why the rest did not (figures/chart_yield.json)
+        chart_yield = {"style": style, "data_points": len(store.data_points), "chapters": {}}
+        claimed_ids: set = set()
         catalogs = {}
         for sid, sd in sections:
-            cat = build_section_catalog(store.data_points, sid, _evidence_ids(sid),
-                                        primary_domains=primary)
+            ev_ids = _evidence_ids(sid)
+            claimed_ids.update(ev_ids)
+            cat = build_section_catalog(store.data_points, sid, ev_ids,
+                                        primary_domains=policy)
+            chart_yield["chapters"][str(sid)] = {"catalog": dict(cat.stats)}
             if not cat.is_empty():
                 catalogs[sid] = (cat, sd)
-        print(f"[AutoFigures] chart spec: {len(catalogs)}/{len(sections)} chapters have "
+        section_ids = {str(sid) for sid, _sd in sections}
+        chart_yield["points_without_chapter"] = sum(
+            1 for dp in store.data_points
+            if str(getattr(dp, "section_id", "") or "") not in section_ids
+            and str(getattr(dp, "evidence_id", "") or "") not in claimed_ids)
+        print(f"[AutoFigures] chart spec ({style}): {len(catalogs)}/{len(sections)} chapters have "
               f"plottable series; up to {max_panels} panels each")
         if not catalogs:
+            self._write_chart_yield(figures_dir, chart_yield)
             return []
 
         def _spec_for(sid):
@@ -4603,7 +4730,8 @@ Output only the text (no JSON, no heading):"""
                                       max_panels=max_panels, language=language,
                                       research_topic=getattr(session, "query", "") or "")
                 resp = llm.generate(msgs["user"], system_prompt=msgs["system"])
-                panels = parse_panels(getattr(resp, "content", "") or "")
+                status: dict = {}
+                panels = parse_panels(getattr(resp, "content", "") or "", status)
                 safe_sid = _re.sub(r"[^0-9a-z]", "_", str(sid).lower())
                 used_ids: set = set()
                 for i, p in enumerate(panels):
@@ -4614,29 +4742,51 @@ Output only the text (no JSON, no heading):"""
                         n += 1
                     used_ids.add(pid)
                     p["id"] = f"s{safe_sid}_{pid}"
-                valid, rejected = validate_panels(panels, cat.to_data(), max_panels=max_panels)
-                return sid, title, valid, [(p.get("id") if p else None, r) for p, r in rejected], None
+                vstats: dict = {}
+                valid, rejected = validate_panels(panels, cat.to_data(), max_panels=max_panels,
+                                                  stats=vstats)
+                info = {"parsed": bool(status.get("ok")), "proposed": len(panels),
+                        "over_limit": vstats.get("over_limit", 0)}
+                return sid, title, valid, [(p.get("id") if p else None, r) for p, r in rejected], None, info
             except Exception as e:            # one chapter never breaks the others
                 if isinstance(e, RunCancelled):
                     raise
-                return sid, sd.get("title") or sid, [], [], f"{type(e).__name__}: {e}"
+                return sid, sd.get("title") or sid, [], [], f"{type(e).__name__}: {e}", {}
 
         workers = max(1, min(int(rp.figure_max_workers or 1), int(rc.parallel_max_workers or 1)))
         results = []
         with ContextThreadPoolExecutor(max_workers=workers) as ex:
             results = list(ex.map(_spec_for, list(catalogs)))
 
+        def _source_text(evidence_id, url):
+            ev = None
+            try:
+                ev = (evidence_locker.get_evidence(evidence_id) if evidence_id else None) \
+                    or (evidence_locker.get_by_url(url) if url else None)
+            except Exception:
+                ev = None
+            if ev is None:
+                return None
+            return (getattr(ev, "extracted_text", "") or "") or (getattr(ev, "content_excerpt", "") or "")
+
         figures: list = []
         page_panels: list = []
         page_sections: list = []
-        for sid, title, valid, rejected, error in results:
+        no_chart: list = []            # chapters with series but no chart, and why
+        ungrounded: list = []          # panels with values the source text does not hold
+        conflicts: list = []           # judgments that contradict the data (reported, never rewritten)
+        for sid, title, valid, rejected, error, info in results:
             cat, _sd = catalogs[sid]
+            y = chart_yield["chapters"].setdefault(str(sid), {})
+            y.update({"series": len(cat.series), **info, "valid": len(valid),
+                      "rejected": [{"id": pid, "reason": r} for pid, r in rejected]})
             try:
                 (figures_dir / f"chart_data_{sid}.json").write_text(
                     json.dumps(cat.to_data(), ensure_ascii=False, indent=1), encoding="utf-8")
             except Exception:
                 pass
             if error:
+                y["error"] = error
                 print(f"[AutoFigures] chart spec failed for {sid}: {error}")
                 ResearchWarnings.get_instance().add(
                     ResearchWarnings.LOW, "AutoFigures",
@@ -4645,12 +4795,35 @@ Output only the text (no JSON, no heading):"""
                 print(f"[AutoFigures] {sid}: {len(rejected)} panel(s) rejected: "
                       + "; ".join(f"{pid}: {r}" for pid, r in rejected[:4]))
             ids = []
+            render_failed = 0
             for panel in valid:
+                if panel.get("name_fixes"):
+                    print(f"[AutoFigures] {panel['id']}: legend names fixed: "
+                          + "; ".join(panel["name_fixes"]))
                 try:
-                    path = render_png(panel, figures_dir / f"chart_{panel['id']}.png", language=language)
+                    g = ground_panel(panel, _source_text)
+                except Exception as e:
+                    g = {"checked": 0, "issues": [], "error": str(e)}
+                panel["grounding"] = g
+                try:
+                    fx = apply_facts(panel, style)
+                except Exception as e:
+                    fx = {"error": str(e)}
+                if g["issues"] and style == "enhanced":
+                    panel["caption"] = (str(panel.get("caption") or "").rstrip()
+                                        + f"　※{len(g['issues'])}点の値は出典本文で確認できませんでした（要確認）。")
+                try:
+                    path = render_png(panel, figures_dir / f"chart_{panel['id']}.png", language=language,
+                                      style=style)
                 except Exception as e:
                     print(f"[AutoFigures] PNG render failed for {panel.get('id')}: {e}")
+                    render_failed += 1
                     continue
+                # warnings only for charts that are actually in the report
+                if fx.get("conflict"):
+                    conflicts.append((sid, panel, fx["conflict"]))
+                if g["issues"]:
+                    ungrounded.append((sid, panel, g["issues"]))
                 src = next((s.get("url") for ser in panel.get("series", [])
                             for s in (ser.get("sources") or []) if s and s.get("url")), None)
                 caption = str(panel.get("caption") or "")
@@ -4668,8 +4841,58 @@ Output only the text (no JSON, no heading):"""
                 ))
                 page_panels.append(panel)
                 ids.append(panel["id"])
+            y.update({"rendered": len(ids), "render_failed": render_failed,
+                      "panels": [{"id": p["id"], "form": p.get("form"),
+                                  "form_rendered": p.get("form_rendered"),
+                                  "name_fixes": p.get("name_fixes") or [],
+                                  "grounding": p.get("grounding"),
+                                  "rendered": p["id"] in ids} for p in valid]})
             if ids:
                 page_sections.append({"title": f"{sid}. {title}", "panel_ids": ids})
+            elif not error:
+                if not info.get("parsed"):
+                    why = "チャート設計の応答を JSON として読めませんでした"
+                elif not info.get("proposed"):
+                    why = "LLM が描く価値のあるパネルなしと判断しました"
+                elif render_failed:
+                    why = (f"合格した {len(valid)} 件の画像の描画に失敗しました"
+                           + (f"（ほか {len(rejected)} 件は検証で不採用）" if rejected else ""))
+                elif rejected:
+                    why = f"提案 {info['proposed']} 件がすべて検証で不採用（{rejected[0][1][:60]}）"
+                else:
+                    why = "描画に失敗しました"
+                y["no_chart_reason"] = why
+                no_chart.append(f"第{sid}章: {why}")
+        chart_warnings: list = []      # kept in chart_yield.json: a resumed run shows them again
+        if no_chart:
+            chart_warnings.append(
+                f"数値の系列はあるのにチャートが出なかった章が {len(no_chart)} 件あります（"
+                + "／".join(no_chart[:4]) + ("…" if len(no_chart) > 4 else "") + "）。")
+        if ungrounded:
+            parts = []
+            for sid, panel, issues in ungrounded[:4]:
+                it = issues[0]
+                parts.append(f"「{panel.get('title', '')}」{it.get('label')}={it.get('value')}: "
+                             f"{PROBLEM_TEXT.get(it['problem'], it['problem'])}")
+            n = sum(len(i) for _s, _p, i in ungrounded)
+            chart_warnings.append(
+                f"チャートの {n} 点の値が出典本文で確認できませんでした（図は表示しています。"
+                f"要確認: " + "／".join(parts) + ("…" if len(ungrounded) > 4 else "") + "）。")
+        if conflicts:
+            parts = [f"「{p.get('title', '')}」の「{c['judgment'][:40]}」: {c['reason']}"
+                     for _s, p, c in conflicts[:3]]
+            chart_warnings.append(
+                f"データと食い違う可能性のある「見るべき点」が {len(conflicts)} 件あります（文はそのまま"
+                f"にしています。要確認: " + "／".join(parts) + ("…" if len(conflicts) > 3 else "") + "）。")
+        if FONT_STATE.get("japanese_missing") and language == "ja" and figures:
+            chart_warnings.append(
+                "日本語フォントが見つからないため、チャート画像の日本語が□で表示される可能性が"
+                "あります（fonts-noto-cjk などを導入してください）。")
+        for message in chart_warnings:
+            ResearchWarnings.get_instance().add(ResearchWarnings.LOW, "AutoFigures", message)
+        chart_yield["warnings"] = chart_warnings
+        chart_yield["charts"] = len(figures)
+        self._write_chart_yield(figures_dir, chart_yield)
         try:
             page = render_html(page_panels, title=f"{getattr(session, 'query', '') or ''} — チャート",
                                subtitle="数値はデータ層から。斜線＝換算・導出・推定・二次。各パネルに出所と見るべき点。",
@@ -4681,6 +4904,14 @@ Output only the text (no JSON, no heading):"""
             print(f"[AutoFigures] charts.html failed: {e}")
         print(f"[AutoFigures] chart spec: {len(figures)} chart(s) across {len(page_sections)} chapter(s)")
         return figures
+
+    @staticmethod
+    def _write_chart_yield(figures_dir: Path, chart_yield: dict) -> None:
+        try:
+            (Path(figures_dir) / "chart_yield.json").write_text(
+                json.dumps(chart_yield, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+        except Exception as e:
+            print(f"[AutoFigures] chart_yield.json failed: {e}")
 
     def _numerical_store_for(self, session: ResearchSession,
                              evidence_locker: EvidenceLocker) -> NumericalDataStore:
@@ -5975,6 +6206,11 @@ def run_manual_research(
                 verification_result = outcome["verdict"]
                 verification_html = outcome["html_path"]
 
+        # PDF / HTML place the figures under their chapters while rendering
+        # (the same as run())
+        fmt_value = str(getattr(config.report.format, "value", config.report.format)).lower()
+        if figure_collection is not None and fmt_value in ("pdf", "html"):
+            generator.figure_collection = figure_collection
         report_path = generator.generate_report(
             session=session,
             evidence_locker=evidence_locker,
@@ -6005,7 +6241,10 @@ def run_manual_research(
         manifest = build_semantic_manifest(chapters_now, figure_collection)
         semantic_freeze_hash = manifest_hash(manifest)
         check = check_artifact(manifest, report_path,
-                               evidence_locker=evidence_locker)
+                               evidence_locker=evidence_locker,
+                               extra_allowed=_report_titles(session) + (
+                                   [getattr(getattr(result, "context", None), "report_title", "") or ""]
+                                   if version_tag != "v1" else []))
         semantic_artifact_check = check["status"]
         if check["status"] == "fail":
             run_status = "failed_semantic_check"

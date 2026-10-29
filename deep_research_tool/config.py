@@ -811,6 +811,15 @@ class ReportConfig:
     chart_engine: str = "spec"
     # sources whose numbers count as 公表 (primary) in charts; others are 二次
     chart_primary_domains: List[str] = field(default_factory=list)
+    # How spec charts are made and shown (both keep "numbers only from the
+    # data layer"; both get the same correctness fixes):
+    # "classic"  — the v1.5 look and making as they are (default)
+    # "enhanced" — the recommended changes: values checked against the
+    #   source text shown on the chart, research firms / PR wires are 二次
+    #   and actual beats forecast, the judgment and caption carry facts
+    #   computed from the data, PNGs drawn at their printed size with
+    #   number formats, automatic hbar for many labels and a layout QA pass
+    chart_style: str = "classic"
 
 
 @dataclass
@@ -980,6 +989,17 @@ class Config:
                 f"Valid codes: {sorted(REGION_LOCALE_MAP)}")
 
         return errors
+
+
+CHART_STYLES = ("classic", "enhanced")
+
+
+def _chart_style(value) -> str:
+    """'classic' (default) or 'enhanced'; anything else is an error."""
+    v = str(value or "classic").strip().lower()
+    if v not in CHART_STYLES:
+        raise ValueError(f"chart_style must be one of {CHART_STYLES}: {value!r}")
+    return v
 
 
 def create_config(
@@ -1163,6 +1183,7 @@ def create_config(
     chart_max_per_section: int = 6,
     chart_engine: str = "spec",
     chart_primary_domains: Optional[List[str]] = None,
+    chart_style: str = "classic",
     # Format strictness
     strict_format: bool = False,
     # Fermi estimation parameters
@@ -1378,6 +1399,9 @@ def create_config(
         intelligent_charts: Use ChartAnalyzer for smart chart recommendations
         chart_insights: Generate insights and messages for charts
         chart_max_per_section: Maximum charts per section
+        chart_style: How spec charts are made: "classic" (the v1.5 look,
+            default) or "enhanced" (source-checked values on the chart,
+            data-derived judgment / caption, print-size PNGs with layout QA)
         **kwargs: Additional keyword arguments
 
     Returns:
@@ -1615,6 +1639,7 @@ def create_config(
         chart_max_per_section=chart_max_per_section,
         chart_engine=chart_engine,
         chart_primary_domains=list(chart_primary_domains or []),
+        chart_style=_chart_style(chart_style),
     )
 
     proxy_config = ProxyConfig(

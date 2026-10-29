@@ -28,6 +28,46 @@ class ReportFormat(str, Enum):
     HTML = "html"
 
 
+# a URL may hold balanced parentheses ('…/Foo_(bar)') and a quote
+_MD_LINK = re.compile(r"\[([^\]\n]+)\]\((https?://(?:[^()\s]|\([^()\s]*\))+)\)")
+
+
+def _pdf_links(escaped: str) -> str:
+    """A Markdown link prints as its text, linked ('[統計](https://…)' was
+    printed raw and wrapped mid-URL)."""
+    def link(m):
+        href = m.group(2).replace('"', "%22").replace("'", "%27")
+        return f'<a href="{href}" color="#1a5fb4">{m.group(1)}</a>'
+    return _MD_LINK.sub(link, escaped)
+
+
+def _pdf_plain(escaped: str) -> str:
+    """The same text with links as their text only (when the linked markup
+    cannot be laid out, nothing is cut off)."""
+    return _MD_LINK.sub(lambda m: m.group(1), escaped)
+
+
+def _html_linked(value) -> str:
+    """HTML-escaped text with a Markdown link as a link (a figure caption
+    or table cell printed '[統計](https://…)' raw)."""
+    import html as _html
+    return _MD_LINK.sub(lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>',
+                        _html.escape('' if value is None else str(value)))
+
+
+def _paragraph(Paragraph, markup: str, style):
+    """A Paragraph with Markdown links as links; when that markup cannot be
+    parsed, the text without the links — whole, never cut to 500 characters."""
+    try:
+        return Paragraph(_pdf_links(markup), style)
+    except Exception:
+        try:
+            return Paragraph(_pdf_plain(markup), style)
+        except Exception:
+            import html as _h
+            return Paragraph(_h.escape(re.sub(r"<[^>]+>", "", _pdf_plain(markup))), style)
+
+
 class ReportGenerator:
     """
     Generate research reports in various formats.
@@ -66,6 +106,14 @@ class ReportGenerator:
         self.include_images = include_images
         self.include_quality_summary = include_quality_summary
         self.language = language
+        # the run's frozen FigureTableCollection: the PDF / HTML renderers
+        # place its figures, charts and tables under their chapters
+        # (Markdown / Word get theirs from FigureTableGenerator afterwards)
+        self.figure_collection = None
+        self.figures_inserted = 0
+        # set when the PDF had to be rebuilt without figure images
+        self.pdf_figures_dropped = None
+        self._pdf_safe_mode = False
 
     def generate_report(
         self,
@@ -596,7 +644,7 @@ class ReportGenerator:
             from reportlab.lib.units import inch
             from reportlab.platypus import (
                 SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-                PageBreak
+                PageBreak, KeepTogether
             )
             from reportlab.pdfbase import pdfmetrics
             from reportlab.pdfbase.ttfonts import TTFont
@@ -620,7 +668,30 @@ class ReportGenerator:
 
         # Register Japanese fonts if language is Japanese
         japanese_font = None
-        if self.language == "ja":
+        # a Japanese font also for an English report that quotes Japanese
+        # titles or text (Helvetica printed them as blocks)
+        cjk = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
+        # what the PDF prints — never the source pages kept with each section
+        # (extracted_content), which an English report does not show
+        printed = [str(getattr(plan, "title", "") or ""), str(getattr(session, "query", "") or "")]
+        for sid, data in (renumbered_contents or {}).items():
+            if not isinstance(data, dict):
+                continue
+            if sid == "_executive_summary":
+                printed += [str(data.get("executive_summary", "") or "")]
+                printed += [str(x) for k in ("key_findings", "recommendations") for x in (data.get(k) or [])]
+            elif not str(sid).startswith("_"):
+                printed += [str(data.get("content", "") or "")]
+        try:
+            printed += [f"{i.section} {i.title}" for i in plan.table_of_contents.get_flat_sections()] if plan else []
+        except Exception:
+            pass
+        printed += [str(getattr(e, "citation_text", "") or "") for e in evidence_list]
+        coll = self.figure_collection
+        if coll is not None:
+            printed += [f"{f.title} {f.caption}" for f in coll.figures + coll.charts]
+            printed += [f"{t.title} {t.caption} {t.headers} {t.rows}" for t in coll.tables]
+        if self.language == "ja" or any(cjk.search(t) for t in printed):
             japanese_font = self._register_japanese_fonts()
 
         # Determine fonts to use
@@ -664,6 +735,24 @@ class ReportGenerator:
             spaceAfter=6,
             wordWrap='CJK',  # Enable CJK word wrapping
         )
+        caption_style = ParagraphStyle(
+            'FigureCaption', parent=body_style, fontSize=9, leading=12,
+            textColor=colors.HexColor("#555555"), spaceBefore=2, spaceAfter=12,
+        )
+        self.figures_inserted = 0
+        placed: set = set()
+
+        def _esc_text(s):
+            # a numeric 0 / 0.0 cell is a value, not an empty cell
+            return ("" if s is None else str(s)).replace("&", "&amp;").replace(
+                "<", "&lt;").replace(">", "&gt;")
+
+        def _figures(section_id):
+            for flowable in self._pdf_figure_flowables(
+                    self._figure_items(section_id, placed), doc.width, body_style,
+                    caption_style, _esc_text, colors, Table, TableStyle, Paragraph,
+                    KeepTogether, inch):
+                story.append(flowable)
 
         # Title
         story.append(Paragraph(
@@ -721,10 +810,8 @@ class ReportGenerator:
                         if para.strip():
                             # Escape special characters for reportlab
                             safe_para = para.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                            try:
-                                story.append(Paragraph(safe_para, body_style))
-                            except Exception:
-                                story.append(Paragraph(para[:500] + "...", body_style))
+                            story.append(_paragraph(Paragraph, safe_para, body_style))
+                _figures(str(item.section))
 
                 # Subsections
                 for sub in item.subsections:
@@ -734,13 +821,15 @@ class ReportGenerator:
                         heading2_style
                     ))
                     if sub_content:
-                        safe_content = self._strip_citations(
-                            sub_content.get("content", "")
-                        ).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                        try:
-                            story.append(Paragraph(safe_content[:2000], body_style))
-                        except Exception:
-                            story.append(Paragraph("Content unavailable", body_style))
+                        # every paragraph, as for a chapter (it was cut at 2,000
+                        # characters, so the PDF lost the rest of the subsection)
+                        sub_text = self._strip_citations(sub_content.get("content", ""))
+                        for para in sub_text.split("\n\n"):
+                            if not para.strip():
+                                continue
+                            safe_para = para.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                            story.append(_paragraph(Paragraph, safe_para, body_style))
+                    _figures(str(sub.section))
 
         # Chapters outside the plan (e.g. the verified figure appendix)
         def _esc(s):
@@ -752,25 +841,27 @@ class ReportGenerator:
             for kind, payload in blocks:
                 try:
                     if kind == "h2":
-                        story.append(Paragraph(_esc(payload), heading1_style))
+                        story.append(_paragraph(Paragraph, _esc(payload), heading1_style))
                     elif kind == "h3":
-                        story.append(Paragraph(_esc(payload), heading2_style))
+                        story.append(_paragraph(Paragraph, _esc(payload), heading2_style))
                     elif kind == "table":
-                        ncols = max(len(r) for r in payload)
-                        rows = [[Paragraph(_esc(c), body_style) for c in r]
-                                + [""] * (ncols - len(r)) for r in payload]
-                        t = Table(rows)
-                        t.setStyle(TableStyle([
-                            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                            ('BACKGROUND', (0, 0), (-1, 0), colors.beige),
-                            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                        ]))
-                        story.append(t)
+                        story.extend(self._pdf_table(payload[0], payload[1:], doc.width, body_style,
+                                                     _esc, colors, Table, TableStyle, Paragraph))
                     else:
                         prefix = "• " if kind == "bullet" else ""
-                        story.append(Paragraph(prefix + _esc(payload), body_style))
+                        story.append(_paragraph(Paragraph, prefix + _esc(payload), body_style))
                 except Exception:
                     story.append(Paragraph("Content unavailable", body_style))
+
+        # figures of chapters the plan does not list
+        orphans = self._orphan_figure_items(placed)
+        if orphans:
+            story.append(Paragraph("図表" if self.language == "ja" else "Figures and tables",
+                                   heading1_style))
+            for flowable in self._pdf_figure_flowables(
+                    orphans, doc.width, body_style, caption_style, _esc_text, colors,
+                    Table, TableStyle, Paragraph, KeepTogether, inch):
+                story.append(flowable)
 
         # Verification Summary
         if verification_result:
@@ -818,7 +909,23 @@ class ReportGenerator:
                     story.append(Paragraph(f"{i}. [Citation formatting error]", body_style))
 
         # Build PDF
-        doc.build(story)
+        try:
+            doc.build(story)
+        except Exception as e:
+            # a layout failure must not lose the whole report: rebuild once
+            # with every table as row text and without figure images
+            if self._pdf_safe_mode:
+                raise
+            print(f"[ReportGenerator] PDF layout failed ({type(e).__name__}: {e}); "
+                  f"rebuilding with tables as text and without figure images")
+            self._pdf_safe_mode = True
+            try:
+                path = self._generate_pdf(session, evidence_locker, verification_result, filename,
+                                          filtered_evidence)
+            finally:
+                self._pdf_safe_mode = False
+            self.pdf_figures_dropped = f"{type(e).__name__}: {e}"[:300]
+            return path
 
         return filepath
 
@@ -841,6 +948,8 @@ class ReportGenerator:
 
         # Build content sections
         sections_html = []
+        self.figures_inserted = 0
+        placed: set = set()
         if plan:
             for item in plan.table_of_contents.items:
                 section_content = renumbered_contents.get(item.section, {})
@@ -852,6 +961,7 @@ class ReportGenerator:
                         {self._markdown_to_html(section_content.get('content', ''))}
                     </div>
                 """
+                section_html += self._html_figures(self._figure_items(str(item.section), placed))
 
                 # Images
                 if self.include_images and section_content.get("images"):
@@ -874,6 +984,7 @@ class ReportGenerator:
                         <div class="section-content">
                             {self._markdown_to_html(sub_content.get('content', ''))}
                         </div>
+                        {self._html_figures(self._figure_items(str(sub.section), placed))}
                     </section>
                     """
 
@@ -889,15 +1000,15 @@ class ReportGenerator:
                 parts.append(f"<h2>{_html.escape(sid)}</h2>")
             for kind, payload in blocks:
                 if kind == "h2":
-                    parts.append(f"<h2>{_html.escape(payload)}</h2>")
+                    parts.append(f"<h2>{_html_linked(payload)}</h2>")
                 elif kind == "h3":
-                    parts.append(f"<h3>{_html.escape(payload)}</h3>")
+                    parts.append(f"<h3>{_html_linked(payload)}</h3>")
                 elif kind == "table":
                     head, *body = payload
                     parts.append("<table>" + "<tr>" + "".join(
                         f"<th>{_html.escape(c)}</th>" for c in head) + "</tr>"
                         + "".join("<tr>" + "".join(
-                            f"<td>{_html.escape(c)}</td>" for c in r) + "</tr>"
+                            f"<td>{_html_linked(c)}</td>" for c in r) + "</tr>"
                             for r in body) + "</table>")
                 elif kind == "bullet":
                     parts.append(f"<ul><li>{self._markdown_to_html(payload)[3:-4]}</li></ul>")
@@ -905,6 +1016,11 @@ class ReportGenerator:
                     parts.append(self._markdown_to_html(payload))
             parts.append("</section>")
             sections_html.append("\n".join(parts))
+        orphans = self._orphan_figure_items(placed)
+        if orphans:
+            sections_html.append(
+                '<section id="figures"><h2>' + ("図表" if self.language == "ja" else "Figures and tables")
+                + "</h2>" + self._html_figures(orphans) + "</section>")
 
         # Executive summary
         exec_summary = renumbered_contents.get("_executive_summary", {})
@@ -1062,6 +1178,12 @@ class ReportGenerator:
         figure {{ flex: 1; min-width: 200px; text-align: center; }}
         figure img {{ max-width: 100%; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
         figcaption {{ font-size: 0.9em; color: #666; margin-top: 8px; }}
+        figure.report-figure {{ flex: 1 1 100%; max-width: 760px; margin: 0 auto; }}
+        figure.report-figure img {{ box-shadow: none; border-radius: 0; }}
+        figure.report-figure figcaption {{ text-align: left; }}
+        .report-table {{ width: 100%; border-collapse: collapse; margin: 10px 0; }}
+        .report-table th, .report-table td {{ padding: 6px 10px; border: 1px solid var(--border-color); text-align: left; }}
+        .report-table caption {{ text-align: left; font-weight: bold; padding: 6px 0; }}
         .verification-summary {{ background: #fff3cd; padding: 25px; border-radius: 8px; margin: 30px 0; }}
         .reliability-score {{ text-align: center; margin: 20px 0; }}
         .reliability-score .score {{ font-size: 3em; font-weight: bold; color: var(--primary-color); display: block; }}
@@ -1191,6 +1313,157 @@ class ReportGenerator:
         flush_para()
         flush_table()
         return blocks
+
+    # ------------------------------------------------------------------
+    # figures for the PDF / HTML renderers
+    # ------------------------------------------------------------------
+
+    def _figure_items(self, section_id: str, placed: set) -> List[Tuple[str, Any]]:
+        """A chapter's figures, tables and charts (the Markdown insertion
+        order); each chapter is placed once."""
+        coll = self.figure_collection
+        if coll is None or section_id in placed:
+            return []
+        placed.add(section_id)
+        return ([("image", f) for f in coll.get_figures_for_section(section_id)]
+                + [("table", t) for t in coll.get_tables_for_section(section_id)]
+                + [("image", c) for c in coll.get_charts_for_section(section_id)])
+
+    def _orphan_figure_items(self, placed: set) -> List[Tuple[str, Any]]:
+        """Items whose chapter is not in the plan (never silently dropped)."""
+        coll = self.figure_collection
+        if coll is None:
+            return []
+        return ([("image", f) for f in coll.figures if f.section_id not in placed]
+                + [("table", t) for t in coll.tables if t.section_id not in placed]
+                + [("image", c) for c in coll.charts if c.section_id not in placed])
+
+    @staticmethod
+    def _figure_caption(fig) -> str:
+        # the caption alone, as the Markdown / Word insertion prints it (a
+        # chart carries its title in the image); every line of it is then
+        # a frozen fragment for the artifact check
+        return str(fig.caption or "").strip() or str(fig.title or "").strip()
+
+    def _pdf_figure_flowables(self, items, avail_width, body_style, caption_style, esc,
+                              colors, Table, TableStyle, Paragraph, KeepTogether, inch) -> list:
+        from reportlab.platypus import Image as RLImage
+        from reportlab.lib.utils import ImageReader
+        out = []
+        for kind, obj in items:
+            try:
+                if kind == "image":
+                    path = Path(obj.image_path) if obj.image_path else None
+                    if path is None or not path.exists() or self._pdf_safe_mode:
+                        continue
+                    reader = ImageReader(str(path))
+                    reader.getRGBData()         # decode now: a cut-off file fails HERE, not in doc.build
+                    iw, ih = reader.getSize()
+                    # the width Word uses (5.5 in), never wider than the frame
+                    w = min(5.5 * inch, avail_width)
+                    h = w * ih / max(1, iw)
+                    if h > 8.0 * inch:
+                        w, h = w * 8.0 * inch / h, 8.0 * inch
+                    block = [RLImage(str(path), width=w, height=h)]
+                    cap = self._figure_caption(obj)
+                    if cap:
+                        block.append(_paragraph(Paragraph, esc(cap), caption_style))
+                    out.append(KeepTogether(block))
+                    self.figures_inserted += 1
+                elif obj.headers:
+                    out.append(_paragraph(Paragraph, f"<b>{esc(obj.title or '')}</b>", body_style))
+                    out.extend(self._pdf_table(list(obj.headers),
+                                               [list(r)[:len(obj.headers)] for r in obj.rows],
+                                               avail_width, body_style, esc, colors, Table,
+                                               TableStyle, Paragraph))
+                    if obj.caption and obj.caption != obj.title:
+                        out.append(_paragraph(Paragraph, esc(obj.caption), caption_style))
+                    self.figures_inserted += 1
+            except Exception as e:
+                print(f"[ReportGenerator] figure skipped in PDF: {e}")
+        return out
+
+    def _pdf_table(self, header, rows, avail_width, body_style, esc, colors, Table, TableStyle,
+                   Paragraph) -> list:
+        """A table for the PDF: equal column widths (without them one long
+        cell squeezed the others below zero and the whole build failed);
+        a table with a cell taller than a page (or any table, when the PDF
+        is being rebuilt after a layout failure) is set as one paragraph per
+        row instead (a row cannot split across pages)."""
+        ncols = max([len(header)] + [len(r) for r in rows]) or 1
+        col_w = avail_width / ncols
+        # characters per line INSIDE the cell padding (6 pt each side), and
+        # the row height that gives: a row taller than ~600 pt cannot be laid
+        # out, and a column narrower than the padding cannot hold a cell
+        inner = col_w - 12
+        fs = max(1.0, float(body_style.fontSize))
+        lead = float(getattr(body_style, "leading", 0) or fs * 1.2)
+        per_line = max(1, int(inner / fs)) if inner > 0 else 0
+        # a grid only when a column holds two full-width characters and the
+        # widest number of the table on one line ('12,345' is not printed as
+        # '12,3' over '45'), and no row is taller than a page
+        try:
+            from reportlab.pdfbase.pdfmetrics import stringWidth
+            widest = max([stringWidth(tok, body_style.fontName, fs)
+                          for r in [header] + rows for c in r
+                          for tok in re.findall(r"[約▲△▼▽±+\-−$¥€£(（]*[0-9][0-9,.]*[%％)）]?",
+                                                "" if c is None else str(c))]
+                         or [0.0])
+        except Exception:
+            widest = 0.0
+        too_tall = inner < max(2 * fs, widest) or any(
+            (len("" if c is None else str(c)) / per_line + 1) * lead > 600
+            for r in [header] + rows for c in r) or self._pdf_safe_mode
+        if too_tall:
+            # one line per row, cells separated by ' | ' (the same text as
+            # the table, so the verified content still matches)
+            out = [_paragraph(Paragraph, "<b>" + " | ".join(esc(h) for h in header) + "</b>", body_style)]
+            for r in rows:
+                out.append(_paragraph(Paragraph, " | ".join(esc(c) for c in r), body_style))
+            return out
+        cells = [[_paragraph(Paragraph, esc(c), body_style) for c in r] + [""] * (ncols - len(r))
+                 for r in [header] + rows]
+        t = Table(cells, colWidths=[col_w] * ncols, repeatRows=1)
+        t.setStyle(TableStyle([
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.beige),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ]))
+        return [t]
+
+    def _html_figures(self, items) -> str:
+        import base64
+        import html as _html
+        text = _html_linked
+        parts = []
+        for kind, obj in items:
+            try:
+                if kind == "image":
+                    path = Path(obj.image_path) if obj.image_path else None
+                    if path is None or not path.exists():
+                        continue
+                    ext = path.suffix.lstrip(".").lower() or "png"
+                    mime = {"jpg": "jpeg", "svg": "svg+xml"}.get(ext, ext)
+                    data = base64.b64encode(path.read_bytes()).decode("ascii")
+                    parts.append(
+                        f'<figure class="report-figure"><img src="data:image/{mime};base64,{data}" '
+                        f'alt="{_html.escape(obj.alt_text or obj.title or "")}">'
+                        f'<figcaption>{text(self._figure_caption(obj))}</figcaption></figure>')
+                    self.figures_inserted += 1
+                elif obj.headers:
+                    head = "".join(f"<th>{_html.escape('' if h is None else str(h))}</th>"
+                                   for h in obj.headers)
+                    body = "".join("<tr>" + "".join(
+                        f"<td>{text(c)}</td>" for c in r)
+                        + "</tr>" for r in obj.rows)
+                    title = str(obj.title or "")
+                    cap = title + (f" — {obj.caption}" if obj.caption and obj.caption != title else "")
+                    parts.append(f"<table class=\"report-table\"><caption>{text(cap)}</caption>"
+                                 f"<tr>{head}</tr>{body}</table>")
+                    self.figures_inserted += 1
+            except Exception as e:
+                print(f"[ReportGenerator] figure skipped in HTML: {e}")
+        return ('<div class="figures">' + "".join(parts) + "</div>") if parts else ""
 
     def _slugify(self, text: str) -> str:
         """Convert text to URL-friendly slug."""
@@ -1335,8 +1608,14 @@ class ReportGenerator:
         text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
         # Italic
         text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
-        # Links
-        text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
+        # Links: a URL may hold one level of parentheses ('…/ビール_(日本)'),
+        # as the artifact check reads it; a script URL is not linked
+        def link(m):
+            href = m.group(2).strip()
+            if re.match(r"(?i)(?:javascript|vbscript|data):", href):
+                return m.group(1)
+            return f'<a href="{href.replace(chr(34), "%22")}">{m.group(1)}</a>'
+        text = re.sub(r'\[([^\]]+)\]\(((?:[^()]|\([^()]*\))+)\)', link, text)
         # Line breaks
         text = text.replace('\n\n', '</p><p>')
         text = text.replace('\n', '<br>')

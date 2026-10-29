@@ -15,6 +15,8 @@ import re
 from statistics import mean, pstdev
 from typing import Any, Dict, List, Optional, Tuple
 
+from .data_layer import _CURRENCY_WORDS, canon, parse_unit
+
 FORMS = ("bar", "hbar", "stacked_bar", "stacked_hbar", "line_xy")
 ROLES = ("emphasis", "context", "context2", "part")
 MAX_SERIES = 8
@@ -81,8 +83,12 @@ def build_messages(section_title: str, section_goal: str, catalog: List[Dict[str
 # parsing
 # ----------------------------------------------------------------------
 
-def parse_panels(text: str) -> List[Dict[str, Any]]:
-    """The JSON array in an LLM reply (code fences and prose tolerated)."""
+def parse_panels(text: str, status: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """The JSON array in an LLM reply (code fences and prose tolerated).
+    ``status["ok"]`` tells an explicit [] (nothing worth plotting) from a
+    reply that held no JSON array at all."""
+    if status is not None:
+        status["ok"] = False
     if not text:
         return []
     s = str(text).strip()
@@ -98,6 +104,8 @@ def parse_panels(text: str) -> List[Dict[str, Any]]:
         return []
     if not isinstance(data, list):
         return []
+    if status is not None:
+        status["ok"] = True
     return [p for p in data if isinstance(p, dict)]
 
 
@@ -134,6 +142,9 @@ def resolve(panels: List[Dict[str, Any]], data: Dict[str, Any]) -> List[Dict[str
             s["values"] = list(d["values"])
             s["basis"] = list(d.get("basis") or [None] * len(s["values"]))
             s["unit"] = d.get("unit")            # the DATA's unit, never the LLM's
+            # what the series IS (for the legend name check)
+            s["_data"] = {"name": d.get("name") or "", "kind": d.get("kind") or "",
+                          "entity": d.get("entity") or "", "year": d.get("year")}
             s["source"] = d.get("source", "")
             s["sources"] = list(d.get("sources") or [])
             if xy_form and not all(isinstance(v, dict) for v in s["values"] if v is not None):
@@ -141,9 +152,91 @@ def resolve(panels: List[Dict[str, Any]], data: Dict[str, Any]) -> List[Dict[str
                 if not q["labels"]:
                     raise SpecError(f"{q.get('id')}/{s.get('name')}: line_xy にはラベル配列（年）が必要です")
                 _to_xy(q, s)
+        _check_series_names(q)
         _normalize_panel(q)
         out.append(q)
     return out
+
+
+def _series_keys(s: Dict[str, Any]) -> List[str]:
+    """What tells this series apart from the others in a panel: the
+    entity of a time series, the year of a comparison."""
+    d = s.get("_data") or {}
+    if d.get("kind") == "time" and d.get("entity"):
+        return [canon(d["entity"])]
+    if d.get("kind") == "comparison" and d.get("year"):
+        return [str(d["year"])]
+    return []
+
+
+def _check_series_names(q: Dict[str, Any]) -> None:
+    """The legend name is the LLM's (it never sees the values): a name that
+    names ANOTHER series of the panel (company A's line labelled 'B社')
+    would swap the subjects while every number stays right. Such a name
+    is replaced by the data's own name; a name that names neither (a
+    generic '当社') is kept."""
+    series = q.get("series") or []
+    keys = [_series_keys(s) for s in series]
+    fixes = []
+    for i, s in enumerate(series):
+        name = canon(s.get("name") or "")
+        own = keys[i]
+        if not name or not own or any(k and k in name for k in own):
+            continue
+        others = [k for j, ks in enumerate(keys) if j != i for k in ks if k and k not in own]
+        if any(k in name for k in others):
+            data_name = (s.get("_data") or {}).get("name") or s.get("values_ref") or ""
+            fixes.append(f"{s.get('name')} → {data_name}")
+            s["name"] = data_name
+    if fixes:
+        q["name_fixes"] = fixes
+
+
+_CURRENCY_BASES = set(_CURRENCY_WORDS.values())
+_TITLE_UNIT = re.compile(r"[（(]([^（）()]{1,16})[）)]\s*$")
+_ANY_PAREN = re.compile(r"[（(]([^（）()]{1,16})[）)]")
+
+
+def fix_title_unit(title: str, unit: str, append: bool = False) -> str:
+    """The unit in a title's closing parentheses must be the DATA's unit
+    (the LLM wrote it without seeing the data: '（億円）' over 百万円
+    values). A parenthesis that is not a unit ('（調査会社別）') is kept;
+    ``append`` adds '（unit）' to a title without one."""
+    title = str(title or "")
+    unit = str(unit or "")
+    if not unit:
+        return title
+    ub, u_f, _l2 = parse_unit(unit)
+
+    def unit_check(inner: str):
+        """(is a unit, needs replacing) for one parenthesis."""
+        if inner == unit:
+            return True, False
+        ib, i_f, _l = parse_unit(inner)
+        # only a parenthesis that IS a unit is replaced: '（2024年）',
+        # '（前年比）', '（主要5社）' are kept even over a '%' series
+        inner_is_unit = ib == ub or ib == "%" or ib in _CURRENCY_BASES or i_f != 1.0
+        related = (ib == ub) or (ib in _CURRENCY_BASES and ub in _CURRENCY_BASES) \
+            or "%" in (ib, ub)
+        return inner_is_unit and related, inner_is_unit and related and (ib, i_f) != (ub, u_f)
+
+    m = _TITLE_UNIT.search(title)
+    if m:
+        is_unit, wrong = unit_check(m.group(1).strip())
+        if wrong:
+            return title[:m.start(1)] + unit + title[m.end(1):]
+        if is_unit or not append:
+            return title
+    if not append:
+        return title
+    # a unit already in a parenthesis inside the title ('売上（億円）の推移')
+    for mid in _ANY_PAREN.finditer(title):
+        is_unit, wrong = unit_check(mid.group(1).strip())
+        if wrong:
+            return title[:mid.start(1)] + unit + title[mid.end(1):]
+        if is_unit:
+            return title
+    return f"{title}（{unit}）"
 
 
 def _to_xy(q: Dict[str, Any], s: Dict[str, Any]) -> None:
@@ -155,12 +248,14 @@ def _to_xy(q: Dict[str, Any], s: Dict[str, Any]) -> None:
             xs.append(float(str(lab).strip()))
         except ValueError:
             raise SpecError(f"{q.get('id')}: line_xy はラベルが数値（年）の系列だけです（{lab!r}）")
-    pts, basis = [], []
-    for x, v, b in zip(xs, s["values"], s["basis"] + [None] * len(xs)):
+    pts, basis, sources = [], [], []
+    srcs = list(s.get("sources") or []) + [None] * len(xs)
+    for x, v, b, src in zip(xs, s["values"], s["basis"] + [None] * len(xs), srcs):
         if isinstance(v, (int, float)) and not isinstance(v, bool):
             pts.append({"x": x, "y": float(v)})
             basis.append(b)
-    s["values"], s["basis"] = pts, basis
+            sources.append(src)            # stays aligned with the points
+    s["values"], s["basis"], s["sources"] = pts, basis, sources
 
 
 def _data_max(q: Dict[str, Any]) -> float:
@@ -198,7 +293,16 @@ def _normalize_panel(q: Dict[str, Any]) -> None:
     if isinstance(y_max, bool) or not isinstance(y_max, (int, float)):
         q.pop("y_max", None)
     else:
-        q["y_max"] = max(float(y_max), _data_max(q))
+        top = _data_max(q)
+        # an axis far above the data (the LLM guessed 5000 for values up to
+        # 300) squashes every bar; % axes may stop at 100
+        roomy = max(2.0 * top, 100.0 if q.get("unit") == "%" else 0.0)
+        if top <= 0 or float(y_max) > roomy:
+            q.pop("y_max", None)
+        else:
+            q["y_max"] = max(float(y_max), top)
+    if q.get("title") and q.get("unit"):
+        q["title"] = fix_title_unit(q["title"], q["unit"])
     height = q.get("height")
     if height is not None:
         try:
@@ -232,6 +336,11 @@ def validate(panels: List[Dict[str, Any]]) -> None:
             raise SpecError(f"{pid}: 系列数は 1〜{MAX_SERIES} です（{len(series)}）")
         if form.startswith("stacked") and not 2 <= len(series) <= 4:
             raise SpecError(f"{pid}: stacked_* の系列は 2〜4 本です")
+        if form.startswith("stacked") and any(
+                isinstance(v, (int, float)) and not isinstance(v, bool) and v < 0
+                for s in series for v in (s.get("values") or [])):
+            # a negative part cannot be stacked (the segment would vanish)
+            raise SpecError(f"{pid}: 積み上げ形式に負の値は描けません")
         if sum(1 for s in series if s.get("role") == "emphasis") > 1:
             raise SpecError(f"{pid}: emphasis は 1 系列までです")
         for s in series:
@@ -284,10 +393,13 @@ def validate(panels: List[Dict[str, Any]]) -> None:
 
 
 def validate_panels(panels: List[Dict[str, Any]], data: Dict[str, Any],
-                    max_panels: Optional[int] = None
+                    max_panels: Optional[int] = None,
+                    stats: Optional[Dict[str, Any]] = None,
                     ) -> Tuple[List[Dict[str, Any]], List[Tuple[Dict[str, Any], str]]]:
     """Resolve + validate panel by panel: (valid resolved panels, rejected
-    [(panel, reason)]). One bad panel never discards the others."""
+    [(panel, reason)]). One bad panel never discards the others.
+    ``stats["over_limit"]`` counts the panels left unchecked once
+    ``max_panels`` valid ones were found."""
     valid: List[Dict[str, Any]] = []
     rejected: List[Tuple[Dict[str, Any], str]] = []
     seen: set = set()
@@ -313,6 +425,8 @@ def validate_panels(panels: List[Dict[str, Any]], data: Dict[str, Any],
             rejected.append((p, f"{type(e).__name__}: {e}"))
         if max_panels is not None and len(valid) >= max_panels:
             break
+    if stats is not None:
+        stats["over_limit"] = max(0, len(panels) - len(valid) - len(rejected))
     return valid, rejected
 
 

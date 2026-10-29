@@ -898,8 +898,10 @@ def report(
                 sid: sdata.get("content", "")
                 for sid, sdata in session.section_contents.items()
                 if not sid.startswith("_") and sdata.get("content")})
+            from .main import _report_titles
             check = check_artifact(manifest, report_path,
-                                   evidence_locker=evidence_locker)
+                                   evidence_locker=evidence_locker,
+                                   extra_allowed=_report_titles(session))
             if check["status"] == "fail":
                 console.print(
                     f"[red]ARTIFACT CHECK FAILED: 欠落"
