@@ -24,6 +24,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from .data_layer import _PER_POP
+
 _TIME_LABEL = re.compile(r"^(19|20)\d{2}(\s*Q[1-4])?$", re.I)
 _MAX_WORDS = ("過去最高", "過去最大", "最高", "最大", "最多", "首位", "トップ", "1位", "一位",
               "最も多い", "最も大きい", "最も高い")
@@ -42,7 +44,8 @@ _LOSS = ("赤字", "損失", "欠損", "純損", "マイナス")
 _SCOPE = ("除", "以外", "以降", "以来", "以後", "後は", "後では", "では", "のうち", "の中で", "勢",
           "に限", "限定", "に絞", "だけで", "のみで", "で見ると", "で見れば", "において",
           "前年比", "前年同期比", "前期比", "増加幅", "減少幅", "上昇幅", "下落幅", "増加率", "減少率",
-          "上昇率", "下落率", "伸び", "落ち込み", "増減", "成長率", "変化", "振れ幅")
+          "上昇率", "下落率", "伸び", "落ち込み", "増減", "成長率", "変化", "振れ幅",
+          "前年差", "前年対比", "上げ幅", "下げ幅", "伸長率", "増加額", "減少額")
 
 
 def _num(v: Any) -> Optional[float]:
@@ -78,8 +81,8 @@ def _natural(v: float, unit: str) -> Tuple[float, str]:
     Other units that start with a number ('2015年=100', '100世帯当たり台')
     are not scales and stay as they are."""
     m = re.match(r"^(\d+)(兆|億|万|千|百万|十億)(.*)$", unit or "")
-    # '10万人当たり' is a rate per 100,000 people, not 10 × 万
-    if m and not re.match(r"^\s*(?:人|世帯)?\s*(?:当たり|あたり)", m.group(3)):
+    # '10万人当たり' / '/10万人' are rates per 100,000 people, not 10 × 万
+    if m and not _PER_POP.search(unit):
         return v * int(m.group(1)), m.group(2) + m.group(3)
     return v, unit
 
@@ -92,8 +95,9 @@ def _fmt(v: float, unit: str) -> str:
         s = f"{v:.3g}"
     else:
         s = f"{v:,.1f}"
-    if any(ch.isdigit() for ch in unit):
-        # '98.5（2015年=100）', '15.7（人口10万人当たり）' — never '98.52015年=100'
+    if unit[:1].isdigit() or (_PER_POP.search(unit) and "/" not in unit):
+        # '98.5（2015年=100）', '15.7（人口10万人当たり）' — never '98.52015年=100';
+        # '12.1億t-co2', '15.7件/10万人' read as they are
         return f"{s}（{unit}）"
     return s + ("%" if unit == "%" else unit)
 
@@ -175,8 +179,9 @@ def judgment_conflict(judgment: str, facts: Dict[str, Any]) -> Optional[str]:
         for m in _names(unicodedata.normalize("NFKC", lab).lower(), text):
             # a topic before the name in the same sentence is a scope
             # ('欧州メーカーはVolkswagenが首位、Nissanが最下位', '増加率は2020年が最大')
-            if "は" in re.split(r"[。．!?！？]", text[:m.start()])[-1]:
-                continue
+            prefix = re.split(r"[。．!?！？]", text[:m.start()])[-1]
+            if "は" in prefix or re.search(r"で[、,]?\s*$", prefix):
+                continue                        # also '国内でB社が首位', '前年差で2020年が最大'
             rest = text[m.end():]
             words_max = [w for w in _MAX_WORDS if not (period and w in _RANK)]
             words_min = [w for w in _MIN_WORDS if not (period and w in _RANK)]

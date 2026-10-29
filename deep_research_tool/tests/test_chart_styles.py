@@ -1697,3 +1697,43 @@ class TestR5Reports:
                                        verification_result=None)
             text = " ".join("\n".join(p.extract_text() for p in pypdf.PdfReader(str(path)).pages).splitlines())
             assert all(f"12,{345 + i}" in text for i in range(n - 1)), n
+
+
+class TestR5Followups:
+
+    def test_wrap_never_starts_a_line_with_a_space(self):
+        from deep_research_tool.chartkit.render_png import _wrap
+        assert _wrap("データセンター（DC） 向けGPU出荷", 10) == "データセンター（DC）\n向けGPU出荷"
+        assert _wrap("見るべき点: 北米が2025年に最大", 5).split("\n")[1] == "北米が"
+
+    def test_row_labels_and_more_counters(self):
+        # a header-scaled cell followed by the next row's label is not 'scale 1'
+        for quote, page in [("売上高1,234億円", "主要指標（単位：億円）\n売上高 1,234\n店舗数 56\n営業利益 98"),
+                            ("売上原価は45,678百万円", "内訳（単位：百万円）\n売上原価 45,678\n人件費 12,345"),
+                            ("net income of $1,234 million", "(In millions)\nNet income 1,234\nShares used 456")]:
+            assert quote_in_source(quote, page), quote
+        for quote, page in [("会員数は35万名", "会員数は35名（2024年3月末）"), ("契約数は35万世帯", "契約数は35世帯"),
+                            ("生産量は350万トン", "国内生産量は350トン"), ("3.5 million subscribers", "the service had 3.5 subscribers")]:
+            assert not quote_in_source(quote, page), quote
+
+    def test_per_population_and_digit_units(self):
+        from deep_research_tool.chartkit.data_layer import parse_unit
+        from deep_research_tool.chartkit.facts import _fmt
+        assert parse_unit("/10万人") == ("/10万人", 1.0, "") and parse_unit("人口千人当たり")[1] == 1.0
+        assert parse_unit("千円/人")[:2] == ("円/人", 1e3)                  # a scale with '/人' stays a scale
+        assert _fmt(15.7, "/10万人") == "15.7/10万人" and _fmt(15.7, "件/10万人") == "15.7件/10万人"
+        assert _fmt(12.1, "億t-co2") == "12.1億t-co2" and _fmt(45, "m2") == "45m2"
+        assert _fmt(540, "兆円(2015年連鎖価格)") == "540兆円(2015年連鎖価格)"
+        assert _fmt(7.2, "人口千人当たり") == "7.2（人口千人当たり）"
+
+    def test_de_scopes(self):
+        cos = panel_facts({"form": "bar", "unit": "億円", "labels": ["a社", "b社", "c社"],
+                           "series": [{"values": [400, 300, 200]}]})
+        for t in ("国内でB社が首位。", "EVでB社が首位。"):
+            assert judgment_conflict(t, cos) is None, t
+        assert judgment_conflict("B社が首位。", cos)
+
+    def test_numbered_items_with_full_width_characters(self):
+        from deep_research_tool.report.semantic_manifest import verify_frozen_in_artifact
+        text = "市場シェア（2023年）はA社が首位で約45％を占め、B社とC社がこれに続く構図：数年来続いている…"
+        assert verify_frozen_in_artifact({"chapters": {"1": "1. " + text}}, text)["ok"]

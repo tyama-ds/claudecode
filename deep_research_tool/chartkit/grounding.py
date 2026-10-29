@@ -159,10 +159,14 @@ def _quantities(text: str) -> List[float]:
 
 _NUMBER = re.compile(r"[0-9]+(?:[,，][0-9]{3})*(?:[.．][0-9]+)?")
 _COMPOUND_AFTER = re.compile(r"\s*(千億|百億|十億|千万|百万|十万)")
-# a number followed directly by a counter or unit is written WITHOUT a scale
+# a number followed directly (same line) by a counter or unit is written
+# WITHOUT a scale — never the start of a longer word or the next row's
+# label ('人件費', '店舗数', 'Users')
 _UNIT_AFTER = re.compile(
-    r"\s?(?:[人円社件台個本枚店校%回歳倍点]|ドル|ユーロ|ポンド|ウォン|元"
-    r"|(?:dollars?|yen|euros?|users?|people|persons?|units?|tons?|shares?)(?![a-z]))", re.I)
+    r"[ \t]?(?:(?:世帯|店舗|拠点|箇所|か所|カ所|米ドル|ドル|ユーロ|ポンド|ウォン|トン|ユーザー"
+    r"|[人名円社件台個本枚店校戸回歳倍点元])(?![\u4e00-\u9fff\u30a0-\u30ff])|%"
+    r"|(?:dollars?|yen|euros?|users?|people|persons?|units?|tons?|tonnes?|shares?|customers?"
+    r"|subscribers?|households?|employees?|members?|vehicles?|t)(?![A-Za-z]))")
 
 
 def _scaled(text: str) -> List[tuple]:

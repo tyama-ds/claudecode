@@ -1406,7 +1406,8 @@ class ReportGenerator:
             from reportlab.pdfbase.pdfmetrics import stringWidth
             widest = max([stringWidth(tok, body_style.fontName, fs)
                           for r in [header] + rows for c in r
-                          for tok in re.findall(r"[-+]?[0-9][0-9,.]*%?", "" if c is None else str(c))]
+                          for tok in re.findall(r"[約▲△▼▽±+\-−$¥€£(（]*[0-9][0-9,.]*[%％)）]?",
+                                                "" if c is None else str(c))]
                          or [0.0])
         except Exception:
             widest = 0.0

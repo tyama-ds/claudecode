@@ -160,7 +160,10 @@ class _Wrapper(textwrap.TextWrapper):
                 cur_line.pop()
             return
         cur_line.append(chunk[:end])
-        reversed_chunks[-1] = chunk[end:]
+        if end >= len(chunk):
+            reversed_chunks.pop()               # textwrap then drops the space after it
+        else:
+            reversed_chunks[-1] = chunk[end:]
 
 
 def _wrap(text: str, width: int) -> str:

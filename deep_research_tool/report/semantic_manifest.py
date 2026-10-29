@@ -118,7 +118,6 @@ def manifest_hash(manifest: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 import re as _re
-import unicodedata as _ud
 
 # [SOURCE 1] / [SOURCE: 1] editing tags, [1] display numbers and [^1]
 # footnote markers are all citation plumbing, not semantic text
@@ -255,7 +254,7 @@ def verify_frozen_in_artifact(manifest: Dict[str, Any],
             # ('1. …' as a Word / HTML list) is there without its '1.' — a
             # list number is followed by a space ('1. 2030年…'); '12.5%…'
             # or '1.5兆円…' is a number, not item 1
-            m = _re.match(r"\s*\d{1,3}[.)]\s+(.+)$", _ud.normalize("NFKC", fragment or ""), _re.S)
+            m = _re.match(r"\s*\d{1,3}[.)]\s+(.+)$", fragment or "", _re.S)
             if not (m and normalize_semantic_text(m.group(1)) in haystack):
                 missing.append(fragment.strip()[:120])
 

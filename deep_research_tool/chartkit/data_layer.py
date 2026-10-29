@@ -95,8 +95,9 @@ _SCALES: Tuple[Tuple[str, float, str], ...] = (
 # every scale written in a unit, longest first (to strip it in one piece)
 _SCALE_ALT = "|".join(re.escape(w) for w, _f, _l in sorted(_SCALES, key=lambda t: -len(t[0]))
                       if not w.isascii() or w[0].isdigit())
-_PER_POP = re.compile(r"(?:/|人口|per\s*)\s*[0-9,.]*\s*(?:十|百|千)?万\s*(?:人|世帯)?"
-                      r"|[0-9,.]*\s*(?:十|百|千)?万\s*(?:人|世帯)\s*(?:当たり|あたり)")
+_PER_POP = re.compile(r"(?:/|人口|per\s*)\s*(?:[0-9][0-9,.]*\s*(?:(?:十|百|千)?万|千|百)?|(?:(?:十|百|千)?万|千|百))"
+                      r"\s*(?:人|世帯)?(?:\s*(?:当たり|あたり))?(?![0-9])"
+                      r"|[0-9,.]*\s*(?:(?:十|百|千)?万|千)\s*(?:人|世帯)?\s*(?:当たり|あたり|対)")
 _SCALE_LABEL_FACTOR = {"兆": 1e12, "千億": 1e11, "百億": 1e10, "10億": 1e9, "億": 1e8,
                        "千万": 1e7, "百万": 1e6, "十万": 1e5, "万": 1e4, "千": 1e3, "": 1.0}
 _CURRENCY_WORDS = {
@@ -133,7 +134,7 @@ def parse_unit(unit: Optional[str]) -> Tuple[str, float, str]:
     # a per-population denominator is part of the unit, not a scale
     # ('件（人口10万人当たり）', '人/10万人')
     if _PER_POP.search(low):
-        return spelled.strip(" -_/・"), 1.0, ""
+        return spelled.strip().rstrip(" -_/・"), 1.0, ""     # '/10万人' keeps its '/'
     factor, label, hit = 1.0, "", ""
     for word, f, lab in _SCALES:
         # longest match first is guaranteed by the table order
