@@ -122,8 +122,10 @@ import re as _re
 # [SOURCE 1] / [SOURCE: 1] editing tags, [1] display numbers and [^1]
 # footnote markers are all citation plumbing, not semantic text
 _CITATION_RE = _re.compile(r"\[(?:SOURCE:?\s*)?\^?\d+\]")
-_MD_IMAGE_RE = _re.compile(r"!\[[^\]]*\]\([^)]*\)")
-_MD_LINK_RE = _re.compile(r"\[([^\]]*)\]\([^)]*\)")
+# a URL may hold one level of parentheses ('…/ビール_(日本)'): the link
+# ends at its own ')', not at the first one
+_MD_IMAGE_RE = _re.compile(r"!\[[^\]]*\]\((?:[^()]|\([^()]*\))*\)")
+_MD_LINK_RE = _re.compile(r"\[([^\]]*)\]\((?:[^()]|\([^()]*\))*\)")
 # tag-shaped only: '伸び率が<1%' or 'a < b > c' in plain text is kept
 _TAG_RE = _re.compile(r"</?[A-Za-z][^<>]*>")
 # '<!-- Chart not found: … -->' left by the Markdown insertion is not text
@@ -250,7 +252,8 @@ def verify_frozen_in_artifact(manifest: Dict[str, Any],
         if needle not in haystack:
             # a numbered list item whose number the renderer draws itself
             # ('1. …' as a Word / HTML list) is there without its '1.'
-            m = _re.match(r"\d{1,3}[.)](.+)$", needle)
+            # (a list number only: '12.5%…' is a decimal, not item 12)
+            m = _re.match(r"\d{1,3}[.)](?![0-9])(.+)$", needle)
             if not (m and m.group(1) in haystack):
                 missing.append(fragment.strip()[:120])
 

@@ -37,6 +37,11 @@ _END = r"(?:です|である|だ|となった|になった)?(?=$|[。．.！!？
 _NEG = ("ない", "なかった", "ず", "れず", "外れ", "陥落", "転落", "譲", "奪われ", "落とし", "後退")
 # losses and deficits: '最大' of a negative amount is ambiguous
 _LOSS = ("赤字", "損失", "欠損", "純損", "マイナス")
+# a scope or a change: '国内勢ではB社が最大', 'A社を除くと…', 'コロナ後では…',
+# '増加幅は2019年が最大' — the claim is not about the plotted values as a whole
+_SCOPE = ("除", "以外", "以降", "以来", "以後", "後は", "後では", "では", "のうち", "の中で", "勢",
+          "に限", "限定", "に絞", "だけで", "のみで", "で見ると", "で見れば", "において",
+          "前年比", "増加幅", "減少幅", "上昇幅", "下落幅", "伸び率", "増減", "成長率", "伸び幅")
 
 
 def _num(v: Any) -> Optional[float]:
@@ -129,7 +134,10 @@ def _material(a: float, b: float, unit: str) -> bool:
 
 
 def _move(a: float, b: float, unit: str) -> str:
-    if not _material(a, b, unit):
+    """The direction the reader is told: 5 % of the larger value, or 1 pt
+    on a '%' series (0.4 %→0.9 % is a rise, not 'ほぼ横ばい')."""
+    d = abs(b - a)
+    if d < 0.05 * max(abs(a), abs(b), 1e-9) and not (unit == "%" and d >= 1.0):
         return "flat"
     return "up" if b > a else "down"
 
@@ -148,18 +156,20 @@ def judgment_conflict(judgment: str, facts: Dict[str, Any]) -> Optional[str]:
     with no negation or loss in the sentence. A difference below 5 % (1 pt
     for '%') is never a contradiction; a rank chart ('位') is not checked
     (a smaller number is the better rank)."""
-    text = str(judgment or "")
+    import unicodedata
+    # the catalog lower-cases names ('NXP' → 'nxp'); full-width digits too
+    text = unicodedata.normalize("NFKC", str(judgment or "")).lower()
     if not text or facts.get("kind") not in ("time", "comparison"):
         return None
     unit = facts.get("unit") or ""
     pts: List[Tuple[str, float]] = facts["points"]
     if "位" in unit or any(w in text for w in _LOSS) or any(w in text for w in _NEG) \
-            or (unit != "%" and any(v < 0 for _l, v in pts)):
+            or any(w in text for w in _SCOPE) or (unit != "%" and any(v < 0 for _l, v in pts)):
         return None
     forecast = facts.get("forecast") or set()
     for lab, v in pts:
         period = bool(_TIME_LABEL.match(lab))
-        for m in _names(lab, text):
+        for m in _names(unicodedata.normalize("NFKC", lab).lower(), text):
             rest = text[m.end():]
             words_max = [w for w in _MAX_WORDS if not (period and w in _RANK)]
             words_min = [w for w in _MIN_WORDS if not (period and w in _RANK)]
@@ -185,6 +195,9 @@ def fact_sentence(facts: Dict[str, Any]) -> str:
     if facts.get("kind") == "time":
         (fl, fv), (ll, lv) = facts["first"], facts["last"]
         fl, ll = mark(fl), mark(ll)
+        if "位" in unit:                         # a rank: a smaller number is a rise
+            word = {"up": "順位を下げた", "down": "順位を上げた", "flat": "ほぼ同じ順位"}[facts["direction"]]
+            return f"{fl}→{ll}で{_fmt(fv, unit)}→{_fmt(lv, unit)}（{word}）"
         word = {"up": "増加", "down": "減少", "flat": "ほぼ横ばい"}[facts["direction"]]
         pct = facts.get("change_pct")
         extra = ""
@@ -192,7 +205,8 @@ def fact_sentence(facts: Dict[str, Any]) -> str:
             if pct is not None:
                 extra = f"、{pct:+.0f}%"
             elif unit == "%":
-                extra = f"、{facts['change']:+.1f}pt".replace(".0pt", "pt")
+                c = facts["change"]             # '+0.03pt', never '+0pt'
+                extra = "、" + (f"{c:+.2g}" if abs(c) < 0.1 else f"{c:+.1f}".replace(".0", "")) + "pt"
         return f"{fl}→{ll}で{_fmt(fv, unit)}→{_fmt(lv, unit)}（{word}{extra}）"
     if facts.get("kind") == "comparison":
         (ml, mv), (nl, nv) = facts["max"], facts["min"]

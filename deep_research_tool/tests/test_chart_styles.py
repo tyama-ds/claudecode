@@ -1370,3 +1370,200 @@ class TestR3Artifact:
                                    verification_result=None)
         text = "".join(p.extract_text() for p in pypdf.PdfReader(str(path)).pages).replace("\n", "")
         assert "最後の文はここにある。" in text
+
+
+# --------------------------------------------------------------------------
+# regressions from the fourth review round
+# --------------------------------------------------------------------------
+
+def test_r4_wrap_matches_textwrap_on_hyphens_tabs_and_indents():
+    import textwrap
+    from deep_research_tool.chartkit.render_png import _wrap
+    for text, width in [("Fuji-Xerox Holdings market share", 10), ("well-known brand-new state-of-the-art", 12),
+                        ("  indented text here", 10), ("a\tb c", 10), ("line1\r\nline2", 10)]:
+        assert _wrap(text, width) == "\n".join(textwrap.wrap(text, width)), text
+    # a number keeps its 億 / 万 multiplier at a line end
+    for width in range(14, 20):
+        assert "6\n億" not in _wrap("あいうえおかきくけこさしすせそ6億缶の出荷", width)
+
+
+@pytest.mark.parametrize("n_cats,n_series", [(15, 3), (36, 1)])
+def test_r4_enhanced_hbar_height_is_bounded(tmp_path, n_cats, n_series):
+    pytest.importorskip("matplotlib")
+    panel = _panel("hbar", [f"カテゴリー{i}" for i in range(n_cats)],
+                   [([10 + i + j for i in range(n_cats)], "emphasis" if j == 0 else "context")
+                    for j in range(n_series)])
+    qa = _qa(panel, "enhanced", tmp_path)
+    assert qa["size_px"][1] <= 10.5 * 200 and qa["spill"] == [] and not qa["tick_overlaps"]
+
+
+class TestR4Units:
+
+    def test_scale_letters(self):
+        from deep_research_tool.chartkit.data_layer import _raw_numbers, repair_scale
+        assert _raw_numbers("10kΩ") == [(10.0, 1.0, "")]                 # a unit symbol, not x1000
+        assert repair_scale(10, "抵抗値は10kΩ", "kΩ") == ("kΩ", False)
+        assert _raw_numbers("US$450m")[0][1] == 1e6 and _raw_numbers("USD 1.2B")[0][1] == 1e9
+        assert _raw_numbers("$1.2T")[0][1] == 1e12 and _raw_numbers("5m")[0][1] == 1.0
+        assert _raw_numbers("3百億円")[0][2] == "?"                        # compound: not a bare 3
+
+    def test_compound_and_rate_units(self):
+        from deep_research_tool.chartkit.data_layer import parse_unit, repair_scale
+        assert parse_unit("1000億円")[:2] == ("円", 1e11) and parse_unit("1,000万円")[:2] == ("円", 1e7)
+        # a per-population rate is a unit, not a scale
+        assert parse_unit("人口10万人当たり")[1] == 1.0 and parse_unit("百万人当たり")[1] == 1.0
+        assert repair_scale(5.1, "revenue of $5.1 billion", "千億円") == ("billion 円", True)
+
+    def test_scale_errors_in_grounding(self):
+        assert not value_in_quote(450, "億ドル", "US$450m") and value_in_quote(4.5, "億ドル", "US$450m")
+        assert not value_in_quote(1.2, "億ドル", "$1.2T") and value_in_quote(1.2, "兆ドル", "$1.2T")
+        assert not value_in_quote(1.2, "億ドル", "USD 1.2B") and value_in_quote(12, "億ドル", "USD 1.2B")
+        assert not value_in_quote(3, "億円", "3百億円") and value_in_quote(300, "億円", "3百億円")
+
+    def test_quotes_against_the_page(self):
+        from deep_research_tool.chartkit.grounding import _scale_conflict
+        assert not quote_in_source("売上高は1,234億円", "売上高は1,240億円だった")   # a misquote
+        assert quote_in_source("1兆2,000億円", "市場は1.2兆円") and quote_in_source("3億5,000万円", "3.5億円")
+        assert not quote_in_source("$5.2 billion", "revenue was $5.2 million")
+        assert _scale_conflict("$5.2 billion", "revenue was $5.2 million")
+
+    def test_rounded_fractions(self):
+        assert value_in_quote(33, "%", "3人に1人") and value_in_quote(33.3, "%", "3人に1人")
+        assert value_in_quote(14, "%", "7人に1人") and value_in_quote(67, "%", "3分の2")
+
+
+class TestR4Facts:
+
+    def _line(self, vals, unit="億円", start=2020):
+        return panel_facts({"form": "line_xy", "unit": unit, "labels": [], "title": "t", "caption": "",
+                            "judgment": "", "series": [{"name": "s", "unit": unit, "basis": [PUB] * len(vals),
+                                                        "values": [{"x": float(start + i), "y": v}
+                                                                   for i, v in enumerate(vals)],
+                                                        "sources": [{} for _ in vals]}]})
+
+    def test_rank_and_small_percent_wording(self):
+        from deep_research_tool.chartkit.facts import fact_sentence
+        assert fact_sentence(self._line([12, 9, 5, 3], unit="位")) == "2020→2023で12位→3位（順位を上げた）"
+        assert "増加、+0.5pt" in fact_sentence(self._line([0.5, 0.6, 0.8, 1.0], unit="%"))
+        assert "+0.03pt" in fact_sentence(self._line([0.5, 0.53], unit="%"))
+
+    def test_scope_and_case(self):
+        bar = panel_facts({"form": "bar", "unit": "億円", "labels": ["toyota", "honda", "ｓｏｎｙ"],
+                           "series": [{"values": [100, 300, 50]}]})
+        assert judgment_conflict("Toyotaが首位。", bar) and judgment_conflict("ＳＯＮＹが首位。", bar)
+        assert judgment_conflict("Hondaが首位。", bar) is None
+        for t in ("国内ではToyotaが首位。", "国内市場に限ればToyotaが首位", "北米だけで見るとToyotaが首位"):
+            assert judgment_conflict(t, bar) is None, t
+
+
+class TestR4Reports:
+
+    def test_links_with_quotes_and_parentheses(self):
+        from deep_research_tool.report.generator import _html_linked, _pdf_links
+        from deep_research_tool.report.semantic_manifest import normalize_semantic_text
+        url = "https://ja.wikipedia.org/wiki/ノンアルコールビール_(日本)"
+        assert f'<a href="{url}"' in _pdf_links(f"制度は[解説記事]({url})が詳しい。")
+        assert normalize_semantic_text(f"制度は[解説記事]({url})が詳しい。") == "制度は解説記事が詳しい。"
+        assert '%22' in _pdf_links('[記事](https://ex.com/a"b)') and '"b' not in _pdf_links('[記事](https://ex.com/a"b)')
+        assert _html_linked("出所: [統計](https://ex.com/s?a=1&b=2)") == \
+            '出所: <a href="https://ex.com/s?a=1&amp;b=2">統計</a>'
+
+    @pytest.mark.parametrize("fmt", ["pdf", "html"])
+    def test_links_in_captions_and_cells_print_as_text(self, tmp_path, fmt):
+        pytest.importorskip("reportlab")
+        from PIL import Image
+        from deep_research_tool.config import ReportFormat
+        from deep_research_tool.report.figure_table_generator import (
+            Figure, FigureTableCollection, FigureType, TableData)
+        from deep_research_tool.report.semantic_manifest import extract_artifact_text
+        png = tmp_path / "c.png"
+        Image.new("RGB", (600, 400), "white").save(png)
+        coll = FigureTableCollection(
+            charts=[Figure(figure_id="c1", figure_type=FigureType.CHART, title="推移", section_id="1",
+                           caption="シェアの推移。出所: [業界団体の出荷統計](https://www.example.or.jp/stats/2024/a.html)",
+                           image_path=png)],
+            tables=[TableData(table_id="t1", title="主要企業", section_id="1",
+                              caption="出所: [商業動態統計](https://www.meti.go.jp/statistics/tyo/syoudou/x.xlsx)",
+                              headers=["資料", "内容"], rows=[["[経済産業省](https://www.meti.go.jp/a.html)", "月次"]])])
+        gen, session, locker = TestR3Artifact()._gen(tmp_path, coll)
+        path = gen.generate_report(session=session, evidence_locker=locker, format=ReportFormat(fmt),
+                                   verification_result=None)
+        text = extract_artifact_text(path)
+        assert "業界団体の出荷統計" in text and "商業動態統計" in text and "経済産業省" in text
+        assert "](http" not in text
+
+    def test_english_pdf_takes_a_cjk_font_for_a_japanese_summary(self, tmp_path, monkeypatch):
+        pytest.importorskip("reportlab")
+        from deep_research_tool.config import ReportFormat
+        from deep_research_tool.report.generator import ReportGenerator
+        from deep_research_tool.tests.test_finalization_integration import make_locker, make_plan, make_session
+        calls = []
+        monkeypatch.setattr(ReportGenerator, "_register_japanese_fonts", lambda self: calls.append(1))
+        plan = make_plan([("1", "Market share", "d")])
+        session = make_session(plan, {"1": {"title": "Market share", "content": "Company A leads. " * 5,
+                                            "evidence": []}})
+        session.section_contents["_executive_summary"] = {
+            "executive_summary": "The market keeps growing.", "recommendations": [],
+            "key_findings": ["The flagship brand 'オールフリー' leads the category nationwide"]}
+        gen = ReportGenerator(output_dir=tmp_path, language="en", include_citations=False)
+        gen.generate_report(session, make_locker(tmp_path, [("https://ex.com/a", "data " * 20)]),
+                            format=ReportFormat.PDF, filename="r")
+        assert calls
+
+    def test_wide_table_numbers_stay_whole_in_the_pdf(self, tmp_path):
+        pytest.importorskip("reportlab")
+        pypdf = pytest.importorskip("pypdf")
+        from deep_research_tool.config import ReportFormat
+        from deep_research_tool.report.figure_table_generator import FigureTableCollection, TableData
+        coll = FigureTableCollection(tables=[TableData(
+            table_id="w", title="年次推移", caption="", headers=["メーカー"] + [str(y) for y in range(2011, 2024)],
+            rows=[["A社"] + [f"12,{345 + i}.6" for i in range(13)]], section_id="1")])
+        gen, session, locker = TestR3Artifact()._gen(tmp_path, coll)
+        path = gen.generate_report(session=session, evidence_locker=locker, format=ReportFormat.PDF,
+                                   verification_result=None)
+        lines = "\n".join(p.extract_text() for p in pypdf.PdfReader(str(path)).pages).splitlines()
+        text = " ".join(lines)
+        assert "2011" in text and "2023" in text and "12,345.6" in text and "12,357.6" in text
+
+    def test_numbered_fallback_takes_integer_list_numbers_only(self):
+        from deep_research_tool.report.semantic_manifest import verify_frozen_in_artifact
+        # a line under the addition floor and a table cell: only the missing check sees them
+        frozen = "1.5兆円規模の国内市場は2030年までに倍増する見込みである。"
+        res = verify_frozen_in_artifact({"chapters": {"1": frozen}}, frozen.replace("1.5兆円", "2.5兆円"))
+        assert not res["ok"]
+        body = "国内市場は2030年までに大きく拡大する見込みであり、主要各社は投資を続けている。"
+        table = {"chapters": {"1": body}, "figures": [{"title": "表1 市場規模", "caption": "",
+                                                       "headers": ["年", "成長率"], "rows": [["2024", "12.5%"]]}]}
+        assert not verify_frozen_in_artifact(table, body + "\n表1 市場規模\n年 成長率\n2024 99.5%")["ok"]
+        assert verify_frozen_in_artifact(table, body + "\n表1 市場規模\n年 成長率\n2024 12.5%")["ok"]
+        listed = "1. 国内市場は堅調に拡大しており主要メーカーは増産投資を進めている。"
+        assert verify_frozen_in_artifact({"chapters": {"1": listed}}, listed[3:])["ok"]
+
+    def test_docx_tall_chart_fits_the_page(self, tmp_path):
+        docx = pytest.importorskip("docx")
+        from PIL import Image
+        from docx.shared import Inches
+        from deep_research_tool.report.figure_table_generator import _add_docx_picture
+        tall, wide = tmp_path / "tall.png", tmp_path / "wide.png"
+        Image.new("RGB", (400, 2000), "white").save(tall)
+        Image.new("RGB", (1100, 700), "white").save(wide)
+        doc = docx.Document()
+        _add_docx_picture(doc.add_paragraph().add_run(), tall, Inches)
+        _add_docx_picture(doc.add_paragraph().add_run(), wide, Inches)
+        shapes = doc.inline_shapes
+        assert shapes[0].height <= Inches(8.0) + 1 and shapes[1].width == Inches(5.5)
+
+    def test_resume_shows_the_chart_warnings_again(self, tmp_path):
+        from deep_research_tool.report.figure_table_generator import FigureTableCollection
+        from deep_research_tool.tests.test_finalization_integration import FakeSearch, build_tool, make_llm
+        from deep_research_tool.utils.helpers import ResearchWarnings
+        figs = tmp_path / "figs"
+        figs.mkdir()
+        (figs / "figure_collection.json").write_text(json.dumps(FigureTableCollection().to_dict()), encoding="utf-8")
+        msg = "図「市場規模」: 判断文が数値と食い違う可能性があります"
+        (figs / "chart_yield.json").write_text(json.dumps({"warnings": [msg]}, ensure_ascii=False), encoding="utf-8")
+        ResearchWarnings.reset()
+        tool = build_tool(tmp_path, make_llm(), FakeSearch())
+        coll, _gen = tool._restore_figures(figs / "figure_collection.json")
+        assert coll is not None
+        assert any(msg in w["message"] for w in ResearchWarnings.get_instance().get_all())

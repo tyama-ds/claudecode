@@ -3879,6 +3879,14 @@ class DeepResearchTool:
         )
         print(f"[Resume] figures: {len(collection.figures)} figure(s), "
               f"{len(collection.tables)} table(s), {len(collection.charts)} chart(s) reused")
+        # the chart checks of that attempt (contradicted judgments, values not
+        # found in their sources) are shown again with the reused charts
+        try:
+            yld = json.loads((figures_dir / "chart_yield.json").read_text(encoding="utf-8"))
+            for message in yld.get("warnings") or []:
+                ResearchWarnings.get_instance().add(ResearchWarnings.LOW, "AutoFigures", str(message))
+        except Exception:
+            pass
         return collection, generator
 
     def _restore_finalization(self, session, result=None, evidence_locker=None) -> bool:
@@ -4855,9 +4863,9 @@ Output only the text (no JSON, no heading):"""
                     why = "描画に失敗しました"
                 y["no_chart_reason"] = why
                 no_chart.append(f"第{sid}章: {why}")
+        chart_warnings: list = []      # kept in chart_yield.json: a resumed run shows them again
         if no_chart:
-            ResearchWarnings.get_instance().add(
-                ResearchWarnings.LOW, "AutoFigures",
+            chart_warnings.append(
                 f"数値の系列はあるのにチャートが出なかった章が {len(no_chart)} 件あります（"
                 + "／".join(no_chart[:4]) + ("…" if len(no_chart) > 4 else "") + "）。")
         if ungrounded:
@@ -4867,22 +4875,22 @@ Output only the text (no JSON, no heading):"""
                 parts.append(f"「{panel.get('title', '')}」{it.get('label')}={it.get('value')}: "
                              f"{PROBLEM_TEXT.get(it['problem'], it['problem'])}")
             n = sum(len(i) for _s, _p, i in ungrounded)
-            ResearchWarnings.get_instance().add(
-                ResearchWarnings.LOW, "AutoFigures",
+            chart_warnings.append(
                 f"チャートの {n} 点の値が出典本文で確認できませんでした（図は表示しています。"
                 f"要確認: " + "／".join(parts) + ("…" if len(ungrounded) > 4 else "") + "）。")
         if conflicts:
             parts = [f"「{p.get('title', '')}」の「{c['judgment'][:40]}」: {c['reason']}"
                      for _s, p, c in conflicts[:3]]
-            ResearchWarnings.get_instance().add(
-                ResearchWarnings.LOW, "AutoFigures",
+            chart_warnings.append(
                 f"データと食い違う可能性のある「見るべき点」が {len(conflicts)} 件あります（文はそのまま"
                 f"にしています。要確認: " + "／".join(parts) + ("…" if len(conflicts) > 3 else "") + "）。")
         if FONT_STATE.get("japanese_missing") and language == "ja" and figures:
-            ResearchWarnings.get_instance().add(
-                ResearchWarnings.LOW, "AutoFigures",
+            chart_warnings.append(
                 "日本語フォントが見つからないため、チャート画像の日本語が□で表示される可能性が"
                 "あります（fonts-noto-cjk などを導入してください）。")
+        for message in chart_warnings:
+            ResearchWarnings.get_instance().add(ResearchWarnings.LOW, "AutoFigures", message)
+        chart_yield["warnings"] = chart_warnings
         chart_yield["charts"] = len(figures)
         self._write_chart_yield(figures_dir, chart_yield)
         try:

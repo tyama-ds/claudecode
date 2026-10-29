@@ -126,21 +126,21 @@ def _fmt(value: float, unit: str, signed: bool = False) -> str:
 
 # characters that must not start a line (Japanese line-breaking rules)
 _NO_LINE_START = set("、。，．・：；？！）］｝〕〉》」』】ー々ゝゞ～%％,.:;)]}")
-_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.,%％'’\-/:+]*|\s+|.", re.S)
-
-
-_ASCII_WS = re.compile(r"([ \t\n\r\f\v]+)")
+# a number keeps its multiplier ('6億缶', '1.6億円', '3千5百'); a Latin word stays whole
+_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.,%％'’\-/:+]*(?:[千百万億兆京][0-9.,]*)*|\s+|.", re.S)
 
 
 def _wrap(text: str, width: int) -> str:
-    """Wrap to ``width`` characters the way v1.5's textwrap did — break at
-    spaces when the next word fits on a line of its own, fill the line
-    with a word longer than a line — except that a number or a Latin word
-    is never split ('6億缶' and '1.5' stay whole) and a line never starts
-    with closing punctuation. A full-width space is text, as in textwrap."""
+    """Wrap to ``width`` characters the way v1.5's textwrap did — the same
+    chunks (spaces, breaks after a hyphen, tabs, line breaks), a word moved
+    to the next line when it fits there, a word longer than a line filling
+    it — except that a number with its multiplier or a Latin word is never
+    split ('6億缶' and '1.5' stay whole) and a line never starts with
+    closing punctuation."""
     text = str(text or "")
     if not text:
         return ""
+    import textwrap
     lines: List[str] = []
     cur = ""
 
@@ -166,12 +166,14 @@ def _wrap(text: str, width: int) -> str:
         else:
             cur += tok
 
-    for chunk in _ASCII_WS.split(text):
+    for chunk in textwrap.TextWrapper(width=max(1, width))._split_chunks(text):
         if not chunk:
             continue
-        if _ASCII_WS.fullmatch(chunk):
-            if cur:
-                cur += " " * len(chunk.replace("\r\n", "\n"))   # spaces kept, as textwrap did
+        if not chunk.strip():
+            # spaces inside a line are kept; at a line start they are
+            # dropped, except the paragraph's own indent (as textwrap)
+            if cur or not lines:
+                cur += chunk
             continue
         if len(cur) + len(chunk) <= width:
             cur += chunk
@@ -295,9 +297,11 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
             if seg_row:
                 fig_h = max(2.6 * scale + 0.6, 0.55 * scale * max(1, rows_h) + 2.0 * scale + 0.4)
             elif horiz:
-                # several series side by side: a category is at most 0.6 in
-                # tall (bars get thinner) so the chart stays within a page
-                per_cat = min(0.45 * scale * max(1, n_series), 0.6)
+                # the whole chart stays within a page (10.5 in): a category
+                # gets at most 0.6 in and shrinks down to 0.16 in (bars get
+                # thinner) before the chart grows past the page
+                budget = 10.5 - 0.9 - (2.0 * scale + 0.6)
+                per_cat = min(0.45 * scale * max(1, n_series), 0.6, max(0.16, budget / max(1.0, rows_h)))
                 fig_h = max(3.2 * scale + 0.6, per_cat * max(1, rows_h) + 2.0 * scale + 0.6)
             else:
                 fig_h = L["bar_h"]
@@ -584,6 +588,8 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
             _rotate_crowded_ticks(fig, ax)
         _fit_axis_edges(fig, ax)
         _fit_left_margin(fig, ax)                    # ticks may have widened meanwhile
+        if not seg_row:
+            _thin_value_ticks(fig, ax, horiz)        # the plot may have narrowed
         # the plot may have narrowed: labels that touch now are dropped too
         _drop_overlapping(fig, sorted(point_labels, key=lambda t: label_rank.get(id(t), 1)))
         _drop_overlapping(fig, sorted(value_labels, key=lambda t: label_rank.get(id(t), 1)))

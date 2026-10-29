@@ -69,6 +69,7 @@ PRIMARY_PATH_HINTS: Tuple[str, ...] = (
 # scale words inside a unit string → (factor, canonical scale label)
 _SCALES: Tuple[Tuple[str, float, str], ...] = (
     # compound Japanese scales first ('千億円' is 1e11 yen, not 億 + '千円')
+    ("1000億", 1e11, "千億"),
     ("千億", 1e11, "千億"),
     ("百億", 1e10, "百億"),
     ("100億", 1e10, "百億"),
@@ -91,6 +92,11 @@ _SCALES: Tuple[Tuple[str, float, str], ...] = (
     ("千", 1e3, "千"),
     ("万", 1e4, "万"),
 )
+# every scale written in a unit, longest first (to strip it in one piece)
+_SCALE_ALT = "|".join(re.escape(w) for w, _f, _l in sorted(_SCALES, key=lambda t: -len(t[0]))
+                      if not w.isascii() or w[0].isdigit())
+_PER_POP = re.compile(r"(?:/|人口|per\s*)\s*[0-9,.]*\s*(?:十|百|千)?万\s*(?:人|世帯)?"
+                      r"|[0-9,.]*\s*(?:十|百|千)?万\s*(?:人|世帯)\s*(?:当たり|あたり)")
 _SCALE_LABEL_FACTOR = {"兆": 1e12, "千億": 1e11, "百億": 1e10, "10億": 1e9, "億": 1e8,
                        "千万": 1e7, "百万": 1e6, "十万": 1e5, "万": 1e4, "千": 1e3, "": 1.0}
 _CURRENCY_WORDS = {
@@ -120,7 +126,11 @@ def parse_unit(unit: Optional[str]) -> Tuple[str, float, str]:
     unit, not a presentation scale).
     """
     raw = unicodedata.normalize("NFKC", str(unit or "")).strip()
-    low = raw.lower()
+    low = re.sub(r"(?<=\d),(?=\d{3})", "", raw.lower())      # '1,000万円' → '1000万円'
+    # a per-population denominator is part of the unit, not a scale
+    # ('件（人口10万人当たり）', '人/10万人')
+    if _PER_POP.search(low):
+        return low.strip(" -_/・"), 1.0, ""
     factor, label, hit = 1.0, "", ""
     for word, f, lab in _SCALES:
         # longest match first is guaranteed by the table order
@@ -196,13 +206,18 @@ def _raw_numbers(raw_text: str) -> List[Tuple[float, float, str]]:
         nxt = text[m.end():m.end() + 1]
         if word in ("千", "百万") and nxt in ("万", "億"):
             word = "?"
+        if not word and text[m.end():m.end() + 2] in ("百億", "十億", "十万"):
+            word = "?"                  # '3百億' is 300億 (read as a compound)
         if not word:
-            # '$1.2B' / 'US$450M' / '1.5k': a scale letter stuck to the number
-            # (B / M / K only after a currency sign: '3M' may be a company)
+            # '$1.2B' / 'US$450m' / 'USD 1.2B' / '1.5k': a scale letter stuck
+            # to the number (B / M / T only after a currency: '3M' may be a
+            # company); never a letter that starts a unit ('10kΩ', '5km')
             letter, after = text[m.end(1):m.end(1) + 1], text[m.end(1) + 1:m.end(1) + 2]
-            if letter and not (after.isascii() and after.isalpha()):
-                if letter == "k" or (letter in "BMK" and re.search(r"[$¥€£]\s*$", text[max(0, m.start() - 4):m.start()])):
-                    word = {"b": "b", "m": "m", "k": "k"}[letter.lower()]
+            if letter and letter.lower() in "bmkt" and not (after.isalpha() and ord(after) < 0x3000):
+                money = re.search(r"(?:[$¥€£]|\b(?:usd|jpy|eur|gbp|cny|us\$))\s*$",
+                                  text[max(0, m.start() - 6):m.start()], re.I)
+                if letter == "k" or (money and letter.lower() in "bmkt"):
+                    word = {"b": "b", "m": "m", "k": "k", "t": "tn"}[letter.lower()]
         factor = dict(_RAW_SCALES).get(word, 1.0) if word != "?" else float("nan")
         out.append((num, factor, word))
     return out
@@ -247,7 +262,7 @@ def repair_scale(value: Any, raw_text: str, unit: str) -> Tuple[str, bool]:
         if re.fullmatch(r"[a-z]+", word):
             # English scale word: keep the unit's original currency spelling
             word = _SCALE_WORD.get(word, word)
-            cur = re.sub(r"(?i)\b(trillion|billion|million|thousand|bn|mn|tn)\b|兆|億|百万|万|千", "",
+            cur = re.sub(r"(?i)\b(trillion|billion|million|thousand|bn|mn|tn)\b|" + _SCALE_ALT, "",
                          unicodedata.normalize("NFKC", str(unit or ""))).strip() or base
             return f"{word} {cur}", True
         return f"{word}{base}", True

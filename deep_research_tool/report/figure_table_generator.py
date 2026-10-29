@@ -215,6 +215,21 @@ PIE_COLORS = [
 ]
 
 
+def _add_docx_picture(run, path, Inches) -> None:
+    """5.5 in wide, as before — but a tall chart is fitted to the page
+    height (8 in), as the PDF does, instead of running off the page."""
+    try:
+        from PIL import Image as _PILImage
+        with _PILImage.open(str(path)) as im:
+            w, h = im.size
+        if w and 5.5 * h / w > 8.0:
+            run.add_picture(str(path), height=Inches(8.0))
+            return
+    except Exception:
+        pass
+    run.add_picture(str(path), width=Inches(5.5))
+
+
 class FigureTableGenerator:
     """
     Generate figures and tables for research reports.
@@ -2580,7 +2595,7 @@ Example: line"""
                         p = doc.add_paragraph()
                         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                         run = p.add_run()
-                        run.add_picture(str(elem.image_path), width=Inches(5.5))
+                        _add_docx_picture(run, elem.image_path, Inches)
 
                         # Add caption
                         caption_p = doc.add_paragraph()
@@ -2649,7 +2664,7 @@ Example: line"""
                     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     run = p.add_run()
                     img_path = Path(item.image_path) if not isinstance(item.image_path, Path) else item.image_path
-                    run.add_picture(str(img_path), width=Inches(5.5))
+                    _add_docx_picture(run, img_path, Inches)
                     caption_p = doc.add_paragraph()
                     caption_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     caption_run = caption_p.add_run(item.caption)

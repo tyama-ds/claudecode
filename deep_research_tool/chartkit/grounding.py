@@ -18,7 +18,7 @@ import re
 import unicodedata
 from typing import Any, Callable, Dict, List, Optional
 
-from .data_layer import _jp_compounds, _raw_numbers, parse_unit
+from .data_layer import _JP_COMPOUND, _jp_compounds, _raw_numbers, parse_unit
 
 QUOTED_BASIS = ("公表", "二次", "換算")
 VALUE_NOT_IN_QUOTE = "value_not_in_quote"
@@ -77,7 +77,9 @@ def value_in_quote(value: float, unit: str, raw_text: str) -> bool:
     text = unicodedata.normalize("NFKC", str(raw_text or ""))
     if base == "%":
         # 3割 / 3割5分 / 3分の1 / 4人に1人 are percentages
-        if any(_close(v, p) for p in _percent_forms(text)):
+        # (a fraction may be rounded: '3人に1人' as 33 or 33.3 %)
+        if any(_close(v, p) or abs(v - round(p)) < 1e-9 or abs(v - round(p, 1)) < 1e-9
+               for p in _percent_forms(text)):
             return True
         # a number that is part of '3割' / '3分の1' is not '3 %'
         text = re.sub(r"[0-9一二三四五六七八九十]+(?:\.[0-9]+)?\s*割(?:\s*[0-9一二三四五六七八九]\s*分)?"
@@ -118,21 +120,45 @@ def quote_in_source(raw_text: str, source_text: str) -> bool:
         return True
     nums = re.findall(r"\d+(?:\.\d+)?", q)
     key = [n for n in nums if not _YEAR.match(n)] or nums
-    # whole numbers only: '50' is not in '2050' or '150'
-    if key and all(re.search(rf"(?<![\d.]){re.escape(n)}(?![\d]|\.\d)", src) for n in key):
+    # whole numbers only: '50' is not in '2050' or '150' — and the scale
+    # must agree ('$5.2B' is not '$5.2 million'; '35万人' is not '35人')
+    if key and all(re.search(rf"(?<![\d.]){re.escape(n)}(?![\d]|\.\d)", src) for n in key) \
+            and not _scale_conflict(raw_text, source_text):
         return True
-    # the same quantities written another way ('1.2兆円' for '1兆2,000億円')
+    # the same quantities written another way ('1.2兆円' for '1兆2,000億円'):
+    # exactly the same — the 0.5 % rounding of a converted value is not
+    # for the quote itself ('1,234億円' is not in a page that says '1,240億円')
     want = _quantities(raw_text)
     have = _quantities(source_text)
-    return bool(want) and all(any(_close(w, h) for h in have) for w in want)
+    return bool(want) and all(any(abs(w - h) <= 1e-9 * max(abs(w), abs(h)) for h in have) for w in want)
 
 
 def _quantities(text: str) -> List[float]:
-    """Every scaled quantity of a text (years left out)."""
+    """Every scaled quantity of a text (years left out); a Japanese
+    compound ('1兆2,000億') counts as its total only."""
     t = unicodedata.normalize("NFKC", str(text or ""))
-    out = [n * f for n, f, w in _raw_numbers(t) if f == f and (w or not _YEAR.match(f"{n:g}"))]
-    out.extend(_jp_compounds(t))
+    out: List[float] = []
+    rest = t
+    for m in _JP_COMPOUND.finditer(t):
+        totals = _jp_compounds(m.group(0))
+        if totals:
+            out.extend(totals)
+            rest = rest.replace(m.group(0), " ", 1)
+    out.extend(n * f for n, f, w in _raw_numbers(rest) if f == f and (w or not _YEAR.match(f"{n:g}")))
     return out
+
+
+def _scale_conflict(raw_text: str, source_text: str) -> bool:
+    """A number the quote writes WITH a scale appears in the page only
+    with a different scale."""
+    page = [(n, f) for n, f, _w in _raw_numbers(source_text) if f == f]
+    for n, f, w in _raw_numbers(raw_text):
+        if not w or f != f:
+            continue
+        same = [pf for pn, pf in page if _close(pn, n)]
+        if same and all(not _close(pf, f) for pf in same):
+            return True
+    return False
 
 
 def ground_panel(panel: Dict[str, Any],
