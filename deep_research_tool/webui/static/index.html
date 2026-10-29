@@ -1645,6 +1645,9 @@ const $ = (id) => document.getElementById(id);
 // sent nothing (a saved 検証 OFF did this from v1.7.0 on). Show it, with a
 // way out; pageReady is set at the end of this script.
 let pageReady = false;
+// a hash typed / linked by the user (setView writes one during start-up)
+const openedWithHash = !!location.hash;
+let initError = null;
 function showInitError(err) {
   if (document.getElementById('initErrorBanner')) return;
   const msg = (err && (err.message || String(err))) || '不明なエラー';
@@ -1660,12 +1663,21 @@ function showInitError(err) {
   box.children[1].textContent = msg;
   document.body.prepend(box);
   document.getElementById('initErrorReset').onclick = () => {
-    try { localStorage.removeItem('drt_settings'); localStorage.removeItem('drt_ui_view'); } catch (e) {}
+    // every saved screen value of this page — never the API keys
+    try {
+      for (const k of Object.keys(localStorage)) {
+        if (k.startsWith('drt_') && k !== 'drt_secrets_persist') localStorage.removeItem(k);
+      }
+    } catch (e) {}
     location.reload();
   };
   document.getElementById('initErrorReload').onclick = () => location.reload();
 }
-window.addEventListener('error', (ev) => { if (!pageReady) showInitError(ev.error || ev.message); });
+// remember the first error while starting; the banner shows only if this
+// script then really stopped (pageReady still false once the page is
+// parsed) — an extension's own error must not raise it
+window.addEventListener('error', (ev) => { if (!pageReady && !initError) initError = ev.error || ev.message; });
+document.addEventListener('DOMContentLoaded', () => { if (!pageReady) showInitError(initError); });
 let logLength = 0;
 let logSeq = -1;
 // client-side log buffer: the server sends only its last 50 entries per poll,
@@ -3845,7 +3857,7 @@ async function pollJobs() {
     // already chose a tab or opened one through the hash)
     if (!initialRunSwitchDone) {
       initialRunSwitchDone = true;
-      if (!userPickedView && !location.hash
+      if (!userPickedView && !openedWithHash
           && jobs.some(j => ['running', 'queued', 'plan_review'].includes(j.state))) setView('run');
     }
   } catch (e) { /* server briefly unavailable; keep polling */ }
@@ -4512,7 +4524,9 @@ function applySnapshot(s) {
 }
 
 function loadFormPresets() {
-  try { return JSON.parse(localStorage.getItem(FORM_PRESETS_KEY) || '{}'); } catch (e) { return {}; }
+  let presets = {};
+  try { presets = JSON.parse(localStorage.getItem(FORM_PRESETS_KEY) || '{}'); } catch (e) { return {}; }
+  return presets && typeof presets === 'object' && !Array.isArray(presets) ? presets : {};
 }
 function renderFormPresetOptions() {
   const presets = loadFormPresets();

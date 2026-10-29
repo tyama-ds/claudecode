@@ -129,6 +129,62 @@ def test_an_error_while_starting_shows_a_way_out(ui_server):
         pw.stop()
 
 
+def test_an_extensions_error_is_not_a_start_up_failure(ui_server):
+    pw, browser = _browser()
+    try:
+        page, errors, _ = _load(browser, _url(ui_server, "/"),
+                                "localStorage.setItem('drt_ui_view', 'run');"
+                                "window.addEventListener('resize', () => { throw new Error('userscript failed'); });")
+        assert page.evaluate("pageReady") is True
+        assert not page.query_selector("#initErrorBanner")
+    finally:
+        browser.close()
+        pw.stop()
+
+
+def test_broken_form_presets_and_reset_keeps_the_keys(ui_server):
+    pw, browser = _browser()
+    try:
+        page, errors, _ = _load(browser, _url(ui_server, "/"),
+                                "localStorage.setItem('drt_form_presets', 'null')")
+        assert errors == [] and page.evaluate("pageReady") is True
+        page.evaluate("localStorage.setItem('drt_secrets_persist', '{\"openai_api_key\": \"k\"}');"
+                      "localStorage.setItem('drt_settings', '{}'); showInitError(new Error('x'))")
+        page.click("#initErrorReset")
+        page.wait_for_timeout(800)
+        assert page.evaluate("localStorage.getItem('drt_secrets_persist')") is not None
+        assert page.evaluate("localStorage.getItem('drt_settings')") is None
+    finally:
+        browser.close()
+        pw.stop()
+
+
+def test_a_running_job_opens_on_the_run_tab(ui_server):
+    pw, browser = _browser()
+    try:
+        page = browser.new_page()
+        page.route("**/api/jobs", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps({"version": "x", "max_concurrent": 3, "queued": 0, "jobs": [
+                {"job_id": "job-r", "query": "q", "state": "running", "progress": 10, "log": [],
+                 "log_seq": 0, "result": None, "params_summary": {}}]})))
+        page.goto(_url(ui_server, "/"), wait_until="networkidle")
+        page.wait_for_timeout(1500)
+        assert page.evaluate("document.body.dataset.view") == "run"
+        page2 = browser.new_page()                     # a link to a tab keeps that tab
+        page2.route("**/api/jobs", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps({"version": "x", "max_concurrent": 3, "queued": 0, "jobs": [
+                {"job_id": "job-r", "query": "q", "state": "running", "progress": 10, "log": [],
+                 "log_seq": 0, "result": None, "params_summary": {}}]})))
+        page2.goto(_url(ui_server, "/#history"), wait_until="networkidle")
+        page2.wait_for_timeout(1500)
+        assert page2.evaluate("document.body.dataset.view") == "history"
+    finally:
+        browser.close()
+        pw.stop()
+
+
 def test_past_result_body_after_a_restart(tmp_path):
     report = tmp_path / "job-old" / "reports" / "report.md"
     report.parent.mkdir(parents=True)
@@ -189,22 +245,48 @@ class TestLedger:
         a.record(_job("job-z"))
         assert "job-x" not in json.loads((tmp_path / "jobs_ledger.json").read_text("utf-8"))["jobs"]
 
-    def test_a_second_server_does_not_mark_live_jobs_interrupted(self, tmp_path):
-        (tmp_path / "jobs_ledger.json").write_text(json.dumps({"version": 1, "jobs": {
-            "job-run": {"job_id": "job-run", "query": "q", "state": "running", "started_at": 1.0}}}),
-            encoding="utf-8")
-        lock, shared = srv._lock_output_folder(str(tmp_path))
+    def test_a_restarted_server_leaves_another_live_servers_jobs(self, tmp_path):
+        lock_b, owner_b, _ = srv._claim_output_folder(str(tmp_path))          # server B stays up
+        b = JobManager(output_dir=str(tmp_path), owner=owner_b)
+        job = _job("job-b", state="running")
+        b.jobs[job.job_id] = job
+        b.record(job)
+        lock_a, owner_a, live = srv._claim_output_folder(str(tmp_path))       # server A (re)starts
         try:
-            assert lock is not None and shared is False
-            _lock2, shared2 = srv._lock_output_folder(str(tmp_path))
-            assert shared2 is True                     # another live server holds the folder
-            m = JobManager(output_dir=str(tmp_path), mark_interrupted=not shared2)
-            assert m.history()[0]["state"] == "running"
+            assert owner_b in live
+            a = JobManager(output_dir=str(tmp_path), owner=owner_a, live_owners=live)
+            assert {r["job_id"]: r["state"] for r in a.history()}["job-b"] == "running"
+            job.state = "completed"                                           # B finishes it
+            b.record(job)
+            assert {r["job_id"]: r["state"] for r in a.history()}["job-b"] == "completed"
+            a.record(_job("job-a"))                                           # A's write keeps it
+            on_disk = json.loads((tmp_path / "jobs_ledger.json").read_text("utf-8"))["jobs"]
+            assert on_disk["job-b"]["state"] == "completed"
         finally:
-            lock.close()
-        lock3, shared3 = srv._lock_output_folder(str(tmp_path))
-        assert shared3 is False                         # released with its holder
-        lock3.close()
+            lock_a.close()
+        lock_b.close()                                                        # B ends
+        lock_c, owner_c, live_c = srv._claim_output_folder(str(tmp_path))
+        assert owner_b not in live_c and not (tmp_path / f".webui-{owner_b}.lock").exists()
+        lock_c.close()
+
+    def test_a_dead_servers_running_job_is_interrupted(self, tmp_path):
+        (tmp_path / "jobs_ledger.json").write_text(json.dumps({"version": 1, "jobs": {
+            "job-old": {"job_id": "job-old", "state": "running", "started_at": 1.0},
+            "job-gone": {"job_id": "job-gone", "state": "running", "started_at": 2.0, "owner": "123-dead"}}}),
+            encoding="utf-8")
+        m = JobManager(output_dir=str(tmp_path), owner="me", live_owners={"456-alive"})
+        assert {r["job_id"]: r["state"] for r in m.history()} == {"job-old": "interrupted",
+                                                                   "job-gone": "interrupted"}
+
+    def test_another_servers_forget_reaches_this_one(self, tmp_path):
+        a = JobManager(output_dir=str(tmp_path))
+        b = JobManager(output_dir=str(tmp_path))
+        a.record(_job("job-x"))
+        assert {r["job_id"] for r in b.history()} == {"job-x"}
+        assert a.forget("job-x")
+        assert b.history() == []
+        b.record(_job("job-y"))
+        assert set(json.loads((tmp_path / "jobs_ledger.json").read_text("utf-8"))["jobs"]) == {"job-y"}
 
     def test_bom_and_list_ledgers_are_read_and_a_broken_one_is_kept(self, tmp_path):
         ledger = tmp_path / "jobs_ledger.json"

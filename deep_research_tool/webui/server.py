@@ -19,6 +19,7 @@ import time
 import traceback
 import uuid
 from collections import deque
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -824,24 +825,35 @@ class JobManager:
     MAX_KEPT = 20        # finished jobs kept in memory for the job list
     LEDGER_NAME = "jobs_ledger.json"
 
-    def __init__(self, output_dir: str = "./output", mark_interrupted: bool = True):
+    def __init__(self, output_dir: str = "./output", owner: Optional[str] = None,
+                 live_owners=()):
         self.output_dir = output_dir
         self.jobs: "Dict[str, ResearchJob]" = {}
         self._queue: "deque" = deque()          # (job, params) waiting
         self._lock = threading.Lock()
         self._ledger: Dict[str, Dict[str, Any]] = {}
         self._ledger_lock = threading.Lock()
+        self._ledger_stat = None     # (mtime_ns, size) of the file last read / written
         self._forgotten: set = set()
-        self._own: set = set()       # records this process wrote (they win a merge)
-        # False when another live server uses the same output folder: its
-        # running jobs are not 'interrupted' (run_server decides)
-        self._mark_interrupted = mark_interrupted
+        self._own: set = set()       # jobs this process recorded (they win a merge)
+        # which server wrote a record (run_server's folder claim), and the
+        # other servers alive on this folder: their running jobs are not
+        # 'interrupted' by this one starting
+        self.owner = owner
+        self._live_owners = set(live_owners or ())
         self._load_ledger()
 
     # --- persistent history ledger ------------------------------------
 
     def _ledger_path(self) -> Path:
         return Path(self.output_dir) / self.LEDGER_NAME
+
+    def _ledger_file_stat(self):
+        try:
+            st = self._ledger_path().stat()
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
 
     def _read_ledger_file(self) -> Optional[Dict[str, Dict[str, Any]]]:
         """The ledger on disk: {} when there is none, None when it cannot
@@ -870,13 +882,46 @@ class JobManager:
         return out
 
     def _merge_ledger_file(self) -> None:
-        """Take in what another server on the same folder recorded since
-        (its records are kept; this process's live jobs keep their own)."""
+        """Take in what another server on the same folder recorded (or
+        removed) since: the file is the record of every job this process
+        did not run itself. Skipped while the file is unchanged."""
+        stat = self._ledger_file_stat()
+        if stat is not None and stat == self._ledger_stat:
+            return
         disk = self._read_ledger_file()
-        for jid, rec in (disk or {}).items():
+        if disk is None:
+            return
+        for jid in list(self._ledger):
+            if jid not in disk and jid not in self._own:
+                del self._ledger[jid]             # forgotten by another server
+        for jid, rec in disk.items():
             if jid in self._forgotten or jid in self._own:
                 continue
             self._ledger[jid] = rec
+        self._ledger_stat = stat
+
+    @contextmanager
+    def _ledger_file_lock(self):
+        """Serialize read-merge-write across server processes on one folder
+        (a whole-file rewrite from a stale copy lost the other's record)."""
+        handle = None
+        try:
+            lock_path = self._ledger_path().with_name(self.LEDGER_NAME + ".lock")
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = open(lock_path, "a+")
+            deadline = time.time() + 10
+            while not _try_lock_file(handle):
+                if time.time() > deadline:
+                    break                          # write anyway rather than lose it
+                time.sleep(0.05)
+        except OSError:
+            pass
+        try:
+            yield
+        finally:
+            if handle is not None:
+                _unlock_file(handle)
+                handle.close()
 
     def _load_ledger(self) -> None:
         disk = self._read_ledger_file()
@@ -890,40 +935,53 @@ class JobManager:
                 print(f"[JobManager] 履歴ファイルを読めないため {backup.name} に控えました")
             except Exception as e:
                 print(f"[JobManager] ledger backup failed: {e}")
+        else:
+            self._ledger_stat = self._ledger_file_stat()
         self._ledger = disk or {}
-        if not self._mark_interrupted:
-            return
         # a record left non-terminal by a dead process (server restarted
-        # mid-run) can never finish: mark it so it is not shown as running
+        # mid-run) can never finish: mark it so it is not shown as running —
+        # but never a job of another server that is still running
         changed = False
         for rec in self._ledger.values():
             if isinstance(rec, dict) and rec.get("state") in (
-                    "queued", "running", "plan_review"):
+                    "queued", "running", "plan_review") \
+                    and rec.get("owner") not in self._live_owners:
                 rec["state"] = "interrupted"
                 rec["error"] = rec.get("error") or \
                     "サーバーの再起動により完了前に中断されました"
                 rec["finished_at"] = rec.get("finished_at") or \
                     rec.get("started_at")
-                self._own.add(str(rec.get("job_id")))
                 changed = True
         if changed:
-            self._write_ledger()
+            self._write_ledger(merge=False)
 
-    def _write_ledger(self) -> None:
+    def _write_ledger(self, merge: bool = True) -> None:
         path = self._ledger_path()
-        # merge first: a whole-file rewrite from this process's copy dropped
-        # what another server on the same folder had recorded
-        self._merge_ledger_file()
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(path.name + ".tmp")
-            tmp.write_text(json.dumps({"version": 1, "jobs": self._ledger},
-                                      ensure_ascii=False, indent=1,
-                                      default=str),
-                           encoding="utf-8")
-            os.replace(tmp, path)
-        except Exception as e:
-            print(f"[JobManager] ledger write failed: {e}")
+        with self._ledger_file_lock():
+            # merge first: a whole-file rewrite from this process's copy
+            # dropped what another server on the same folder had recorded
+            if merge:
+                self._merge_ledger_file()
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                # a temp file of this process and thread only
+                tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+                tmp.write_text(json.dumps({"version": 1, "jobs": self._ledger},
+                                          ensure_ascii=False, indent=1,
+                                          default=str),
+                               encoding="utf-8")
+                for attempt in range(5):
+                    try:
+                        os.replace(tmp, path)
+                        break
+                    except PermissionError:
+                        # Windows: another server is reading the file right now
+                        if attempt == 4:
+                            raise
+                        time.sleep(0.1)
+                self._ledger_stat = self._ledger_file_stat()
+            except Exception as e:
+                print(f"[JobManager] ledger write failed: {e}")
 
     def record(self, job: "ResearchJob", output_dir: str = None) -> None:
         """Upsert the job's ledger record (no secrets, no log bodies)."""
@@ -941,6 +999,7 @@ class JobManager:
                 "params_summary": scrub_secrets(job.params_summary),
                 "result": scrub_secrets(job.result) if job.result else None,
                 "error": (job.error or "")[:500] or None,
+                "owner": self.owner or prev.get("owner"),
             }
             self._ledger[job.job_id] = entry
             self._own.add(job.job_id)
@@ -2388,16 +2447,9 @@ class _UIServer(ThreadingHTTPServer):
     allow_reuse_address = os.name != "nt"
 
 
-def _lock_output_folder(output_dir: str):
-    """(lock handle, shared): an exclusive lock on <output>/.webui.lock held
-    for this process's life — the OS releases it however the process
-    ends. shared is True when another live server already holds it."""
-    try:
-        path = Path(output_dir) / ".webui.lock"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handle = open(path, "a+")
-    except OSError:
-        return None, False                  # cannot tell: behave as before
+def _try_lock_file(handle) -> bool:
+    """An exclusive, non-blocking lock on an open file (released when the
+    file is closed or the process ends, however it ends)."""
     try:
         if os.name == "nt":
             import msvcrt
@@ -2406,10 +2458,60 @@ def _lock_output_folder(output_dir: str):
         else:
             import fcntl
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
     except OSError:
-        handle.close()
-        return None, True
-    return handle, False
+        return False
+
+
+def _unlock_file(handle) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
+def _claim_output_folder(output_dir: str):
+    """(lock handle, owner id, live owners): this server's own lock file
+    <output>/.webui-<owner>.lock, held for the process's life, and the ids
+    of the other servers alive on the folder (a lock file nobody holds is
+    a server that ended — it is removed)."""
+    folder = Path(output_dir)
+    owner = f"{os.getpid()}-{uuid.uuid4().hex[:6]}"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        handle = open(folder / f".webui-{owner}.lock", "a+")
+        if not _try_lock_file(handle):
+            handle.close()
+            return None, None, set()
+    except OSError:
+        return None, None, set()                 # cannot tell: behave as before
+    live = set()
+    for other in folder.glob(".webui-*.lock"):
+        oid = other.name[len(".webui-"):-len(".lock")]
+        if oid == owner:
+            continue
+        try:
+            probe = open(other, "a+")
+        except OSError:
+            live.add(oid)
+            continue
+        if _try_lock_file(probe):
+            _unlock_file(probe)
+            probe.close()
+            try:
+                other.unlink()
+            except OSError:
+                pass
+        else:
+            probe.close()
+            live.add(oid)
+    return handle, owner, live
 
 
 def run_server(host: str = "127.0.0.1", port: int = 8765,
@@ -2425,11 +2527,11 @@ def run_server(host: str = "127.0.0.1", port: int = 8765,
         print(f"ポート {port} を使えません（{e}）。別の Deep Research Tool のサーバーが"
               f"起動していないか確認し、止めるか --port で別のポートを指定してください。")
         raise SystemExit(1)
-    lock, shared = _lock_output_folder(output_dir)
-    if shared:
+    lock, owner, live = _claim_output_folder(output_dir)
+    if live:
         print(f"注意: 別のサーバーが同じ出力フォルダ（{Path(output_dir).resolve()}）を使っています。"
               f"履歴は両方の記録をまとめて保存しますが、実行中の調査はそれを始めたサーバーでしか見えません。")
-    server.job_manager = JobManager(output_dir=output_dir, mark_interrupted=not shared)
+    server.job_manager = JobManager(output_dir=output_dir, owner=owner, live_owners=live)
     server.folder_lock = lock
     server.output_dir = output_dir
     url = f"http://{host}:{port}/{('#' + fragment) if fragment else ''}"
@@ -2446,6 +2548,10 @@ def run_server(host: str = "127.0.0.1", port: int = 8765,
     finally:
         if lock is not None:
             lock.close()
+            try:
+                Path(lock.name).unlink()
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
