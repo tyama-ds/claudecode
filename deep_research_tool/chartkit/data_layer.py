@@ -126,18 +126,21 @@ def parse_unit(unit: Optional[str]) -> Tuple[str, float, str]:
     unit, not a presentation scale).
     """
     raw = unicodedata.normalize("NFKC", str(unit or "")).strip()
-    low = re.sub(r"(?<=\d),(?=\d{3})", "", raw.lower())      # '1,000万円' → '1000万円'
+    spelled = raw.lower()
+    # the scale is looked up without thousands commas ('1,000万円' → 千万);
+    # a unit with no scale keeps its own spelling ('1,000 tons')
+    low = re.sub(r"(?<=\d),(?=\d{3})", "", spelled)
     # a per-population denominator is part of the unit, not a scale
     # ('件（人口10万人当たり）', '人/10万人')
     if _PER_POP.search(low):
-        return low.strip(" -_/・"), 1.0, ""
+        return spelled.strip(" -_/・"), 1.0, ""
     factor, label, hit = 1.0, "", ""
     for word, f, lab in _SCALES:
         # longest match first is guaranteed by the table order
         if word in low:
             factor, label, hit = f, lab, word
             break
-    base = low.replace(hit, "", 1).strip() if hit else low
+    base = low.replace(hit, "", 1).strip() if hit else spelled
     base = base.strip(" -_/・")
     base = _CURRENCY_WORDS.get(base, base)
     if base in ("％", "percent", "pct", "パーセント"):
@@ -192,8 +195,19 @@ def _jp_compounds(text: str) -> List[float]:
     return out
 
 
+# 'k' as an SI prefix written apart from its unit ('10k ohm', '4.7k Ω')
+_SI_UNIT_AFTER = re.compile(r"\s*(?:Ω|ω|ohms?(?![a-z])|v(?![a-z])|w(?![a-z])|hz(?![a-z])|wh(?![a-z])"
+                            r"|va(?![a-z])|var(?![a-z]))", re.I)
+
+
 def _raw_numbers(raw_text: str) -> List[Tuple[float, float, str]]:
     """(number, scale factor, scale word) for every number in a text."""
+    return [(n, f, w) for n, f, w, _s, _e in raw_number_spans(raw_text)]
+
+
+def raw_number_spans(raw_text: str) -> List[Tuple[float, float, str, int, int]]:
+    """``_raw_numbers`` with each number's span in the NFKC text (the end
+    is after its scale word, if any)."""
     text = unicodedata.normalize("NFKC", str(raw_text or ""))
     out = []
     for m in _RAW_NUMBER.finditer(text):
@@ -216,10 +230,13 @@ def _raw_numbers(raw_text: str) -> List[Tuple[float, float, str]]:
             if letter and letter.lower() in "bmkt" and not (after.isalpha() and ord(after) < 0x3000):
                 money = re.search(r"(?:[$¥€£]|\b(?:usd|jpy|eur|gbp|cny|us\$))\s*$",
                                   text[max(0, m.start() - 6):m.start()], re.I)
-                if letter == "k" or (money and letter.lower() in "bmkt"):
+                if letter == "k" and _SI_UNIT_AFTER.match(text, m.end(1) + 1):
+                    pass                        # '10k ohm' is 10 kΩ, not 10,000 ohm
+                elif letter == "k" or (money and letter.lower() in "bmkt"):
                     word = {"b": "b", "m": "m", "k": "k", "t": "tn"}[letter.lower()]
         factor = dict(_RAW_SCALES).get(word, 1.0) if word != "?" else float("nan")
-        out.append((num, factor, word))
+        end = m.end() if m.group(2) else (m.end(1) + 1 if word in ("b", "m", "k", "tn") else m.end(1))
+        out.append((num, factor, word, m.start(1), end))
     return out
 
 

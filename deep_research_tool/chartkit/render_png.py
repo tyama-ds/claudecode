@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import math
 import re
+import textwrap
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -130,62 +131,46 @@ _NO_LINE_START = set("、。，．・：；？！）］｝〕〉》」』】ー�
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.,%％'’\-/:+]*(?:[千百万億兆京][0-9.,]*)*|\s+|.", re.S)
 
 
+class _Wrapper(textwrap.TextWrapper):
+    """v1.5's textwrap, except where it cuts a word longer than a line:
+    after the last hyphen that fits (textwrap's own rule), otherwise never
+    inside a number with its multiplier or a Latin word ('6億缶', '1.5',
+    'Holdings' move to the next line whole; a URL longer than a line is
+    still cut), and a line never starts with closing punctuation."""
+
+    def _handle_long_word(self, reversed_chunks, cur_line, cur_len, width):
+        space_left = 1 if width < 1 else width - cur_len
+        chunk = reversed_chunks[-1]
+        end = space_left
+        if len(chunk) > space_left:
+            hyphen = chunk.rfind("-", 0, space_left)
+            if hyphen > 0 and any(c != "-" for c in chunk[:hyphen]):
+                end = hyphen + 1
+            else:
+                for m in _TOKEN.finditer(chunk):
+                    if m.start() < end < m.end() and len(m.group(0)) <= width:
+                        end = m.start()
+                        break
+                while 0 < end < len(chunk) and chunk[end] in _NO_LINE_START:
+                    end += 1                    # keep closing punctuation on this line
+        if end == 0 and space_left > 0:
+            # the whole word goes to the next line: end this one without
+            # its trailing space (a full line, space_left 0, is textwrap's own case)
+            while cur_line and not cur_line[-1].strip():
+                cur_line.pop()
+            return
+        cur_line.append(chunk[:end])
+        reversed_chunks[-1] = chunk[end:]
+
+
 def _wrap(text: str, width: int) -> str:
-    """Wrap to ``width`` characters the way v1.5's textwrap did — the same
-    chunks (spaces, breaks after a hyphen, tabs, line breaks), a word moved
-    to the next line when it fits there, a word longer than a line filling
-    it — except that a number with its multiplier or a Latin word is never
-    split ('6億缶' and '1.5' stay whole) and a line never starts with
-    closing punctuation."""
+    """Wrap to ``width`` characters as v1.5 did ("\\n".join(textwrap.wrap()))
+    — the same chunks, spaces and hyphen breaks — with the long-word
+    exceptions of ``_Wrapper``."""
     text = str(text or "")
     if not text:
         return ""
-    import textwrap
-    lines: List[str] = []
-    cur = ""
-
-    def put_token(tok: str) -> None:
-        nonlocal cur
-        while len(tok) > width:                 # a URL longer than a line is cut, not overflowed
-            room = width - len(cur)
-            if room <= 0:
-                lines.append(cur.rstrip())
-                cur, room = "", width
-            cur += tok[:room]
-            tok = tok[room:]
-            lines.append(cur.rstrip())
-            cur = ""
-        if not tok:
-            return
-        if len(cur) + len(tok) > width and cur.strip():
-            if tok[0] in _NO_LINE_START:
-                cur += tok                      # keep closing punctuation on this line
-                return
-            lines.append(cur.rstrip())
-            cur = tok
-        else:
-            cur += tok
-
-    for chunk in textwrap.TextWrapper(width=max(1, width))._split_chunks(text):
-        if not chunk:
-            continue
-        if not chunk.strip():
-            # spaces inside a line are kept; at a line start they are
-            # dropped, except the paragraph's own indent (as textwrap)
-            if cur or not lines:
-                cur += chunk
-            continue
-        if len(cur) + len(chunk) <= width:
-            cur += chunk
-        elif cur.strip() and len(chunk) <= width and chunk[0] not in _NO_LINE_START:
-            lines.append(cur.rstrip())          # the word goes to the next line whole
-            cur = chunk
-        else:
-            for tok in _TOKEN.findall(chunk):   # a word longer than a line fills it
-                put_token(tok)
-    if cur.strip():
-        lines.append(cur.rstrip())
-    return "\n".join(lines)
+    return "\n".join(_Wrapper(width=max(1, width)).wrap(text))
 
 
 def _overlaps(a, b, pad: float = 1.0) -> bool:

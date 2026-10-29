@@ -1567,3 +1567,133 @@ class TestR4Reports:
         coll, _gen = tool._restore_figures(figs / "figure_collection.json")
         assert coll is not None
         assert any(msg in w["message"] for w in ResearchWarnings.get_instance().get_all())
+
+
+# --------------------------------------------------------------------------
+# regressions from the fifth review round
+# --------------------------------------------------------------------------
+
+def test_r5_long_hyphenated_words_break_at_the_hyphen_as_textwrap():
+    import textwrap
+    from deep_research_tool.chartkit.render_png import _wrap
+    for text, width in [("FY2020-FY2025", 10), ("gpt-4o-mini", 10), ("claude-3-opus", 10), ("gemini-1.5-pro", 10),
+                        ("e-commerce", 8), ("2020-2025年度", 8), ("abcdefghi claude-3-opus x", 10),
+                        ("  Revenue growth", 8), ("x-ray imaging", 6)]:
+        assert _wrap(text, width) == "\n".join(textwrap.wrap(text, width)), text
+    assert _wrap("あいうえおHoldings", 8) == "あいうえお\nHoldings"          # a Latin word is not cut
+
+
+def test_r5_classic_unit_label_keeps_its_comma():
+    from deep_research_tool.chartkit.data_layer import parse_unit
+    assert parse_unit("1,000 tons") == ("1,000 tons", 1.0, "")
+    assert parse_unit("deaths per 100,000")[0] == "deaths per 100,000"
+    assert parse_unit("1,000万円")[:2] == ("円", 1e7)
+
+
+class TestR5Grounding:
+
+    def test_a_scale_the_page_states_elsewhere_is_not_a_conflict(self):
+        for quote, page in [("売上高123,456百万円", "（単位：百万円）\n売上高 118,230 123,456"),
+                            ("国内市場規模は1,234億円", "国内市場規模の推移（単位：億円）\n2023年 1,234"),
+                            ("revenue of $4,512 million", "(in millions of U.S. dollars) Revenue 4,512 4,876"),
+                            ("1,200億円", "2030年に1,200～1,500億円に達する"),
+                            ("3.5 million users", "reached 3.5M users"), ("KRW 1.2 trillion", "sales of ₩1.2T")]:
+            assert quote_in_source(quote, page), quote
+
+    def test_stated_different_scales_conflict(self):
+        for quote, page in [("$5.2 billion", "revenue was $5.2 million"), ("3,000億円", "設備投資額は3,000万円"),
+                            ("約3千億円", "国内市場規模は約3千万円と推定される"), ("5千万円", "同社の売上高は5千億円"),
+                            ("3百億円", "3百万円"), ("35万人", "利用者は35人")]:
+            assert not quote_in_source(quote, page), quote
+        assert quote_in_source("約3千億円", "市場は約3千億円")
+
+    def test_half_up_fractions_and_spaced_si_prefix(self):
+        from deep_research_tool.chartkit.data_layer import repair_scale
+        for v, text in [(13, "8人に1人"), (63, "8分の5"), (3, "40人に1人"), (6.3, "16人に1人"), (12, "8人に1人")]:
+            assert value_in_quote(v, "%", text), (v, text)
+        assert not value_in_quote(14, "%", "8人に1人") and not value_in_quote(34, "%", "3人に1人")
+        for text in ("a 10k ohm pull-up resistor", "10k Ω", "4.7k ohms"):
+            value = 4.7 if "4.7" in text else 10
+            assert repair_scale(value, text, "kΩ") == ("kΩ", False), text
+            assert value_in_quote(value, "kΩ", text), text
+
+
+class TestR5Facts:
+
+    def test_rate_units_are_not_scaled(self):
+        from deep_research_tool.chartkit.facts import _fmt
+        assert _fmt(15.7, "10万人当たり") == "15.7（10万人当たり）"
+        assert _fmt(15.7, "人口10万人当たり") == "15.7（人口10万人当たり）"
+        assert _fmt(5, "10億ドル") == "50億ドル" and _fmt(15.7, "1,000 tons") == "15.7（1,000 tons）"
+
+    def test_topic_scopes_and_rate_topics_are_not_flagged(self):
+        bar = panel_facts({"form": "bar", "unit": "億円",
+                           "labels": ["toyota", "volkswagen", "hyundai", "honda", "nissan", "bmw"],
+                           "series": [{"values": [1030, 900, 720, 400, 330, 250]}]})
+        for t in ("欧州メーカーはVolkswagenが首位。", "日系メーカーはToyotaが首位、Nissanが最下位。"):
+            assert judgment_conflict(t, bar) is None, t
+        assert judgment_conflict("Volkswagenが首位。", bar)
+        lv = panel_facts({"form": "line_xy", "unit": "億円", "labels": [], "series": [
+            {"values": [{"x": float(2019 + i), "y": v} for i, v in enumerate([1000, 1300, 1100, 1200, 1400])]}]})
+        for t in ("増加率は2020年が最大。", "伸びは2020年が最大。", "前年同期比は2020年が最大。", "落ち込みは2021年が最大。"):
+            assert judgment_conflict(t, lv) is None, t
+        assert judgment_conflict("2020年が過去最高。", lv)
+
+
+class TestR5Reports:
+
+    @pytest.mark.parametrize("fmt", ["html", "pdf", "markdown"])
+    def test_body_link_with_parentheses_passes(self, tmp_path, fmt):
+        pytest.importorskip("reportlab")
+        from deep_research_tool.config import ReportFormat
+        from deep_research_tool.report.semantic_manifest import build_semantic_manifest, check_artifact
+        from deep_research_tool.main import _report_titles
+        gen, session, locker = TestR3Artifact()._gen(tmp_path)
+        body = ("本文 [1]\n\n制度の詳細は[ノンアルコールビール](https://ja.wikipedia.org/wiki/ノンアルコールビール_(日本))"
+                "の解説が詳しく、酒税法上の区分と市場の成り立ちを整理している。")
+        session.section_contents["1"]["content"] = body
+        path = gen.generate_report(session=session, evidence_locker=locker, format=ReportFormat(fmt),
+                                   verification_result=None)
+        res = check_artifact(build_semantic_manifest({"1": body}), path, locker, extra_allowed=_report_titles(session))
+        assert res["status"] == "pass", res
+        if fmt == "html":
+            assert 'href="https://ja.wikipedia.org/wiki/ノンアルコールビール_(日本)"' in path.read_text(encoding="utf-8")
+
+    def test_list_items_that_start_with_a_number(self):
+        from deep_research_tool.report.semantic_manifest import verify_frozen_in_artifact
+        text = "2030年までに国内市場は倍増する見込みであり、主要メーカーは増産投資を相次いで進めている。"
+        for marker in ("1. ", "1) ", "2. "):
+            assert verify_frozen_in_artifact({"chapters": {"1": marker + text}}, text)["ok"], marker
+
+    def test_english_pdf_ignores_unprinted_source_pages(self, tmp_path, monkeypatch):
+        pytest.importorskip("reportlab")
+        from deep_research_tool.config import ReportFormat
+        from deep_research_tool.report.generator import ReportGenerator
+        from deep_research_tool.tests.test_finalization_integration import make_locker, make_plan, make_session
+        calls = []
+        monkeypatch.setattr(ReportGenerator, "_register_japanese_fonts", lambda self: calls.append(1))
+        plan = make_plan([("1", "Market share", "d")])
+        session = make_session(plan, {"1": {"title": "Market share", "content": "Company A leads. " * 5,
+                                            "evidence": []}})
+        plan.title = plan.table_of_contents.title = session.query = "US beverage market"
+        session.section_contents["1"]["extracted_content"] = [
+            {"title": "日本語 | 中文", "content": "言語を選択", "raw_content": "日本市場の資料", "key_points": ["国内"]}]
+        gen = ReportGenerator(output_dir=tmp_path, language="en", include_citations=False)
+        gen.generate_report(session, make_locker(tmp_path, [("https://ex.com/a", "data " * 20)]),
+                            format=ReportFormat.PDF, filename="r")
+        assert not calls
+
+    def test_five_digit_values_never_split_in_a_pdf_grid(self, tmp_path):
+        pytest.importorskip("reportlab")
+        pypdf = pytest.importorskip("pypdf")
+        from deep_research_tool.config import ReportFormat
+        from deep_research_tool.report.figure_table_generator import FigureTableCollection, TableData
+        for n in (9, 11, 12):
+            coll = FigureTableCollection(tables=[TableData(
+                table_id="w", title="年次推移", caption="", headers=["メーカー"] + [str(2024 - n + i) for i in range(n - 1)],
+                rows=[["A社"] + [f"12,{345 + i}" for i in range(n - 1)]], section_id="1")])
+            gen, session, locker = TestR3Artifact()._gen(tmp_path / str(n), coll)
+            path = gen.generate_report(session=session, evidence_locker=locker, format=ReportFormat.PDF,
+                                       verification_result=None)
+            text = " ".join("\n".join(p.extract_text() for p in pypdf.PdfReader(str(path)).pages).splitlines())
+            assert all(f"12,{345 + i}" in text for i in range(n - 1)), n

@@ -41,7 +41,8 @@ _LOSS = ("赤字", "損失", "欠損", "純損", "マイナス")
 # '増加幅は2019年が最大' — the claim is not about the plotted values as a whole
 _SCOPE = ("除", "以外", "以降", "以来", "以後", "後は", "後では", "では", "のうち", "の中で", "勢",
           "に限", "限定", "に絞", "だけで", "のみで", "で見ると", "で見れば", "において",
-          "前年比", "増加幅", "減少幅", "上昇幅", "下落幅", "伸び率", "増減", "成長率", "伸び幅")
+          "前年比", "前年同期比", "前期比", "増加幅", "減少幅", "上昇幅", "下落幅", "増加率", "減少率",
+          "上昇率", "下落率", "伸び", "落ち込み", "増減", "成長率", "変化", "振れ幅")
 
 
 def _num(v: Any) -> Optional[float]:
@@ -77,7 +78,8 @@ def _natural(v: float, unit: str) -> Tuple[float, str]:
     Other units that start with a number ('2015年=100', '100世帯当たり台')
     are not scales and stay as they are."""
     m = re.match(r"^(\d+)(兆|億|万|千|百万|十億)(.*)$", unit or "")
-    if m:
+    # '10万人当たり' is a rate per 100,000 people, not 10 × 万
+    if m and not re.match(r"^\s*(?:人|世帯)?\s*(?:当たり|あたり)", m.group(3)):
         return v * int(m.group(1)), m.group(2) + m.group(3)
     return v, unit
 
@@ -90,8 +92,9 @@ def _fmt(v: float, unit: str) -> str:
         s = f"{v:.3g}"
     else:
         s = f"{v:,.1f}"
-    if unit[:1].isdigit():
-        return f"{s}（{unit}）"           # '98.5（2015年=100）', never '98.52015年=100'
+    if any(ch.isdigit() for ch in unit):
+        # '98.5（2015年=100）', '15.7（人口10万人当たり）' — never '98.52015年=100'
+        return f"{s}（{unit}）"
     return s + ("%" if unit == "%" else unit)
 
 
@@ -170,6 +173,10 @@ def judgment_conflict(judgment: str, facts: Dict[str, Any]) -> Optional[str]:
     for lab, v in pts:
         period = bool(_TIME_LABEL.match(lab))
         for m in _names(unicodedata.normalize("NFKC", lab).lower(), text):
+            # a topic before the name in the same sentence is a scope
+            # ('欧州メーカーはVolkswagenが首位、Nissanが最下位', '増加率は2020年が最大')
+            if "は" in re.split(r"[。．!?！？]", text[:m.start()])[-1]:
+                continue
             rest = text[m.end():]
             words_max = [w for w in _MAX_WORDS if not (period and w in _RANK)]
             words_min = [w for w in _MIN_WORDS if not (period and w in _RANK)]

@@ -671,8 +671,17 @@ class ReportGenerator:
         # a Japanese font also for an English report that quotes Japanese
         # titles or text (Helvetica printed them as blocks)
         cjk = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
-        printed = [str(renumbered_contents), str(getattr(plan, "title", "") or ""),
-                   str(getattr(session, "query", "") or "")]
+        # what the PDF prints — never the source pages kept with each section
+        # (extracted_content), which an English report does not show
+        printed = [str(getattr(plan, "title", "") or ""), str(getattr(session, "query", "") or "")]
+        for sid, data in (renumbered_contents or {}).items():
+            if not isinstance(data, dict):
+                continue
+            if sid == "_executive_summary":
+                printed += [str(data.get("executive_summary", "") or "")]
+                printed += [str(x) for k in ("key_findings", "recommendations") for x in (data.get(k) or [])]
+            elif not str(sid).startswith("_"):
+                printed += [str(data.get("content", "") or "")]
         try:
             printed += [f"{i.section} {i.title}" for i in plan.table_of_contents.get_flat_sections()] if plan else []
         except Exception:
@@ -832,9 +841,9 @@ class ReportGenerator:
             for kind, payload in blocks:
                 try:
                     if kind == "h2":
-                        story.append(Paragraph(_esc(payload), heading1_style))
+                        story.append(_paragraph(Paragraph, _esc(payload), heading1_style))
                     elif kind == "h3":
-                        story.append(Paragraph(_esc(payload), heading2_style))
+                        story.append(_paragraph(Paragraph, _esc(payload), heading2_style))
                     elif kind == "table":
                         story.extend(self._pdf_table(payload[0], payload[1:], doc.width, body_style,
                                                      _esc, colors, Table, TableStyle, Paragraph))
@@ -991,9 +1000,9 @@ class ReportGenerator:
                 parts.append(f"<h2>{_html.escape(sid)}</h2>")
             for kind, payload in blocks:
                 if kind == "h2":
-                    parts.append(f"<h2>{_html.escape(payload)}</h2>")
+                    parts.append(f"<h2>{_html_linked(payload)}</h2>")
                 elif kind == "h3":
-                    parts.append(f"<h3>{_html.escape(payload)}</h3>")
+                    parts.append(f"<h3>{_html_linked(payload)}</h3>")
                 elif kind == "table":
                     head, *body = payload
                     parts.append("<table>" + "<tr>" + "".join(
@@ -1390,9 +1399,18 @@ class ReportGenerator:
         fs = max(1.0, float(body_style.fontSize))
         lead = float(getattr(body_style, "leading", 0) or fs * 1.2)
         per_line = max(1, int(inner / fs)) if inner > 0 else 0
-        # a grid only when a column holds two full-width characters (a year
-        # or '12,345' is not split across lines) and no row is taller than a page
-        too_tall = inner < 2 * fs or any(
+        # a grid only when a column holds two full-width characters and the
+        # widest number of the table on one line ('12,345' is not printed as
+        # '12,3' over '45'), and no row is taller than a page
+        try:
+            from reportlab.pdfbase.pdfmetrics import stringWidth
+            widest = max([stringWidth(tok, body_style.fontName, fs)
+                          for r in [header] + rows for c in r
+                          for tok in re.findall(r"[-+]?[0-9][0-9,.]*%?", "" if c is None else str(c))]
+                         or [0.0])
+        except Exception:
+            widest = 0.0
+        too_tall = inner < max(2 * fs, widest) or any(
             (len("" if c is None else str(c)) / per_line + 1) * lead > 600
             for r in [header] + rows for c in r) or self._pdf_safe_mode
         if too_tall:
@@ -1589,8 +1607,14 @@ class ReportGenerator:
         text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
         # Italic
         text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
-        # Links
-        text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
+        # Links: a URL may hold one level of parentheses ('…/ビール_(日本)'),
+        # as the artifact check reads it; a script URL is not linked
+        def link(m):
+            href = m.group(2).strip()
+            if re.match(r"(?i)(?:javascript|vbscript|data):", href):
+                return m.group(1)
+            return f'<a href="{href.replace(chr(34), "%22")}">{m.group(1)}</a>'
+        text = re.sub(r'\[([^\]]+)\]\(((?:[^()]|\([^()]*\))+)\)', link, text)
         # Line breaks
         text = text.replace('\n\n', '</p><p>')
         text = text.replace('\n', '<br>')

@@ -18,7 +18,7 @@ import re
 import unicodedata
 from typing import Any, Callable, Dict, List, Optional
 
-from .data_layer import _JP_COMPOUND, _jp_compounds, _raw_numbers, parse_unit
+from .data_layer import _JP_COMPOUND, _JP_UNITS, _jp_compounds, _raw_numbers, parse_unit, raw_number_spans
 
 QUOTED_BASIS = ("公表", "二次", "換算")
 VALUE_NOT_IN_QUOTE = "value_not_in_quote"
@@ -68,6 +68,16 @@ def _percent_forms(text: str) -> List[float]:
     return out
 
 
+def _rounded(v: float, p: float) -> bool:
+    """v is p rounded (half up or half to even) to v's own precision — a
+    whole number or one decimal: 13 % or 12 % for '8人に1人' (12.5 %)."""
+    if abs(v - round(v)) < 1e-9:
+        return abs(v - p) <= 0.5 + 1e-9
+    if abs(v * 10 - round(v * 10)) < 1e-9:
+        return abs(v - p) <= 0.05 + 1e-9
+    return False
+
+
 def value_in_quote(value: float, unit: str, raw_text: str) -> bool:
     """The value (in the series' display unit) is a number of the quote:
     the same number, or the same quantity once both scales are applied
@@ -78,8 +88,7 @@ def value_in_quote(value: float, unit: str, raw_text: str) -> bool:
     if base == "%":
         # 3割 / 3割5分 / 3分の1 / 4人に1人 are percentages
         # (a fraction may be rounded: '3人に1人' as 33 or 33.3 %)
-        if any(_close(v, p) or abs(v - round(p)) < 1e-9 or abs(v - round(p, 1)) < 1e-9
-               for p in _percent_forms(text)):
+        if any(_close(v, p) or _rounded(v, p) for p in _percent_forms(text)):
             return True
         # a number that is part of '3割' / '3分の1' is not '3 %'
         text = re.sub(r"[0-9一二三四五六七八九十]+(?:\.[0-9]+)?\s*割(?:\s*[0-9一二三四五六七八九]\s*分)?"
@@ -148,15 +157,45 @@ def _quantities(text: str) -> List[float]:
     return out
 
 
+_NUMBER = re.compile(r"[0-9]+(?:[,，][0-9]{3})*(?:[.．][0-9]+)?")
+_COMPOUND_AFTER = re.compile(r"\s*(千億|百億|十億|千万|百万|十万)")
+# a number followed directly by a counter or unit is written WITHOUT a scale
+_UNIT_AFTER = re.compile(
+    r"\s?(?:[人円社件台個本枚店校%回歳倍点]|ドル|ユーロ|ポンド|ウォン|元"
+    r"|(?:dollars?|yen|euros?|users?|people|persons?|units?|tons?|shares?)(?![a-z]))", re.I)
+
+
+def _scaled(text: str) -> List[tuple]:
+    """(number, how it is scaled) for every number of a text: the factor of
+    its scale word (a compound such as 千億 resolved), 1.0 when a counter
+    or unit follows it directly ('35人', '12%'), None when the text does not
+    say (a table cell under '単位：百万円', the low end of '1,200～1,500億円',
+    an unparsed '3.5M')."""
+    t = unicodedata.normalize("NFKC", str(text or ""))
+    out = []
+    for n, f, w, start, end in raw_number_spans(t):
+        if w == "?":
+            num = _NUMBER.match(t, start)
+            m = _COMPOUND_AFTER.match(t, num.end()) if num else None
+            out.append((n, dict(_JP_UNITS)[m.group(1)] if m else None, True))
+        elif w:
+            out.append((n, f, True))
+        else:
+            out.append((n, 1.0 if _UNIT_AFTER.match(t, end) else None, False))
+    return out
+
+
 def _scale_conflict(raw_text: str, source_text: str) -> bool:
     """A number the quote writes WITH a scale appears in the page only
-    with a different scale."""
-    page = [(n, f) for n, f, _w in _raw_numbers(source_text) if f == f]
-    for n, f, w in _raw_numbers(raw_text):
-        if not w or f != f:
+    with a different, stated scale ('$5.2 billion' / '$5.2 million',
+    '35万人' / '35人', '約3千億円' / '約3千万円'). A page number whose scale
+    the page does not state never conflicts."""
+    page = _scaled(source_text)
+    for n, f, has_word in _scaled(raw_text):
+        if not has_word or f is None:
             continue
-        same = [pf for pn, pf in page if _close(pn, n)]
-        if same and all(not _close(pf, f) for pf in same):
+        same = [pf for pn, pf, _w in page if _close(pn, n)]
+        if same and all(pf is not None and not _close(pf, f) for pf in same):
             return True
     return False
 
