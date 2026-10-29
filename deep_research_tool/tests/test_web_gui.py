@@ -53,7 +53,8 @@ class TestGuiLaunchers:
         opened = []
         fake_server = SimpleNamespace(serve_forever=lambda: None,
                                       server_close=lambda: None)
-        with patch.object(srv, "ThreadingHTTPServer",
+        # the server class run_server builds (no shared port on Windows)
+        with patch.object(srv, "_UIServer",
                           return_value=fake_server), \
                 patch("webbrowser.open", side_effect=opened.append), \
                 patch.object(srv.threading, "Timer",

@@ -824,13 +824,18 @@ class JobManager:
     MAX_KEPT = 20        # finished jobs kept in memory for the job list
     LEDGER_NAME = "jobs_ledger.json"
 
-    def __init__(self, output_dir: str = "./output"):
+    def __init__(self, output_dir: str = "./output", mark_interrupted: bool = True):
         self.output_dir = output_dir
         self.jobs: "Dict[str, ResearchJob]" = {}
         self._queue: "deque" = deque()          # (job, params) waiting
         self._lock = threading.Lock()
         self._ledger: Dict[str, Dict[str, Any]] = {}
         self._ledger_lock = threading.Lock()
+        self._forgotten: set = set()
+        self._own: set = set()       # records this process wrote (they win a merge)
+        # False when another live server uses the same output folder: its
+        # running jobs are not 'interrupted' (run_server decides)
+        self._mark_interrupted = mark_interrupted
         self._load_ledger()
 
     # --- persistent history ledger ------------------------------------
@@ -838,17 +843,56 @@ class JobManager:
     def _ledger_path(self) -> Path:
         return Path(self.output_dir) / self.LEDGER_NAME
 
-    def _load_ledger(self) -> None:
+    def _read_ledger_file(self) -> Optional[Dict[str, Dict[str, Any]]]:
+        """The ledger on disk: {} when there is none, None when it cannot
+        be read (a UTF-8 BOM or a list of records is accepted)."""
+        path = self._ledger_path()
         try:
-            path = self._ledger_path()
-            if path.is_file():
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    self._ledger = {str(k): v for k, v in
-                                    (data.get("jobs") or {}).items()}
+            if not path.is_file():
+                return {}
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
         except Exception as e:
             print(f"[JobManager] ledger load failed: {e}")
-            self._ledger = {}
+            return None
+        jobs = data.get("jobs") if isinstance(data, dict) else data
+        if isinstance(jobs, dict):
+            items = list(jobs.items())
+        elif isinstance(jobs, list):
+            items = [(r.get("job_id"), r) for r in jobs if isinstance(r, dict)]
+        else:
+            print("[JobManager] ledger load failed: unexpected shape")
+            return None
+        out = {}
+        for k, v in items:
+            if k and isinstance(v, dict):
+                v.setdefault("job_id", str(k))
+                out[str(k)] = v
+        return out
+
+    def _merge_ledger_file(self) -> None:
+        """Take in what another server on the same folder recorded since
+        (its records are kept; this process's live jobs keep their own)."""
+        disk = self._read_ledger_file()
+        for jid, rec in (disk or {}).items():
+            if jid in self._forgotten or jid in self._own:
+                continue
+            self._ledger[jid] = rec
+
+    def _load_ledger(self) -> None:
+        disk = self._read_ledger_file()
+        if disk is None:
+            # keep the unreadable file: the next write would replace it
+            path = self._ledger_path()
+            backup = path.with_name(f"jobs_ledger.unreadable-{time.strftime('%Y%m%d-%H%M%S')}.json")
+            try:
+                import shutil
+                shutil.copy2(path, backup)
+                print(f"[JobManager] 履歴ファイルを読めないため {backup.name} に控えました")
+            except Exception as e:
+                print(f"[JobManager] ledger backup failed: {e}")
+        self._ledger = disk or {}
+        if not self._mark_interrupted:
+            return
         # a record left non-terminal by a dead process (server restarted
         # mid-run) can never finish: mark it so it is not shown as running
         changed = False
@@ -860,12 +904,16 @@ class JobManager:
                     "サーバーの再起動により完了前に中断されました"
                 rec["finished_at"] = rec.get("finished_at") or \
                     rec.get("started_at")
+                self._own.add(str(rec.get("job_id")))
                 changed = True
         if changed:
             self._write_ledger()
 
     def _write_ledger(self) -> None:
         path = self._ledger_path()
+        # merge first: a whole-file rewrite from this process's copy dropped
+        # what another server on the same folder had recorded
+        self._merge_ledger_file()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_name(path.name + ".tmp")
@@ -895,24 +943,34 @@ class JobManager:
                 "error": (job.error or "")[:500] or None,
             }
             self._ledger[job.job_id] = entry
+            self._own.add(job.job_id)
             self._write_ledger()
 
     def history(self):
         """Ledger records newest first (includes runs from before a
         restart; live jobs are merged with their current state)."""
         with self._ledger_lock:
-            records = [dict(r) for r in self._ledger.values()]   # copies
+            self._merge_ledger_file()
+            records = [dict(r) for r in self._ledger.values()
+                       if isinstance(r, dict)]                    # copies
         live = {j.job_id: j for j in self.jobs.values()}
         for rec in records:
-            job = live.get(rec["job_id"])
+            job = live.get(rec.get("job_id"))
             if job is not None:
                 rec["state"] = job.state
                 rec["queue_position"] = job.queue_position
-        records.sort(key=lambda r: r.get("started_at") or 0, reverse=True)
+
+        def started(rec):
+            try:
+                return float(rec.get("started_at") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        records.sort(key=started, reverse=True)
         return records
 
     def forget(self, job_id: str) -> bool:
         with self._ledger_lock:
+            self._forgotten.add(job_id)
             removed = self._ledger.pop(job_id, None) is not None
             if removed:
                 self._write_ledger()
@@ -1453,8 +1511,13 @@ class WebUIHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         if download:
+            # a header is Latin-1: a Japanese file name goes in filename*
+            # (it raised and dropped the connection)
+            from urllib.parse import quote
+            plain = path.name.encode("ascii", "replace").decode("ascii").replace('"', "_")
             self.send_header(
-                "Content-Disposition", f'attachment; filename="{path.name}"',
+                "Content-Disposition",
+                f"attachment; filename=\"{plain}\"; filename*=UTF-8''{quote(path.name)}",
             )
         self.end_headers()
         self.wfile.write(data)
@@ -1647,6 +1710,26 @@ class WebUIHandler(BaseHTTPRequestHandler):
     # ---- routes ----
 
     def do_GET(self):
+        self._guarded(self._do_get)
+
+    def do_POST(self):
+        self._guarded(self._do_post)
+
+    def _guarded(self, handler) -> None:
+        """A request that raises answers 500 with the reason — it used to
+        drop the connection, so the page showed nothing at all."""
+        try:
+            handler()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:
+            traceback.print_exc()
+            try:
+                self._send_json({"error": f"{type(e).__name__}: {e}"}, 500)
+            except Exception:
+                pass
+
+    def _do_get(self):
         parsed = urlparse(self.path)
         route = parsed.path
 
@@ -1752,7 +1835,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         else:
             self._send_json({"error": "not found"}, 404)
 
-    def do_POST(self):
+    def _do_post(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/upload":
             self._handle_upload()
@@ -2298,6 +2381,37 @@ def llm_parallel_test(params: Dict[str, Any]):
     }, 200)
 
 
+class _UIServer(ThreadingHTTPServer):
+    # Windows lets a second socket bind a port marked SO_REUSEADDR, so two
+    # copies of the server could share one port and split the page's
+    # requests between them; without it the second start fails loudly
+    allow_reuse_address = os.name != "nt"
+
+
+def _lock_output_folder(output_dir: str):
+    """(lock handle, shared): an exclusive lock on <output>/.webui.lock held
+    for this process's life — the OS releases it however the process
+    ends. shared is True when another live server already holds it."""
+    try:
+        path = Path(output_dir) / ".webui.lock"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(path, "a+")
+    except OSError:
+        return None, False                  # cannot tell: behave as before
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None, True
+    return handle, False
+
+
 def run_server(host: str = "127.0.0.1", port: int = 8765,
                output_dir: str = "./output", open_browser: bool = False,
                fragment: str = "") -> None:
@@ -2305,8 +2419,18 @@ def run_server(host: str = "127.0.0.1", port: int = 8765,
     default browser is opened on the UI (this is the GUI — no Tk)."""
     from ..utils.helpers import ensure_utf8_output
     ensure_utf8_output()  # avoid cp932 print crashes on Windows
-    server = ThreadingHTTPServer((host, port), WebUIHandler)
-    server.job_manager = JobManager(output_dir=output_dir)
+    try:
+        server = _UIServer((host, port), WebUIHandler)
+    except OSError as e:
+        print(f"ポート {port} を使えません（{e}）。別の Deep Research Tool のサーバーが"
+              f"起動していないか確認し、止めるか --port で別のポートを指定してください。")
+        raise SystemExit(1)
+    lock, shared = _lock_output_folder(output_dir)
+    if shared:
+        print(f"注意: 別のサーバーが同じ出力フォルダ（{Path(output_dir).resolve()}）を使っています。"
+              f"履歴は両方の記録をまとめて保存しますが、実行中の調査はそれを始めたサーバーでしか見えません。")
+    server.job_manager = JobManager(output_dir=output_dir, mark_interrupted=not shared)
+    server.folder_lock = lock
     server.output_dir = output_dir
     url = f"http://{host}:{port}/{('#' + fragment) if fragment else ''}"
     print(f"Deep Research Tool v{__version__} Web UI: {url}")
@@ -2319,6 +2443,9 @@ def run_server(host: str = "127.0.0.1", port: int = 8765,
     except KeyboardInterrupt:
         print("\nShutting down...")
         server.shutdown()
+    finally:
+        if lock is not None:
+            lock.close()
 
 
 if __name__ == "__main__":

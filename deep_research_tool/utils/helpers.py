@@ -205,17 +205,28 @@ class _SafeTextStream:
 
     def write(self, text):
         try:
-            return self._stream.write(text)
-        except UnicodeEncodeError:
-            encoding = getattr(self._stream, "encoding", None) or "utf-8"
             try:
-                safe = text.encode(encoding, errors="replace").decode(
-                    encoding, errors="replace")
-                return self._stream.write(safe)
-            except Exception:
-                # Absolute fallback: pure ASCII
-                return self._stream.write(
-                    text.encode("ascii", errors="replace").decode("ascii"))
+                return self._stream.write(text)
+            except UnicodeEncodeError:
+                encoding = getattr(self._stream, "encoding", None) or "utf-8"
+                try:
+                    safe = text.encode(encoding, errors="replace").decode(
+                        encoding, errors="replace")
+                    return self._stream.write(safe)
+                except UnicodeError:
+                    # Absolute fallback: pure ASCII
+                    return self._stream.write(
+                        text.encode("ascii", errors="replace").decode("ascii"))
+        except OSError:
+            # the console / pipe is gone (a launcher that exited): a print
+            # must never stop a run ('[Errno 32] Broken pipe')
+            return len(text) if isinstance(text, str) else 0
+
+    def flush(self):
+        try:
+            return self._stream.flush()
+        except OSError:
+            return None
 
     def writelines(self, lines):
         for line in lines:
