@@ -1576,7 +1576,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
         # header is Latin-1: a Japanese file name goes in filename*
         if path.parent != STATIC_DIR:                 # not the page itself
             from urllib.parse import quote
-            plain = path.name.encode("ascii", "replace").decode("ascii").replace('"', "_")
+            import re as _re
+            plain = _re.sub(r'[\x00-\x1f\x7f"\\;]', "_",
+                            path.name.encode("ascii", "replace").decode("ascii"))
             self.send_header(
                 "Content-Disposition",
                 f"{'attachment' if download else 'inline'}; filename=\"{plain}\"; "
@@ -1702,6 +1704,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
             "section_evidence": data.get("section_evidence") or {},
             "section_titles": titles,
             "files": files,
+            # the run's verification (performed / skipped / cancelled …):
+            # how to read a source without a per-source record
+            "verification": ((result.get("status") or {}).get("verification")),
         })
 
     def _history_record(self, manager, params):

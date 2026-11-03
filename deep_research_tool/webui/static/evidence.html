@@ -219,7 +219,7 @@ function render() {
       <td class="title">${e.url ? `<a href="${esc(e.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(e.title || e.url)}</a>` : esc(e.title || '(出典不明)')}
         <div class="domain">${esc(domainOf(e.url))}${e.publisher ? ' ・ ' + esc(e.publisher) : ''}${e.published_date ? ' ・ ' + esc(e.published_date) : ''}</div></td>
       <td class="opt">${secs.map(s => `<span class="badge" title="${esc(sectionLabel(s))}">§${esc(s)}</span>`).join('') || '<span class="hint">—</span>'}</td>
-      <td><span class="badge q-${esc(q)}" title="出典の信頼度（出典の種類から規則で判定。主張の検証結果とは別）">${esc(QUAL_JA[q] || q)}</span>${verifyBadge(e)}<div class="scores">信頼 ${fmt(e.reliability_score)} ・ 関連 ${fmt(e.relevance_score)} ・ 重要 ${fmt(e.importance_score)}</div></td>
+      <td><span class="badge q-${esc(q)}" title="出典の信頼度（出典の種類から規則で判定。主張の検証結果とは別）">${esc(QUAL_JA[q] || q)}</span>${verifyBadge(e)}<div class="scores">${e.reliability_score ? '信頼スコア ' + fmt(e.reliability_score) + ' ・ ' : ''}関連 ${fmt(e.relevance_score)} ・ 重要 ${fmt(e.importance_score)}</div></td>
       <td class="opt scores">${esc(String(e.accessed_at || '').replace('T', ' ').slice(0, 16))}</td>
       <td class="excerpt">${esc(excerpt.slice(0, 180))}${excerpt.length > 180 ? '…' : ''}</td></tr>`;
     if (!open.has(e.id)) return row;
@@ -241,9 +241,17 @@ function render() {
 }
 const fmt = (v) => (typeof v === 'number' ? v.toFixed(2) : '—');
 // how the run's verification used the source (metadata.verification)
+// a source without a per-source record: say why, from the run's verification
+function noRecordText() {
+  const s = data && data.verification;
+  if (s === 'performed') return '検証は実施済みですが、出典ごとの記録はありません（途中から再開した調査、または v1.11.2 より前の調査）';
+  if (s === 'cancelled' || s === 'timeout' || s === 'failed' || s === 'interrupted') return '検証が完了しなかったため、出典ごとの記録はありません';
+  if (s === 'skipped' || s === 'not_run') return 'この調査では検証を行っていません';
+  return '出典ごとの検証の記録はありません';
+}
 function verifyText(e) {
   const v = (e.metadata || {}).verification;
-  if (!v) return 'この調査では記録がありません（検証なしの実行、または v1.11.2 より前の調査）';
+  if (!v) return noRecordText();
   if (v.contradicted) return `主張 ${v.contradicted} 件と食い違い（要確認事項を参照）`;
   if (v.supported) return `主張 ${v.supported} 件の裏付けになりました`;
   if (v.judged) return '照合しましたが、裏付けとしては使われませんでした';

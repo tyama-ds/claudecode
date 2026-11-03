@@ -662,6 +662,8 @@ class DeepResearchTool:
                 "raw_chapters": dict(outcome.get("raw_chapters") or {}),
                 "ordered_evidence_ids": list(outcome.get("ordered_evidence_ids")
                                              or []),
+                # how the verification used each source (restored on resume)
+                "evidence_support": outcome.get("evidence_support"),
                 "manifest_hash": getattr(self, "semantic_manifest_hash", None),
             }
             tmp = path.with_name(path.name + ".tmp")
@@ -3589,6 +3591,10 @@ class DeepResearchTool:
         outcome = getattr(self, "finalization_outcome", None) or {}
         support = outcome.get("evidence_support")
         if support is None:
+            # no record of THIS run: never keep one carried over (a feedback
+            # re-research seeds the parent's evidence with the parent's)
+            for ev in evidence_locker.get_all_evidence():
+                ev.metadata.pop("verification", None)
             return
         for ev in evidence_locker.get_all_evidence():
             s = support.get(str(ev.id)) or {}
@@ -3974,6 +3980,7 @@ class DeepResearchTool:
             "verdict": None, "decision": data.get("decision") or "accept",
             "history": [], "limitations": [],
             "ordered_evidence_ids": list(data.get("ordered_evidence_ids") or []),
+            "evidence_support": data.get("evidence_support"),
             "html_path": self._restored_verification_html,
             "verification_summary": None, "restored": True,
         }

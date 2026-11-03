@@ -255,8 +255,7 @@ details .body { padding: 0 2px 14px; }
 /* engine cards: a short status in the card, the explanation / reason /
    setup command on hover or keyboard focus (long paths overflowed it) */
 .mode-card .t, .mode-card .r { overflow-wrap: anywhere; }
-.engine-card[data-tip]::after {
-  content: attr(data-tip);
+.engine-card .tip {
   display: none;                  /* not laid out until shown: no sideways scroll */
   position: absolute; left: 0; top: calc(100% + 6px); width: max(100%, 320px); max-width: min(420px, 86vw);
   background: #172b40; color: #fff; font-size: 12px; line-height: 1.6; font-weight: 400;
@@ -264,13 +263,14 @@ details .body { padding: 0 2px 14px; }
   pointer-events: none; z-index: 60;
   white-space: pre-line; overflow-wrap: anywhere; box-sizing: border-box;
 }
-.engine-card:last-child[data-tip]::after { left: auto; right: 0; }
-.engine-card[data-tip]:hover, .engine-card[data-tip]:focus-within { z-index: 60; }
-.engine-card[data-tip]:hover::after, .engine-card[data-tip]:focus-within::after { display: block; }
+.engine-card:last-child .tip { left: auto; right: 0; }
+.engine-card:hover, .engine-card:focus-within { z-index: 60; }
+/* a child, not ::after — the selected card's ::after is its orbit ring */
+.engine-card:hover .tip, .engine-card:focus-within .tip { display: block; }
 .engine-card .more { display: block; margin-top: 4px; color: var(--muted); font-size: 10.5px; }
 @media (max-width: 560px) {
   #engineModes.mode-cards-3 { grid-template-columns: 1fr; }
-  .engine-card:last-child[data-tip]::after { left: 0; right: auto; }
+  .engine-card:last-child .tip { left: 0; right: auto; }
 }
 .engine-flow { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 4px; margin-top: 6px; font-size: 11.5px; color: var(--muted); }
 .engine-flow span { border: 1px solid var(--border); border-radius: 999px; padding: 1px 9px; background: var(--bg); }
@@ -2172,12 +2172,12 @@ function renderEngineCards() {
     // the long explanation / reason / setup command go in the tooltip
     const tip = [e.description, !ok && e.reason ? '⚠ ' + e.reason : '',
                  !ok && e.setup_command ? '作成コマンド: ' + e.setup_command : ''].filter(Boolean).join('\n\n');
-    return `<label class="mode-card engine-card${sel ? ' sel' : ''}${ok ? '' : ' disabled'}"${tip ? ` data-tip="${escapeHtml(tip)}"` : ''} data-engine="${escapeHtml(e.id)}">
+    return `<label class="mode-card engine-card${sel ? ' sel' : ''}${ok ? '' : ' disabled'}" data-engine="${escapeHtml(e.id)}">
       <input type="radio" name="research_engine" value="${escapeHtml(e.id)}"${sel ? ' checked' : ''}${ok ? '' : ' disabled'}>
       <span class="t">${escapeHtml(title)}${e.kind === 'builtin' ? '' : engineBadge(e)}${e.version && e.kind !== 'builtin' ? `<span class="v">${escapeHtml(String(e.version))}</span>` : ''}</span>
       <span class="d">　${escapeHtml(sub)}</span>
       ${!ok && fix ? `<span class="r">${fix.trim()}</span>` : ''}
-      ${tip ? `<span class="more">ⓘ ${ok ? '詳細' : '使えない理由'}はカーソルを合わせると表示</span>` : ''}
+      ${tip ? `<span class="more">ⓘ ${ok ? '詳細' : '使えない理由'}はカーソルを合わせると表示</span><span class="tip" role="tooltip">${escapeHtml(tip)}</span>` : ''}
     </label>`;
   }).join('');
   box.classList.toggle('mode-cards-3', list.length <= 3);
@@ -3715,9 +3715,14 @@ async function loadResultEvidence(result) {
         const items = data.evidence || [];
         parts.push(`<div class="hint">収集した根拠 ${items.length} 件（${escapeHtml(String(result.evidence_json).split(/[\\/]/).pop())}）</div>`);
         const checked = items.filter(e => (e.metadata || {}).verification);
+        const ver = (result.status || {}).verification;
         if (checked.length) {
           const backing = checked.filter(e => e.metadata.verification.supported).length;
           parts.push(`<div class="hint">検証で主張の裏付けになった出典: <b>${backing}</b> 件。「検証」はこの調査の検証で各出典が使われたか、「出典の信頼度」は出典の種類から規則で判定した目安です。</div>`);
+        } else if (items.length) {
+          parts.push(`<div class="hint">${ver === 'performed' ? '検証は実施済みですが、出典ごとの記録はありません（途中から再開した調査、または v1.11.2 より前の調査）。'
+            : (ver === 'cancelled' || ver === 'timeout') ? '検証が完了しなかったため、出典ごとの検証の記録はありません。'
+            : ver === 'skipped' ? 'この調査では検証を行っていません。' : ''}「出典の信頼度」は出典の種類から規則で判定した目安で、主張の検証結果とは別です。</div>`);
         }
         const bySection = data.section_evidence || {};
         const secIds = Object.keys(bySection).sort((a, b) => a.localeCompare(b, undefined, {numeric: true}));
@@ -4433,6 +4438,29 @@ function historyParams(ps, res) {
   const add = (k, v, on) => { if (v !== undefined && v !== null && v !== '') chips.push(`<span class="pchip${on ? ' on' : ''}"><i>${escapeHtml(k)}</i>${escapeHtml(String(v))}</span>`); };
   const yes = v => v === true || v === 'true' || v === 1 || v === '1';
   const no = v => v === false || v === 'false' || v === 0 || v === '0';
+  res = res || {};
+  const verAxis = (res.status || {}).verification;
+  const VER_DONE = {skipped: 'なし', cancelled: '中止', timeout: '時間切れ'};
+  // runs that are not a research: only what they did
+  if (res.kind === 'fermi' || ps.fermi) {
+    add('実行', 'フェルミ推定', true);
+    if (ps.provider) add('LLM', ps.model ? `${ps.provider} / ${ps.model}` : ps.provider);
+    return `<div class="hist-params">${chips.join('')}</div>`;
+  }
+  if (ps.regenerate || res.regenerated_from) {
+    const rg = ps.regenerate || {};
+    add('実行', '再出力（検索・検証なし）', true);
+    if (rg.output_format) add('出力', LABELS.output_format[rg.output_format] || rg.output_format);
+    return `<div class="hist-params">${chips.join('')}</div>`;
+  }
+  if (ps.verify || res.kind === 'verify' || ps.run_mode === 'verify_only') {
+    add('実行', '検証のみ（調査ループなし）', true);
+    add('検証', verAxis && verAxis !== 'performed' ? (VER_DONE[verAxis] || verAxis)
+      : (LABELS.verification_profile[ps.verification_profile] || ps.verification_profile || '実施'), true);
+    if (ps.output_format) add('出力', LABELS.output_format[ps.output_format] || ps.output_format);
+    if (ps.provider) add('LLM', ps.model ? `${ps.provider} / ${ps.model}` : ps.provider);
+    return `<div class="hist-params">${chips.join('')}</div>`;
+  }
   if (ps.research_engine && ps.research_engine !== 'builtin') add('エンジン', (engineById[ps.research_engine] || {}).name || ps.research_engine, true);
   const rp = RESEARCH_PRESETS[ps.research_preset];
   add('調査の深さ', rp ? rp.label : ps.research_preset, true);
@@ -4451,11 +4479,14 @@ function historyParams(ps, res) {
     if (ps.chart_max_per_section) opts.push(`グラフ最大 ${ps.chart_max_per_section}/章`);
     if (ps.chart_style) opts.push(ps.chart_style === 'enhanced' ? '改良版' : 'コア維持版');
     if (opts.length) t += `（${opts.join('・')}）`;
-    if (f) t += ` → 実際: グラフ ${f.charts}・表 ${f.tables}・画像 ${f.images}`;
+    if (f) t += ` → 実際: グラフ ${f.charts || 0}・表 ${f.tables || 0}・画像 ${f.images || 0}`;
     add('図表', t, true);
   }
-  if (no(ps.enable_verification) || ps.run_mode === 'research_only') add('検証', 'なし（調査のみ）');
-  else add('検証', ps.run_mode === 'verify_only' ? '検証のみ' : (LABELS.verification_profile[ps.verification_profile] || ps.verification_profile || 'あり'), true);
+  // what happened first (the result's status), then what was set
+  if (verAxis && verAxis !== 'performed' && verAxis !== 'unknown') add('検証', VER_DONE[verAxis] || verAxis);
+  else if (verAxis === 'performed') add('検証', LABELS.verification_profile[ps.verification_profile] || ps.verification_profile || '実施', true);
+  else if (no(ps.enable_verification) || ps.run_mode === 'research_only') add('検証', 'なし（調査のみ）');
+  else if (ps.verification_profile) add('検証', LABELS.verification_profile[ps.verification_profile] || ps.verification_profile, true);
   add('資料', LABELS.source_mode[ps.source_mode] || ps.source_mode);
   if (ps.crawl_mode && ps.source_mode !== 'local' && ps.source_mode !== 'urls') add('クロール', LABELS.crawl_mode[ps.crawl_mode] || ps.crawl_mode);
   if (ps.output_format) add('出力', `${LABELS.output_format[ps.output_format] || ps.output_format}${ps.report_version ? '・' + String(ps.report_version).toUpperCase() : ''}`);

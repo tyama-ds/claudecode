@@ -120,21 +120,31 @@ def test_engine_cards_never_overflow_and_explain_on_hover(ui_server, width):
         page.route("**/api/engines*", engines)
         page.goto(_url(ui_server, "/#new"), wait_until="networkidle")
         page.wait_for_timeout(800)
+        # the text of a card stays inside it (the selected card's orbit
+        # ring sticks out 1.5 px by design, so the card box is not measured)
         state = page.evaluate("""() => ({
-            overflow: Array.from(document.querySelectorAll('#engineModes .engine-card'))
-                .some(c => c.scrollWidth > c.clientWidth + 1),
+            overflow: Array.from(document.querySelectorAll('#engineModes .engine-card')).some(c => {
+                const r = c.getBoundingClientRect();
+                return Array.from(c.querySelectorAll('.t, .d, .r, .more')).some(el => {
+                    const e = el.getBoundingClientRect();
+                    return e.right > r.right + 1 || el.scrollWidth > el.clientWidth + 1; }); }),
             sideways: document.documentElement.scrollWidth > window.innerWidth,
             reasonInCard: document.getElementById('engineModes').innerText.includes('python.exe')})""")
         assert state == {"overflow": False, "sideways": False, "reasonInCard": False}, state
         card = page.query_selector("#engineModes .engine-card[data-engine='gpt-researcher']")
-        assert "python.exe" in card.get_attribute("data-tip")
+        assert not card.query_selector(".tip").is_visible()
         card.scroll_into_view_if_needed()
         card.hover()
         page.wait_for_timeout(200)
-        tip = page.evaluate("getComputedStyle(document.querySelector(\"#engineModes .engine-card[data-engine='gpt-researcher']\"), '::after')")
-        assert tip is not None
-        shown = page.evaluate("getComputedStyle(document.querySelector(\"#engineModes .engine-card[data-engine='gpt-researcher']\"), '::after').display")
-        assert shown == "block"
+        tip = card.query_selector(".tip")
+        assert tip.is_visible() and "python.exe" in tip.inner_text()
+        # the SELECTED card too (its ::after is the orbit ring, which stays)
+        builtin = page.query_selector("#engineModes .engine-card.sel")
+        builtin.hover()
+        page.wait_for_timeout(200)
+        assert builtin.query_selector(".tip").is_visible()
+        ring = page.evaluate("getComputedStyle(document.querySelector('#engineModes .engine-card.sel'), '::after').display")
+        assert ring == "block"
     finally:
         browser.close()
         pw.stop()
@@ -213,3 +223,75 @@ def test_evidence_tab_keeps_its_scroll_and_explains_each_source(tmp_path):
         pw.stop()
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_no_record_when_the_verification_did_not_finish_or_did_not_run(tmp_path):
+    from deep_research_tool.main import DeepResearchTool
+    from deep_research_tool.report.finalization_runner import FinalizationRunner
+    # cancelled before any judgment: no per-source record at all
+    runner = SimpleNamespace(claim_verifier=SimpleNamespace())
+    assert not hasattr(runner.claim_verifier, "last_claims")
+    # a feedback re-research seeded with the parent's evidence, no verification this time
+    locker = EvidenceLocker(research_id="t", output_dir=tmp_path)
+    ev = locker.add_evidence(url="https://example.com/a", title="親の出典", content_excerpt="x")
+    ev.metadata["verification"] = {"supported": 3, "judged": 3, "contradicted": 0}
+    tool = SimpleNamespace(config=SimpleNamespace(research=SimpleNamespace(language="ja")), finalization_outcome=None)
+    DeepResearchTool._annotate_evidence(tool, locker)
+    assert "verification" not in ev.metadata
+
+
+def test_resumed_run_gets_its_record_back(tmp_path):
+    from deep_research_tool.main import DeepResearchTool
+    session = SimpleNamespace(session_id="s1")
+    tool = SimpleNamespace(_status_axes=lambda: {}, semantic_manifest_hash=None)
+    path = DeepResearchTool._save_final_body(tool, session, {
+        "decision": "accept", "chapters": {"1": "本文"}, "raw_chapters": {"1": "本文"},
+        "ordered_evidence_ids": ["e1"], "evidence_support": {"e1": {"supported": 1, "judged": 1, "contradicted": 0}}},
+        tmp_path)
+    assert json.loads(path.read_text(encoding="utf-8"))["evidence_support"]["e1"]["supported"] == 1
+
+
+@pytest.mark.parametrize("ps,res,want,absent", [
+    ({"verify": True, "run_mode": "research_only", "verification_profile": "balanced"},
+     {"kind": "verify", "status": {"verification": "performed"}}, ["検証のみ", "Balanced"], ["なし（調査のみ）", "調査の深さ"]),
+    ({"query": "q", "regenerate": {"output_format": "docx"}}, {"regenerated_from": "final_body"},
+     ["再出力", "Word"], ["label:検証"]),
+    ({"enable_verification": False}, {"kind": "fermi"}, ["フェルミ推定"], ["label:検証"]),
+    ({"research_preset": "standard", "verification_profile": "strict"}, {"status": {"verification": "cancelled"}},
+     ["中止"], ["Strict"]),
+])
+def test_history_chips_follow_the_run_kind(tmp_path, ps, res, want, absent):
+    (tmp_path / "jobs_ledger.json").write_text(json.dumps({"version": 1, "jobs": {"job-x": {
+        "job_id": "job-x", "query": "q", "state": "completed", "started_at": 1.0,
+        "params_summary": ps, "result": res}}}), encoding="utf-8")
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), WebUIHandler)
+    httpd.job_manager = JobManager(output_dir=str(tmp_path))
+    httpd.output_dir = str(tmp_path)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    pw, browser = _browser()
+    try:
+        page, errors, _ = _load(browser, _url(httpd, "/#history"), None)
+        text = page.inner_text("#historyList .hist-params")
+        labels = page.eval_on_selector_all("#historyList .hist-params .pchip i", "els => els.map(e => e.textContent)")
+        for w in want:
+            assert w in text, (w, text)
+        for a in absent:
+            if a.startswith("label:"):
+                assert a[6:] not in labels, (a, labels)
+            else:
+                assert a not in text, (a, text)
+        assert errors == []
+    finally:
+        browser.close()
+        pw.stop()
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_download_name_never_breaks_the_header(ui_server, tmp_path):
+    f = tmp_path / "up" / 'a"b;c.md'
+    f.parent.mkdir(parents=True)
+    f.write_text("x", encoding="utf-8")
+    with urllib.request.urlopen(_url(ui_server, f"/api/report-file?path={quote(str(f))}&download=1"), timeout=10) as res:
+        cd = res.headers["Content-Disposition"]
+        assert cd.startswith('attachment; filename="a_b_c.md"') and "filename*=UTF-8''a%22b%3Bc.md" in cd

@@ -599,7 +599,12 @@ class FinalizationRunner:
         outcome["raw_chapters"] = frozen
         outcome["chapters"] = rendered
         outcome["ordered_evidence_ids"] = ordered_ids
-        outcome["evidence_support"] = self._evidence_support()
+        # a cancelled / timed-out verification has no per-source record
+        # (its sources were not 'unchecked', the check stopped)
+        outcome["evidence_support"] = (
+            None if outcome.get("decision") in ("cancelled", "timeout")
+            or getattr(self.claim_verifier, "last_claims", None) is None
+            else self._evidence_support())
 
         verdict = outcome["verdict"]
         m = verdict.metrics
