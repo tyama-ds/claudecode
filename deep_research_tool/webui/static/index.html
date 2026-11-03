@@ -243,12 +243,35 @@ details .body { padding: 0 2px 14px; }
 .mode-cards-3 { grid-template-columns: repeat(3, 1fr); }
 .mode-cards-auto { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
 /* an engine / source that cannot be chosen here: visible, explained, not selectable */
-.mode-card.disabled { opacity: .62; cursor: not-allowed; }
+.mode-card.disabled { cursor: not-allowed; }
+/* dim the text, not the card: a dimmed card made its tooltip transparent
+   and put it under the start box (opacity makes a stacking context) */
+.mode-card.disabled > .t, .mode-card.disabled > .d { opacity: .62; }
 .mode-card.disabled:hover { border-color: var(--border); transform: none; box-shadow: none; }
 .mode-card .t .badge { margin-left: 6px; vertical-align: 1px; font-size: 10.5px; padding: 0 7px; }
 .mode-card .t .v { font-weight: 400; font-size: 11px; color: var(--muted); margin-left: 4px; }
 .mode-card .r { display: block; margin-top: 4px; font-size: 11px; color: #92400e; line-height: 1.45; }
 .mode-card .r a { color: var(--accent); }
+/* engine cards: a short status in the card, the explanation / reason /
+   setup command on hover or keyboard focus (long paths overflowed it) */
+.mode-card .t, .mode-card .r { overflow-wrap: anywhere; }
+.engine-card[data-tip]::after {
+  content: attr(data-tip);
+  display: none;                  /* not laid out until shown: no sideways scroll */
+  position: absolute; left: 0; top: calc(100% + 6px); width: max(100%, 320px); max-width: min(420px, 86vw);
+  background: #172b40; color: #fff; font-size: 12px; line-height: 1.6; font-weight: 400;
+  padding: 10px 12px; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
+  pointer-events: none; z-index: 60;
+  white-space: pre-line; overflow-wrap: anywhere; box-sizing: border-box;
+}
+.engine-card:last-child[data-tip]::after { left: auto; right: 0; }
+.engine-card[data-tip]:hover, .engine-card[data-tip]:focus-within { z-index: 60; }
+.engine-card[data-tip]:hover::after, .engine-card[data-tip]:focus-within::after { display: block; }
+.engine-card .more { display: block; margin-top: 4px; color: var(--muted); font-size: 10.5px; }
+@media (max-width: 560px) {
+  #engineModes.mode-cards-3 { grid-template-columns: 1fr; }
+  .engine-card:last-child[data-tip]::after { left: 0; right: auto; }
+}
 .engine-flow { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 4px; margin-top: 6px; font-size: 11.5px; color: var(--muted); }
 .engine-flow span { border: 1px solid var(--border); border-radius: 999px; padding: 1px 9px; background: var(--bg); }
 .engine-flow span.ext { border-color: var(--accent); color: var(--text); background: var(--accent-soft); font-weight: 700; }
@@ -289,6 +312,11 @@ button.secondary:disabled { opacity: .5; cursor: not-allowed; }
 .hist-row { border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; font-size: 12.5px; }
 .hist-row .q { font-weight: 700; }
 .hist-row .meta { color: var(--muted); font-size: 11.5px; margin: 2px 0 6px; }
+/* what the run was set to emphasise (history) */
+.hist-params { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 6px; }
+.pchip { font-size: 11px; border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; background: var(--bg); color: var(--text); max-width: 100%; overflow-wrap: anywhere; }
+.pchip i { font-style: normal; color: var(--muted); margin-right: 4px; }
+.pchip.on { border-color: var(--accent); background: var(--accent-soft); }
 .hist-row .acts { display: flex; gap: 6px; flex-wrap: wrap; }
 .hist-row .acts button, .reoutput button { font-size: 11.5px; padding: 4px 9px; }
 .reoutput { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
@@ -2141,11 +2169,15 @@ function renderEngineCards() {
       : (e.kind === 'mock' ? '開発用モック（通信なし）' : '別の Python 環境で実行');
     const fix = (!ok && e.kind === 'external' && e.health !== 'planned')
       ? ' <a href="#" class="engine-setup">設定を開く</a>' : '';
-    return `<label class="mode-card${sel ? ' sel' : ''}${ok ? '' : ' disabled'}" title="${escapeHtml(e.description || '')}" data-engine="${escapeHtml(e.id)}">
+    // the long explanation / reason / setup command go in the tooltip
+    const tip = [e.description, !ok && e.reason ? '⚠ ' + e.reason : '',
+                 !ok && e.setup_command ? '作成コマンド: ' + e.setup_command : ''].filter(Boolean).join('\n\n');
+    return `<label class="mode-card engine-card${sel ? ' sel' : ''}${ok ? '' : ' disabled'}"${tip ? ` data-tip="${escapeHtml(tip)}"` : ''} data-engine="${escapeHtml(e.id)}">
       <input type="radio" name="research_engine" value="${escapeHtml(e.id)}"${sel ? ' checked' : ''}${ok ? '' : ' disabled'}>
       <span class="t">${escapeHtml(title)}${e.kind === 'builtin' ? '' : engineBadge(e)}${e.version && e.kind !== 'builtin' ? `<span class="v">${escapeHtml(String(e.version))}</span>` : ''}</span>
       <span class="d">　${escapeHtml(sub)}</span>
-      ${!ok && e.reason ? `<span class="r">${escapeHtml(e.reason)}${fix}</span>` : ''}
+      ${!ok && fix ? `<span class="r">${fix.trim()}</span>` : ''}
+      ${tip ? `<span class="more">ⓘ ${ok ? '詳細' : '使えない理由'}はカーソルを合わせると表示</span>` : ''}
     </label>`;
   }).join('');
   box.classList.toggle('mode-cards-3', list.length <= 3);
@@ -3530,8 +3562,17 @@ function renderEngineSummary(e) {
 }
 
 let currentResult = null;
+let shownResultKey = null;     // the job + result the 結果 view last drew
 
 function showResults(result, jobId, pinned) {
+  // the selected job's status arrives every 1.5 s: the same result again
+  // is not redrawn (redrawing reset the 根拠 / 本文 scroll to the top)
+  const key = (jobId || resultJobId || selectedJobId || '') + '|' + JSON.stringify(result || {});
+  if (key === shownResultKey && $('resultPanel').style.display === 'block') {
+    if (jobId) { resultJobId = jobId; resultPinned = !!pinned; }
+    return;
+  }
+  shownResultKey = key;
   currentResult = result;
   if (jobId) { resultJobId = jobId; resultPinned = !!pinned; }
   else if (resultJobId === null) { resultJobId = selectedJobId; resultPinned = false; }
@@ -3673,6 +3714,11 @@ async function loadResultEvidence(result) {
         if (jobAtRequest !== (resultJobId || selectedJobId)) return;
         const items = data.evidence || [];
         parts.push(`<div class="hint">収集した根拠 ${items.length} 件（${escapeHtml(String(result.evidence_json).split(/[\\/]/).pop())}）</div>`);
+        const checked = items.filter(e => (e.metadata || {}).verification);
+        if (checked.length) {
+          const backing = checked.filter(e => e.metadata.verification.supported).length;
+          parts.push(`<div class="hint">検証で主張の裏付けになった出典: <b>${backing}</b> 件。「検証」はこの調査の検証で各出典が使われたか、「出典の信頼度」は出典の種類から規則で判定した目安です。</div>`);
+        }
         const bySection = data.section_evidence || {};
         const secIds = Object.keys(bySection).sort((a, b) => a.localeCompare(b, undefined, {numeric: true}));
         const byId = Object.fromEntries(items.map(e => [e.evidence_id || e.id, e]));
@@ -3703,13 +3749,25 @@ async function loadResultEvidence(result) {
   $('resultEvidence').innerHTML = parts.join('') || '<p class="hint">根拠の一覧はありません。</p>';
 }
 
+// 出典の信頼度: rated by rule from the kind of source (not the verification)
+const QUALITY_JA = {authoritative: '公的・学術', high: '高', medium: '中', low: '低', unverified: '未評価'};
+// how the run's verification used a source (metadata.verification, v1.11.2+)
+function evidenceVerificationBadge(e) {
+  const v = (e.metadata || {}).verification;
+  if (!v) return '';
+  if (v.contradicted) return `<span class="badge bad" title="この出典と食い違う主張がありました（要確認事項を参照）">⚠ 検証: 主張 ${v.contradicted} 件と食い違い</span>`;
+  if (v.supported) return `<span class="badge ok" title="検証でこの出典が主張の裏付けになりました">✔ 検証: 主張 ${v.supported} 件を裏付け</span>`;
+  if (v.judged) return '<span class="badge muted" title="検証で照合しましたが、裏付けとしては使われませんでした">検証: 照合のみ</span>';
+  return '<span class="badge muted" title="この出典を根拠に挙げた主張がなかったため、検証では照合していません">検証: 照合対象外</span>';
+}
 function evidenceRow(e) {
   const url = e.source_url || e.url || '';
   const title = e.source_title || e.title || url || '(出典不明)';
   const q = (e.content || e.quote || e.text || '').toString().slice(0, 160);
   return `<div class="warn-row" style="border-left-color:var(--border)">
     ${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(title)}</a>` : escapeHtml(title)}
-    ${e.quality_category ? `<span class="badge muted">${escapeHtml(e.quality_category)}</span>` : ''}
+    ${evidenceVerificationBadge(e)}
+    ${e.quality_category ? `<span class="badge muted" title="出典の種類（ドメイン・ページの手がかり）から規則で判定した目安です。主張の検証結果とは別です">出典の信頼度: ${escapeHtml(QUALITY_JA[e.quality_category] || e.quality_category)}</span>` : ''}
     ${q ? `<div class="hint" style="margin-top:2px">${escapeHtml(q)}${q.length >= 160 ? '…' : ''}</div>` : ''}</div>`;
 }
 
@@ -4346,9 +4404,9 @@ function renderHistory(records) {
     return `<div class="hist-row" data-job="${escapeHtml(r.job_id)}">
       <div class="q">${escapeHtml(r.query || '(無題)')}</div>
       <div class="meta">${HIST_STATE[r.state] || escapeHtml(r.state || '')} ・ ${fmtDate(r.started_at || r.created_at)} ・ ${fmtSec(r.elapsed_seconds)}
-        ・ ${escapeHtml(LABELS.source_mode[ps.source_mode] || ps.source_mode || '')}${ps.research_preset ? ' ・ ' + escapeHtml((RESEARCH_PRESETS[ps.research_preset] || {}).label || ps.research_preset) : ''}${ps.research_engine && ps.research_engine !== 'builtin' ? ' ・ エンジン: ' + escapeHtml((engineById[ps.research_engine] || {}).name || ps.research_engine) : ''}
         ${ps.parent_job_id ? `<div style="margin-top:2px">↳ フィードバック再調査（元: ${escapeHtml((records.find(x => x.job_id === ps.parent_job_id) || {}).query || ps.parent_job_id)}${res.revision ? '・' + escapeHtml(res.revision.mode_label || res.revision.mode) : ''}）</div>` : ''}
         ${axes.verification ? '<div>' + statusBadges(axes, res) + '</div>' : ''}</div>
+      ${historyParams(ps, res)}
       <div class="acts">
         ${(res.report_path || Object.keys(saved).length) ? '<button type="button" class="secondary" data-act="show">結果を見る</button>' : ''}
         <button type="button" class="secondary" data-act="dup">条件を複製</button>
@@ -4365,6 +4423,47 @@ function renderHistory(records) {
   $('historyList').querySelectorAll('button[data-act]').forEach(btn => {
     btn.addEventListener('click', () => historyAction(btn.dataset.act, btn.closest('.hist-row')));
   });
+}
+
+// the settings a past run used, as labelled chips (what it emphasised)
+const LANG_JA = {ja: '日本語', en: '英語', zh: '中国語', ko: '韓国語'};
+function historyParams(ps, res) {
+  ps = ps || {};
+  const chips = [];
+  const add = (k, v, on) => { if (v !== undefined && v !== null && v !== '') chips.push(`<span class="pchip${on ? ' on' : ''}"><i>${escapeHtml(k)}</i>${escapeHtml(String(v))}</span>`); };
+  const yes = v => v === true || v === 'true' || v === 1 || v === '1';
+  const no = v => v === false || v === 'false' || v === 0 || v === '0';
+  if (ps.research_engine && ps.research_engine !== 'builtin') add('エンジン', (engineById[ps.research_engine] || {}).name || ps.research_engine, true);
+  const rp = RESEARCH_PRESETS[ps.research_preset];
+  add('調査の深さ', rp ? rp.label : ps.research_preset, true);
+  if (ps.iterations || ps.max_iterations) add('調査回数/章', `${ps.iterations || '既定'}〜${ps.max_iterations || '既定'}`);
+  const d = DELIVERABLE_PRESETS[ps.deliverable];
+  add('仕上がり', d ? d.label : ps.deliverable, true);
+  const chars = Number(ps.preferred_body_chars) || 0;
+  if (ps.target_pages) add('文章量', `約${ps.target_pages}ページ`);
+  else if (ps.length_mode === 'fixed') add('文章量', chars ? `固定 約${chars.toLocaleString()}字` : '固定');
+  else if (ps.length_mode) add('文章量', chars ? `適応（目標 約${chars.toLocaleString()}字）` : '適応（情報量から）');
+  const f = res && res.figures;
+  if (no(ps.auto_figures)) add('図表', 'なし');
+  else if (ps.auto_figures !== undefined || f) {
+    let t = 'あり';
+    const opts = [];
+    if (ps.chart_max_per_section) opts.push(`グラフ最大 ${ps.chart_max_per_section}/章`);
+    if (ps.chart_style) opts.push(ps.chart_style === 'enhanced' ? '改良版' : 'コア維持版');
+    if (opts.length) t += `（${opts.join('・')}）`;
+    if (f) t += ` → 実際: グラフ ${f.charts}・表 ${f.tables}・画像 ${f.images}`;
+    add('図表', t, true);
+  }
+  if (no(ps.enable_verification) || ps.run_mode === 'research_only') add('検証', 'なし（調査のみ）');
+  else add('検証', ps.run_mode === 'verify_only' ? '検証のみ' : (LABELS.verification_profile[ps.verification_profile] || ps.verification_profile || 'あり'), true);
+  add('資料', LABELS.source_mode[ps.source_mode] || ps.source_mode);
+  if (ps.crawl_mode && ps.source_mode !== 'local' && ps.source_mode !== 'urls') add('クロール', LABELS.crawl_mode[ps.crawl_mode] || ps.crawl_mode);
+  if (ps.output_format) add('出力', `${LABELS.output_format[ps.output_format] || ps.output_format}${ps.report_version ? '・' + String(ps.report_version).toUpperCase() : ''}`);
+  if (ps.language) add('言語', (LANG_JA[ps.language] || ps.language) + (yes(ps.multilingual) ? '＋多言語検索' : ''));
+  if (yes(ps.deep_think)) add('DeepThink', 'ON', true);
+  if (yes(ps.fermi_estimation)) add('フェルミ推定', 'ON', true);
+  if (ps.provider) add('LLM', ps.model ? `${ps.provider} / ${ps.model}` : ps.provider);
+  return chips.length ? `<div class="hist-params">${chips.join('')}</div>` : '';
 }
 
 async function historyAction(act, row) {

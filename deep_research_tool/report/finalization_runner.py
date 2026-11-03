@@ -599,6 +599,7 @@ class FinalizationRunner:
         outcome["raw_chapters"] = frozen
         outcome["chapters"] = rendered
         outcome["ordered_evidence_ids"] = ordered_ids
+        outcome["evidence_support"] = self._evidence_support()
 
         verdict = outcome["verdict"]
         m = verdict.metrics
@@ -663,6 +664,22 @@ class FinalizationRunner:
     # ------------------------------------------------------------------
     # interruption / summary
     # ------------------------------------------------------------------
+
+    def _evidence_support(self) -> Dict[str, Dict[str, int]]:
+        """Per evidence id, how the final verification used it: claims it
+        supported, claims it was judged against, claims it contradicted."""
+        support: Dict[str, Dict[str, int]] = {}
+        for claim in getattr(self.claim_verifier, "last_claims", None) or []:
+            used = {str(eid) for eid, _off in (getattr(claim, "evidence_provenance", None) or [])}
+            backing = {str(e) for e in (getattr(claim, "supporting_source_ids", None) or [])}
+            for eid in used | backing:
+                s = support.setdefault(eid, {"supported": 0, "judged": 0, "contradicted": 0})
+                s["judged"] += 1
+                if claim.status == "supported" and eid in backing:
+                    s["supported"] += 1
+                elif claim.status == "contradicted":
+                    s["contradicted"] += 1
+        return support
 
     @staticmethod
     def _interrupted_outcome(controller, chapters, verdict, decision):
