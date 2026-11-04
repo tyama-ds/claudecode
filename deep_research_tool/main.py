@@ -1109,6 +1109,11 @@ class DeepResearchTool:
             verdict is not None
             and getattr(getattr(verdict, "metrics", None),
                         "verification_failed", False))
+        # a resumed run reuses the frozen body without its verdict: the
+        # status saved with that body says whether the check had failed
+        saved = outcome.get("restored_status") if outcome.get("restored") else None
+        if isinstance(saved, dict) and saved.get("verification") == "failed":
+            verified_failed = True
 
         if not self.config.enable_verification:
             verification = "skipped"
@@ -3994,6 +3999,7 @@ class DeepResearchTool:
             "evidence_support": data.get("evidence_support"),
             "html_path": self._restored_verification_html,
             "verification_summary": None, "restored": True,
+            "restored_status": data.get("status") if isinstance(data.get("status"), dict) else None,
         }
         # reference entry n must be the evidence the frozen [n] cites: the
         # locker takes the frozen order (as the runner did before freezing)

@@ -399,6 +399,70 @@ def test_a_resumed_run_gets_its_record_back(tmp_path):
     assert _records(res2["evidence_json"])[url]["supported"] >= 1
 
 
+def test_a_resumed_run_keeps_a_failed_verification_failed(tmp_path):
+    """The check failed (no claims), then the run was resumed with the
+    verification stage reused: still 'failed', still no record."""
+    from deep_research_tool.tests.test_finalization_integration import RoutedLLM, all_answered_coverage, j
+    from deep_research_tool.tests.test_resume_stages import _first_run, _resume
+
+    def failing():
+        return RoutedLLM().on("extract", j({"claims": []})).on("coverage", all_answered_coverage)
+    tool, fake, result, _llm = _first_run(tmp_path, failing())
+    assert result["status"]["verification"] == "failed"
+    tool2, res2, llm2 = _resume(tmp_path, fake, result["session_id"], failing())
+    assert tool2.finalization_outcome.get("restored") is True and not llm2.prompts("extract")
+    assert res2["status"]["verification"] == "failed" and res2["status"]["quality"] == "unverified"
+    assert set(_records(res2["evidence_json"]).values()) == {None}
+
+
+def _figures_run(tmp_path, fmt, missing_png=False, insertion_fails=False):
+    """run() with a frozen figure collection of one chart and one table."""
+    pytest.importorskip("reportlab")
+    from unittest.mock import patch
+    from PIL import Image
+    from deep_research_tool.main import DeepResearchTool
+    from deep_research_tool.report.figure_table_generator import (
+        Figure, FigureTableCollection, FigureTableGenerator, FigureType, TableData)
+    from deep_research_tool.tests import test_finalization_integration as T
+    from deep_research_tool.utils.helpers import ResearchWarnings
+    ResearchWarnings.reset()
+    png = tmp_path / "figs" / "chart.png"
+    png.parent.mkdir(parents=True)
+    if not missing_png:
+        Image.new("RGB", (800, 500), "white").save(png)
+    coll = FigureTableCollection(
+        charts=[Figure(figure_id="c1", figure_type=FigureType.CHART, title="シェアの推移",
+                       caption="A社のシェアの推移を示す図。出所: 統計", section_id="1", image_path=png)],
+        tables=[TableData(table_id="t1", title="主要企業のシェア", caption="出所: 各社IR",
+                          headers=["社名", "シェア"], rows=[["A社", "52%"], ["B社", "0"]], section_id="1")])
+    llm = T.make_llm()
+    tool = T.build_tool(tmp_path, llm, T.FakeSearch(), auto_figures=True, output_format=fmt,
+                        report_generator_version="v1")
+    gen = FigureTableGenerator(llm_client=llm, output_dir=tmp_path / "figs")
+    base = T.Base()
+    base.tmp = tmp_path
+
+    def boom(self, **kw):
+        raise RuntimeError("insertion down")
+    with patch.object(DeepResearchTool, "_generate_figure_collection", lambda self, **kw: (coll, gen)):
+        if insertion_fails:
+            with patch.object(DeepResearchTool, "_insert_figures_into_report", boom):
+                return T.run_tool(tool, base.default_session(), T.make_locker(tmp_path, T.SUPPORTED_EVIDENCE))
+        return T.run_tool(tool, base.default_session(), T.make_locker(tmp_path, T.SUPPORTED_EVIDENCE))
+
+
+def test_figure_counts_say_how_many_reached_the_report(tmp_path):
+    # the PDF renderer places the table but not the chart whose image is missing
+    res = _figures_run(tmp_path / "pdf", "pdf", missing_png=True)
+    assert res["figures"] == {"charts": 1, "tables": 1, "images": 0, "placed": 1, "total": 2}
+    # the post-render insertion failed: the report has none of them
+    res = _figures_run(tmp_path / "md-fail", "markdown", insertion_fails=True)
+    assert res["figures"] == {"charts": 1, "tables": 1, "images": 0, "placed": 0, "total": 2}
+    # inserted after rendering: generated counts only (placement not measured there)
+    res = _figures_run(tmp_path / "md", "markdown")
+    assert res["figures"] == {"charts": 1, "tables": 1, "images": 0}
+
+
 def test_a_feedback_re_research_does_not_start_with_the_parents_record(tmp_path):
     from deep_research_tool.revision import seed_locker
     parent = EvidenceLocker(research_id="parent", output_dir=tmp_path / "parent")
