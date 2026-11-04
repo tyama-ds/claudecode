@@ -467,6 +467,9 @@ def seed_locker(parent_evidence_path: Optional[Path], session_id: str,
             locker = None
     if locker is None:
         locker = EvidenceLocker(research_id=session_id, output_dir=ev_dir)
+    # the parent's verification is not this run's (the new run's live view,
+    # checkpoints and a cancelled run would show the parent's results)
+    locker.drop_verification_records()
     locker.research_id = session_id
     locker.output_dir = ev_dir
     return locker

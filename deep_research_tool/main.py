@@ -2237,6 +2237,9 @@ class DeepResearchTool:
         # generate_and_save). The collection was generated and verified
         # BEFORE the freeze; no LLM runs here.
         figures_report_path = None
+        # how many of the generated figures reached the report body, when
+        # that is known (the history shows it next to the generated counts)
+        figures_placement = None
         if figures_embedded:
             if version_tag == "v2":
                 n_items = (len(figure_collection.figures) + len(figure_collection.charts)
@@ -2246,6 +2249,7 @@ class DeepResearchTool:
                 n_items = (len(figure_collection.figures) + len(figure_collection.tables)
                            + len(figure_collection.charts))
                 placed = int(getattr(generator, "figures_inserted", 0) or 0)
+            figures_placement = {"placed": int(placed), "total": int(n_items)}
             print(f"[AutoFigures] {placed}/{n_items} figure(s)/table(s) placed by the "
                   f"{Path(report_path).suffix.lstrip('.').upper()} renderer")
             dropped = getattr(generator, "pdf_figures_dropped", None)
@@ -2293,6 +2297,11 @@ class DeepResearchTool:
                     f"Falling back to original report without figures.",
                 )
                 figures_report_path = None
+            if figures_report_path is None:
+                # the report keeps its original content without figures
+                figures_placement = {"placed": 0, "total": (
+                    len(figure_collection.figures) + len(figure_collection.tables)
+                    + len(figure_collection.charts))}
 
         # Determine the active report path
         active_report_path = Path(figures_report_path) if figures_report_path else Path(report_path)
@@ -2452,10 +2461,12 @@ class DeepResearchTool:
             # None stays None (the UI must not offer a file called "None")
             "evidence_csv": str(evidence_csv) if evidence_csv else None,
             "verification_html": str(verification_html) if verification_html else None,
-            # what the report has as figures (shown in the history)
+            # the figures GENERATED for the report, and how many reached its
+            # body when that is known (shown in the history)
             "figures": ({"charts": len(figure_collection.charts),
                          "tables": len(figure_collection.tables),
-                         "images": len(figure_collection.figures)}
+                         "images": len(figure_collection.figures),
+                         **(figures_placement or {})}
                         if figure_collection is not None else None),
             "session": session,
             "evidence_locker": evidence_locker,
@@ -2641,6 +2652,8 @@ class DeepResearchTool:
             ev_path = Path(evidence_path) if evidence_path else None
         if ev_path is not None and ev_path.is_file():
             evidence_locker = _Locker.load_from_json(ev_path)
+            # the loaded run's verification is not this one's
+            evidence_locker.drop_verification_records()
             # exports of THIS run go next to its own artifacts
             evidence_locker.output_dir = output_dir / "evidence"
             evidence_locker.output_dir.mkdir(parents=True, exist_ok=True)
@@ -3590,11 +3603,9 @@ class DeepResearchTool:
             print(f"[Evidence] source rating skipped: {e}")
         outcome = getattr(self, "finalization_outcome", None) or {}
         support = outcome.get("evidence_support")
+        # never keep a record carried over from another run
+        evidence_locker.drop_verification_records()
         if support is None:
-            # no record of THIS run: never keep one carried over (a feedback
-            # re-research seeds the parent's evidence with the parent's)
-            for ev in evidence_locker.get_all_evidence():
-                ev.metadata.pop("verification", None)
             return
         for ev in evidence_locker.get_all_evidence():
             s = support.get(str(ev.id)) or {}

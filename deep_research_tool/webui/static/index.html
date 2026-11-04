@@ -263,10 +263,18 @@ details .body { padding: 0 2px 14px; }
   pointer-events: none; z-index: 60;
   white-space: pre-line; overflow-wrap: anywhere; box-sizing: border-box;
 }
+/* placeEngineTip() keeps a shown tip inside the window; this is the
+   starting point before it runs */
 .engine-card:last-child .tip { left: auto; right: 0; }
-.engine-card:hover, .engine-card:focus-within { z-index: 60; }
+/* shown on hover, and on KEYBOARD focus only: a mouse click focuses the
+   card's radio, and :focus-within kept the tip over the next card after
+   the pointer left. Separate rules: a browser without :has() drops only
+   its own rule, not the hover one. */
+.engine-card:hover { z-index: 60; }
+.engine-card:has(:focus-visible) { z-index: 60; }
 /* a child, not ::after — the selected card's ::after is its orbit ring */
-.engine-card:hover .tip, .engine-card:focus-within .tip { display: block; }
+.engine-card:hover .tip { display: block; }
+.engine-card:has(:focus-visible) .tip { display: block; }
 .engine-card .more { display: block; margin-top: 4px; color: var(--muted); font-size: 10.5px; }
 @media (max-width: 560px) {
   #engineModes.mode-cards-3 { grid-template-columns: 1fr; }
@@ -2152,6 +2160,8 @@ async function loadEngines() {
   }
   engineById = Object.fromEntries(engineCatalog.map(e => [e.id, e]));
   renderEngineCards();
+  // the history names engines and their options from this catalog
+  if (historyCache.length) renderHistory(historyCache);
 }
 function renderEngineCards() {
   const box = $('engineModes');
@@ -2172,16 +2182,23 @@ function renderEngineCards() {
     // the long explanation / reason / setup command go in the tooltip
     const tip = [e.description, !ok && e.reason ? '⚠ ' + e.reason : '',
                  !ok && e.setup_command ? '作成コマンド: ' + e.setup_command : ''].filter(Boolean).join('\n\n');
+    // screen readers get the same text through aria-describedby
+    const tipId = 'enginetip_' + String(e.id).replace(/[^a-z0-9_-]/gi, '_');
     return `<label class="mode-card engine-card${sel ? ' sel' : ''}${ok ? '' : ' disabled'}" data-engine="${escapeHtml(e.id)}">
-      <input type="radio" name="research_engine" value="${escapeHtml(e.id)}"${sel ? ' checked' : ''}${ok ? '' : ' disabled'}>
+      <input type="radio" name="research_engine" value="${escapeHtml(e.id)}"${sel ? ' checked' : ''}${ok ? '' : ' disabled'}${tip ? ` aria-describedby="${tipId}"` : ''}>
       <span class="t">${escapeHtml(title)}${e.kind === 'builtin' ? '' : engineBadge(e)}${e.version && e.kind !== 'builtin' ? `<span class="v">${escapeHtml(String(e.version))}</span>` : ''}</span>
       <span class="d">　${escapeHtml(sub)}</span>
       ${!ok && fix ? `<span class="r">${fix.trim()}</span>` : ''}
-      ${tip ? `<span class="more">ⓘ ${ok ? '詳細' : '使えない理由'}はカーソルを合わせると表示</span><span class="tip" role="tooltip">${escapeHtml(tip)}</span>` : ''}
+      ${tip ? `<span class="more">ⓘ ${ok ? '詳細' : '使えない理由'}はカーソルを合わせると表示</span><span class="tip" role="tooltip" id="${tipId}">${escapeHtml(tip)}</span>` : ''}
     </label>`;
   }).join('');
   box.classList.toggle('mode-cards-3', list.length <= 3);
   box.classList.toggle('mode-cards-auto', list.length > 3);
+  box.querySelectorAll('.engine-card').forEach(card => {
+    const place = () => requestAnimationFrame(() => placeEngineTip(card));
+    card.addEventListener('mouseenter', place);
+    card.addEventListener('focusin', place);
+  });
   box.querySelectorAll('.engine-setup').forEach(a => a.addEventListener('click', ev => {
     ev.preventDefault(); ev.stopPropagation(); openSettingsTab('tabFeatures');
   }));
@@ -2190,6 +2207,21 @@ function renderEngineCards() {
   }));
   applyModeVisibility();
   updateSummaryStrip();
+}
+// a shown engine tip stays inside the window: with more than three cards
+// (auto-fill grid) any card can be at the right or left edge, not only the
+// last one
+function placeEngineTip(card) {
+  const tip = card.querySelector('.tip');
+  if (!tip || getComputedStyle(tip).display === 'none') return;
+  tip.style.right = 'auto';
+  tip.style.left = '0px';
+  const vw = document.documentElement.clientWidth;
+  const c = card.getBoundingClientRect(), w = tip.getBoundingClientRect().width;
+  let left = 0;
+  if (c.left + w > vw - 8) left = (vw - 8) - (c.left + w);
+  if (c.left + left < 8) left = 8 - c.left;
+  tip.style.left = Math.round(left) + 'px';
 }
 // engine options (options_schema → inputs). Values live on the inputs;
 // collectEngineOptions() reads them back for the request.
@@ -3714,14 +3746,15 @@ async function loadResultEvidence(result) {
         if (jobAtRequest !== (resultJobId || selectedJobId)) return;
         const items = data.evidence || [];
         parts.push(`<div class="hint">収集した根拠 ${items.length} 件（${escapeHtml(String(result.evidence_json).split(/[\\/]/).pop())}）</div>`);
-        const checked = items.filter(e => (e.metadata || {}).verification);
         const ver = (result.status || {}).verification;
+        const checked = VER_NO_RECORD.includes(ver) ? [] : items.filter(e => (e.metadata || {}).verification);
         if (checked.length) {
-          const backing = checked.filter(e => e.metadata.verification.supported).length;
-          parts.push(`<div class="hint">検証で主張の裏付けになった出典: <b>${backing}</b> 件。「検証」はこの調査の検証で各出典が使われたか、「出典の信頼度」は出典の種類から規則で判定した目安です。</div>`);
+          const backing = checked.filter(e => Number(e.metadata.verification.supported)).length;
+          const against = checked.filter(e => Number(e.metadata.verification.contradicted)).length;
+          parts.push(`<div class="hint">検証で主張の裏付けになった出典: <b>${backing}</b> 件${against ? `、引用した主張と食い違うと判定された出典: <b>${against}</b> 件` : ''}。「検証」はこの調査の検証で各出典が使われたか、「出典の信頼度」は出典の種類から規則で判定した目安です。</div>`);
         } else if (items.length) {
-          parts.push(`<div class="hint">${ver === 'performed' ? '検証は実施済みですが、出典ごとの記録はありません（途中から再開した調査、または v1.11.2 より前の調査）。'
-            : (ver === 'cancelled' || ver === 'timeout') ? '検証が完了しなかったため、出典ごとの検証の記録はありません。'
+          parts.push(`<div class="hint">${ver === 'performed' ? '検証は実施済みですが、出典ごとの記録はありません（v1.11.2 より前の調査など）。'
+            : (ver === 'cancelled' || ver === 'timeout' || ver === 'failed') ? '検証が最後まで行えなかったため、出典ごとの検証の記録はありません。'
             : ver === 'skipped' ? 'この調査では検証を行っていません。' : ''}「出典の信頼度」は出典の種類から規則で判定した目安で、主張の検証結果とは別です。</div>`);
         }
         const bySection = data.section_evidence || {};
@@ -3732,12 +3765,12 @@ async function loadResultEvidence(result) {
           const rows = (bySection[sid] || []).map(id => byId[id]).filter(Boolean).slice(0, 15);
           if (!rows.length) continue;
           parts.push(`<label style="margin-top:8px">§${escapeHtml(sid)}</label>`);
-          rows.forEach(e => { seen.add(e.evidence_id || e.id); parts.push(evidenceRow(e)); });
+          rows.forEach(e => { seen.add(e.evidence_id || e.id); parts.push(evidenceRow(e, ver)); });
         }
         const rest = items.filter(e => !seen.has(e.evidence_id || e.id)).slice(0, 30);
         if (rest.length) {
           parts.push('<label style="margin-top:8px">その他</label>');
-          rest.forEach(e => parts.push(evidenceRow(e)));
+          rest.forEach(e => parts.push(evidenceRow(e, ver)));
         }
       }
     } catch (e) { parts.push('<p class="hint">エビデンスファイルを読み込めませんでした</p>'); }
@@ -3757,21 +3790,27 @@ async function loadResultEvidence(result) {
 // 出典の信頼度: rated by rule from the kind of source (not the verification)
 const QUALITY_JA = {authoritative: '公的・学術', high: '高', medium: '中', low: '低', unverified: '未評価'};
 // how the run's verification used a source (metadata.verification, v1.11.2+)
-function evidenceVerificationBadge(e) {
+// a run whose verification did not complete has no record of its own
+// (a record there could only be another run's)
+const VER_NO_RECORD = ['skipped', 'cancelled', 'timeout', 'failed'];
+function evidenceVerificationBadge(e, ver) {
   const v = (e.metadata || {}).verification;
-  if (!v) return '';
-  if (v.contradicted) return `<span class="badge bad" title="この出典と食い違う主張がありました（要確認事項を参照）">⚠ 検証: 主張 ${v.contradicted} 件と食い違い</span>`;
-  if (v.supported) return `<span class="badge ok" title="検証でこの出典が主張の裏付けになりました">✔ 検証: 主張 ${v.supported} 件を裏付け</span>`;
-  if (v.judged) return '<span class="badge muted" title="検証で照合しましたが、裏付けとしては使われませんでした">検証: 照合のみ</span>';
-  return '<span class="badge muted" title="この出典を根拠に挙げた主張がなかったため、検証では照合していません">検証: 照合対象外</span>';
+  if (!v || VER_NO_RECORD.includes(ver)) return '';
+  const sup = Number(v.supported) || 0, con = Number(v.contradicted) || 0, jud = Number(v.judged) || 0;
+  const out = [];
+  if (sup) out.push(`<span class="badge ok" title="検証でこの出典が主張の裏付けになりました">✔ 検証: 主張 ${sup} 件を裏付け</span>`);
+  if (con) out.push(`<span class="badge bad" title="この出典を引用した主張が、出典の内容と食い違うと判定されました（要確認事項を参照）">⚠ 検証: 主張 ${con} 件と食い違い</span>`);
+  if (out.length) return out.join(' ');
+  if (jud) return '<span class="badge muted" title="検証で照合しましたが、裏付けとしては使われませんでした">検証: 照合のみ</span>';
+  return '<span class="badge muted" title="検証ではこの出典を照合していません（この出典を挙げた主張がなかった、簡易検証で省かれた、など）">検証: 照合なし</span>';
 }
-function evidenceRow(e) {
+function evidenceRow(e, ver) {
   const url = e.source_url || e.url || '';
   const title = e.source_title || e.title || url || '(出典不明)';
   const q = (e.content || e.quote || e.text || '').toString().slice(0, 160);
   return `<div class="warn-row" style="border-left-color:var(--border)">
     ${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(title)}</a>` : escapeHtml(title)}
-    ${evidenceVerificationBadge(e)}
+    ${evidenceVerificationBadge(e, ver)}
     ${e.quality_category ? `<span class="badge muted" title="出典の種類（ドメイン・ページの手がかり）から規則で判定した目安です。主張の検証結果とは別です">出典の信頼度: ${escapeHtml(QUALITY_JA[e.quality_category] || e.quality_category)}</span>` : ''}
     ${q ? `<div class="hint" style="margin-top:2px">${escapeHtml(q)}${q.length >= 160 ? '…' : ''}</div>` : ''}</div>`;
 }
@@ -4440,7 +4479,7 @@ function historyParams(ps, res) {
   const no = v => v === false || v === 'false' || v === 0 || v === '0';
   res = res || {};
   const verAxis = (res.status || {}).verification;
-  const VER_DONE = {skipped: 'なし', cancelled: '中止', timeout: '時間切れ'};
+  const VER_DONE = {skipped: 'なし', cancelled: '中止', timeout: '時間切れ', failed: '実行できず'};
   // runs that are not a research: only what they did
   if (res.kind === 'fermi' || ps.fermi) {
     add('実行', 'フェルミ推定', true);
@@ -4455,16 +4494,29 @@ function historyParams(ps, res) {
   }
   if (ps.verify || res.kind === 'verify' || ps.run_mode === 'verify_only') {
     add('実行', '検証のみ（調査ループなし）', true);
-    add('検証', verAxis && verAxis !== 'performed' ? (VER_DONE[verAxis] || verAxis)
+    add('検証', verAxis && verAxis !== 'performed' && verAxis !== 'unknown' ? (VER_DONE[verAxis] || verAxis)
       : (LABELS.verification_profile[ps.verification_profile] || ps.verification_profile || '実施'), true);
     if (ps.output_format) add('出力', LABELS.output_format[ps.output_format] || ps.output_format);
     if (ps.provider) add('LLM', ps.model ? `${ps.provider} / ${ps.model}` : ps.provider);
     return `<div class="hist-params">${chips.join('')}</div>`;
   }
-  if (ps.research_engine && ps.research_engine !== 'builtin') add('エンジン', (engineById[ps.research_engine] || {}).name || ps.research_engine, true);
+  // an external engine runs its own search with its own options: the
+  // built-in loop's rounds / crawl settings did not apply to it
+  const ext = !!ps.research_engine && ps.research_engine !== 'builtin';
+  if (ext) {
+    const eng = engineById[ps.research_engine] || {};
+    add('エンジン', eng.name || ps.research_engine, true);
+    const props = ((eng.options_schema || {}).properties) || {};
+    const eo = (ps.engine_options && typeof ps.engine_options === 'object') ? ps.engine_options : {};
+    Object.keys(eo).forEach(k => {
+      const v = eo[k];
+      add((props[k] || {}).title || k, typeof v === 'boolean' ? (v ? 'ON' : 'OFF')
+        : (v !== null && typeof v === 'object') ? JSON.stringify(v) : v);
+    });
+  }
   const rp = RESEARCH_PRESETS[ps.research_preset];
   add('調査の深さ', rp ? rp.label : ps.research_preset, true);
-  if (ps.iterations || ps.max_iterations) add('調査回数/章', `${ps.iterations || '既定'}〜${ps.max_iterations || '既定'}`);
+  if (!ext && (ps.iterations || ps.max_iterations)) add('調査回数/章', `${ps.iterations || '既定'}〜${ps.max_iterations || '既定'}`);
   const d = DELIVERABLE_PRESETS[ps.deliverable];
   add('仕上がり', d ? d.label : ps.deliverable, true);
   const chars = Number(ps.preferred_body_chars) || 0;
@@ -4479,7 +4531,12 @@ function historyParams(ps, res) {
     if (ps.chart_max_per_section) opts.push(`グラフ最大 ${ps.chart_max_per_section}/章`);
     if (ps.chart_style) opts.push(ps.chart_style === 'enhanced' ? '改良版' : 'コア維持版');
     if (opts.length) t += `（${opts.join('・')}）`;
-    if (f) t += ` → 実際: グラフ ${f.charts || 0}・表 ${f.tables || 0}・画像 ${f.images || 0}`;
+    // generated counts; when known, how many did not reach the report body
+    if (f) {
+      t += ` → 生成: グラフ ${Number(f.charts) || 0}・表 ${Number(f.tables) || 0}・画像 ${Number(f.images) || 0}`;
+      const missing = (Number(f.total) || 0) - (Number(f.placed) || 0);
+      if (f.placed !== undefined && f.placed !== null && missing > 0) t += `（うち本文に入らなかったもの ${missing} 件）`;
+    }
     add('図表', t, true);
   }
   // what happened first (the result's status), then what was set
@@ -4488,7 +4545,7 @@ function historyParams(ps, res) {
   else if (no(ps.enable_verification) || ps.run_mode === 'research_only') add('検証', 'なし（調査のみ）');
   else if (ps.verification_profile) add('検証', LABELS.verification_profile[ps.verification_profile] || ps.verification_profile, true);
   add('資料', LABELS.source_mode[ps.source_mode] || ps.source_mode);
-  if (ps.crawl_mode && ps.source_mode !== 'local' && ps.source_mode !== 'urls') add('クロール', LABELS.crawl_mode[ps.crawl_mode] || ps.crawl_mode);
+  if (!ext && ps.crawl_mode && ps.source_mode !== 'local' && ps.source_mode !== 'urls') add('クロール', LABELS.crawl_mode[ps.crawl_mode] || ps.crawl_mode);
   if (ps.output_format) add('出力', `${LABELS.output_format[ps.output_format] || ps.output_format}${ps.report_version ? '・' + String(ps.report_version).toUpperCase() : ''}`);
   if (ps.language) add('言語', (LANG_JA[ps.language] || ps.language) + (yes(ps.multilingual) ? '＋多言語検索' : ''));
   if (yes(ps.deep_think)) add('DeepThink', 'ON', true);

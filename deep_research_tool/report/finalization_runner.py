@@ -599,12 +599,7 @@ class FinalizationRunner:
         outcome["raw_chapters"] = frozen
         outcome["chapters"] = rendered
         outcome["ordered_evidence_ids"] = ordered_ids
-        # a cancelled / timed-out verification has no per-source record
-        # (its sources were not 'unchecked', the check stopped)
-        outcome["evidence_support"] = (
-            None if outcome.get("decision") in ("cancelled", "timeout")
-            or getattr(self.claim_verifier, "last_claims", None) is None
-            else self._evidence_support())
+        outcome["evidence_support"] = self._support_record(outcome)
 
         verdict = outcome["verdict"]
         m = verdict.metrics
@@ -670,19 +665,41 @@ class FinalizationRunner:
     # interruption / summary
     # ------------------------------------------------------------------
 
+    def _support_record(self, outcome: Dict[str, Any]) -> Optional[Dict[str, Dict[str, int]]]:
+        """The per-source record of the final verification, or None when
+        there is no complete one. Its sources were not 'unchecked' then:
+        the check was cancelled / timed out, the check itself failed (no
+        claims could be extracted), or the verifier kept no claims."""
+        if outcome.get("decision") in ("cancelled", "timeout"):
+            return None
+        metrics = getattr(outcome.get("verdict"), "metrics", None)
+        if getattr(metrics, "verification_failed", False):
+            return None
+        if getattr(self.claim_verifier, "last_claims", None) is None:
+            return None
+        return self._evidence_support()
+
     def _evidence_support(self) -> Dict[str, Dict[str, int]]:
         """Per evidence id, how the final verification used it: claims it
-        supported, claims it was judged against, claims it contradicted."""
+        supported, claims it was judged against, claims it contradicted.
+
+        A contradiction is only put on a source the claim CITED (the
+        judge saw exactly the cited sources and found they disagree).
+        A claim judged against chunks picked from the whole locker (an
+        executive summary, an uncited minor claim) does not say which of
+        them disagrees, so those sources only count as judged."""
         support: Dict[str, Dict[str, int]] = {}
         for claim in getattr(self.claim_verifier, "last_claims", None) or []:
             used = {str(eid) for eid, _off in (getattr(claim, "evidence_provenance", None) or [])}
             backing = {str(e) for e in (getattr(claim, "supporting_source_ids", None) or [])}
+            against_cited = (claim.status == "contradicted"
+                             and bool(getattr(claim, "citation_mismatch", False)))
             for eid in used | backing:
                 s = support.setdefault(eid, {"supported": 0, "judged": 0, "contradicted": 0})
                 s["judged"] += 1
                 if claim.status == "supported" and eid in backing:
                     s["supported"] += 1
-                elif claim.status == "contradicted":
+                elif against_cited:
                     s["contradicted"] += 1
         return support
 

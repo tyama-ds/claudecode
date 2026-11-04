@@ -242,27 +242,40 @@ function render() {
 const fmt = (v) => (typeof v === 'number' ? v.toFixed(2) : '—');
 // how the run's verification used the source (metadata.verification)
 // a source without a per-source record: say why, from the run's verification
+const NO_RECORD = ['skipped', 'not_run', 'cancelled', 'timeout', 'failed', 'interrupted'];
 function noRecordText() {
   const s = data && data.verification;
-  if (s === 'performed') return '検証は実施済みですが、出典ごとの記録はありません（途中から再開した調査、または v1.11.2 より前の調査）';
-  if (s === 'cancelled' || s === 'timeout' || s === 'failed' || s === 'interrupted') return '検証が完了しなかったため、出典ごとの記録はありません';
+  if (s === 'performed') return '検証は実施済みですが、出典ごとの記録はありません（v1.11.2 より前の調査など）';
+  if (s === 'cancelled' || s === 'timeout' || s === 'failed' || s === 'interrupted') return '検証が最後まで行えなかったため、出典ごとの記録はありません';
   if (s === 'skipped' || s === 'not_run') return 'この調査では検証を行っていません';
   return '出典ごとの検証の記録はありません';
 }
-function verifyText(e) {
+// this run's record; a run whose verification did not complete has none
+// (a record there could only be another run's)
+function verifyRecord(e) {
   const v = (e.metadata || {}).verification;
+  if (!v || NO_RECORD.includes(data && data.verification)) return null;
+  return {supported: Number(v.supported) || 0, judged: Number(v.judged) || 0, contradicted: Number(v.contradicted) || 0};
+}
+function verifyText(e) {
+  const v = verifyRecord(e);
   if (!v) return noRecordText();
-  if (v.contradicted) return `主張 ${v.contradicted} 件と食い違い（要確認事項を参照）`;
-  if (v.supported) return `主張 ${v.supported} 件の裏付けになりました`;
+  const parts = [];
+  if (v.supported) parts.push(`主張 ${v.supported} 件の裏付けになりました`);
+  if (v.contradicted) parts.push(`この出典を引用した主張 ${v.contradicted} 件が、出典の内容と食い違うと判定されました（要確認事項を参照）`);
+  if (parts.length) return parts.join(' / ');
   if (v.judged) return '照合しましたが、裏付けとしては使われませんでした';
-  return 'この出典を根拠に挙げた主張がなく、照合していません';
+  return '検証ではこの出典を照合していません（この出典を挙げた主張がなかった、簡易検証で省かれた、など）';
 }
 function verifyBadge(e) {
-  const v = (e.metadata || {}).verification;
+  const v = verifyRecord(e);
   if (!v) return '';
-  const cls = v.contradicted ? 'q-low' : v.supported ? 'q-high' : 'q-unverified';
-  const label = v.contradicted ? `⚠ 食い違い ${v.contradicted}` : v.supported ? `✔ 裏付け ${v.supported}` : v.judged ? '照合のみ' : '照合対象外';
-  return ` <span class="badge ${cls}" title="${esc(verifyText(e))}">検証: ${esc(label)}</span>`;
+  const title = esc(verifyText(e));
+  const out = [];
+  if (v.supported) out.push(` <span class="badge q-high" title="${title}">検証: ✔ 裏付け ${v.supported}</span>`);
+  if (v.contradicted) out.push(` <span class="badge q-low" title="${title}">検証: ⚠ 食い違い ${v.contradicted}</span>`);
+  if (out.length) return out.join('');
+  return ` <span class="badge q-unverified" title="${title}">検証: ${v.judged ? '照合のみ' : '照合なし'}</span>`;
 }
 ['q', 'section', 'quality', 'domain', 'stype'].forEach(id => $(id).addEventListener('input', () => { if (id === 'quality') { qualityFilter = $('quality').value; renderQualityChips(); } render(); }));
 document.querySelectorAll('th[data-sort]').forEach(th => th.addEventListener('click', () => {
