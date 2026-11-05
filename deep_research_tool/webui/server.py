@@ -1270,6 +1270,8 @@ class JobManager:
             "plan": result.get("research_plan"),
             # the offline chart page (Chart.js) of the spec engine
             "charts_html": result.get("charts_html"),
+            # the figures / tables / charts the report has (history)
+            "figures": result.get("figures"),
             # verify-only: where the body and the evidence came from
             "verify_source": result.get("verify_source"),
         }
@@ -1569,14 +1571,18 @@ class WebUIHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
-        if download:
-            # a header is Latin-1: a Japanese file name goes in filename*
-            # (it raised and dropped the connection)
+        # the file's own name, also when 開く makes the browser save it (a
+        # Word file was saved as 'report-file' without its extension); a
+        # header is Latin-1: a Japanese file name goes in filename*
+        if path.parent != STATIC_DIR:                 # not the page itself
             from urllib.parse import quote
-            plain = path.name.encode("ascii", "replace").decode("ascii").replace('"', "_")
+            import re as _re
+            plain = _re.sub(r'[\x00-\x1f\x7f"\\;]', "_",
+                            path.name.encode("ascii", "replace").decode("ascii"))
             self.send_header(
                 "Content-Disposition",
-                f"attachment; filename=\"{plain}\"; filename*=UTF-8''{quote(path.name)}",
+                f"{'attachment' if download else 'inline'}; filename=\"{plain}\"; "
+                f"filename*=UTF-8''{quote(path.name)}",
             )
         self.end_headers()
         self.wfile.write(data)
@@ -1698,6 +1704,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
             "section_evidence": data.get("section_evidence") or {},
             "section_titles": titles,
             "files": files,
+            # the run's verification (performed / skipped / cancelled …):
+            # how to read a source without a per-source record
+            "verification": ((result.get("status") or {}).get("verification")),
         })
 
     def _history_record(self, manager, params):
@@ -1888,6 +1897,13 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 ".html": "text/html; charset=utf-8",
                 ".json": "application/json; charset=utf-8",
                 ".csv": "text/csv; charset=utf-8",
+                ".txt": "text/plain; charset=utf-8",
+                ".pdf": "application/pdf",
+                ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".svg": "image/svg+xml", ".gif": "image/gif", ".webp": "image/webp",
             }.get(path.suffix.lower(), "application/octet-stream")
             download = (query.get("download") or ["0"])[0] == "1"
             self._send_file(path, content_type, download=download)

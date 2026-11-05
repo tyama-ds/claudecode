@@ -662,6 +662,8 @@ class DeepResearchTool:
                 "raw_chapters": dict(outcome.get("raw_chapters") or {}),
                 "ordered_evidence_ids": list(outcome.get("ordered_evidence_ids")
                                              or []),
+                # how the verification used each source (restored on resume)
+                "evidence_support": outcome.get("evidence_support"),
                 "manifest_hash": getattr(self, "semantic_manifest_hash", None),
             }
             tmp = path.with_name(path.name + ".tmp")
@@ -1107,6 +1109,11 @@ class DeepResearchTool:
             verdict is not None
             and getattr(getattr(verdict, "metrics", None),
                         "verification_failed", False))
+        # a resumed run reuses the frozen body without its verdict: the
+        # status saved with that body says whether the check had failed
+        saved = outcome.get("restored_status") if outcome.get("restored") else None
+        if isinstance(saved, dict) and saved.get("verification") == "failed":
+            verified_failed = True
 
         if not self.config.enable_verification:
             verification = "skipped"
@@ -1961,6 +1968,8 @@ class DeepResearchTool:
 
         extras_flags = {}
         semantic_freeze_hash = None
+        if not self.config.enable_verification:
+            self._annotate_evidence(evidence_locker)    # no verification to wait for
         if version_tag == "v3":
             # V3: DOCX-native generation flow
             self.progress_plan.enter("writing")
@@ -2222,6 +2231,7 @@ class DeepResearchTool:
         # research rounds, in the final citation order.
         self.progress_plan.enter("rendering")
         if self.config.research.save_evidence:
+            self._annotate_evidence(evidence_locker)
             evidence_format = self.config.research.evidence_format
             if evidence_format in ("json", "both"):
                 evidence_json = evidence_locker.export_to_json()
@@ -2232,6 +2242,9 @@ class DeepResearchTool:
         # generate_and_save). The collection was generated and verified
         # BEFORE the freeze; no LLM runs here.
         figures_report_path = None
+        # how many of the generated figures reached the report body, when
+        # that is known (the history shows it next to the generated counts)
+        figures_placement = None
         if figures_embedded:
             if version_tag == "v2":
                 n_items = (len(figure_collection.figures) + len(figure_collection.charts)
@@ -2241,6 +2254,7 @@ class DeepResearchTool:
                 n_items = (len(figure_collection.figures) + len(figure_collection.tables)
                            + len(figure_collection.charts))
                 placed = int(getattr(generator, "figures_inserted", 0) or 0)
+            figures_placement = {"placed": int(placed), "total": int(n_items)}
             print(f"[AutoFigures] {placed}/{n_items} figure(s)/table(s) placed by the "
                   f"{Path(report_path).suffix.lstrip('.').upper()} renderer")
             dropped = getattr(generator, "pdf_figures_dropped", None)
@@ -2288,6 +2302,11 @@ class DeepResearchTool:
                     f"Falling back to original report without figures.",
                 )
                 figures_report_path = None
+            if figures_report_path is None:
+                # the report keeps its original content without figures
+                figures_placement = {"placed": 0, "total": (
+                    len(figure_collection.figures) + len(figure_collection.tables)
+                    + len(figure_collection.charts))}
 
         # Determine the active report path
         active_report_path = Path(figures_report_path) if figures_report_path else Path(report_path)
@@ -2447,6 +2466,13 @@ class DeepResearchTool:
             # None stays None (the UI must not offer a file called "None")
             "evidence_csv": str(evidence_csv) if evidence_csv else None,
             "verification_html": str(verification_html) if verification_html else None,
+            # the figures GENERATED for the report, and how many reached its
+            # body when that is known (shown in the history)
+            "figures": ({"charts": len(figure_collection.charts),
+                         "tables": len(figure_collection.tables),
+                         "images": len(figure_collection.figures),
+                         **(figures_placement or {})}
+                        if figure_collection is not None else None),
             "session": session,
             "evidence_locker": evidence_locker,
             "verification_result": verification_result,
@@ -2631,6 +2657,8 @@ class DeepResearchTool:
             ev_path = Path(evidence_path) if evidence_path else None
         if ev_path is not None and ev_path.is_file():
             evidence_locker = _Locker.load_from_json(ev_path)
+            # the loaded run's verification is not this one's
+            evidence_locker.drop_verification_records()
             # exports of THIS run go next to its own artifacts
             evidence_locker.output_dir = output_dir / "evidence"
             evidence_locker.output_dir.mkdir(parents=True, exist_ok=True)
@@ -2715,6 +2743,7 @@ class DeepResearchTool:
         # --- artifacts, checks, metadata ----------------------------------
         self.progress_plan.enter("rendering")
         quiet_progress("Saving artifacts...", 0)
+        self._annotate_evidence(evidence_locker)
         evidence_json = evidence_locker.export_to_json()
         evidence_csv = None
         if self.config.research.evidence_format in ("csv", "both"):
@@ -3530,6 +3559,7 @@ class DeepResearchTool:
 
         outcome = runner.run(chapters)
         self.finalization_outcome = outcome
+        self._annotate_evidence(evidence_locker)
 
         # Freeze: write the verified, display-numbered text back into the
         # generation result (extras become chapters of their own).
@@ -3547,6 +3577,48 @@ class DeepResearchTool:
 
         self._warn_on_finalization_outcome(outcome)
         return outcome["verdict"], outcome["html_path"]
+
+    def _annotate_evidence(self, evidence_locker) -> None:
+        """What a reader needs next to each source:
+        - its reliability, rated by its domain (no LLM) — it was never
+          rated, so every source showed 'unverified' even after a
+          verification;
+        - how the verification used it (claims it supported / was judged
+          against / contradicted), once a verification ran.
+        Idempotent; never changes the verification itself."""
+        if evidence_locker is None:
+            return
+        try:
+            # by the source's domain only (official / academic / major outlet
+            # lists): the page-text heuristics rated a short excerpt of a
+            # ministry page 'low'; an unknown domain stays 未評価
+            from .evidence.locker import QualityCategory, SourceType
+            from .evidence.quality_evaluator import QualityEvaluator
+            rater = QualityEvaluator(llm_client=None, language=self.config.research.language)
+            for ev in evidence_locker.get_all_evidence():
+                if ev.quality_category != QualityCategory.UNVERIFIED or not ev.url:
+                    continue
+                r = rater.evaluate_url(ev.url)
+                ev.quality_category = r.get("quality_category", QualityCategory.UNVERIFIED)
+                if ev.source_type == SourceType.UNKNOWN:
+                    ev.source_type = r.get("source_type", SourceType.UNKNOWN)
+                if not ev.quality_indicators.domain_authority:
+                    ev.quality_indicators.domain_authority = float(r.get("domain_authority") or 0.0)
+        except Exception as e:
+            print(f"[Evidence] source rating skipped: {e}")
+        outcome = getattr(self, "finalization_outcome", None) or {}
+        support = outcome.get("evidence_support")
+        # never keep a record carried over from another run
+        evidence_locker.drop_verification_records()
+        if support is None:
+            return
+        for ev in evidence_locker.get_all_evidence():
+            s = support.get(str(ev.id)) or {}
+            ev.metadata["verification"] = {
+                "supported": int(s.get("supported", 0)),
+                "judged": int(s.get("judged", 0)),
+                "contradicted": int(s.get("contradicted", 0)),
+            }
 
     def _run_finalization_v1(self, session, evidence_locker, query,
                              requirements="", progress_callback=None,
@@ -3593,6 +3665,7 @@ class DeepResearchTool:
 
         outcome = runner.run(chapters)
         self.finalization_outcome = outcome
+        self._annotate_evidence(evidence_locker)
 
         exec_key = "要旨" if self.config.research.language == "ja" \
             else "Executive Summary"
@@ -3923,8 +3996,10 @@ class DeepResearchTool:
             "verdict": None, "decision": data.get("decision") or "accept",
             "history": [], "limitations": [],
             "ordered_evidence_ids": list(data.get("ordered_evidence_ids") or []),
+            "evidence_support": data.get("evidence_support"),
             "html_path": self._restored_verification_html,
             "verification_summary": None, "restored": True,
+            "restored_status": data.get("status") if isinstance(data.get("status"), dict) else None,
         }
         # reference entry n must be the evidence the frozen [n] cites: the
         # locker takes the frozen order (as the runner did before freezing)

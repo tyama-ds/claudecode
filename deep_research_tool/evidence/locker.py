@@ -495,6 +495,17 @@ class EvidenceLocker:
         with self._lock:
             return list(self._evidence.values())
 
+    def drop_verification_records(self) -> None:
+        """Remove the per-source verification records (metadata
+        'verification'). They describe ONE run's final verification: a
+        locker loaded from another run (feedback re-research, verify-only)
+        must not show that run's results as its own."""
+        for ev in self.get_all_evidence():
+            if isinstance(ev.metadata, dict):
+                ev.metadata.pop("verification", None)
+            else:
+                ev.metadata = {}
+
     def get_by_url(self, url: str) -> Optional[Evidence]:
         """Get the first evidence item with this URL."""
         if not url:

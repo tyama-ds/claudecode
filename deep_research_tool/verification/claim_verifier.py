@@ -1949,6 +1949,9 @@ JSON only."""
                             f"{a.redundant_passages[0][:80]}"),
                 ))
 
+        # the judgments of this report (per evidence: which claims it
+        # supported) for the evidence exports
+        self.last_claims = list(all_claims)
         return verdict
 
     # ------------------------------------------------------------------

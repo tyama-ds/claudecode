@@ -89,9 +89,9 @@ td.n { color: var(--muted); font-variant-numeric: tabular-nums; width: 1%; }
     <div class="filters">
       <div><label for="q">検索（タイトル・本文・URL）</label><input id="q" type="search" placeholder="例: 市場規模"></div>
       <div><label for="section">章</label><select id="section"><option value="">すべて</option></select></div>
-      <div><label for="quality">品質</label><select id="quality"><option value="">すべて</option>
-        <option value="authoritative">authoritative（公的・学術）</option><option value="high">high</option>
-        <option value="medium">medium</option><option value="low">low</option><option value="unverified">unverified</option></select></div>
+      <div><label for="quality" title="出典の種類（ドメイン・ページの手がかり）から規則で判定した目安。主張の検証結果とは別です">出典の信頼度</label><select id="quality"><option value="">すべて</option>
+        <option value="authoritative">公的・学術</option><option value="high">高</option>
+        <option value="medium">中</option><option value="low">低</option><option value="unverified">未評価</option></select></div>
       <div><label for="domain">ドメイン</label><select id="domain"><option value="">すべて</option></select></div>
       <div><label for="stype">種別</label><select id="stype"><option value="">すべて</option></select></div>
     </div>
@@ -180,7 +180,7 @@ function renderQualityChips() {
   (data.evidence || []).forEach(e => { const q = e.quality_category || 'unverified'; counts[q] = (counts[q] || 0) + 1; });
   const order = ['authoritative', 'high', 'medium', 'low', 'unverified'];
   $('qualityChips').innerHTML = order.filter(q => counts[q]).map(q =>
-    `<span class="chip" data-q="${q}" aria-pressed="${qualityFilter === q}">${q}（${QUAL_JA[q] || ''}） ${counts[q]}</span>`).join('');
+    `<span class="chip" data-q="${q}" aria-pressed="${qualityFilter === q}">信頼度 ${QUAL_JA[q] || q} ${counts[q]}</span>`).join('');
   $('qualityChips').querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => {
     qualityFilter = qualityFilter === c.dataset.q ? '' : c.dataset.q; $('quality').value = qualityFilter; renderQualityChips(); render(); }));
 }
@@ -219,7 +219,7 @@ function render() {
       <td class="title">${e.url ? `<a href="${esc(e.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(e.title || e.url)}</a>` : esc(e.title || '(出典不明)')}
         <div class="domain">${esc(domainOf(e.url))}${e.publisher ? ' ・ ' + esc(e.publisher) : ''}${e.published_date ? ' ・ ' + esc(e.published_date) : ''}</div></td>
       <td class="opt">${secs.map(s => `<span class="badge" title="${esc(sectionLabel(s))}">§${esc(s)}</span>`).join('') || '<span class="hint">—</span>'}</td>
-      <td><span class="badge q-${esc(q)}">${esc(q)}</span><div class="scores">信頼 ${fmt(e.reliability_score)} ・ 関連 ${fmt(e.relevance_score)} ・ 重要 ${fmt(e.importance_score)}</div></td>
+      <td><span class="badge q-${esc(q)}" title="出典の信頼度（出典の種類から規則で判定。主張の検証結果とは別）">${esc(QUAL_JA[q] || q)}</span>${verifyBadge(e)}<div class="scores">${e.reliability_score ? '信頼スコア ' + fmt(e.reliability_score) + ' ・ ' : ''}関連 ${fmt(e.relevance_score)} ・ 重要 ${fmt(e.importance_score)}</div></td>
       <td class="opt scores">${esc(String(e.accessed_at || '').replace('T', ' ').slice(0, 16))}</td>
       <td class="excerpt">${esc(excerpt.slice(0, 180))}${excerpt.length > 180 ? '…' : ''}</td></tr>`;
     if (!open.has(e.id)) return row;
@@ -229,6 +229,7 @@ function render() {
       <dt>使われた章</dt><dd>${secs.map(sectionLabel).map(esc).join(' / ') || '—'}</dd>
       <dt>検索クエリ</dt><dd>${esc(e.search_query || '—')}</dd>
       <dt>取得</dt><dd>${esc(e.accessed_at || '—')}${e.access_method ? '（' + esc(e.access_method) + '）' : ''}</dd>
+      <dt>検証</dt><dd>${esc(verifyText(e))}</dd>
       <dt>品質メモ</dt><dd>${esc(e.quality_notes || '—')}</dd>
       <dt>引用</dt><dd>${esc(e.citation_text || '—')}</dd>
       <dt>抜粋</dt><dd>${esc(e.content_excerpt || '—')}</dd>
@@ -239,6 +240,43 @@ function render() {
     const id = tr.dataset.id; if (open.has(id)) open.delete(id); else open.add(id); render(); }));
 }
 const fmt = (v) => (typeof v === 'number' ? v.toFixed(2) : '—');
+// how the run's verification used the source (metadata.verification)
+// a source without a per-source record: say why, from the run's verification
+const NO_RECORD = ['skipped', 'not_run', 'cancelled', 'timeout', 'failed', 'interrupted'];
+function noRecordText() {
+  const s = data && data.verification;
+  if (s === 'performed') return '検証は実施済みですが、出典ごとの記録はありません（v1.11.2 より前の調査など）';
+  if (s === 'cancelled' || s === 'timeout' || s === 'failed' || s === 'interrupted') return '検証が最後まで行えなかったため、出典ごとの記録はありません';
+  if (s === 'skipped' || s === 'not_run') return 'この調査では検証を行っていません';
+  return '出典ごとの検証の記録はありません';
+}
+// this run's record; a run whose verification did not complete has none
+// (a record there could only be another run's)
+function verifyRecord(e) {
+  const v = (e.metadata || {}).verification;
+  if (!v || NO_RECORD.includes(data && data.verification)) return null;
+  return {supported: Number(v.supported) || 0, judged: Number(v.judged) || 0, contradicted: Number(v.contradicted) || 0};
+}
+function verifyText(e) {
+  const v = verifyRecord(e);
+  if (!v) return noRecordText();
+  const parts = [];
+  if (v.supported) parts.push(`主張 ${v.supported} 件の裏付けになりました`);
+  if (v.contradicted) parts.push(`この出典を引用した主張 ${v.contradicted} 件が、出典の内容と食い違うと判定されました（要確認事項を参照）`);
+  if (parts.length) return parts.join(' / ');
+  if (v.judged) return '照合しましたが、裏付けとしては使われませんでした';
+  return '検証ではこの出典を照合していません（この出典を挙げた主張がなかった、簡易検証で省かれた、など）';
+}
+function verifyBadge(e) {
+  const v = verifyRecord(e);
+  if (!v) return '';
+  const title = esc(verifyText(e));
+  const out = [];
+  if (v.supported) out.push(` <span class="badge q-high" title="${title}">検証: ✔ 裏付け ${v.supported}</span>`);
+  if (v.contradicted) out.push(` <span class="badge q-low" title="${title}">検証: ⚠ 食い違い ${v.contradicted}</span>`);
+  if (out.length) return out.join('');
+  return ` <span class="badge q-unverified" title="${title}">検証: ${v.judged ? '照合のみ' : '照合なし'}</span>`;
+}
 ['q', 'section', 'quality', 'domain', 'stype'].forEach(id => $(id).addEventListener('input', () => { if (id === 'quality') { qualityFilter = $('quality').value; renderQualityChips(); } render(); }));
 document.querySelectorAll('th[data-sort]').forEach(th => th.addEventListener('click', () => {
   const k = th.dataset.sort; sort = {key: k, dir: sort.key === k && sort.dir === 'asc' ? 'desc' : 'asc'};
