@@ -1,0 +1,77 @@
+{
+  "notice": "正解・候補・過去判定はすべて架空のデモ用データです。過去実績を測定したものではありません。",
+  "items": [
+    {
+      "id": "n1",
+      "report_id": "r1",
+      "placeholder": "{{n1}}",
+      "statement": "【架空デモ】青葉サンプル工業の2024年3月期の連結売上高は {{value}} 億円だった。",
+      "value": "120.5",
+      "unit": "億円",
+      "tolerance": "0.05",
+      "accepted_units": {"百万円": "0.01", "万円": "0.0001", "円": "0.00000001"},
+      "source_ids": ["s1"],
+      "candidates": [{"value": "118", "unit": "億円", "origin": "historical", "historical_verdict": "refuted", "note": "架空の過去値・過去判定。実績ではありません。"}]
+    },
+    {
+      "id": "n2",
+      "report_id": "r1",
+      "placeholder": "{{n2}}",
+      "statement": "【架空デモ】青葉サンプル工業の2024年3月期末の従業員数は {{value}} 人だった。",
+      "value": "240",
+      "unit": "人",
+      "tolerance": "0",
+      "accepted_units": {"名": "1"},
+      "source_ids": ["s1"],
+      "candidates": [{"value": "240", "unit": "人", "origin": "historical", "historical_verdict": "supported", "note": "架空の過去値・過去判定。実績ではありません。"}]
+    },
+    {
+      "id": "n3",
+      "report_id": "r1",
+      "placeholder": "{{n3}}",
+      "statement": "【架空デモ】青葉サンプル工業の2024年3月期の売上高営業利益率は {{value}} ％だった。",
+      "value": "8.2",
+      "unit": "%",
+      "tolerance": "0.05",
+      "accepted_units": {"％": "1", "割合": "100"},
+      "source_ids": ["s1"],
+      "candidates": [{"value": "8.4", "unit": "%", "origin": "historical", "historical_verdict": "refuted", "note": "架空の過去値・過去判定。実績ではありません。"}]
+    },
+    {
+      "id": "n4",
+      "report_id": "r2",
+      "placeholder": "{{n4}}",
+      "statement": "【架空デモ】みどり実証地区の2023年度の年間発電量は {{value}} 万kWhだった。",
+      "value": "45.6",
+      "unit": "万kWh",
+      "tolerance": "0.05",
+      "accepted_units": {"kWh": "0.0001", "MWh": "0.1", "GWh": "100"},
+      "source_ids": ["s2"],
+      "candidates": [{"value": "4560", "unit": "万kWh", "origin": "historical", "historical_verdict": "refuted", "note": "架空の過去値・過去判定。実績ではありません。"}]
+    },
+    {
+      "id": "n5",
+      "report_id": "r2",
+      "placeholder": "{{n5}}",
+      "statement": "【架空デモ】みどり実証地区の2023年度末の稼働設備数は {{value}} 件だった。",
+      "value": "32",
+      "unit": "件",
+      "tolerance": "0",
+      "accepted_units": {},
+      "source_ids": ["s2"],
+      "candidates": [{"value": "32", "unit": "件", "origin": "historical", "historical_verdict": "supported", "note": "架空の過去値・過去判定。実績ではありません。"}]
+    },
+    {
+      "id": "n6",
+      "report_id": "r2",
+      "placeholder": "{{n6}}",
+      "statement": "【架空デモ】みどり実証地区の2023年度末アンケートの有効回答に占める満足回答の割合は {{value}} ％だった。",
+      "value": "91.4",
+      "unit": "%",
+      "tolerance": "0.05",
+      "accepted_units": {"％": "1", "割合": "100"},
+      "source_ids": ["s2"],
+      "candidates": [{"value": "94.1", "unit": "%", "origin": "historical", "historical_verdict": "refuted", "note": "架空の過去値・過去判定。実績ではありません。"}]
+    }
+  ]
+}

@@ -1,0 +1,61 @@
+{
+  "slug": "anti-hallucination",
+  "name": "Anti-hallucination",
+  "path": "anti-hallucination/",
+  "summary": "数値穴埋め・ファクトチェックをモデル別に比較するローカルアプリ。引用・条件・情報保持を検査して修正候補を選別するCLIを含む。",
+  "status": "active",
+  "phase": "予備実験用プロトタイプ",
+  "progress": 65,
+  "started": "2026-11-01",
+  "updated": "2026-11-05",
+  "ports": [
+    8788
+  ],
+  "ci": false,
+  "portal": false,
+  "stack": [
+    "Python 3.11+",
+    "標準ライブラリ",
+    "HTML/CSS/JavaScript"
+  ],
+  "milestones": [
+    {
+      "title": "数値穴埋め・判定・採点のローカルUIとCLI",
+      "state": "done",
+      "date": "2026-11-01"
+    },
+    {
+      "title": "引用検査・局所保留・台帳整合化の実装",
+      "state": "done",
+      "date": "2026-11-02"
+    },
+    {
+      "title": "公開用ソース・サンプル・テストの整理",
+      "state": "done",
+      "date": "2026-11-05"
+    },
+    {
+      "title": "独立した新規レポートで改善効果を検証",
+      "state": "doing"
+    },
+    {
+      "title": "文書修正のモデル呼出と検索を統合",
+      "state": "todo"
+    }
+  ],
+  "next": [
+    "新規レポートで見逃し・誤修正・不要変更を評価",
+    "修正CLIのモデル呼出と検索の統合を検討"
+  ],
+  "risks": [
+    "デモは模擬モデルであり性能評価には使えない",
+    "修正CLIの意味判断と検索は外部担当が必要",
+    "過去の実験データは公開版に含めない"
+  ],
+  "log": [
+    {
+      "date": "2026-11-05",
+      "summary": "Anti-hallucinationアプリのソース、架空サンプル、テスト、利用手順を追加。実験記録と認証情報を除外。"
+    }
+  ]
+}

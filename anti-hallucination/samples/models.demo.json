@@ -1,0 +1,7 @@
+{
+  "models": [
+    {"id": "demo-careful", "provider": "demo", "model": "careful"},
+    {"id": "demo-noisy", "provider": "demo", "model": "noisy"}
+  ],
+  "repeats": 1
+}

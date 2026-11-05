@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+!.env.example
+runs/
+data/
+models.local.json
+*.log
+
+# Local research inputs, review records and generated contracts
+pilot/
+*.local.json
+case_drafts*.json
+guard_contract.json
+block_packet.json
+normalized/
+guard_input/
+preview/
+gated/

@@ -1,0 +1,15 @@
+{
+  "normalization_version": "ledger_consistency_v1",
+  "transformation_kind": "conservative_support_label_downgrade_not_format_only",
+  "rules": [
+    "Only supported check statuses without the existing validator's required access become unknown.",
+    "Citation permits any declared full_section evidence; other checks require declared primary full_section evidence.",
+    "One qualifying referenced evidence item is sufficient, matching the unmodified validator.",
+    "A supported claim becomes uncertain only if applicable checks contain unknown and otherwise only supported/unknown.",
+    "No positive label, evidence, claim text, candidate finding, patch or dependency is created or changed.",
+    "All other invalid ledger, quotation, mapping or candidate invariants fail; no output is returned as normalized.",
+    "Preserve raw bytes and the complete audit; bind original/candidate/raw and normalized ledger hashes.",
+    "Replay this function to verify artifacts. Raw current-arm failure remains failure in an experiment."
+  ],
+  "limitation": "Normalization only makes recorded support labels consistent with declared evidence access. It does not verify retrieval, entailment, factual truth, necessity or claim completeness. Writer reason/rationale strings remain unchanged and are not new justifications for the normalized labels."
+}

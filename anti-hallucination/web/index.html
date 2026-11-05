@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>数値ファクトチェック実験室</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar"><div class="brand-mark">N<span>✓</span></div><div><div class="eyebrow">NUMERIC FACT-CHECK LAB</div><div class="brand">数値ファクトチェック実験室</div></div><span class="local-badge">LOCAL · PILOT 01</span></header>
+  <main>
+    <section class="intro"><div><div class="eyebrow accent">MODEL COMPARISON</div><h1>数字を埋める。<br>根拠で確かめる。</h1><p>同じ問題と資料でモデルを比較し、チェックを加えた効果を測ります。</p></div><div class="intro-note"><span class="small-label">今回の実験</span><strong>固定資料による予備実験</strong><p>穴埋め → 共通候補の検証 → 採点<br>検索条件を固定し、数値回答と判定の差を確認します。</p></div></section>
+    <ol class="steps"><li><span>01</span>レポートと正解を入力</li><li><span>02</span>モデルを選んで実行</li><li><span>03</span>結果と根拠を比較</li></ol>
+    <section class="panel" aria-labelledby="setup-title">
+      <div class="panel-head"><div><span class="small-label">EXPERIMENT SETUP</span><h2 id="setup-title">実験データ</h2></div><div class="button-row"><button id="load-demo" class="secondary">デモ一式を読み込む</button><button id="load-live" class="secondary">API設定のひな形</button></div></div>
+      <div id="mode-note" class="notice"></div>
+      <div class="input-grid">
+        <div class="input-card"><div class="number">01</div><h3>レポート・根拠資料</h3><p>数値を伏せた本文と、全モデルに渡す共通資料。</p><label class="file-label">JSONファイルを選択<input id="file-reports" type="file" accept=".json,application/json"></label><span id="name-reports" class="filename">サンプル未読込</span><details><summary>JSONを確認・編集</summary><textarea id="reports" aria-label="レポートJSON" spellcheck="false"></textarea></details></div>
+        <div class="input-card"><div class="number">02</div><h3>正解データ</h3><p>正解値、単位、許容誤差、過去の候補値。採点に使用します。</p><label class="file-label">JSONファイルを選択<input id="file-gold" type="file" accept=".json,application/json"></label><span id="name-gold" class="filename">サンプル未読込</span><details><summary>JSONを確認・編集</summary><textarea id="gold" aria-label="正解JSON" spellcheck="false"></textarea></details></div>
+        <div class="input-card"><div class="number">03</div><h3>比較モデル</h3><p>モデルID、API接続先、反復回数を指定。キーは環境変数から読みます。</p><label class="file-label">JSONファイルを選択<input id="file-config" type="file" accept=".json,application/json"></label><span id="name-config" class="filename">サンプル未読込</span><details><summary>JSONを確認・編集</summary><textarea id="config" aria-label="モデル設定JSON" spellcheck="false"></textarea></details></div>
+      </div>
+      <div class="run-bar"><div><button id="validate" class="secondary">入力を検証</button><button id="run" class="primary">実験を実行 <span aria-hidden="true">↗</span></button><button id="cancel" class="danger" hidden>停止</button></div><p>実APIモードでは、レポート・資料・判定対象を設定先APIに送信します。</p></div>
+      <div id="validation" class="validation" hidden></div>
+      <div id="error" class="error" role="alert" hidden></div>
+      <div id="progress-wrap" class="progress-wrap" hidden><div class="progress-label"><strong id="stage">準備</strong><span id="progress-text" aria-live="polite"></span></div><progress id="progress" max="1" value="0"></progress><p id="progress-message"></p></div>
+    </section>
+    <section class="history-line"><label for="history">保存済みの実験</label><select id="history"><option value="">実験を選択</option></select><button id="open-history" class="secondary">結果を開く</button></section>
+    <section id="empty" class="empty-state"><div class="empty-symbol">↔</div><h2>比較結果がここに表示されます</h2><p>まずはデモを実行して、入力から比較までの流れを確認できます。<br>デモの数値は模擬モデルの動作確認用で、実際のAIの性能ではありません。</p></section>
+    <section id="results" hidden>
+      <div class="panel-head result-head"><div><span class="small-label">EXPERIMENT RESULTS</span><h2 id="result-title">モデル別の比較</h2><p id="result-meta"></p></div><a id="download" class="button secondary">結果一式を保存（ZIP）</a></div>
+      <p class="download-note">ZIPには入力・正解データ・プロンプト・生ログ・CSV集計を含みます。</p>
+      <div id="result-banner" class="notice"></div><details><summary>評価範囲・集計上の注意</summary><div id="warnings"></div></details>
+      <div class="tabs" role="tablist" aria-label="結果表示"><button class="tab active" data-tab="fill" role="tab" aria-selected="true">穴埋め</button><button class="tab" data-tab="check" role="tab" aria-selected="false">ファクトチェック</button><button class="tab" data-tab="pipeline" role="tab" aria-selected="false">チェックの効果</button><button class="tab" data-tab="detail" role="tab" aria-selected="false">回答・根拠・ログ</button><button id="review-tab" class="tab" data-tab="review" role="tab" aria-selected="false" hidden>レビュー・拡張案</button></div>
+      <div id="view-fill" class="tab-view panel"><h3>数値回答の正確さ</h3><p class="hint">全出題数が分母です。保留・実行失敗も残し、回答できた問題だけで精度を高く見せません。</p><div id="fill-chart"></div><div id="fill-table" class="table-scroll"></div></div>
+      <div id="view-check" class="tab-view panel" hidden><h3>同じ候補に対する判定</h3><p class="hint">正しい対照値・提供された候補・各モデルや条件の回答を共通の候補集合にします。この集合の誤りの割合は、実運用の割合とは異なります。</p><div id="check-table" class="table-scroll"></div><p class="hint">「引用文字列一致率」は出典IDと引用の存在確認です。根拠が判定を意味的に支持するかは別途確認してください。</p></div>
+      <div id="view-pipeline" class="tab-view panel" hidden><h3>正しい回答を残し、誤った回答を止める</h3><p class="hint">元の全出題数が分母です。「チェックなし」と、生成モデル×判定モデルの組み合わせを比較します。初期版は数値を修正せず、支持された回答だけを通します。</p><div id="pipeline-table" class="table-scroll"></div></div>
+      <div id="view-detail" class="tab-view panel" hidden><div class="panel-head"><h3>項目ごとの回答と判定</h3><label>絞り込み <input id="filter" type="search" placeholder="モデル名・項目IDなど"></label></div><div id="detail-list"></div></div>
+      <div id="view-review" class="tab-view panel" hidden><div id="review-content"></div></div>
+    </section>
+    <footer>固定資料・数値問題に限定した探索的な比較です。模擬結果と実APIの結果は区別して保存します。初期版には信頼区間とWeb検索を含みません。</footer>
+  </main>
+  <script src="/app.js"></script>
+</body></html>

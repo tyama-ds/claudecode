@@ -1,5 +1,7 @@
 # Deep Research Tool
 
+> **Anti-hallucination:** [数値ファクトチェック比較アプリと文書修正CLI](anti-hallucination/README.md)（Python 3.11+、標準ライブラリのみ）。
+
 AIを活用した自動リサーチツール。OpenAI/Anthropic APIとWeb検索を組み合わせて、包括的な調査レポートを自動生成します。
 
 ## 特徴

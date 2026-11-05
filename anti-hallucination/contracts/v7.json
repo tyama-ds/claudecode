@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "gate_version": "v7",
+  "hash_algorithm": "SHA256 of UTF-8 JSON sorted by object keys, ensure_ascii=false, separators=(',', ':'), allow_nan=false; text hashes use exact UTF-8 text.",
+  "blocks": "Every nonblank physical line becomes B0001 etc.; offsets count Python Unicode characters, end exclusive; line terminators excluded.",
+  "evidence": {
+    "evidence_id": "unique string",
+    "url": "absolute HTTPS URL",
+    "locator": "nonempty string",
+    "summary": "nonempty string",
+    "access": "full_section|partial|unavailable",
+    "primary": "boolean"
+  },
+  "ledger": {
+    "schema_version": 1,
+    "block_packet_sha256": "canonical block packet hash",
+    "original_sha256": "canonical original JSON hash",
+    "evidence": "array of evidence",
+    "blocks": [
+      {
+        "block_id": "every packet block exactly once",
+        "claim_ids": "array of claim IDs",
+        "nonfactual_reason": "nonempty iff claim_ids empty; otherwise empty string"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "unique string",
+        "block_id": "own block",
+        "quote": "nonempty exact substring of own block",
+        "context_block_ids": "known block IDs including own block and relevant headings/table headers/nearby context",
+        "report_scope": "nonempty for factual claims: contextual original claim scope",
+        "source_scope": "nonempty for factual claims: evidenced scope or explicit unknown with reason",
+        "status": "supported|problem|uncertain|nonfactual",
+        "reason": "nonempty string",
+        "checks": {
+          "quantity": {
+            "status": "supported|contradicted|missing_material|unknown|not_applicable",
+            "rationale": "nonempty string",
+            "evidence_ids": "array of known evidence IDs"
+          },
+          "metric": {
+            "status": "supported|contradicted|missing_material|unknown|not_applicable",
+            "rationale": "nonempty string",
+            "evidence_ids": "array of known evidence IDs"
+          },
+          "population": {
+            "status": "supported|contradicted|missing_material|unknown|not_applicable",
+            "rationale": "nonempty string",
+            "evidence_ids": "array of known evidence IDs"
+          },
+          "time": {
+            "status": "supported|contradicted|missing_material|unknown|not_applicable",
+            "rationale": "nonempty string",
+            "evidence_ids": "array of known evidence IDs"
+          },
+          "comparison": {
+            "status": "supported|contradicted|missing_material|unknown|not_applicable",
+            "rationale": "nonempty string",
+            "evidence_ids": "array of known evidence IDs"
+          },
+          "modality": {
+            "status": "supported|contradicted|missing_material|unknown|not_applicable",
+            "rationale": "nonempty string",
+            "evidence_ids": "array of known evidence IDs"
+          },
+          "citation": {
+            "status": "supported|contradicted|missing_material|unknown|not_applicable",
+            "rationale": "nonempty string",
+            "evidence_ids": "array of known evidence IDs"
+          }
+        }
+      }
+    ]
+  },
+  "ledger_rules": [
+    "All seven checks are mandatory. Supported requires at least one applicable check, all applicable checks supported, and primary full_section evidence for each; citation alone allows secondary full_section evidence.",
+    "Use unknown when scope is unknown; supported must not conceal scope uncertainty. Arithmetic may cite primary input data and explain the calculation in evidence.summary.",
+    "nonfactual requires all checks not_applicable. problem requires at least one contradicted or missing_material check.",
+    "Block claim membership is reciprocal and complete. Quote matches are exact. Complete block coverage is not proof of atomic completeness."
+  ],
+  "candidate": "Existing replication repair schema, plus mandatory nonempty patch.claim_ids exactly covering every overlapping ledger claim; optional patch.depends_on_patch_ids referencing existing patches with no cycles. Original sources remain unchanged.",
+  "guard_packet": "schema_version,input_sha256:{original,candidate,ledger},original,candidate_repair,candidate_applied,ledger,block_packet,limitation; CLI also includes input_file_sha256 for exact raw files. No baseline/gold inputs.",
+  "guard": {
+    "schema_version": 1,
+    "guard_packet_sha256": "canonical entire guard packet hash",
+    "input_sha256": {
+      "original": "from packet",
+      "candidate": "from packet",
+      "ledger": "from packet"
+    },
+    "evidence": "array; may be empty and reference ledger evidence; overlapping IDs must be identical",
+    "patch_reviews": [
+      {
+        "patch_id": "each candidate patch exactly once",
+        "necessity": "necessary|optional|unnecessary|uncertain",
+        "rationale": "nonempty independent judgment",
+        "evidence_ids": "known IDs",
+        "coverage_complete": "boolean; attest all original assertions, including units omitted from ledger",
+        "coverage_reason": "nonempty string",
+        "additions": [
+          {
+            "after_quote": "nonempty exact substring of patch.after; enumerate every added factual/citation unit beyond the mapped corrections",
+            "content_kind": "factual|citation|nonfactual",
+            "claim_ids": "known ledger IDs for context; material_omission requires at least one eligible touched claim per factual/citation addition; other known context IDs do not veto",
+            "status": "supported|uncertain|contradicted",
+            "evidence_ids": "known IDs",
+            "reason": "nonempty independent assessment",
+            "report_scope": "nonempty unless nonfactual",
+            "source_scope": "nonempty unless nonfactual"
+          }
+        ],
+        "units": [
+          {
+            "unit_id": "unique within patch",
+            "claim_ids": "array of patch claim IDs; collectively map all; may be empty for an additional original unit",
+            "before_quote": "nonempty exact substring of patch.before, overlapping each referenced claim",
+            "status": "supported|uncertain|contradicted",
+            "content_kind": "factual|citation|nonfactual (default factual)",
+            "evidence_ids": "known IDs",
+            "reason": "nonempty independent source assessment",
+            "after_quote": "exact substring of patch.after or empty",
+            "disposition": "preserved|corrected_with_evidence|removed_unsupported|lost|uncertain",
+            "rationale": "nonempty independent explanation"
+          }
+        ]
+      }
+    ],
+    "final_review": {
+      "selection_binding": "Copy every field of preview.selection exactly; operator may attach these after a blinded semantic review.",
+      "status": "pass|fail|unknown",
+      "coverage_complete": "boolean",
+      "reason": "nonempty full-report independent assessment",
+      "patch_localization": {
+        "status": "none|definite|ambiguous|unknown",
+        "patch_ids": "unique selected patch IDs",
+        "all_failure_causes_localized": "boolean; true only if ALL failure causes are definitely attributable to the listed patches",
+        "reason": "nonempty explanation; none requires empty IDs and false attestation; pass requires none"
+      },
+      "uncertainty_localization": {
+        "status": "none|definite|ambiguous|unknown; definite describes location certainty, not factual correctness",
+        "patch_ids": "unique selected IDs containing all approval-blocking uncertainty; nonempty to recover",
+        "patch_reasons": "object mapping exactly every patch_id to its nonempty uncertainty reason; {} when no IDs",
+        "all_unresolved_concerns_localized": "boolean: ALL approval-blocking unresolved concerns are confined to these selected changes",
+        "remainder_coverage_complete": "boolean: reviewer actually examined ALL remaining changes AND their cross-document interactions, including preservation and source support; unmentioned IDs do not constitute coverage",
+        "no_preexisting_or_nonlocal_concerns": "boolean: no approval-blocking uncertainty comes from unchanged original text, nonlocal context, or an unidentified cause; unchanged known original problems are not automatically new repair failures",
+        "reason": "nonempty scope and coverage explanation; none requires empty IDs/reasons and all three attestations false"
+      }
+    },
+    "final_reviews": "Alternative to final_review: one or two strict v7 reviews. One total removal/review round may follow either localized failure or localized uncertainty; never one of each. Never provide both fields."
+  },
+  "gate_rules": [
+    "Only necessary patches with complete coverage, all mapped claims and accessible full_section necessity evidence survive. Eligibility requires a source-backed correction/removal or the material_omission route; all v3 safety checks still apply.",
+    "material_omission uses the same original/candidate/ledger/guard records without relabeling. Every original unit must be literally preserved. SequenceMatcher(autojunk=False) must classify before-to-after as only equal/insert, and reviewed additions must cover all inserted nonwhitespace characters. This conservative alignment may hold ambiguous repeated text.",
+    "For material_omission every addition must cover inserted text; at least one is factual/citation. Each factual/citation addition must reference at least one touched claim linked to an existing missing_material check using matching full_section evidence. Other known claim_ids are context and neither authorize nor veto the addition. Citation additions link citation checks; factual additions link non-citation checks. Original units, additions, coverage, necessity and scopes retain all existing validation.",
+    "Matching omission evidence means the same evidence ID, or identical normalized HTTPS document URLs: lowercase scheme/hostname, default port 443, empty path '/', and exact path/query/fragment. Freeform locator and summary text may differ and do not participate in identity. Both records must be full_section; factual links require both primary. This establishes source document identity only, not section identity or semantic entailment; independent guard judgments remain responsible for section relevance and entailment. No fuzzy URL matching.",
+    "preserved requires identical before_quote and after_quote; even semantically equivalent paraphrases can be held by this conservative rule.",
+    "Corrected factual units require primary full_section evidence and nonempty changed after_quote. Citation units in relink patches may use secondary full_section evidence. Nonfactual units may be preserved but not source-corrected.",
+    "additions is mandatory even when empty; coverage_reason must attest that all introduced assertions beyond mapped corrections were reviewed, or that none exist. Uncertain/contradicted additions hold the patch. Supported factual additions require primary full_section evidence; citation additions allow secondary full_section evidence.",
+    "Any lost/uncertain disposition holds the patch. Supported or uncertain units/ledger claims cannot be removed. Removal requires a contradicted unprotected unit, evidence and empty after_quote.",
+    "Rejected dependencies cascade. Added sources referenced by accepted replacements or source_urls survive even if introduced for a rejected patch; never renumber. Numeric token ambiguity conservatively retains sources.",
+    "Reuse v5 eligibility, original information protection and source retention without changing frozen inputs or labels.",
+    "Screen assembled selected text, not candidate fragments alone. Each bare decimal source-ID token requires a uniquely occurring numeric-only citation-unit/addition quote (one number per physical line, horizontal whitespace allowed). Token boundaries come from the annotation itself, so a declared citation already joined inside a replacement is screened. Original anchors additionally use original standalone lines and numeric-only citation before_quote declarations. Repeated quotes and broad contextual citation quotes do not establish precise numeric intent; record repeated-quote ambiguity and leave it for full semantic review. Numeric source membership alone never classifies a number. Untouched original number lines without citation intent declarations remain for independent review. Complete bracketed citations may appear inline; malformed bracket syntax remains for independent review.",
+    "Track exact equal-character original provenance and edit seams. Existing unchanged original joins are not blamed. Counterfactually revert each potential responsible patch: an adjacent edit is excluded from blame if the same anchor-side join remains. Reject definite responsible patches and transitive dependents; reassemble and rescreen to a fixed point without editing any replacement. Ambiguous mechanical attribution vetoes the whole selection.",
+    "Every selection binds exact text/sources, input JSON, packet, guard evaluation, exclusion trail and mechanical diagnostics. Final reviews copy all selection fields exactly; stale or malformed reviews raise before applying.",
+    "The changed full report requires a second independently produced complete pass with its new exact selection binding. No old pass transfers. Failed/incomplete/unknown second review or missing re-review vetoes all remaining patches. Maximum recovery rounds is one.",
+    "If localized removal and closure leave no selected patches, recovery terminates with recovery_status=no_remainder, recovery_eligible=false and the original report. No second review is requested and no recovery pass is claimed; an unexpected second review is rejected.",
+    "Retain complete, definite v6 failure recovery only when uncertainty_localization is none. Unknown stays unknown and can recover only with none failure localization, definite nonempty uncertainty IDs, exact per-ID reasons, and all three uncertainty attestations true. Absent, ambiguous, mixed failure/uncertainty, incomplete remainder coverage, or nonlocal uncertainty vetoes the whole selection.",
+    "Holding uncertainty is not a confirmed error finding and does not correct or validate that patch. Keep original raw status/reasons. Exclude only identified patches plus transitive dependents and any newly mechanically implicated patches. Never rewrite or re-enable a patch.",
+    "Failure and uncertainty recovery share a single maximum round. A fresh independent complete pass of the exact reduced full report is mandatory. Unknown, fail, or incomplete second review causes a terminal veto; no third review or candidate regeneration is allowed.",
+    "A blinded reviewer returns status, coverage_complete, reason, patch_localization and uncertainty_localization; the operator attaches exact selection bindings. A v6 comparator may strip only uncertainty_localization for schema compatibility, preserving all original status/coverage/failure judgments. Independence and truth of attestations cannot be established by this code."
+  ],
+  "cli": [
+    "blocks --original PATH --output PATH",
+    "describe --output PATH",
+    "prepare --original PATH --candidate PATH --ledger PATH --output-dir DIR",
+    "preview --original PATH --candidate PATH --ledger PATH --guard-packet PATH --guard PATH --output-dir DIR",
+    "apply --original PATH --candidate PATH --ledger PATH --guard-packet PATH --guard PATH --output-dir DIR",
+    "recover --original PATH --candidate PATH --ledger PATH --guard-packet PATH --guard PATH --final-review PATH --output-dir DIR"
+  ],
+  "limitation": "Block coverage and exact unit mappings are structural checks, not proof of exhaustive atomic extraction or factual truth; semantic labels are supplied by reviewers. Citation screening covers declared bare numeric citation lines; it does not prove citation intent or semantic correctness. Localized uncertainty is a hold, not a confirmed error; its scope and remainder coverage require independent semantic judgment.",
+  "report_interface": "v5-compatible result fields plus mechanical_diagnostics, exclusion_trail, review_history, mechanical_veto, recovery_eligible; selected_applied is the last reviewed/provisional selection, final_applied is original on full veto. Selection is immutable and remains bound to the reviewed selection even when final veto changes effective_repair. v7 adds recovery_kind, uncertainty_held_patch_ids and separate failure/uncertainty removal-round counts; unknown review status and per-patch reasons are retained in review_history and exclusion_trail."
+}

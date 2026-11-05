@@ -1,0 +1,38 @@
+{
+  "models": [
+    {
+      "id": "openai-model-a",
+      "provider": "openai_responses",
+      "model": "REPLACE_WITH_AVAILABLE_OPENAI_MODEL_ID",
+      "api_key_env": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1",
+      "timeout_seconds": 90,
+      "max_output_tokens": 2400,
+      "input_cost_per_million": null,
+      "output_cost_per_million": null
+    },
+    {
+      "id": "compatible-model-b",
+      "provider": "openai_chat",
+      "model": "REPLACE_WITH_AVAILABLE_COMPATIBLE_MODEL_ID",
+      "api_key_env": "COMPATIBLE_API_KEY",
+      "base_url": "https://REPLACE_WITH_PROVIDER_HOST/v1",
+      "timeout_seconds": 90,
+      "max_output_tokens": 2400,
+      "input_cost_per_million": null,
+      "output_cost_per_million": null
+    },
+    {
+      "id": "anthropic-model-c",
+      "provider": "anthropic",
+      "model": "REPLACE_WITH_AVAILABLE_CLAUDE_MODEL_ID",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "base_url": "https://api.anthropic.com/v1",
+      "timeout_seconds": 90,
+      "max_output_tokens": 2400,
+      "input_cost_per_million": null,
+      "output_cost_per_million": null
+    }
+  ],
+  "repeats": 1
+}
