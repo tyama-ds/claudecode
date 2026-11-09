@@ -283,5 +283,19 @@
       "summary": "初版"
     }
   ],
-  "updated": "2026-11-05"
+  "updated": "2026-11-05",
+  "images": [
+    {
+      "file": "images/deep_research_tool/2026-11-09-report.jpg",
+      "kind": "gui",
+      "caption": "Web UI（App Portal のプレビュー画像 2）",
+      "date": "2026-11-09"
+    },
+    {
+      "file": "images/deep_research_tool/2026-11-09-main.jpg",
+      "kind": "gui",
+      "caption": "Web UI（App Portal のプレビュー画像）",
+      "date": "2026-11-09"
+    }
+  ]
 }
