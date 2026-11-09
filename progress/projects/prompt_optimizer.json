@@ -52,5 +52,13 @@
       "summary": "初版、単体 HTML 版、暗号化した API キー保存、テストモード"
     }
   ],
-  "updated": "2026-02-16"
+  "updated": "2026-02-16",
+  "images": [
+    {
+      "file": "images/prompt_optimizer/2026-11-09-main.jpg",
+      "kind": "gui",
+      "caption": "単体 HTML 版の初回セットアップ",
+      "date": "2026-11-09"
+    }
+  ]
 }

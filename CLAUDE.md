@@ -29,10 +29,20 @@ This repository is in its early stages of development. As the project evolves, t
    - `updated` を今日の日付にする
    - 完了したマイルストーンは `state` を `done` にして `date` を入れる。着手中なら `doing`、新しい予定は `todo` で追加する
    - `phase`・`progress`（0〜100 の目安）・`next`・`risks`・`status` を実態に合わせて見直す
-2. for_eigyo を同じ親フォルダに用意し（無ければ `git clone https://github.com/tyama-ds/for_eigyo ../for_eigyo`。リモート環境では add_repo で追加）、
+2. 画面のあるプロジェクトは、使用イメージ（画像）を付ける。
+   - 変更後のアプリを起動し、for_eigyo の `progress/capture.py` で **修正箇所** を撮る
+     （`python ../for_eigyo/progress/capture.py --repo-root . --slug <slug> --url <URL> --name <短い名前> --kind change --highlight <変更した要素の CSS セレクタ> --caption "..." --ref "#PR番号"`。赤枠付き）。
+     画面の見た目が変わったときは **画面イメージ**（`--kind gui`）も撮り直す。新しいアプリは初版の画面イメージを付ける。
+   - 画像は このリポジトリの `progress/images/<slug>/` に保存され、進捗ファイルの `images` に追記される
+     （使い方は for_eigyo の [progress/README.md](https://github.com/tyama-ds/for_eigyo/blob/main/progress/README.md)）。
+   - 画面に関わらない変更（API・CLI・内部処理だけ）は撮らなくてよい。撮れない環境では理由を PR 本文と報告に書く。
+   - PR 本文に「画面イメージ」の節を作り、画像を貼る
+     （`![修正箇所](https://github.com/tyama-ds/claudecode/blob/<ブランチ名>/progress/images/<slug>/<ファイル名>?raw=true)`）。
+     画面の変更が無いときは「画面の変更なし」と書く。ユーザーへの完了報告にも同じ画像を添える。
+3. for_eigyo を同じ親フォルダに用意し（無ければ `git clone https://github.com/tyama-ds/for_eigyo ../for_eigyo`。リモート環境では add_repo で追加）、
    `python ../for_eigyo/progress/build_dashboard.py --source claudecode=$(pwd)` を実行して検証と生成を行う。
    新しいフォルダがあれば、このリポジトリの `progress/projects/` に下書きが自動作成されるので、記入してコミットする。
-3. push したら、生成された `../for_eigyo/progress/dashboard.html` を上記の公開先へ再公開する。
+4. push したら、生成された `../for_eigyo/progress/dashboard.html` を上記の公開先へ再公開する。
    Artifact ツールで公開先を `action: "read"` してから、`url` に公開先を指定して publish する（新しい URL を作らない）。
    for_eigyo 側の dashboard.html はコミットしなくてよい（for_eigyo での次の作業時に更新される）。
    Artifact ツールが使えない環境では再公開を省略し、その旨をユーザーに伝える。

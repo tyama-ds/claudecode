@@ -57,5 +57,13 @@
       "date": "2026-11-05",
       "summary": "Anti-hallucinationアプリのソース、架空サンプル、テスト、利用手順を追加。実験記録と認証情報を除外。"
     }
+  ],
+  "images": [
+    {
+      "file": "images/anti-hallucination/2026-11-09-main.jpg",
+      "kind": "gui",
+      "caption": "数値ファクトチェック実験室（実験データの入力）",
+      "date": "2026-11-09"
+    }
   ]
 }

@@ -71,5 +71,13 @@
       "summary": "初版: Codex × Claude Code の協調と Web UI"
     }
   ],
-  "updated": "2026-07-09"
+  "updated": "2026-07-09",
+  "images": [
+    {
+      "file": "images/agent_orchestrator/2026-11-09-main.jpg",
+      "kind": "gui",
+      "caption": "タスクの入力と協調戦略の設定",
+      "date": "2026-11-09"
+    }
+  ]
 }

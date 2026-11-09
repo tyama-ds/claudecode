@@ -48,5 +48,13 @@
       "summary": "初版、ファクター分析、J-Quants API 連携"
     }
   ],
-  "updated": "2026-07-05"
+  "updated": "2026-07-05",
+  "images": [
+    {
+      "file": "images/stock-tracker/2026-11-09-main.jpg",
+      "kind": "gui",
+      "caption": "株価推移と銘柄一覧",
+      "date": "2026-11-09"
+    }
+  ]
 }
