@@ -252,6 +252,8 @@ class Researcher:
         url_max_pages: int = 30,
         preferred_domains: List[str] = None,
         reference_documents: List[Dict[str, Any]] = None,
+        max_body_chars: int = None,
+        deep_think_share: float = 0.0,
     ):
         """
         Initialize Researcher.
@@ -338,6 +340,15 @@ class Researcher:
         # Store target length info (used to calculate per-section target after plan is created)
         self._target_pages = target_pages
         self._target_characters = target_characters
+        # an upper bound only (from the user's hard ceiling): it sizes the
+        # plan and caps each section, but never asks for more text
+        self._max_body_chars = max_body_chars
+        # part of each section's share kept free for the DeepThink
+        # conclusion appended after drafting (0 = DeepThink off)
+        self.deep_think_share = max(0.0, min(0.5, float(deep_think_share or 0)))
+        # the planner sizes the table of contents to the body budget (a
+        # 4,000-char summary must not be planned as 15-20 sections)
+        self.query_generator.body_budget_chars = self._body_budget()
         # ContentExtractor is created without per-section target initially;
         # it will be updated in _execute_research_loop once we know the section count.
         self.parallel_max_workers = parallel_max_workers
@@ -739,6 +750,31 @@ class Researcher:
 
         return self.session
 
+    def _body_target(self) -> Optional[int]:
+        """Total body characters the drafts should land near (None = free).
+
+        target_characters overrides target_pages, as documented; the
+        ceiling (max_body_chars) only clamps — it is never the target."""
+        target = None
+        if getattr(self, "_target_characters", None):
+            target = int(self._target_characters)
+        elif getattr(self, "_target_pages", None):
+            chars_per_page = 1500 if self.language == "ja" else 2500
+            target = int(self._target_pages * chars_per_page)
+        ceiling = getattr(self, "_max_body_chars", None)
+        if target and ceiling:
+            target = min(target, int(ceiling))
+        return target
+
+    def _body_budget(self) -> Optional[int]:
+        """Total body characters the plan is sized for (None = free): the
+        target, else the ceiling (a bound — see _conduct_research_loop)."""
+        target = self._body_target()
+        if target:
+            return target
+        ceiling = getattr(self, "_max_body_chars", None)
+        return int(ceiling) if ceiling else None
+
     def _conduct_research_loop(self) -> None:
         """Execute the main research loop."""
         if not self.session or not self.session.research_plan:
@@ -757,17 +793,22 @@ class Researcher:
             print("[ERROR] No sections found in table of contents!")
             return
 
-        # Calculate per-section character target and propagate to ContentExtractor
-        if total_sections > 0 and (self._target_pages or self._target_characters):
-            if self._target_characters:
-                total_target = self._target_characters
-            else:
-                chars_per_page = 1500 if self.language == "ja" else 2500
-                total_target = self._target_pages * chars_per_page
-            target_per_section = total_target // total_sections
+        # Calculate per-section character target and propagate to ContentExtractor.
+        # When DeepThink appends a conclusion to every section afterwards,
+        # its part of the share is kept free here so the drafted body plus
+        # the appendix lands on the budget instead of ~25% over it.
+        keep = 1.0 - float(getattr(self, "deep_think_share", 0.0) or 0.0)
+        total_target = self._body_target()
+        if total_sections > 0 and total_target:
+            target_per_section = max(1, int(total_target // total_sections * keep))
             self.content_extractor.target_chars_per_section = target_per_section
             print(f"[DEBUG] Dynamic content sizing: {total_target:,} total chars / "
                   f"{total_sections} sections = {target_per_section:,} chars/section")
+        ceiling = getattr(self, "_max_body_chars", None)
+        if total_sections > 0 and ceiling:
+            # an upper bound per section only — never a size to fill
+            self.content_extractor.max_chars_per_section = max(
+                1, int(int(ceiling) // total_sections * keep))
 
         # Initial queries from plan
         available_queries = list(self.session.research_plan.search_queries)

@@ -572,8 +572,22 @@ class FinalizationController:
         progress=None,
         edit_workers: int = 1,
         on_body_change: Callable = None,
+        length_fn: Callable = None,
+        max_length_passes: int = 2,
+        limitations_skip_sections=None,
     ):
         self.verify_fn = verify_fn
+        # fixed mode: length_fn(section_id, issues) compresses ONE section
+        # toward its share of the target (None = section already fits /
+        # cannot be edited). These passes run when the loop would end
+        # over target — outside the revision budget, because evidence
+        # problems or a spent budget must not leave a 4,000-char request
+        # at 30,000 chars — and every one is re-verified.
+        self.length_fn = length_fn
+        self.max_length_passes = max(0, int(max_length_passes or 0))
+        # the limitations note goes to the last section NOT in this set
+        # (render-only chapters such as the V1 要旨 never reach the body)
+        self.limitations_skip_sections = set(limitations_skip_sections or ())
         # called with the chapters after EVERY accepted body change (edits,
         # the limitations append): the runner persists a draft so a run
         # that dies mid-loop resumes from the edited body
@@ -598,6 +612,13 @@ class FinalizationController:
         self.history: List[Dict[str, Any]] = []
         self.limitations: List[str] = []
         self._last_new_sources = 0
+        # length passes run so far (max_length_passes bounds the whole run,
+        # across the ACCEPT and limitations exits)
+        self._length_passes_used = 0
+        # body chars a length pass must leave free for text appended after
+        # it (the 調査上の限界 note); read by the runner's per-section
+        # targets while a pass runs, 0 otherwise
+        self.length_reserve_chars = 0
 
     def _checkpoint(self) -> None:
         if self.progress is not None:
@@ -683,29 +704,62 @@ class FinalizationController:
         self._body_changed(chapters)
         return True
 
+    def _limitations_lines(self, verdict: StructuredVerdict) -> List[str]:
+        """The 調査上の限界 note for this verdict ([] when nothing to note).
+
+        Under a fixed length target the note is kept to about 15% of the
+        target: the issues that do not fit are summarised in one line
+        rather than listed, so the note cannot crowd out the body."""
+        unresolved = [i for i in verdict.issues]
+        if not unresolved and not self.limitations:
+            return []
+        ja = self.language == "ja"
+        lines = ["", "### 調査上の限界" if ja else "### Research Limitations", ""]
+        for note in self.limitations:
+            lines.append(f"- {note}")
+        room = None
+        if self._fixed_band() is not None:
+            room = max(300, int(self.fixed_target_chars * 0.15))
+            used = count_body_chars("\n".join(lines))
+            # what does not fit is summarised: list the most severe points
+            # first (the verifier appends unanswered questions, failed
+            # verification, citation and freshness failures after every
+            # claim issue). Stable, so verifier order holds within a level.
+            rank = {"critical": 0, "important": 1}
+            unresolved.sort(key=lambda i: rank.get(i.severity, 2))
+        for n, i in enumerate(unresolved):
+            what = i.claim or i.reason or i.type
+            line = (f"- 未解決: {what}（{i.reason or i.type}）" if ja
+                    else f"- Unresolved: {what} ({i.reason or i.type})")
+            if room is not None:
+                size = count_body_chars(line)
+                if used + size > room and n > 0:
+                    rest = len(unresolved) - n
+                    lines.append(
+                        f"- ほか{rest}件の未解決の論点があります（一覧は検証結果を参照）。"
+                        if ja else
+                        f"- {rest} more unresolved point(s) (see the verification results).")
+                    break
+                used += size
+            lines.append(line)
+        return lines
+
+    def _limitations_reserve(self, verdict: StructuredVerdict) -> int:
+        """Body chars the 調査上の限界 note will add for this verdict."""
+        lines = self._limitations_lines(verdict)
+        return count_body_chars("\n".join(lines)) if lines else 0
+
     def _append_limitations(self, chapters: Dict[str, str],
                             verdict: StructuredVerdict) -> bool:
         """Deterministically record unresolved issues in the body.
 
         Returns True when the body changed (the caller must re-verify)."""
-        unresolved = [i for i in verdict.issues]
-        if not unresolved and not self.limitations:
+        lines = self._limitations_lines(verdict)
+        if not lines:
             return False
-        if self.language == "ja":
-            lines = ["", "### 調査上の限界", ""]
-            for note in self.limitations:
-                lines.append(f"- {note}")
-            for i in unresolved:
-                what = i.claim or i.reason or i.type
-                lines.append(f"- 未解決: {what}（{i.reason or i.type}）")
-        else:
-            lines = ["", "### Research Limitations", ""]
-            for note in self.limitations:
-                lines.append(f"- {note}")
-            for i in unresolved:
-                what = i.claim or i.reason or i.type
-                lines.append(f"- Unresolved: {what} ({i.reason or i.type})")
-        last_key = list(chapters.keys())[-1] if chapters else None
+        keys = list(chapters.keys())
+        eligible = [k for k in keys if k not in self.limitations_skip_sections]
+        last_key = (eligible or keys or [None])[-1]
         if last_key is None:
             return False
         chapters[last_key] = chapters[last_key].rstrip() + "\n" + "\n".join(lines)
@@ -741,7 +795,19 @@ class FinalizationController:
             })
 
             if decision == ResearchDecision.ACCEPT:
-                return self._finish(chapters, verdict, decision)
+                fitted = self._fit_fixed_length(chapters, verdict)
+                if fitted is not verdict and not self._still_acceptable(fitted):
+                    # the length pass changed the body and the re-verified
+                    # body would no longer be accepted: never ship it as a
+                    # clean ACCEPT — hedge, note and re-verify instead.
+                    # That pass kept no room for the note that now
+                    # follows, so leave the fallback one pass to fit body
+                    # + note (it runs only if they overshoot the band).
+                    self._length_passes_used = min(
+                        self._length_passes_used,
+                        max(0, self.max_length_passes - 1))
+                    return self._exit_with_limitations(chapters, fitted)
+                return self._finish(chapters, fitted, decision)
 
             if decision == ResearchDecision.FINALIZE_WITH_LIMITATIONS:
                 return self._exit_with_limitations(chapters, verdict)
@@ -787,19 +853,23 @@ class FinalizationController:
                                verdict: StructuredVerdict,
                                note_hedge: bool = True) -> Dict[str, Any]:
         """FINALIZE_WITH_LIMITATIONS in the mandated order:
-        hedge -> limitations append -> citation machine check ->
-        full re-verification -> freeze."""
-        changed = False
+        (fixed mode: fit the body, leaving room for the note) -> hedge ->
+        limitations append -> citation machine check -> full
+        re-verification -> freeze."""
+        # the sentence saying why the run ends here is part of the note,
+        # so it is known before the body is fitted around the note
         if note_hedge:
-            changed = self._finalize_with_limitations(chapters, verdict)
+            self._note_limits_reached()
+        elif self.language == "ja":
+            self.limitations.append(
+                "検証ループの上限に達したため、未解決の論点が残っています。")
         else:
-            if self.language == "ja":
-                self.limitations.append(
-                    "検証ループの上限に達したため、未解決の論点が残っています。")
-            else:
-                self.limitations.append(
-                    "The verification loop budget was exhausted; some "
-                    "points remain unresolved.")
+            self.limitations.append(
+                "The verification loop budget was exhausted; some "
+                "points remain unresolved.")
+        verdict = self._fit_fixed_length(
+            chapters, verdict, reserve_fn=self._limitations_reserve)
+        changed = self._hedge(chapters, verdict) if note_hedge else False
         appended = self._append_limitations(chapters, verdict)
         if appended:
             self._body_changed(chapters)
@@ -882,6 +952,10 @@ class FinalizationController:
     def _finalize_with_limitations(self, chapters: Dict[str, str],
                                    verdict: StructuredVerdict) -> bool:
         """Soften unresolved assertions (LLM); caller re-verifies."""
+        self._note_limits_reached()
+        return self._hedge(chapters, verdict)
+
+    def _note_limits_reached(self) -> None:
         if self.language == "ja":
             self.limitations.append(
                 "追加調査の上限に達したか、新しい独立ソースが得られなかったため、"
@@ -889,6 +963,29 @@ class FinalizationController:
         else:
             self.limitations.append(
                 "Research limits were reached; some points remain unverified.")
+
+    def _still_acceptable(self, verdict: StructuredVerdict) -> bool:
+        """Whether a body changed after an ACCEPT decision still earns it:
+        decide() must still ACCEPT it once no research / revision budget is
+        left — the hard gates, the support threshold, critical / important
+        unsupported, contradicted or unanswered points, the user-set floor
+        and the fixed lower band all apply. (An over-band body with no
+        revision budget still decides ACCEPT, so this cannot loop; the
+        ceiling is handled by _finish.)"""
+        from dataclasses import replace
+        spent = replace(
+            self.budget,
+            research_rounds=self.budget.max_final_research_rounds,
+            revision_rounds=self.budget.max_final_revision_rounds)
+        return decide(verdict, spent, self.hard_max_body_chars,
+                      self.hard_min_body_chars,
+                      fixed_target_chars=self.fixed_target_chars,
+                      length_tolerance=self.length_tolerance
+                      ) == ResearchDecision.ACCEPT
+
+    def _hedge(self, chapters: Dict[str, str],
+               verdict: StructuredVerdict) -> bool:
+        """Soften unresolved assertions (LLM); caller re-verifies."""
         if self.hedge_fn is None:
             return False
         changed = False
@@ -900,6 +997,81 @@ class FinalizationController:
             if self._apply_edit(chapters, sid, new_text):
                 changed = True
         return changed
+
+    def _fixed_band(self):
+        if not self.fixed_target_chars:
+            return None
+        upper = int(self.fixed_target_chars * (1 + self.length_tolerance))
+        lower = int(self.fixed_target_chars * (1 - self.length_tolerance))
+        return lower, upper
+
+    def _fit_fixed_length(self, chapters: Dict[str, str],
+                          verdict: StructuredVerdict,
+                          reserve_fn: Callable = None) -> StructuredVerdict:
+        """Bring an over-target fixed-mode body toward the target.
+
+        Up to max_length_passes compress passes over the whole run, each
+        stating the section's target in characters, each followed by full
+        re-verification. reserve_fn(verdict) gives the chars that will be
+        appended afterwards (the limitations note): the body is fitted so
+        body + note lands in the band. Never truncates mechanically; what
+        still does not fit is reported (length_report), not hidden.
+
+        Returns the SAME verdict object when the body was not changed."""
+        band = self._fixed_band()
+        if band is None or self.length_fn is None:
+            return verdict
+        _lower, upper = band
+        try:
+            while self._length_passes_used < self.max_length_passes:
+                reserve = int(reserve_fn(verdict)) if reserve_fn else 0
+                if verdict.metrics.actual_body_chars + reserve <= upper:
+                    break
+                self._checkpoint()
+                self._phase("revising")
+                self._length_passes_used += 1
+                n = self._length_passes_used
+                self.length_reserve_chars = reserve
+                before = verdict.metrics.actual_body_chars
+                changed = False
+                for sid, new_text in self._map_edits(
+                        self.length_fn, list(chapters.keys()),
+                        lambda sid: [i for i in verdict.issues
+                                     if i.section_id in ("", sid)]):
+                    if self._apply_edit(chapters, sid, new_text):
+                        changed = True
+                if not changed:
+                    break
+                verdict = self.verify_fn(chapters)
+                entry = {
+                    "round": f"length-{n}",
+                    "decision": "compress_to_target",
+                    "score": verdict.metrics.claim_support_score,
+                    "issues": len(verdict.issues),
+                    "body_chars": [before, verdict.metrics.actual_body_chars],
+                }
+                if reserve:
+                    entry["reserved_for_note"] = reserve
+                self.history.append(entry)
+                print(f"[Finalize] length pass {n}: {before:,} -> "
+                      f"{verdict.metrics.actual_body_chars:,} chars "
+                      f"(target {self.fixed_target_chars:,}"
+                      + (f", {reserve:,} kept for the limitations note"
+                         if reserve else "") + ")")
+        finally:
+            self.length_reserve_chars = 0
+        return verdict
+
+    def _length_report(self, verdict: StructuredVerdict) -> Optional[Dict[str, Any]]:
+        band = self._fixed_band()
+        actual = int(verdict.metrics.actual_body_chars or 0)
+        if band is None:
+            return {"mode": "adaptive", "body_chars": actual}
+        lower, upper = band
+        return {"mode": "fixed", "target": int(self.fixed_target_chars),
+                "lower": lower, "upper": upper, "body_chars": actual,
+                "within": lower <= actual <= upper,
+                "over": actual > upper, "under": actual < lower}
 
     def _finish(self, chapters, verdict, decision):
         over_hard_max = bool(
@@ -915,4 +1087,5 @@ class FinalizationController:
             "history": self.history,
             "limitations": self.limitations,
             "over_hard_max": over_hard_max,
+            "length_report": self._length_report(verdict),
         }

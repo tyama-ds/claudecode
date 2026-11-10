@@ -166,6 +166,9 @@ class ReportGenerator:
             target_pages=target_pages,
             target_characters=target_characters,
         )
+        # the session actually rendered (a shrunk copy when the legacy
+        # length adjustment ran): the measured body length counts this
+        self.last_rendered_session = adjusted_session
 
         if format == ReportFormat.MARKDOWN:
             return self._generate_markdown(
@@ -297,7 +300,7 @@ class ReportGenerator:
         content_parts = []
 
         # Use filtered evidence or all evidence
-        evidence_list = filtered_evidence if filtered_evidence is not None else evidence_locker.get_all_evidence()
+        evidence_list = filtered_evidence if filtered_evidence is not None else getattr(evidence_locker, "get_reference_evidence", evidence_locker.get_all_evidence)()
 
         # Renumber citations to match final reference order
         renumbered_contents = self._renumber_all_citations(session, evidence_list)
@@ -484,7 +487,7 @@ class ReportGenerator:
         plan = session.research_plan
 
         # Use filtered evidence or all evidence
-        evidence_list = filtered_evidence if filtered_evidence is not None else evidence_locker.get_all_evidence()
+        evidence_list = filtered_evidence if filtered_evidence is not None else getattr(evidence_locker, "get_reference_evidence", evidence_locker.get_all_evidence)()
 
         # Renumber citations to match final reference order
         renumbered_contents = self._renumber_all_citations(session, evidence_list)
@@ -661,7 +664,7 @@ class ReportGenerator:
         plan = session.research_plan
 
         # Use filtered evidence or all evidence
-        evidence_list = filtered_evidence if filtered_evidence is not None else evidence_locker.get_all_evidence()
+        evidence_list = filtered_evidence if filtered_evidence is not None else getattr(evidence_locker, "get_reference_evidence", evidence_locker.get_all_evidence)()
 
         # Renumber citations to match final reference order
         renumbered_contents = self._renumber_all_citations(session, evidence_list)
@@ -941,7 +944,7 @@ class ReportGenerator:
         plan = session.research_plan
 
         # Use filtered evidence or all evidence
-        evidence_list = filtered_evidence if filtered_evidence is not None else evidence_locker.get_all_evidence()
+        evidence_list = filtered_evidence if filtered_evidence is not None else getattr(evidence_locker, "get_reference_evidence", evidence_locker.get_all_evidence)()
 
         # Renumber citations to match final reference order
         renumbered_contents = self._renumber_all_citations(session, evidence_list)

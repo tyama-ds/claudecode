@@ -977,7 +977,10 @@ Output only the polished body (no preamble, no JSON, no code block):"""
         evidence_list = []
         url_to_ref = {}
         if evidence_locker is not None:
-            evidence_list = evidence_locker.get_all_evidence()
+            # References list: only the cited sources once the body is
+            # frozen (first-use order, so entry n is still [n])
+            evidence_list = getattr(evidence_locker, "get_reference_evidence",
+                                    evidence_locker.get_all_evidence)()
             for i, evidence in enumerate(evidence_list, 1):
                 url_to_ref[evidence.url] = i
 

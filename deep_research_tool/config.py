@@ -776,6 +776,49 @@ class ReportConfig:
     hard_max_body_chars: Optional[int] = None    # absolute only when user-set
     length_tolerance: float = 0.20               # +/- band around recommendations
     exclude_references_from_count: bool = True   # count body w/o refs/TOC/markup
+
+    def writing_target_chars(self, language: str = "ja") -> Optional[int]:
+        """The body size the drafts should land NEAR, or None.
+
+        A fixed-mode target or an explicit target_characters (the smaller
+        wins), else target_pages (1,500 chars/page in Japanese, 2,500
+        otherwise — the Researcher's long-standing rate). A user-set hard
+        ceiling only clamps it (to 90%, so drafts land under the ceiling);
+        it never raises it and is not a target by itself.
+        """
+        candidates = []
+        if self.target_characters:
+            candidates.append(int(self.target_characters))
+        if (self.length_mode or "").lower() == "fixed" and self.preferred_body_chars:
+            candidates.append(int(self.preferred_body_chars))
+        target = min(candidates) if candidates else None
+        if target is None and self.target_pages:
+            target = int(self.target_pages) * (1500 if language == "ja" else 2500)
+        ceiling = self.writing_ceiling_chars()
+        if target and ceiling:
+            target = min(target, ceiling)
+        return target
+
+    def writing_ceiling_chars(self) -> Optional[int]:
+        """An upper bound for drafts from the user-set hard ceiling (90%
+        of it, so drafts land under it), or None. A bound, not a size to
+        fill: on its own it caps sections but never asks for more text."""
+        if self.hard_max_body_chars:
+            return max(1, int(self.hard_max_body_chars * 0.9))
+        return None
+
+    def writing_budget_chars(self, language: str = "ja") -> Optional[int]:
+        """The most body text any WRITING step may produce, or None (free).
+
+        The target when there is one, else the ceiling. Without this the
+        research-stage writer (which produces the V1 body) never saw the
+        「要約」 preset's 4,000 and wrote ~3,000 chars per section
+        regardless. Steps that only cap (enhancement, the DeepThink
+        appendix, evidence-review fills) use this; the research-stage
+        writer gets the target and the ceiling separately so a ceiling
+        alone is never turned into a size to fill.
+        """
+        return self.writing_target_chars(language) or self.writing_ceiling_chars()
     auto_figures_include_images: bool = True  # Include images from web sources
     auto_figures_include_tables: bool = True  # Include extracted tables
     auto_figures_include_charts: bool = True  # Include generated charts

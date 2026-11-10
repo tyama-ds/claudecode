@@ -1272,6 +1272,8 @@ class JobManager:
             "charts_html": result.get("charts_html"),
             # the figures / tables / charts the report has (history)
             "figures": result.get("figures"),
+            # measured body characters vs the length setting
+            "length": result.get("length"),
             # verify-only: where the body and the evidence came from
             "verify_source": result.get("verify_source"),
         }

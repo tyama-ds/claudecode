@@ -495,6 +495,28 @@ class EvidenceLocker:
         with self._lock:
             return list(self._evidence.values())
 
+    def set_reference_ids(self, ids: Optional[List[str]]) -> None:
+        """Limit the report's References list to these evidence ids.
+
+        Set from the frozen body's first-use citation order: entry n of
+        the list is still the source [n] cites, but sources that were
+        collected and never cited no longer pad the document (they were
+        tens of thousands of characters on large runs). None / empty =
+        list everything (unverified runs, whose numbering differs). The
+        locker itself — evidence files, the 根拠 view — keeps everything.
+        """
+        with self._lock:
+            ids = [i for i in (ids or []) if i in self._evidence]
+            self._reference_ids = list(dict.fromkeys(ids)) or None
+
+    def get_reference_evidence(self) -> List[Evidence]:
+        """The evidence a report's References section lists."""
+        with self._lock:
+            ref_ids = getattr(self, "_reference_ids", None)
+            if not ref_ids:
+                return list(self._evidence.values())
+            return [self._evidence[i] for i in ref_ids if i in self._evidence]
+
     def drop_verification_records(self) -> None:
         """Remove the per-source verification records (metadata
         'verification'). They describe ONE run's final verification: a

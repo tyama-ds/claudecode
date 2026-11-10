@@ -197,6 +197,83 @@ class QueryGenerator:
         """
         self.llm = llm_client
         self.language = language
+        # total body characters the report is written to (None = free);
+        # set by the Researcher. A small budget gets a small plan.
+        self.body_budget_chars: Optional[int] = None
+
+    # chars per flat section below which a section has no room for substance
+    MIN_CHARS_PER_SECTION = 800
+
+    def _max_flat_sections(self) -> Optional[int]:
+        """Upper bound on researched sections (None = the classic plan).
+
+        Every flat section (main AND sub) is researched and written, so a
+        4,000-char report planned as 5 x (1 + 2-3) sections could only
+        come out at 15-20 sections' worth of text."""
+        budget = getattr(self, "body_budget_chars", None)
+        if not budget:
+            return None
+        max_flat = max(3, int(budget) // self.MIN_CHARS_PER_SECTION)
+        return max_flat if max_flat < 15 else None
+
+    def _structure_rules(self) -> Dict[str, str]:
+        """Plan-shape rules for the prompts (classic or budget-sized)."""
+        max_flat = self._max_flat_sections()
+        if max_flat is None:
+            return {
+                "ja_point": "各メインセクションには必ず2-3個のサブセクションを含める",
+                "ja_required": "- 最低5つのメインセクション\n- 各メインセクションに2-3個のサブセクション\n- 25個以上の検索クエリ",
+                "en_point": "Each main section MUST have 2-3 subsections",
+                "en_required": "- Generate at least 5 main sections\n- Each main section MUST have 2-3 subsections\n- Generate at least 25 search queries",
+            }
+        hi = min(5, max_flat)
+        lo = min(3, hi)
+        budget = int(self.body_budget_chars)
+        if max_flat < 8:
+            ja_sub, en_sub = "サブセクションは作らない（subsections は空配列）", \
+                "Do NOT create subsections (empty subsections arrays)"
+        else:
+            ja_sub = f"サブセクションは必要な場合のみ。メインとサブを合わせて{max_flat}節以内"
+            en_sub = f"Subsections only where needed; at most {max_flat} sections in total including subsections"
+        return {
+            "ja_point": f"本文は全体で約{budget:,}字の短いレポートなので、{ja_sub}",
+            "ja_required": (f"- メインセクションは{lo}〜{hi}個（本文全体で約{budget:,}字）\n"
+                            f"- {ja_sub}\n- 15個以上の検索クエリ"),
+            "en_point": f"The whole body is about {budget:,} characters: {en_sub}",
+            "en_required": (f"- Generate {lo}-{hi} main sections (about {budget:,} characters in total)\n"
+                            f"- {en_sub}\n- Generate at least 15 search queries"),
+        }
+
+    def _fit_plan_to_budget(self, plan: "ResearchPlan",
+                            drop_mains: bool = True) -> "ResearchPlan":
+        """Deterministically cap the plan at _max_flat_sections().
+
+        The prompt asks for a small plan; this guarantees it. Subsections
+        are folded into their parent's description first (their topics
+        stay in scope), then trailing main sections are dropped — unless
+        drop_mains is False (the main sections may be the user's own)."""
+        max_flat = self._max_flat_sections()
+        if max_flat is None or plan is None:
+            return plan
+        toc = plan.table_of_contents
+        if len(toc.get_flat_sections()) <= max_flat:
+            return plan
+        for item in toc.items:
+            if item.subsections:
+                topics = "、".join(sub.title for sub in item.subsections if sub.title)
+                if topics:
+                    sep = "（扱う論点: " if self.language == "ja" else " (covers: "
+                    end = "）" if self.language == "ja" else ")"
+                    item.description = f"{item.description}{sep}{topics}{end}"
+                item.subsections = []
+        if drop_mains and len(toc.items) > max_flat:
+            dropped = [i.title for i in toc.items[max_flat:]]
+            toc.items = toc.items[:max_flat]
+            print(f"[QueryGenerator] body budget {self.body_budget_chars:,} chars: "
+                  f"dropped sections {dropped}")
+        print(f"[QueryGenerator] plan fitted to the body budget: "
+              f"{len(toc.get_flat_sections())} section(s)")
+        return plan
 
     def _is_generic_title(self, title: str) -> bool:
         """Check if a section title is too generic.
@@ -270,7 +347,8 @@ class QueryGenerator:
             issues.append(f"Too many generic section titles: {generic_count}/{total_sections} ({generic_ratio:.0%})")
 
         # Check that at least some sections have subsections
-        if len(toc.items) >= 3 and sections_with_subsections < 2:
+        if (len(toc.items) >= 3 and sections_with_subsections < 2
+                and self._max_flat_sections() is None):
             issues.append(f"Not enough sections with subsections: {sections_with_subsections} (minimum 2)")
 
         # Check if titles are topic-specific (contain keywords from query)
@@ -343,6 +421,44 @@ class QueryGenerator:
 
         return has_preference, preference_text
 
+    # a list item the user wrote: 「1.」「2)」「(3)」「①」「第4章」 after a
+    # boundary (a decimal such as 3.5 or a year such as 2023. is not one)
+    _TOC_ITEM = re.compile(
+        r"[①-⑳Ⅰ-Ⅹ]"
+        r"|(?:^|(?<=[\s　、,，:：;；。／/]))"
+        r"(?:[0-9０-９]{1,2}[.．、)）](?![0-9０-９])"
+        r"|[（(][0-9０-９]{1,2}[)）]"
+        r"|第?[0-9０-９一二三四五六七八九十]+章"
+        r"|(?:I|II|III|IV|V|VI|VII|VIII|IX|X)\.(?=\s))")
+    # a line that starts with a section number without punctuation, as in a
+    # table of contents pasted from Word: 「1 市場概況」「1.1 市場規模」
+    _TOC_NUMBER_LINE = re.compile(
+        r"(?m)^[ \t　]*[0-9０-９]{1,2}(?:[.．][0-9０-９]{1,2})*[ \t　]+\S")
+    # a bulleted line (「・項目」「- item」; '**bold**' is not a bullet)
+    _TOC_BULLET_LINE = re.compile(
+        r"(?m)^[ \t　]*(?:[・－•●■◆◇○□]|[-*](?=[ \t　]))[ \t　]*\S")
+    _TOC_KEYWORDS = ("目次", "章立て", "章構成", "以下の構成", "下記の構成", "次の構成",
+                     "以下の章", "以下のセクション",
+                     "table of contents", "following structure", "following chapters",
+                     "following sections", "include sections", "structure the report")
+
+    def _has_explicit_toc(self, query: str, requirements: str) -> bool:
+        """True only when the user actually wrote a section list.
+
+        The broad _detect_user_toc_preference also fires on ordinary topic
+        text (「市場動向・主要プレイヤー」, 「電源構成」, 'stock' containing
+        'toc', 'GPT-3.5'). That is fine for passing the text to the
+        planner, but it must not switch off the body-budget cap, or a
+        4,000-char summary comes back with 15-20 sections."""
+        text = f"{query}\n{requirements or ''}"
+        lowered = text.lower()
+        if any(k in lowered for k in self._TOC_KEYWORDS):
+            return True
+        items = len(self._TOC_ITEM.findall(text))
+        numbered = len(self._TOC_NUMBER_LINE.findall(text))
+        bullets = len(self._TOC_BULLET_LINE.findall(text))
+        return items >= 3 or numbered >= 3 or bullets >= 3
+
     def create_research_plan(
         self,
         query: str,
@@ -364,6 +480,12 @@ class QueryGenerator:
         """
         # Check if user has specified ToC preferences
         has_user_toc_preference, user_toc_text = self._detect_user_toc_preference(query, requirements)
+        # only a section list the user actually wrote AND that the planner
+        # is told to follow is exempt from the body-budget cap (the
+        # detector above also fires on topic text; a list of purposes the
+        # planner never sees as a ToC protects nothing)
+        explicit_toc = (has_user_toc_preference
+                        and self._has_explicit_toc(query, requirements))
 
         if has_user_toc_preference:
             print(f"[QueryGenerator] User ToC preference detected, skipping validation")
@@ -383,6 +505,13 @@ class QueryGenerator:
 
             if plan is None:
                 continue
+            if not explicit_toc:
+                # a table of contents the USER wrote is never cut down.
+                # Text that only looks like one (the broad detector fired
+                # but no explicit list was found) may still name the
+                # user's chapters: fold subsections, never drop a chapter.
+                plan = self._fit_plan_to_budget(
+                    plan, drop_mains=not has_user_toc_preference)
 
             # Split long compound queries into focused sub-queries
             original_count = len(plan.search_queries)
@@ -462,6 +591,7 @@ Return one complete JSON object only, without commentary or abbreviated arrays."
         )
         today = date.today()
         planning_context = self._planning_context(today)
+        rules = self._structure_rules()
 
         # Build user ToC preference instruction
         user_toc_instruction = ""
@@ -494,7 +624,7 @@ Follow the user's specification above. When user preferences are specified, prio
 
 特に以下に注意してください：
 - 「はじめに」「背景」「考察」「結論」などの一般的なセクション名は避け、調査テーマに具体的なセクション名にする
-- 各主要セクションには必ず2-3個のサブセクションを含める
+- {rules["ja_point"]}
 - セクション名には調査テーマのキーワードを含める
 """
             else:
@@ -506,7 +636,7 @@ IMPORTANT: The previous table of contents was rejected for these reasons. Please
 Pay special attention to:
 - Avoid generic section names like "Introduction", "Background", "Discussion", "Conclusion"
 - Use topic-specific section titles that reflect the research subject
-- Include 2-3 subsections for each main section
+- {rules["en_point"]}
 - Section titles should contain keywords from the research topic
 """
 
@@ -523,7 +653,7 @@ Pay special attention to:
 
 調査計画作成のポイント：
 1. テーマを論理的なセクションとサブセクションに分解する
-2. 各メインセクションには必ず2-3個のサブセクションを含める
+2. {rules["ja_point"]}
 3. 具体的で実行可能な検索クエリを生成する
 4. 重要な用語と概念を特定する"""
         else:
@@ -539,7 +669,7 @@ IMPORTANT GUIDELINES:
 
 When creating a research plan:
 1. Break down the topic into logical, topic-specific sections and subsections
-2. Each main section MUST have 2-3 subsections
+2. {rules["en_point"]}
 3. Generate specific, targeted search queries
 4. Identify key terms and concepts"""
 
@@ -574,9 +704,7 @@ When creating a research plan:
 }}
 
 必須条件：
-- 最低5つのメインセクション
-- 各メインセクションに2-3個のサブセクション
-- 25個以上の検索クエリ
+{rules["ja_required"]}
 - 一般的なセクション名（はじめに、背景、考察、結論等）は使用しない
 
 【検索クエリに関する重要ルール】
@@ -620,9 +748,7 @@ Create a detailed research plan. Return your response as a JSON object with this
 }}
 
 Requirements:
-- Generate at least 5 main sections
-- Each main section MUST have 2-3 subsections
-- Generate at least 25 search queries
+{rules["en_required"]}
 - DO NOT use generic section names (Introduction, Background, Discussion, Conclusion)
 
 CRITICAL RULES FOR SEARCH QUERIES:
