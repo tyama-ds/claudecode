@@ -432,6 +432,11 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--error)
 .file-row .actions { display: flex; gap: 6px; flex-shrink: 0; }
 .warn-row { font-size: 12px; color: var(--muted); padding: 4px 2px; line-height: 1.5;
   border-bottom: 1px dashed var(--line); }
+.length-box { margin-top: 10px; padding: 8px 12px; border-radius: 10px; font-size: 13px;
+  background: var(--success-soft); color: var(--text); border: 1px solid var(--border); }
+.length-box.over, .length-box.under { background: var(--error-soft); border-color: var(--error); }
+.length-box b { font-size: 15px; }
+.length-box .hint { margin: 2px 0 0; }
 .file-row a {
   font-size: 12px; padding: 5px 12px; border-radius: 8px; text-decoration: none;
   background: var(--accent-soft); color: var(--accent); font-weight: 700;
@@ -3300,6 +3305,29 @@ function fileRows(files) {
     </div>`).join('');
 }
 
+// measured body size vs the length setting (the target covers the body only)
+function lengthVerdict(len) {
+  if (!len || len.body_chars === undefined || len.body_chars === null) return null;
+  const n = Number(len.body_chars) || 0;
+  const tgt = Number(len.target) || 0;
+  if (len.mode === 'fixed' && tgt) {
+    if (len.over) return {cls: 'over', text: `目標を超過（約${(n / tgt).toFixed(1)}倍）`};
+    if (len.under) return {cls: 'under', text: '目標に届かず（水増しはしていません）'};
+    return {cls: 'ok', text: '目標の範囲内'};
+  }
+  return {cls: 'ok', text: tgt ? `適応モード（目安 約${tgt.toLocaleString()}字）` : '適応モード（情報量から決定）'};
+}
+function renderLength(len) {
+  const v = lengthVerdict(len);
+  if (!v) return '';
+  const n = Number(len.body_chars) || 0;
+  const tgt = Number(len.target) || 0;
+  const band = len.mode === 'fixed' && tgt && len.lower !== undefined
+    ? `（目標 約${tgt.toLocaleString()}字・許容 ${Number(len.lower).toLocaleString()}〜${Number(len.upper).toLocaleString()}字）` : '';
+  return `<div class="length-box ${v.cls}" id="lengthBox">📏 本文 <b>${n.toLocaleString()}字</b>${band} — ${escapeHtml(v.text)}
+    <p class="hint">字数は本文のみ（見出し・目次・参考文献・表の罫線は含みません）。Word の文字カウントはファイル全体を数えるため、これより多くなります。</p></div>`;
+}
+
 function renderTimings(t) {
   if (!t) return '<p class="hint">所要時間の計測データはありません</p>';
   const rows = (t.stages || []).map(s =>
@@ -3637,6 +3665,7 @@ function showResults(result, jobId, pinned) {
     <div>${statusBadges(axes, result)}</div>
     ${result.regenerated_from ? `<p class="hint">保存済みの調査結果から再出力しました（元データ: ${result.regenerated_from === 'final_body' ? '検証済みの最終本文' : '章本文（未検証・草稿）'}、検索・LLM呼び出しなし）</p>` : ''}
     ${result.kind === 'verify' && result.verify_source ? `<p class="hint">検証のみ: ${result.verify_source.mode === 'session' ? '保存済みの調査' : '外部レポート'}の本文 ${result.verify_source.chapters} 章を、根拠 ${result.verify_source.evidence_items} 件（開始時）と照合しました（調査ループなし）</p>` : ''}
+    ${renderLength(result.length)}
     ${renderResumePlan(result.resume_plan)}
     ${renderRevision(result.revision)}
     ${renderUrlSources(result.url_sources)}
@@ -4520,9 +4549,14 @@ function historyParams(ps, res) {
   const d = DELIVERABLE_PRESETS[ps.deliverable];
   add('仕上がり', d ? d.label : ps.deliverable, true);
   const chars = Number(ps.preferred_body_chars) || 0;
-  if (ps.target_pages) add('文章量', `約${ps.target_pages}ページ`);
-  else if (ps.length_mode === 'fixed') add('文章量', chars ? `固定 約${chars.toLocaleString()}字` : '固定');
-  else if (ps.length_mode) add('文章量', chars ? `適応（目標 約${chars.toLocaleString()}字）` : '適応（情報量から）');
+  // the setting, then (when known) what the body actually came to
+  const len = res && res.length;
+  const actual = len && len.body_chars !== undefined && len.body_chars !== null
+    ? ` → 実績 ${Number(len.body_chars).toLocaleString()}字${len.over ? '（超過）' : len.under ? '（不足）' : ''}` : '';
+  if (ps.target_pages) add('文章量', `約${ps.target_pages}ページ${actual}`, !!actual);
+  else if (ps.length_mode === 'fixed') add('文章量', (chars ? `固定 約${chars.toLocaleString()}字` : '固定') + actual, !!actual);
+  else if (ps.length_mode) add('文章量', (chars ? `適応（目標 約${chars.toLocaleString()}字）` : '適応（情報量から）') + actual, !!actual);
+  else if (actual) add('文章量', actual.replace(' → ', ''), true);
   const f = res && res.figures;
   if (no(ps.auto_figures)) add('図表', 'なし');
   else if (ps.auto_figures !== undefined || f) {

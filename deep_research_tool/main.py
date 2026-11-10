@@ -1679,7 +1679,10 @@ class DeepResearchTool:
             multilingual_config=self.config.multilingual if self.config.multilingual.enabled else None,
             max_content_length=self.config.research.max_content_length,
             target_pages=self.config.report.target_pages,
-            target_characters=self.config.report.target_characters,
+            # the WRITING budget (fixed-mode target / target_characters /
+            # under the hard ceiling): the research-stage writer drafts
+            # every section body, so it must see the size the user asked for
+            target_characters=self.config.report.writing_budget_chars(),
             plan_review_callback=plan_review_callback,
             cancel_check=_cancel_checkpoint,
             run_config=self._run_config_snapshot(),
@@ -1968,6 +1971,7 @@ class DeepResearchTool:
 
         extras_flags = {}
         semantic_freeze_hash = None
+        result = None      # V2/V3 GenerationResult (V1 writes from the session)
         if not self.config.enable_verification:
             self._annotate_evidence(evidence_locker)    # no verification to wait for
         if version_tag == "v3":
@@ -2468,6 +2472,9 @@ class DeepResearchTool:
             "verification_html": str(verification_html) if verification_html else None,
             # the figures GENERATED for the report, and how many reached its
             # body when that is known (shown in the history)
+            # the body's MEASURED size against the length setting (the UI
+            # used to echo only the target, so a 30x overshoot was silent)
+            "length": self._length_summary(session, result),
             "figures": ({"charts": len(figure_collection.charts),
                          "tables": len(figure_collection.tables),
                          "images": len(figure_collection.figures),
@@ -3489,8 +3496,66 @@ class DeepResearchTool:
             checkpoint_fn=self._finalization_checkpoint_fn(),
         )
 
+    def _length_summary(self, session, gen_result=None) -> Dict[str, Any]:
+        """Measured body size vs the length setting (for the result/UI).
+
+        body_chars is the verified body's count when the finalization
+        loop ran (the same count every length decision uses), otherwise
+        the written chapters counted the same way. References, TOC and
+        markup are excluded — the target covers the body only."""
+        from .report.finalization import count_body_chars
+        rp = self.config.report
+        mode = (rp.length_mode or "adaptive").lower()
+        outcome = getattr(self, "finalization_outcome", None) or {}
+        report = outcome.get("length_report") or {}
+        body = report.get("body_chars")
+        if body is None:
+            texts = []
+            chapters = outcome.get("raw_chapters") or outcome.get("chapters")
+            if chapters:
+                texts = list(chapters.values())
+            elif gen_result is not None and getattr(gen_result, "chapters", None):
+                texts = [getattr(ch, "content", "") or ""
+                         for ch in gen_result.chapters.values()]
+            elif session is not None:
+                texts = [d.get("content", "") or ""
+                         for k, d in (session.section_contents or {}).items()
+                         if not str(k).startswith("_") and isinstance(d, dict)]
+            body = sum(count_body_chars(t) for t in texts)
+        target = None
+        if mode == "fixed":
+            target = rp.preferred_body_chars or rp.target_characters
+        elif rp.preferred_body_chars:
+            target = rp.preferred_body_chars
+        summary = {"mode": mode, "body_chars": int(body or 0),
+                   "target": int(target) if target else None,
+                   "hard_min": rp.hard_min_body_chars,
+                   "hard_max": rp.hard_max_body_chars}
+        if mode == "fixed" and target:
+            tol = float(rp.length_tolerance or 0.20)
+            lower, upper = int(target * (1 - tol)), int(target * (1 + tol))
+            summary.update(lower=lower, upper=upper,
+                           within=lower <= summary["body_chars"] <= upper,
+                           over=summary["body_chars"] > upper,
+                           under=summary["body_chars"] < lower)
+        return summary
+
     def _warn_on_finalization_outcome(self, outcome) -> None:
         verdict = outcome["verdict"]
+        lr = outcome.get("length_report") or {}
+        if lr.get("mode") == "fixed" and lr.get("over"):
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.HIGH, "Finalize",
+                f"本文が目標字数に収まりませんでした（目標 約{lr['target']:,}字・"
+                f"上限目安 {lr['upper']:,}字に対し {lr['body_chars']:,}字）。"
+                f"主張と出典を守るため、これ以上の機械的な切り詰めはしていません。",
+            )
+        elif lr.get("mode") == "fixed" and lr.get("under"):
+            ResearchWarnings.get_instance().add(
+                ResearchWarnings.MEDIUM, "Finalize",
+                f"本文が目標字数に届きませんでした（目標 約{lr['target']:,}字に対し "
+                f"{lr['body_chars']:,}字）。根拠の範囲を超える水増しはしていません。",
+            )
         if outcome["decision"] == "cancelled":
             ResearchWarnings.get_instance().add(
                 ResearchWarnings.CRITICAL, "Finalize",
@@ -4007,6 +4072,8 @@ class DeepResearchTool:
         if evidence_locker is not None and ordered_ids:
             try:
                 evidence_locker.reorder(ordered_ids)
+                if hasattr(evidence_locker, "set_reference_ids"):
+                    evidence_locker.set_reference_ids(ordered_ids)
             except Exception as e:
                 print(f"[Resume] evidence reorder failed: {e}")
         exec_key = "要旨" if self.config.research.language == "ja" else "Executive Summary"
@@ -4261,6 +4328,17 @@ class DeepResearchTool:
         """Enhance existing section content with full evidence context."""
         try:
             lang = self.config.research.language
+            # under a writing budget the enhancement replaces detail, it
+            # does not grow the section (the budget was set at drafting)
+            length_rule = ""
+            if self.config.report.writing_budget_chars():
+                cap = max(200, int(len(current_content) * 1.1))
+                length_rule = (
+                    f"7. 強化後の本文は{cap:,}字以内に収めること（現在の長さを保ち、"
+                    f"重要度の低い記述を具体的なデータに置き換える）\n"
+                    if lang == "ja" else
+                    f"7. Keep the enhanced text within {cap:,} characters (keep the "
+                    f"current length; replace low-value detail with concrete data)\n")
             if lang == "ja":
                 prompt = f"""あなたはリサーチレポートのセクション内容を強化するアシスタントです。
 
@@ -4289,7 +4367,7 @@ class DeepResearchTool:
 4. 他のセクションと重複しないようにすること
 5. 元の内容の構造を維持しつつ、情報を充実させること
 6. 推測や仮定は明示すること
-
+{length_rule}
 強化した本文のみを出力してください（JSON不要）:"""
             else:
                 prompt = f"""You are enhancing a research report section with comprehensive evidence.
@@ -4319,7 +4397,7 @@ Key rules:
 4. Avoid duplication with other sections
 5. Maintain original structure while enriching content
 6. Mark speculation explicitly
-
+{length_rule}
 Output only the enhanced text (no JSON):"""
 
             response = self.llm_client.generate(prompt)
@@ -5241,9 +5319,11 @@ Output only the text (no JSON, no heading):"""
                 # prompts), which downstream report generation then
                 # rendered as fragmentary 結論-labeled chapters.
                 conclusion = (result.processed_content or "").strip()
-                if conclusion and conclusion not in content:
+                appended = self._fit_deep_think_conclusion(
+                    conclusion, len(targets))
+                if appended and appended not in content:
                     session.section_contents[section_num]["content"] = (
-                        content.rstrip() + "\n\n" + conclusion
+                        content.rstrip() + "\n\n" + appended
                     )
                 session.section_contents[section_num]["deep_think_conclusion"] = conclusion
 
@@ -5271,6 +5351,32 @@ Output only the text (no JSON, no heading):"""
             progress_callback(f"DeepThink: Complete (avg confidence: {avg_confidence:.2f})", 100)
 
         return session, deep_think_results
+
+    def _fit_deep_think_conclusion(self, conclusion: str,
+                                   n_sections: int) -> str:
+        """The part of a DeepThink conclusion that joins the section body.
+
+        Under a writing budget the appended conclusion gets at most a
+        quarter of the section's share (whole sentences only; nothing if
+        not even one sentence fits). Without a budget it is appended
+        whole, as before. Uncapped, DeepThink roughly doubled the body.
+        """
+        if not conclusion:
+            return ""
+        budget = self.config.report.writing_budget_chars()
+        if not budget:
+            return conclusion
+        cap = max(150, int(budget) // max(1, n_sections) // 4)
+        if len(conclusion) <= cap:
+            return conclusion
+        import re as _re
+        sentences = _re.findall(r"[^。．.!?！？\n]+[。．.!?！？]?\s*", conclusion)
+        kept = ""
+        for sent in sentences:
+            if len(kept) + len(sent) > cap:
+                break
+            kept += sent
+        return kept.strip()
 
     def _note_length_shortfall(
         self,
@@ -6404,11 +6510,13 @@ def regenerate_from_session(
     status = {"process": "completed", "verification": "skipped",
               "quality": "unverified"}
     decision = None
+    ordered_ids: List[str] = []
     if final_body.is_file():
         try:
             data = json.loads(final_body.read_text(encoding="utf-8"))
             chapters = {str(k): str(v) for k, v in
                         (data.get("chapters") or {}).items()}
+            ordered_ids = [str(i) for i in (data.get("ordered_evidence_ids") or [])]
             source = "final_body"
             if isinstance(data.get("status"), dict) and data["status"]:
                 status = dict(data["status"])
@@ -6424,6 +6532,14 @@ def regenerate_from_session(
     locker = EvidenceLocker.load_from_json(evidence_path) \
         if evidence_path.exists() else EvidenceLocker(
             research_id=session.session_id, output_dir=session_dir / "evidence")
+    if source == "final_body" and ordered_ids:
+        # the frozen [n] numbering: entry n is the n-th cited source, and
+        # only cited sources are listed (as in the original output)
+        try:
+            locker.reorder(ordered_ids)
+            locker.set_reference_ids(ordered_ids)
+        except Exception as e:
+            print(f"[Regenerate] evidence reorder failed: {e}")
 
     # render copy: chapters come from the frozen body; nothing is re-cut
     render_session = ResearchSession.load(session_path)

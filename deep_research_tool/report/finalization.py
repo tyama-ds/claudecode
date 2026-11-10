@@ -572,8 +572,22 @@ class FinalizationController:
         progress=None,
         edit_workers: int = 1,
         on_body_change: Callable = None,
+        length_fn: Callable = None,
+        max_length_passes: int = 2,
+        limitations_skip_sections=None,
     ):
         self.verify_fn = verify_fn
+        # fixed mode: length_fn(section_id, issues) compresses ONE section
+        # toward its share of the target (None = section already fits /
+        # cannot be edited). These passes run when the loop would end
+        # over target — outside the revision budget, because evidence
+        # problems or a spent budget must not leave a 4,000-char request
+        # at 30,000 chars — and every one is re-verified.
+        self.length_fn = length_fn
+        self.max_length_passes = max(0, int(max_length_passes or 0))
+        # the limitations note goes to the last section NOT in this set
+        # (render-only chapters such as the V1 要旨 never reach the body)
+        self.limitations_skip_sections = set(limitations_skip_sections or ())
         # called with the chapters after EVERY accepted body change (edits,
         # the limitations append): the runner persists a draft so a run
         # that dies mid-loop resumes from the edited body
@@ -705,7 +719,9 @@ class FinalizationController:
             for i in unresolved:
                 what = i.claim or i.reason or i.type
                 lines.append(f"- Unresolved: {what} ({i.reason or i.type})")
-        last_key = list(chapters.keys())[-1] if chapters else None
+        keys = list(chapters.keys())
+        eligible = [k for k in keys if k not in self.limitations_skip_sections]
+        last_key = (eligible or keys or [None])[-1]
         if last_key is None:
             return False
         chapters[last_key] = chapters[last_key].rstrip() + "\n" + "\n".join(lines)
@@ -741,6 +757,7 @@ class FinalizationController:
             })
 
             if decision == ResearchDecision.ACCEPT:
+                verdict = self._fit_fixed_length(chapters, verdict)
                 return self._finish(chapters, verdict, decision)
 
             if decision == ResearchDecision.FINALIZE_WITH_LIMITATIONS:
@@ -789,6 +806,7 @@ class FinalizationController:
         """FINALIZE_WITH_LIMITATIONS in the mandated order:
         hedge -> limitations append -> citation machine check ->
         full re-verification -> freeze."""
+        verdict = self._fit_fixed_length(chapters, verdict)
         changed = False
         if note_hedge:
             changed = self._finalize_with_limitations(chapters, verdict)
@@ -901,6 +919,64 @@ class FinalizationController:
                 changed = True
         return changed
 
+    def _fixed_band(self):
+        if not self.fixed_target_chars:
+            return None
+        upper = int(self.fixed_target_chars * (1 + self.length_tolerance))
+        lower = int(self.fixed_target_chars * (1 - self.length_tolerance))
+        return lower, upper
+
+    def _fit_fixed_length(self, chapters: Dict[str, str],
+                          verdict: StructuredVerdict) -> StructuredVerdict:
+        """Bring an over-target fixed-mode body toward the target.
+
+        Up to max_length_passes compress passes, each stating the
+        section's target in characters, each followed by full
+        re-verification. Never truncates mechanically; what still does
+        not fit is reported (length_report), not hidden."""
+        band = self._fixed_band()
+        if band is None or self.length_fn is None:
+            return verdict
+        _lower, upper = band
+        for n in range(self.max_length_passes):
+            if verdict.metrics.actual_body_chars <= upper:
+                break
+            self._checkpoint()
+            self._phase("revising")
+            before = verdict.metrics.actual_body_chars
+            changed = False
+            for sid, new_text in self._map_edits(
+                    self.length_fn, list(chapters.keys()),
+                    lambda sid: [i for i in verdict.issues
+                                 if i.section_id in ("", sid)]):
+                if self._apply_edit(chapters, sid, new_text):
+                    changed = True
+            if not changed:
+                break
+            verdict = self.verify_fn(chapters)
+            self.history.append({
+                "round": f"length-{n + 1}",
+                "decision": "compress_to_target",
+                "score": verdict.metrics.claim_support_score,
+                "issues": len(verdict.issues),
+                "body_chars": [before, verdict.metrics.actual_body_chars],
+            })
+            print(f"[Finalize] length pass {n + 1}: {before:,} -> "
+                  f"{verdict.metrics.actual_body_chars:,} chars "
+                  f"(target {self.fixed_target_chars:,})")
+        return verdict
+
+    def _length_report(self, verdict: StructuredVerdict) -> Optional[Dict[str, Any]]:
+        band = self._fixed_band()
+        actual = int(verdict.metrics.actual_body_chars or 0)
+        if band is None:
+            return {"mode": "adaptive", "body_chars": actual}
+        lower, upper = band
+        return {"mode": "fixed", "target": int(self.fixed_target_chars),
+                "lower": lower, "upper": upper, "body_chars": actual,
+                "within": lower <= actual <= upper,
+                "over": actual > upper, "under": actual < lower}
+
     def _finish(self, chapters, verdict, decision):
         over_hard_max = bool(
             self.hard_max_body_chars
@@ -915,4 +991,5 @@ class FinalizationController:
             "history": self.history,
             "limitations": self.limitations,
             "over_hard_max": over_hard_max,
+            "length_report": self._length_report(verdict),
         }

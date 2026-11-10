@@ -297,7 +297,7 @@ class ReportGenerator:
         content_parts = []
 
         # Use filtered evidence or all evidence
-        evidence_list = filtered_evidence if filtered_evidence is not None else evidence_locker.get_all_evidence()
+        evidence_list = filtered_evidence if filtered_evidence is not None else getattr(evidence_locker, "get_reference_evidence", evidence_locker.get_all_evidence)()
 
         # Renumber citations to match final reference order
         renumbered_contents = self._renumber_all_citations(session, evidence_list)
@@ -484,7 +484,7 @@ class ReportGenerator:
         plan = session.research_plan
 
         # Use filtered evidence or all evidence
-        evidence_list = filtered_evidence if filtered_evidence is not None else evidence_locker.get_all_evidence()
+        evidence_list = filtered_evidence if filtered_evidence is not None else getattr(evidence_locker, "get_reference_evidence", evidence_locker.get_all_evidence)()
 
         # Renumber citations to match final reference order
         renumbered_contents = self._renumber_all_citations(session, evidence_list)
@@ -661,7 +661,7 @@ class ReportGenerator:
         plan = session.research_plan
 
         # Use filtered evidence or all evidence
-        evidence_list = filtered_evidence if filtered_evidence is not None else evidence_locker.get_all_evidence()
+        evidence_list = filtered_evidence if filtered_evidence is not None else getattr(evidence_locker, "get_reference_evidence", evidence_locker.get_all_evidence)()
 
         # Renumber citations to match final reference order
         renumbered_contents = self._renumber_all_citations(session, evidence_list)
@@ -941,7 +941,7 @@ class ReportGenerator:
         plan = session.research_plan
 
         # Use filtered evidence or all evidence
-        evidence_list = filtered_evidence if filtered_evidence is not None else evidence_locker.get_all_evidence()
+        evidence_list = filtered_evidence if filtered_evidence is not None else getattr(evidence_locker, "get_reference_evidence", evidence_locker.get_all_evidence)()
 
         # Renumber citations to match final reference order
         renumbered_contents = self._renumber_all_citations(session, evidence_list)

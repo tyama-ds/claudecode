@@ -338,6 +338,9 @@ class Researcher:
         # Store target length info (used to calculate per-section target after plan is created)
         self._target_pages = target_pages
         self._target_characters = target_characters
+        # the planner sizes the table of contents to the body budget (a
+        # 4,000-char summary must not be planned as 15-20 sections)
+        self.query_generator.body_budget_chars = self._body_budget()
         # ContentExtractor is created without per-section target initially;
         # it will be updated in _execute_research_loop once we know the section count.
         self.parallel_max_workers = parallel_max_workers
@@ -739,6 +742,15 @@ class Researcher:
 
         return self.session
 
+    def _body_budget(self) -> Optional[int]:
+        """Total body characters the drafts aim at (None = free)."""
+        if getattr(self, "_target_characters", None):
+            return int(self._target_characters)
+        if getattr(self, "_target_pages", None):
+            chars_per_page = 1500 if self.language == "ja" else 2500
+            return int(self._target_pages * chars_per_page)
+        return None
+
     def _conduct_research_loop(self) -> None:
         """Execute the main research loop."""
         if not self.session or not self.session.research_plan:
@@ -758,12 +770,8 @@ class Researcher:
             return
 
         # Calculate per-section character target and propagate to ContentExtractor
-        if total_sections > 0 and (self._target_pages or self._target_characters):
-            if self._target_characters:
-                total_target = self._target_characters
-            else:
-                chars_per_page = 1500 if self.language == "ja" else 2500
-                total_target = self._target_pages * chars_per_page
+        total_target = self._body_budget()
+        if total_sections > 0 and total_target:
             target_per_section = total_target // total_sections
             self.content_extractor.target_chars_per_section = target_per_section
             print(f"[DEBUG] Dynamic content sizing: {total_target:,} total chars / "

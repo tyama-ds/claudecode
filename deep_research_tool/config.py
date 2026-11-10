@@ -776,6 +776,25 @@ class ReportConfig:
     hard_max_body_chars: Optional[int] = None    # absolute only when user-set
     length_tolerance: float = 0.20               # +/- band around recommendations
     exclude_references_from_count: bool = True   # count body w/o refs/TOC/markup
+
+    def writing_budget_chars(self) -> Optional[int]:
+        """The body size every WRITING step aims at, or None (free).
+
+        A fixed-mode target, an explicit target_characters and a user-set
+        hard ceiling all bound what is drafted — not only what the final
+        check measures. Without this the research-stage writer (which
+        produces the V1 body) never saw the 「要約」 preset's 4,000 and
+        wrote ~3,000 chars per section regardless. The smallest bound
+        wins; the ceiling is aimed below (90%) so drafts land under it.
+        """
+        candidates = []
+        if self.target_characters:
+            candidates.append(int(self.target_characters))
+        if (self.length_mode or "").lower() == "fixed" and self.preferred_body_chars:
+            candidates.append(int(self.preferred_body_chars))
+        if self.hard_max_body_chars:
+            candidates.append(max(1, int(self.hard_max_body_chars * 0.9)))
+        return min(candidates) if candidates else None
     auto_figures_include_images: bool = True  # Include images from web sources
     auto_figures_include_tables: bool = True  # Include extracted tables
     auto_figures_include_charts: bool = True  # Include generated charts

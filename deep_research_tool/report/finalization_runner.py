@@ -499,6 +499,14 @@ class FinalizationRunner:
                 sid, issues, current, mode="rewrite"),
             compress_fn=lambda sid, issues: self._edit_section(
                 sid, issues, current, mode="compress"),
+            # fixed mode: compress toward each section's share of the
+            # target, even after the revision budget is spent
+            length_fn=lambda sid, issues: self._edit_section(
+                sid, issues, current, mode="length"),
+            max_length_passes=(
+                2 if self.verification_settings.max_final_revision_rounds > 0
+                else 1),
+            limitations_skip_sections=self.render_only_sections,
             hedge_fn=lambda sid, issues: self._edit_section(
                 sid, issues, current, mode="hedge"),
             validate_citations_fn=self.citation_mgr.validate,
@@ -593,6 +601,10 @@ class FinalizationRunner:
         # references follow first-use order in every renderer
         try:
             self.locker.reorder(ordered_ids)
+            # References = the sources the frozen body cites (not every
+            # collected source)
+            if hasattr(self.locker, "set_reference_ids"):
+                self.locker.set_reference_ids(ordered_ids)
         except Exception as e:
             print(f"[Finalize] locker reorder failed: {e}")
 
@@ -1704,6 +1716,30 @@ class FinalizationRunner:
             return None
         return out
 
+    def _section_length_target(self, sid: str, current: Dict[str, str]):
+        """(current size, target size) of one section under a length
+        target, or None when no target applies / the section is
+        render-only. The target splits the report's quota over the
+        editable sections in proportion to their current size, after the
+        render-only chapters (which cannot shrink) take their part."""
+        quota = self.planner.fixed_quota()
+        if not quota:
+            hard_max = self._rp("hard_max_body_chars")
+            quota = int(hard_max * 0.95) if hard_max else None
+        if not quota or sid in self.render_only_sections:
+            return None
+        from .finalization import count_body_chars
+        sizes = {k: count_body_chars(v or "") for k, v in current.items()}
+        fixed = sum(n for k, n in sizes.items() if k in self.render_only_sections)
+        editable = {k: n for k, n in sizes.items()
+                    if k not in self.render_only_sections}
+        total = sum(editable.values())
+        size = editable.get(sid, 0)
+        if not total or not size:
+            return None
+        room = max(int(quota) - fixed, 150 * len(editable))
+        return size, max(150, int(room * size / total))
+
     def _edit_section(self, sid: str, issues, current: Dict[str, str],
                       mode: str = "rewrite") -> Optional[str]:
         """LLM edit of ONE section from its EXISTING evidence.
@@ -1728,6 +1764,15 @@ class FinalizationRunner:
             text = (self.session_contents.get(sid) or {}).get("content", "")
         if not text:
             return None
+
+        length_target = self._section_length_target(sid, current)
+        if mode == "length":
+            # only a section over its share is compressed
+            if length_target is None:
+                return None
+            size, target = length_target
+            if size <= int(target * 1.2):
+                return None
 
         # ---- localized patching first (rewrite / hedge) --------------
         if mode in ("rewrite", "hedge"):
@@ -1765,7 +1810,7 @@ class FinalizationRunner:
                 "Using ONLY the evidence above, expand/restructure the text to fix the issues. "
                 "Prefer the evidence marked [NEW]. Do not invent facts. "
                 "Use only the [SOURCE N] numbers listed; keep existing citations.")
-        elif mode == "compress":
+        elif mode in ("compress", "length"):
             instruction = (
                 "重要な主張と引用 [SOURCE N] をすべて維持したまま、重複・冗長・低重要度の記述を圧縮してください。"
                 "引用だけ残して主張を消さない。新しい情報を加えない。"
@@ -1779,6 +1824,27 @@ class FinalizationRunner:
                 if lang_ja else
                 "Soften the unresolved assertions below into hedged statements. "
                 "Change nothing else; keep all citations.")
+
+        if length_target is not None and mode in ("compress", "length", "rewrite"):
+            size, target = length_target
+            lo, hi = int(target * 0.8), int(target * 1.2)
+            if mode == "rewrite":
+                cap = max(hi, size)
+                instruction += (
+                    f"\n修正後の本文は{cap:,}字以内に収めること（レポート全体の目標字数があるため、"
+                    f"増補する場合は重要度の低い記述を削って長さを保つ）。"
+                    if lang_ja else
+                    f"\nKeep the revised text within {cap:,} characters (the report has a "
+                    f"length target; when adding, cut low-importance detail).")
+            else:
+                instruction += (
+                    f"\nこのセクションは現在約{size:,}字です。約{target:,}字（{lo:,}〜{hi:,}字）"
+                    f"まで短くしてください。レポート全体の目標字数に合わせるための指示なので、"
+                    f"この字数を必ず守ること。重要度の低い説明・事例・繰り返しから削る。"
+                    if lang_ja else
+                    f"\nThis section is about {size:,} characters now. Shorten it to about "
+                    f"{target:,} characters ({lo:,}-{hi:,}) to meet the report's length "
+                    f"target; cut low-importance explanation, examples and repetition first.")
 
         prompt = (f"{'あなたはレポート編集者です。' if lang_ja else 'You are a report editor.'}\n\n"
                   f"{'【対象セクション本文】' if lang_ja else '[SECTION TEXT]'}\n{text}\n\n"
