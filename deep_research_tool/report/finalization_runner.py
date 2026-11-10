@@ -522,6 +522,9 @@ class FinalizationRunner:
             edit_workers=self.edit_workers,
             on_body_change=self._persist_draft,
         )
+        # per-section length targets read the controller's reserve (room
+        # kept for the limitations note appended after a length pass)
+        self._controller = controller
 
         import time as _time
         from ..verification.runtime import (
@@ -1737,7 +1740,10 @@ class FinalizationRunner:
         size = editable.get(sid, 0)
         if not total or not size:
             return None
-        room = max(int(quota) - fixed, 150 * len(editable))
+        # text the controller appends after the pass (limitations note)
+        reserve = int(getattr(getattr(self, "_controller", None),
+                              "length_reserve_chars", 0) or 0)
+        room = max(int(quota) - fixed - reserve, 150 * len(editable))
         return size, max(150, int(room * size / total))
 
     def _edit_section(self, sid: str, issues, current: Dict[str, str],
@@ -1836,7 +1842,10 @@ class FinalizationRunner:
                     if lang_ja else
                     f"\nKeep the revised text within {cap:,} characters (the report has a "
                     f"length target; when adding, cut low-importance detail).")
-            else:
+            elif size > target:
+                # only a section over its share is told to shorten (a
+                # redundancy compress of a section under its share keeps
+                # the plain instruction — never "shorten" to a larger size)
                 instruction += (
                     f"\nこのセクションは現在約{size:,}字です。約{target:,}字（{lo:,}〜{hi:,}字）"
                     f"まで短くしてください。レポート全体の目標字数に合わせるための指示なので、"

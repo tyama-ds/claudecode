@@ -3310,12 +3310,23 @@ function lengthVerdict(len) {
   if (!len || len.body_chars === undefined || len.body_chars === null) return null;
   const n = Number(len.body_chars) || 0;
   const tgt = Number(len.target) || 0;
+  // the user-set absolute limits apply in either mode
+  const hmax = Number(len.hard_max) || 0, hmin = Number(len.hard_min) || 0;
   if (len.mode === 'fixed' && tgt) {
     if (len.over) return {cls: 'over', text: `目標を超過（約${(n / tgt).toFixed(1)}倍）`};
     if (len.under) return {cls: 'under', text: '目標に届かず（水増しはしていません）'};
-    return {cls: 'ok', text: '目標の範囲内'};
   }
+  if (hmax && n > hmax) return {cls: 'over', text: `上限 ${hmax.toLocaleString()}字を超過`};
+  if (hmin && n < hmin) return {cls: 'under', text: `下限 ${hmin.toLocaleString()}字に届かず（水増しはしていません）`};
+  if (len.mode === 'fixed' && tgt) return {cls: 'ok', text: '目標の範囲内'};
   return {cls: 'ok', text: tgt ? `適応モード（目安 約${tgt.toLocaleString()}字）` : '適応モード（情報量から決定）'};
+}
+// 「 → 実績 N字（超過）」 for the history chips ('' when not measured)
+function lengthActual(len) {
+  const v = lengthVerdict(len);
+  if (!v) return '';
+  const mark = v.cls === 'over' ? '（超過）' : v.cls === 'under' ? '（不足）' : '';
+  return ` → 実績 ${(Number(len.body_chars) || 0).toLocaleString()}字${mark}`;
 }
 function renderLength(len) {
   const v = lengthVerdict(len);
@@ -4526,6 +4537,9 @@ function historyParams(ps, res) {
     add('検証', verAxis && verAxis !== 'performed' && verAxis !== 'unknown' ? (VER_DONE[verAxis] || verAxis)
       : (LABELS.verification_profile[ps.verification_profile] || ps.verification_profile || '実施'), true);
     if (ps.output_format) add('出力', LABELS.output_format[ps.output_format] || ps.output_format);
+    // verify-only runs also fit a fixed-length body: show what it came to
+    const vActual = lengthActual(res.length);
+    if (vActual) add('文章量', vActual.replace(' → ', ''), true);
     if (ps.provider) add('LLM', ps.model ? `${ps.provider} / ${ps.model}` : ps.provider);
     return `<div class="hist-params">${chips.join('')}</div>`;
   }
@@ -4550,9 +4564,7 @@ function historyParams(ps, res) {
   add('仕上がり', d ? d.label : ps.deliverable, true);
   const chars = Number(ps.preferred_body_chars) || 0;
   // the setting, then (when known) what the body actually came to
-  const len = res && res.length;
-  const actual = len && len.body_chars !== undefined && len.body_chars !== null
-    ? ` → 実績 ${Number(len.body_chars).toLocaleString()}字${len.over ? '（超過）' : len.under ? '（不足）' : ''}` : '';
+  const actual = lengthActual(res && res.length);
   if (ps.target_pages) add('文章量', `約${ps.target_pages}ページ${actual}`, !!actual);
   else if (ps.length_mode === 'fixed') add('文章量', (chars ? `固定 約${chars.toLocaleString()}字` : '固定') + actual, !!actual);
   else if (ps.length_mode) add('文章量', (chars ? `適応（目標 約${chars.toLocaleString()}字）` : '適応（情報量から）') + actual, !!actual);

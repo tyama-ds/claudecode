@@ -166,6 +166,9 @@ class ReportGenerator:
             target_pages=target_pages,
             target_characters=target_characters,
         )
+        # the session actually rendered (a shrunk copy when the legacy
+        # length adjustment ran): the measured body length counts this
+        self.last_rendered_session = adjusted_session
 
         if format == ReportFormat.MARKDOWN:
             return self._generate_markdown(
@@ -430,6 +433,10 @@ class ReportGenerator:
                     content_parts.append(f"\n*注: このレポートでは品質フィルタリングにより {len(evidence_list)}/{total_all} 件のエビデンスを使用しています。*\n")
                 else:
                     content_parts.append(f"\n*Note: This report uses {len(evidence_list)}/{total_all} evidence items after quality filtering.*\n")
+            else:
+                cited_note = self._cited_subset_note(evidence_locker, evidence_list)
+                if cited_note:
+                    content_parts.append(f"\n*{cited_note}*\n")
 
         # References. The body's [N] markers were converted to markdown
         # footnote links [^N] (_process_citations), so matching footnote
@@ -450,6 +457,19 @@ class ReportGenerator:
             f.write("".join(content_parts))
 
         return filepath
+
+    def _cited_subset_note(self, evidence_locker, evidence_list) -> str:
+        """A note under the quality statistics when References lists only
+        the cited sources: the statistics cover every collected source, so
+        say so rather than let them read as describing the list below."""
+        total_all = len(evidence_locker.get_all_evidence())
+        if not evidence_list or len(evidence_list) >= total_all:
+            return ""
+        if self.language == "ja":
+            return (f"注: 品質統計は収集した {total_all} 件の集計です。"
+                    f"参考文献には本文で引用した {len(evidence_list)} 件を掲載しています。")
+        return (f"Note: statistics cover all {total_all} collected sources; "
+                f"References lists the {len(evidence_list)} cited in the body.")
 
     def _get_quality_badge(self, quality: QualityCategory) -> str:
         """Get quality badge for citation."""
@@ -609,6 +629,10 @@ class ReportGenerator:
                 f"High Quality Percentage: {quality_stats['high_quality_percentage']}%\n"
                 f"Average Quality Score: {quality_stats['average_quality_score']}"
             )
+            cited_note = (None if filtered_evidence is not None else
+                          self._cited_subset_note(evidence_locker, evidence_list))
+            if cited_note:
+                doc.add_paragraph(cited_note)
 
         # References
         if self.include_citations:
@@ -1075,6 +1099,11 @@ class ReportGenerator:
             if filtered_evidence is not None:
                 total_all = len(evidence_locker.get_all_evidence())
                 filter_note = f'<p class="filter-note">This report uses {len(evidence_list)}/{total_all} evidence items after quality filtering.</p>'
+            else:
+                cited_note = self._cited_subset_note(evidence_locker, evidence_list)
+                if cited_note:
+                    import html as _html_mod
+                    filter_note = f'<p class="filter-note">{_html_mod.escape(cited_note)}</p>'
 
             quality_html = f"""
             <section class="quality-summary">

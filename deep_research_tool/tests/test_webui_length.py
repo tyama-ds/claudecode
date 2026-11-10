@@ -70,6 +70,52 @@ def test_history_shows_the_measured_length(tmp_path, length, want, absent):
         httpd.server_close()
 
 
+CEILING = {"mode": "adaptive", "body_chars": 31000, "target": None,
+           "hard_min": None, "hard_max": 20000}
+
+
+def test_the_user_set_ceiling_is_checked_in_adaptive_mode(tmp_path):
+    # review C15: an adaptive body over 本文の上限 showed a green 'ok' box
+    job = _job("job-c", CEILING, 1.0)
+    job["params_summary"] = {"deliverable": "standard", "length_mode": "adaptive"}
+    httpd = _server(tmp_path, {"job-c": job})
+    pw, browser = _browser()
+    try:
+        page, errors, _ = _load(browser, _url(httpd, "/#history"), None)
+        assert "実績 31,000字（超過）" in page.inner_text("#historyList .hist-params")
+        page.evaluate("showResults(historyCache.find(r => r.job_id === 'job-c').result, 'job-c', true); setView('result')")
+        page.wait_for_selector("#lengthBox")
+        box = page.inner_text("#lengthBox")
+        assert "上限 20,000字を超過" in box, box
+        assert "over" in page.get_attribute("#lengthBox", "class")
+        assert errors == []
+    finally:
+        browser.close()
+        pw.stop()
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_verify_runs_show_the_measured_length(tmp_path):
+    # review C16: verify-only runs compress a fixed body too
+    job = _job("job-v", OVER, 1.0)
+    job["params_summary"] = {"verify": True, "length_mode": "fixed",
+                             "preferred_body_chars": 4000}
+    job["result"]["kind"] = "verify"
+    httpd = _server(tmp_path, {"job-v": job})
+    pw, browser = _browser()
+    try:
+        page, errors, _ = _load(browser, _url(httpd, "/#history"), None)
+        text = page.inner_text("#historyList .hist-params")
+        assert "検証のみ" in text and "実績 13,200字（超過）" in text, text
+        assert errors == []
+    finally:
+        browser.close()
+        pw.stop()
+        httpd.shutdown()
+        httpd.server_close()
+
+
 def test_result_view_says_whether_the_body_fits(tmp_path):
     httpd = _server(tmp_path, {"job-over": _job("job-over", OVER, 2.0),
                                "job-ok": _job("job-ok", WITHIN, 1.0)})

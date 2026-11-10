@@ -99,6 +99,9 @@ class ContentExtractor:
         self.eval_llm = evaluation_llm_client or llm_client
         self.language = language
         self.target_chars_per_section = target_chars_per_section
+        # upper bound per section from the user's hard ceiling (None = no
+        # bound). Caps the size; unlike the target it never asks for more.
+        self.max_chars_per_section: Optional[int] = None
         # app-wide parallelism ceiling (parallel_max_workers); the stage
         # cap CHUNK_WORKERS still applies on top
         self.max_parallel_workers = max_parallel_workers
@@ -793,24 +796,41 @@ Output JSON only:"""
         Uses target_chars_per_section when available, otherwise falls back
         to DEFAULT_SECTION_CHARS.  Result is clamped to [500, 3000].
         """
-        section_target = self.target_chars_per_section or self.DEFAULT_SECTION_CHARS
+        section_target = self._section_size()
         raw = section_target // max(num_points, 1)
         # an explicit budget is honoured: the old 500-char floor turned a
         # 4,000-char report into 4-6 x 500 chars PER SECTION
-        floor = self.MIN_POINT_CHARS if self.target_chars_per_section else 500
+        floor = self.MIN_POINT_CHARS if self._is_sized() else 500
         return max(floor, min(3000, raw))
 
     # smallest per-point request under an explicit budget
     MIN_POINT_CHARS = 120
+
+    def _section_cap(self) -> Optional[int]:
+        cap = getattr(self, "max_chars_per_section", None)
+        return int(cap) if cap else None
+
+    def _section_size(self) -> int:
+        """The size a section is drafted to: the target, else the default,
+        never above the ceiling's share (a ceiling only ever shrinks)."""
+        size = self.target_chars_per_section or self.DEFAULT_SECTION_CHARS
+        cap = self._section_cap()
+        return min(size, cap) if cap else size
+
+    def _is_sized(self) -> bool:
+        """True when a target or a binding ceiling sets the section size."""
+        cap = self._section_cap()
+        return bool(self.target_chars_per_section
+                    or (cap and cap < self.DEFAULT_SECTION_CHARS))
 
     def _outline_points_range(self) -> tuple:
         """How many outline points a section is drafted from.
 
         4-6 points by default; a small per-section budget gets fewer
         points so each still has room for substance."""
-        per_section = self.target_chars_per_section
-        if not per_section:
+        if not self._is_sized():
             return (4, 6)
+        per_section = self._section_size()
         if per_section < 900:
             return (2, 3)
         if per_section < 1800:
@@ -818,16 +838,30 @@ Output JSON only:"""
         return (4, 6)
 
     def _length_rule(self, per_section: Optional[int] = None) -> str:
-        """A prompt line stating the section's size (empty when free)."""
+        """A prompt line stating the section's size (empty when free).
+
+        A target gives 「約N字（lo〜hi字）」 (hi never above the ceiling's
+        share); a ceiling alone gives 「N字以内」 — an upper bound, so the
+        writer is never asked to fill a ceiling."""
         target = per_section or self.target_chars_per_section
-        if not target:
-            return ""
-        lo, hi = int(target * 0.8), int(target * 1.2)
-        if self.language == "ja":
-            return (f"本文の長さは約{target:,}字（{lo:,}〜{hi:,}字）に収めること。"
-                    f"この長さを超えないよう、重要度の低い内容は省く。")
-        return (f"Keep the body to about {target:,} characters "
-                f"({lo:,}-{hi:,}); omit low-importance detail rather than exceed it.")
+        cap = self._section_cap()
+        if target:
+            target = min(target, cap) if cap else target
+            lo, hi = int(target * 0.8), int(target * 1.2)
+            if cap:
+                hi = max(target, min(hi, cap))
+            if self.language == "ja":
+                return (f"本文の長さは約{target:,}字（{lo:,}〜{hi:,}字）に収めること。"
+                        f"この長さを超えないよう、重要度の低い内容は省く。")
+            return (f"Keep the body to about {target:,} characters "
+                    f"({lo:,}-{hi:,}); omit low-importance detail rather than exceed it.")
+        if cap:
+            if self.language == "ja":
+                return (f"本文は{cap:,}字以内に収めること（上限であり、埋める必要はない）。"
+                        f"超えそうな場合は重要度の低い内容を省く。")
+            return (f"Keep the body within {cap:,} characters (a ceiling, not a size "
+                    f"to fill); omit low-importance detail rather than exceed it.")
+        return ""
 
     def _generate_point_content(
         self,

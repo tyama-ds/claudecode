@@ -419,6 +419,36 @@ class QueryGenerator:
 
         return has_preference, preference_text
 
+    # a list item the user wrote: 「1.」「2)」「(3)」「①」「第4章」 after a
+    # boundary (a decimal such as 3.5 or a year such as 2023. is not one)
+    _TOC_ITEM = re.compile(
+        r"[①-⑳]"
+        r"|(?:^|(?<=[\s　、,，:：;；]))"
+        r"(?:[0-9０-９]{1,2}[.．、)）](?![0-9０-９])"
+        r"|[（(][0-9０-９]{1,2}[)）]"
+        r"|第[0-9０-９一二三四五六七八九十]+章)")
+    # a bulleted line (「・項目」「- item」)
+    _TOC_BULLET_LINE = re.compile(r"(?m)^[ \t　]*[・\-－*•●■][ \t　]*\S")
+    _TOC_KEYWORDS = ("目次", "章立て", "以下の構成", "以下の章", "以下のセクション",
+                     "table of contents", "following structure",
+                     "following sections", "include sections")
+
+    def _has_explicit_toc(self, query: str, requirements: str) -> bool:
+        """True only when the user actually wrote a section list.
+
+        The broad _detect_user_toc_preference also fires on ordinary topic
+        text (「市場動向・主要プレイヤー」, 「電源構成」, 'stock' containing
+        'toc', 'GPT-3.5'). That is fine for passing the text to the
+        planner, but it must not switch off the body-budget cap, or a
+        4,000-char summary comes back with 15-20 sections."""
+        text = f"{query}\n{requirements or ''}"
+        lowered = text.lower()
+        if any(k in lowered for k in self._TOC_KEYWORDS):
+            return True
+        items = len(self._TOC_ITEM.findall(text))
+        bullets = len(self._TOC_BULLET_LINE.findall(text))
+        return items >= 3 or bullets >= 3
+
     def create_research_plan(
         self,
         query: str,
@@ -440,6 +470,9 @@ class QueryGenerator:
         """
         # Check if user has specified ToC preferences
         has_user_toc_preference, user_toc_text = self._detect_user_toc_preference(query, requirements)
+        # only a section list the user actually wrote is exempt from the
+        # body-budget cap (the detector above also fires on topic text)
+        explicit_toc = self._has_explicit_toc(query, requirements)
 
         if has_user_toc_preference:
             print(f"[QueryGenerator] User ToC preference detected, skipping validation")
@@ -459,8 +492,8 @@ class QueryGenerator:
 
             if plan is None:
                 continue
-            if not has_user_toc_preference:
-                # a table of contents the USER specified is never cut down
+            if not explicit_toc:
+                # a table of contents the USER wrote is never cut down
                 plan = self._fit_plan_to_budget(plan)
 
             # Split long compound queries into focused sub-queries

@@ -1679,10 +1679,15 @@ class DeepResearchTool:
             multilingual_config=self.config.multilingual if self.config.multilingual.enabled else None,
             max_content_length=self.config.research.max_content_length,
             target_pages=self.config.report.target_pages,
-            # the WRITING budget (fixed-mode target / target_characters /
-            # under the hard ceiling): the research-stage writer drafts
-            # every section body, so it must see the size the user asked for
-            target_characters=self.config.report.writing_budget_chars(),
+            # the WRITING target (fixed-mode target / target_characters /
+            # target_pages, clamped under the hard ceiling): the
+            # research-stage writer drafts every section body, so it must
+            # see the size the user asked for. The ceiling goes separately
+            # as a bound — on its own it is never a size to fill.
+            target_characters=self.config.report.writing_target_chars(
+                self.config.research.language),
+            max_body_chars=self.config.report.writing_ceiling_chars(),
+            deep_think_share=self._deep_think_share(),
             plan_review_callback=plan_review_callback,
             cancel_check=_cancel_checkpoint,
             run_config=self._run_config_snapshot(),
@@ -2409,8 +2414,7 @@ class DeepResearchTool:
         # removes watermarks, appends references) and release the sinks.
         if live_sink is not None:
             try:
-                refs = [e.citation_text
-                        for e in evidence_locker.get_all_evidence()]
+                refs = self._reference_citations(evidence_locker)
                 outcome = getattr(self, "finalization_outcome", None)
                 axes = self._status_axes()
                 if outcome is not None:
@@ -2842,6 +2846,9 @@ class DeepResearchTool:
             "timings": self._collect_timings(run_token_stats),
             "verification_summary": outcome.get("verification_summary"),
             "verification_cancelled": outcome.get("decision") == "cancelled",
+            # verify-only runs apply the fixed-length passes too, so the
+            # measured body vs the target is reported here as well
+            "length": self._length_summary(session),
             "warnings": warnings_collector.to_dict_list(),
             "warning_count": warnings_collector.count(),
         }
@@ -3496,6 +3503,15 @@ class DeepResearchTool:
             checkpoint_fn=self._finalization_checkpoint_fn(),
         )
 
+    @staticmethod
+    def _reference_citations(evidence_locker) -> List[str]:
+        """The References list of the live report: the same entries as the
+        saved report — only the cited sources once the body is frozen
+        (every collected source otherwise)."""
+        return [e.citation_text for e in getattr(
+            evidence_locker, "get_reference_evidence",
+            evidence_locker.get_all_evidence)()]
+
     def _length_summary(self, session, gen_result=None) -> Dict[str, Any]:
         """Measured body size vs the length setting (for the result/UI).
 
@@ -3518,9 +3534,18 @@ class DeepResearchTool:
                 texts = [getattr(ch, "content", "") or ""
                          for ch in gen_result.chapters.values()]
             elif session is not None:
+                # V1 without verification: count what the generator
+                # RENDERED (the legacy page/character adjustment renders a
+                # shrunk copy) and the executive summary it prints as body
+                # text — the verified path counts that as chapter 要旨
+                rendered = getattr(getattr(self, "report_generator", None),
+                                   "last_rendered_session", None)
+                if getattr(rendered, "section_contents", None) is None:
+                    rendered = session
                 texts = [d.get("content", "") or ""
-                         for k, d in (session.section_contents or {}).items()
+                         for k, d in (rendered.section_contents or {}).items()
                          if not str(k).startswith("_") and isinstance(d, dict)]
+                texts.append(self._executive_summary_markdown(rendered))
             body = sum(count_body_chars(t) for t in texts)
         target = None
         if mode == "fixed":
@@ -3531,8 +3556,15 @@ class DeepResearchTool:
                    "target": int(target) if target else None,
                    "hard_min": rp.hard_min_body_chars,
                    "hard_max": rp.hard_max_body_chars}
-        if mode == "fixed" and target:
-            tol = float(rp.length_tolerance or 0.20)
+        if report.get("mode") == "fixed" and "lower" in report:
+            # the band the finalization loop judged (and warned) with
+            summary.update(target=report.get("target", summary["target"]),
+                           **{k: report[k] for k in
+                              ("lower", "upper", "within", "over", "under")
+                              if k in report})
+        elif mode == "fixed" and target:
+            tol = (float(rp.length_tolerance)
+                   if rp.length_tolerance is not None else 0.20)
             lower, upper = int(target * (1 - tol)), int(target * (1 + tol))
             summary.update(lower=lower, upper=upper,
                            within=lower <= summary["body_chars"] <= upper,
@@ -4238,6 +4270,14 @@ class DeepResearchTool:
                 content = section_data.get("content", "")
                 all_sections_text += f"\n### Section {key}: {title}\n{content[:500]}...\n"
 
+            # under a writing budget every section has a share of it; the
+            # enhancement and the fill for an empty section stay inside it
+            budget = self._writing_budget_or_none()
+            n_body = max(1, sum(1 for k in session.section_contents
+                                if not str(k).startswith("_")))
+            section_share = int(budget) // n_body if budget else None
+            dt_share = self._deep_think_share()
+
             def _review_one(section_key):
                 """One LLM call per section; reads only shared, frozen
                 inputs (overview, re-extracted data, section snapshot)."""
@@ -4254,6 +4294,7 @@ class DeepResearchTool:
                         re_extracted_data=re_extracted_data,
                         all_sections_text=all_sections_text,
                         query=query,
+                        section_share=section_share,
                     )
                 # Generate content for empty/short sections
                 return "generated", current_content, self._generate_section_from_evidence(
@@ -4263,6 +4304,8 @@ class DeepResearchTool:
                     re_extracted_data=re_extracted_data,
                     all_sections_text=all_sections_text,
                     query=query,
+                    max_chars=(max(150, int(section_share * (1 - dt_share)))
+                               if section_share else None),
                 )
 
             # sections are independent: review them concurrently, apply
@@ -4324,15 +4367,20 @@ class DeepResearchTool:
         re_extracted_data: Dict[str, Dict[str, str]],
         all_sections_text: str,
         query: str,
+        section_share: Optional[int] = None,
     ) -> Optional[str]:
         """Enhance existing section content with full evidence context."""
         try:
             lang = self.config.research.language
             # under a writing budget the enhancement replaces detail, it
-            # does not grow the section (the budget was set at drafting)
+            # does not grow the section (the budget was set at drafting):
+            # up to 10% more only while the section stays inside its share
             length_rule = ""
-            if self.config.report.writing_budget_chars():
-                cap = max(200, int(len(current_content) * 1.1))
+            if section_share or self._writing_budget_or_none():
+                grown = int(len(current_content) * 1.1)
+                if section_share:
+                    grown = min(grown, int(section_share))
+                cap = max(200, len(current_content), grown)
                 length_rule = (
                     f"7. 強化後の本文は{cap:,}字以内に収めること（現在の長さを保ち、"
                     f"重要度の低い記述を具体的なデータに置き換える）\n"
@@ -4415,10 +4463,26 @@ Output only the enhanced text (no JSON):"""
         re_extracted_data: Dict[str, Dict[str, str]],
         all_sections_text: str,
         query: str,
+        max_chars: Optional[int] = None,
     ) -> Optional[str]:
-        """Generate section content from full evidence when content is missing."""
+        """Generate section content from full evidence when content is missing.
+
+        max_chars: the section's share of a writing budget (None = free).
+        With it the prompt states the cap and asks for the key points
+        rather than "comprehensive, detailed" coverage."""
         try:
             lang = self.config.research.language
+            if max_chars:
+                detail_ja, cover_ja = "要点を", "重要度の高いものから選んで"
+                detail_en, cover_en = "focused", "selectively, most important first"
+                length_rule_ja = (f"7. 本文は{int(max_chars):,}字以内に収めること"
+                                  f"（重要なデータを優先し、網羅より要点を選ぶ）\n")
+                length_rule_en = (f"7. Keep the text within {int(max_chars):,} characters "
+                                  f"(prioritise key data over coverage)\n")
+            else:
+                detail_ja, cover_ja = "詳細な内容を", "網羅的に"
+                detail_en, cover_en = "detailed", "comprehensively"
+                length_rule_ja = length_rule_en = ""
             if lang == "ja":
                 prompt = f"""あなたはリサーチレポートのセクションを執筆するアシスタントです。
 
@@ -4435,16 +4499,16 @@ Output only the enhanced text (no JSON):"""
 {all_sections_text[:1500]}
 
 【指示】
-上記のエビデンスに基づいて、このセクションの詳細な内容を執筆してください。
+上記のエビデンスに基づいて、このセクションの{detail_ja}執筆してください。
 
 重要ルール:
 1. エビデンスに含まれる具体的な数字、統計データ、年月日を正確に使用すること
 2. 重要なデータは要約せず直接引用すること
-3. 特徴的な数字や出来事を網羅的に取り込むこと
+3. 特徴的な数字や出来事を{cover_ja}取り込むこと
 4. 他のセクションと重複する内容は避けること
 5. 論理的な構成で記述すること
 6. エビデンスにない情報は含めないこと
-
+{length_rule_ja}
 本文のみを出力してください（JSON不要、見出し不要）:"""
             else:
                 prompt = f"""You are writing a research report section from evidence.
@@ -4462,16 +4526,16 @@ Section {section_key}: {section_title}
 {all_sections_text[:1500]}
 
 [INSTRUCTIONS]
-Write detailed content for this section based on the evidence above.
+Write {detail_en} content for this section based on the evidence above.
 
 Key rules:
 1. Use exact numbers, statistics, dates from evidence
 2. Don't summarize key data - use it directly
-3. Include distinctive data points comprehensively
+3. Include distinctive data points {cover_en}
 4. Avoid content already covered in other sections
 5. Write with logical structure
 6. Don't include information not in the evidence
-
+{length_rule_en}
 Output only the text (no JSON, no heading):"""
 
             response = self.llm_client.generate(prompt)
@@ -5352,27 +5416,67 @@ Output only the text (no JSON, no heading):"""
 
         return session, deep_think_results
 
+    # part of each section's share kept for the DeepThink conclusion: the
+    # research-stage writer drafts to the rest (Researcher.deep_think_share)
+    DEEP_THINK_SHARE = 0.2
+
+    def _deep_think_share(self) -> float:
+        dt = getattr(getattr(self, "config", None), "deep_think", None)
+        return self.DEEP_THINK_SHARE if getattr(dt, "enabled", False) else 0.0
+
+    def _writing_budget_or_none(self) -> Optional[int]:
+        """config.report.writing_budget_chars() in the run language, or
+        None when there is no config (a length lookup must never abort the
+        step that asked for it)."""
+        cfg = getattr(self, "config", None)
+        rp = getattr(cfg, "report", None)
+        if rp is None or not hasattr(rp, "writing_budget_chars"):
+            return None
+        lang = getattr(getattr(cfg, "research", None), "language", "ja")
+        return rp.writing_budget_chars(lang)
+
+    # one sentence: a period between digits (12.75, 3.5%) does not end it
+    _SENTENCE_RE = re.compile(
+        r"(?:[^。．.!?！？\n]|(?<=\d)[.．](?=\d))+[。．.!?！？]?\s*")
+    # citation markers written after an English period ("grew. [1] Next")
+    _LEADING_CITES_RE = re.compile(r"^(?:\s*\[\d+(?:\s*[,，、]\s*\d+)*\])+\s*")
+
+    @classmethod
+    def _split_sentences(cls, text: str) -> List[str]:
+        """Whole sentences; trailing citation markers stay with the
+        sentence they belong to."""
+        out: List[str] = []
+        for piece in cls._SENTENCE_RE.findall(text):
+            lead = cls._LEADING_CITES_RE.match(piece)
+            if lead and out:
+                out[-1] = out[-1].rstrip() + " " + lead.group(0).strip() + " "
+                piece = piece[lead.end():]
+            if piece.strip():
+                out.append(piece)
+        return out
+
     def _fit_deep_think_conclusion(self, conclusion: str,
                                    n_sections: int) -> str:
         """The part of a DeepThink conclusion that joins the section body.
 
-        Under a writing budget the appended conclusion gets at most a
-        quarter of the section's share (whole sentences only; nothing if
-        not even one sentence fits). Without a budget it is appended
-        whole, as before. Uncapped, DeepThink roughly doubled the body.
+        Under a writing budget the appended conclusion gets the part of
+        the section's share the research-stage writer kept free for it
+        (DEEP_THINK_SHARE), as whole sentences only — nothing if not even
+        one sentence fits. A decimal point is not a sentence end, so a
+        figure such as 12.75 is never cut to "12.". Without a budget the
+        conclusion is appended whole, as before.
         """
         if not conclusion:
             return ""
-        budget = self.config.report.writing_budget_chars()
+        budget = self._writing_budget_or_none()
         if not budget:
             return conclusion
-        cap = max(150, int(budget) // max(1, n_sections) // 4)
+        share = int(budget) // max(1, n_sections)
+        cap = max(80, int(share * self.DEEP_THINK_SHARE))
         if len(conclusion) <= cap:
             return conclusion
-        import re as _re
-        sentences = _re.findall(r"[^。．.!?！？\n]+[。．.!?！？]?\s*", conclusion)
         kept = ""
-        for sent in sentences:
+        for sent in self._split_sentences(conclusion):
             if len(kept) + len(sent) > cap:
                 break
             kept += sent
