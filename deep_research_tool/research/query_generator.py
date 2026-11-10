@@ -244,12 +244,14 @@ class QueryGenerator:
                             f"- {en_sub}\n- Generate at least 15 search queries"),
         }
 
-    def _fit_plan_to_budget(self, plan: "ResearchPlan") -> "ResearchPlan":
+    def _fit_plan_to_budget(self, plan: "ResearchPlan",
+                            drop_mains: bool = True) -> "ResearchPlan":
         """Deterministically cap the plan at _max_flat_sections().
 
         The prompt asks for a small plan; this guarantees it. Subsections
         are folded into their parent's description first (their topics
-        stay in scope), then trailing main sections are dropped."""
+        stay in scope), then trailing main sections are dropped — unless
+        drop_mains is False (the main sections may be the user's own)."""
         max_flat = self._max_flat_sections()
         if max_flat is None or plan is None:
             return plan
@@ -264,7 +266,7 @@ class QueryGenerator:
                     end = "）" if self.language == "ja" else ")"
                     item.description = f"{item.description}{sep}{topics}{end}"
                 item.subsections = []
-        if len(toc.items) > max_flat:
+        if drop_mains and len(toc.items) > max_flat:
             dropped = [i.title for i in toc.items[max_flat:]]
             toc.items = toc.items[:max_flat]
             print(f"[QueryGenerator] body budget {self.body_budget_chars:,} chars: "
@@ -422,16 +424,23 @@ class QueryGenerator:
     # a list item the user wrote: 「1.」「2)」「(3)」「①」「第4章」 after a
     # boundary (a decimal such as 3.5 or a year such as 2023. is not one)
     _TOC_ITEM = re.compile(
-        r"[①-⑳]"
-        r"|(?:^|(?<=[\s　、,，:：;；]))"
+        r"[①-⑳Ⅰ-Ⅹ]"
+        r"|(?:^|(?<=[\s　、,，:：;；。／/]))"
         r"(?:[0-9０-９]{1,2}[.．、)）](?![0-9０-９])"
         r"|[（(][0-9０-９]{1,2}[)）]"
-        r"|第[0-9０-９一二三四五六七八九十]+章)")
-    # a bulleted line (「・項目」「- item」)
-    _TOC_BULLET_LINE = re.compile(r"(?m)^[ \t　]*[・\-－*•●■][ \t　]*\S")
-    _TOC_KEYWORDS = ("目次", "章立て", "以下の構成", "以下の章", "以下のセクション",
-                     "table of contents", "following structure",
-                     "following sections", "include sections")
+        r"|第?[0-9０-９一二三四五六七八九十]+章"
+        r"|(?:I|II|III|IV|V|VI|VII|VIII|IX|X)\.(?=\s))")
+    # a line that starts with a section number without punctuation, as in a
+    # table of contents pasted from Word: 「1 市場概況」「1.1 市場規模」
+    _TOC_NUMBER_LINE = re.compile(
+        r"(?m)^[ \t　]*[0-9０-９]{1,2}(?:[.．][0-9０-９]{1,2})*[ \t　]+\S")
+    # a bulleted line (「・項目」「- item」; '**bold**' is not a bullet)
+    _TOC_BULLET_LINE = re.compile(
+        r"(?m)^[ \t　]*(?:[・－•●■◆◇○□]|[-*](?=[ \t　]))[ \t　]*\S")
+    _TOC_KEYWORDS = ("目次", "章立て", "章構成", "以下の構成", "下記の構成", "次の構成",
+                     "以下の章", "以下のセクション",
+                     "table of contents", "following structure", "following chapters",
+                     "following sections", "include sections", "structure the report")
 
     def _has_explicit_toc(self, query: str, requirements: str) -> bool:
         """True only when the user actually wrote a section list.
@@ -446,8 +455,9 @@ class QueryGenerator:
         if any(k in lowered for k in self._TOC_KEYWORDS):
             return True
         items = len(self._TOC_ITEM.findall(text))
+        numbered = len(self._TOC_NUMBER_LINE.findall(text))
         bullets = len(self._TOC_BULLET_LINE.findall(text))
-        return items >= 3 or bullets >= 3
+        return items >= 3 or numbered >= 3 or bullets >= 3
 
     def create_research_plan(
         self,
@@ -470,9 +480,12 @@ class QueryGenerator:
         """
         # Check if user has specified ToC preferences
         has_user_toc_preference, user_toc_text = self._detect_user_toc_preference(query, requirements)
-        # only a section list the user actually wrote is exempt from the
-        # body-budget cap (the detector above also fires on topic text)
-        explicit_toc = self._has_explicit_toc(query, requirements)
+        # only a section list the user actually wrote AND that the planner
+        # is told to follow is exempt from the body-budget cap (the
+        # detector above also fires on topic text; a list of purposes the
+        # planner never sees as a ToC protects nothing)
+        explicit_toc = (has_user_toc_preference
+                        and self._has_explicit_toc(query, requirements))
 
         if has_user_toc_preference:
             print(f"[QueryGenerator] User ToC preference detected, skipping validation")
@@ -493,8 +506,12 @@ class QueryGenerator:
             if plan is None:
                 continue
             if not explicit_toc:
-                # a table of contents the USER wrote is never cut down
-                plan = self._fit_plan_to_budget(plan)
+                # a table of contents the USER wrote is never cut down.
+                # Text that only looks like one (the broad detector fired
+                # but no explicit list was found) may still name the
+                # user's chapters: fold subsections, never drop a chapter.
+                plan = self._fit_plan_to_budget(
+                    plan, drop_mains=not has_user_toc_preference)
 
             # Split long compound queries into focused sub-queries
             original_count = len(plan.search_queries)

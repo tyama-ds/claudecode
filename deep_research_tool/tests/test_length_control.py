@@ -290,12 +290,37 @@ class TestPlannerBudget(unittest.TestCase):
         from deep_research_tool.research.query_generator import QueryGenerator
         qg = QueryGenerator(MagicMock(), language="ja")
         for text in ("GPT-3.5以降のLLM市場", "経営層向け・簡潔に", "2023.の決算を重視",
-                     "Focus on Asia, i.e. China", "市場規模は3.5兆円、成長率2.1%"):
+                     "Focus on Asia, i.e. China", "市場規模は3.5兆円、成長率2.1%",
+                     "**重要**: a\n**必須**: b\n**任意**: c", "2024 年\n2025 年"):
             self.assertFalse(qg._has_explicit_toc(text, ""), text)
         for text in ("1. 市場規模 2. 競合 3. 規制", "・市場規模\n・競合\n・規制",
                      "第1章 市場 第2章 競合 第3章 規制", "①市場②競合③規制",
-                     "章立て: 市場と競合"):
+                     "章立て: 市場と競合", "下記の構成で: 市場、競合、規制",
+                     "1 市場概況\n1.1 市場規模\n2 主要企業",
+                     "I. Market II. Players III. Pricing",
+                     "1.市場規模。2.競合。3.規制。", "1.市場規模/2.競合/3.規制"):
             self.assertTrue(qg._has_explicit_toc("炭素繊維", text), text)
+
+    def test_text_that_only_looks_like_a_toc_never_loses_a_chapter(self):
+        # fix review F1: the broad detector fired (the planner was told to
+        # follow the user's structure) but no explicit list was found —
+        # subsections are folded, but no main section is dropped
+        qg, _ = self._qg(4000, _plan_json(7, 3))
+        plan = qg.create_research_plan(
+            "炭素繊維", requirements="章の構成は市場、競合、価格、規制、技術、課題、提言で")
+        toc = plan.table_of_contents
+        self.assertEqual(len(toc.items), 7)
+        self.assertTrue(all(not i.subsections for i in toc.items))
+
+    def test_a_list_of_purposes_keeps_the_cap(self):
+        # fix review F2/F10: '- ' bullets the planner never receives as a
+        # ToC no longer switch the cap off
+        for reqs in ("- 経営層向け\n- 日本市場に限定\n- 2030年までの見通し",
+                     "1）経営層向け\n2）簡潔に\n3）主要3社の比較",
+                     "Focus on: 1) executives, 2) brevity, 3) pricing"):
+            qg, _ = self._qg(4000, _plan_json(5, 3))
+            plan = qg.create_research_plan("炭素繊維", requirements=reqs)
+            self.assertEqual(len(plan.table_of_contents.get_flat_sections()), 5, reqs)
 
 
 class TestDeepThinkCap(unittest.TestCase):
@@ -328,6 +353,32 @@ class TestDeepThinkCap(unittest.TestCase):
             self.assertIsNone(re.search(r"\d[.．](?!\d)", kept), kept)
         self.assertEqual(
             len(tool._split_sentences("前年比3.5%増となった[2]。需要は回復した。")), 2)
+
+    def test_abbreviations_and_terminator_runs_do_not_split(self):
+        # fix review F0: 'U.S.', 'No. 1', 'approx. 32%', 'Corp. and' and
+        # 'Dr. Smith' were split points; '...', '?!', '！？' lost characters
+        import re
+        from deep_research_tool.main import DeepResearchTool
+        split = DeepResearchTool._split_sentences
+        cases = {
+            "The U.S. remains the largest market [1]. Next one.": 2,
+            "It is No. 1 in share, holding approx. 32% of it. Done.": 2,
+            "Key players, e.g. Acme Corp. and Beta Inc., grew. Then Dr. Smith said so.": 2,
+            "Growth slowed... Then it recovered! Really?! Yes.": 4,
+            "本当に持続するのか！？需要は回復した。前年比３．５％増。": 3,
+            "See example.com for details. Sales hit 12.75bn.": 2,
+        }
+        for text, n in cases.items():
+            parts = split(text)
+            self.assertEqual(len(parts), n, parts)
+            self.assertEqual(re.sub(r"\s+", "", "".join(parts)),
+                             re.sub(r"\s+", "", text))          # nothing lost
+
+    def test_a_first_sentence_over_the_cap_adds_nothing(self):
+        tool = self._tool(length_mode="fixed", preferred_body_chars=4000)
+        text = ("The U.S. remains the largest market by far, " + "x" * 150
+                + " [1]. Next sentence.")
+        self.assertEqual(tool._fit_deep_think_conclusion(text, 5), "")
 
     def test_a_citation_after_an_english_period_stays_with_its_sentence(self):
         from deep_research_tool.main import DeepResearchTool
@@ -450,6 +501,93 @@ class TestFixedLengthLoop(unittest.TestCase):
         # the exit ran no further length passes (the body already fits)
         self.assertEqual(sum(1 for h in out["history"]
                              if h["decision"] == "compress_to_target"), 1)
+
+    def _accept_then(self, after, length_fn=None, passes=2, chapters=None):
+        """ACCEPT on a 16,000-char body; the re-verified body after the
+        length pass is judged by after(chapters)."""
+        chapters = chapters or {"1": "あ" * 16000}
+
+        def verify(ch):
+            return after(ch) if len(ch["1"]) < 16000 else _verdict_for(ch)
+        ctrl = FinalizationController(
+            verify_fn=verify,
+            length_fn=length_fn or (lambda sid, issues: chapters[sid][:4000]),
+            hedge_fn=lambda sid, issues: None,
+            budget=LoopBudget(max_final_research_rounds=0,
+                              max_final_revision_rounds=0),
+            fixed_target_chars=4000, max_length_passes=passes)
+        return ctrl, ctrl.run(chapters)
+
+    def test_an_important_gap_after_the_length_pass_is_not_an_accept(self):
+        # fix review F3: only the hard gates were re-checked, so an
+        # important unsupported claim (support 0.55) still shipped 'accept'
+        issue = VerificationIssue(section_id="1", claim_id="C-1",
+                                  type=ISSUE_UNSUPPORTED, severity="important",
+                                  claim="主張", reason="根拠が削られた")
+        _ctrl, out = self._accept_then(
+            lambda ch: _verdict_for(ch, [issue], support=0.55))
+        self.assertEqual(out["decision"], "finalize_with_limitations")
+
+    def test_a_length_pass_that_undershoots_the_band_is_not_an_accept(self):
+        chapters = {"1": "あ" * 16000}
+        _ctrl, out = self._accept_then(
+            lambda ch: _verdict_for(ch),
+            length_fn=lambda sid, issues: chapters[sid][:1200], chapters=chapters)
+        self.assertEqual(out["decision"], "finalize_with_limitations")
+        self.assertTrue(out["length_report"]["under"])
+
+    def test_the_fallback_keeps_one_pass_to_fit_the_note(self):
+        # fix review F5: with one pass (fast profile) the ACCEPT pass used
+        # it up, and the note then pushed body + note over the band
+        chapters = {"1": "あ" * 16000}
+        issues = self._issues(12)
+        holder = {}
+
+        def length_fn(sid, _issues):
+            r = holder["ctrl"].length_reserve_chars
+            # the writer lands high in the band unless told to keep room
+            return chapters[sid][: (4600 if r == 0 else 4000 - r)]
+
+        def after(ch):
+            v = _verdict_for(ch, issues, support=0.5)
+            v.metrics.unsupported_critical_claims = 1
+            return v
+
+        def verify(ch):
+            return after(ch) if len(ch["1"]) < 16000 else _verdict_for(ch)
+        ctrl = FinalizationController(
+            verify_fn=verify, length_fn=length_fn,
+            hedge_fn=lambda sid, issues: None,
+            budget=LoopBudget(max_final_research_rounds=0,
+                              max_final_revision_rounds=0),
+            fixed_target_chars=4000, max_length_passes=1)
+        holder["ctrl"] = ctrl
+        out = ctrl.run(chapters)
+        self.assertEqual(out["decision"], "finalize_with_limitations")
+        self.assertTrue(out["length_report"]["within"], out["length_report"])
+        self.assertEqual(sum(1 for h in out["history"]
+                             if h["decision"] == "compress_to_target"), 2)
+
+    def test_a_short_note_lists_the_critical_points_first(self):
+        # fix review F4: the verifier appends critical coverage failures
+        # after every claim issue; the cap summarised them as 'ほか N件'
+        minor = [VerificationIssue(section_id="1", claim_id=f"C-{i}",
+                                   type=ISSUE_UNSUPPORTED, severity="minor",
+                                   claim=f"細かな主張その{i}についての比較的長い一文である",
+                                   reason="根拠が見つからない") for i in range(14)]
+        critical = VerificationIssue(section_id="", claim_id="Q-1",
+                                     type=ISSUE_UNSUPPORTED, severity="critical",
+                                     claim="主要3社の2025年の市場シェアは何%か",
+                                     reason="回答なし")
+        ctrl = FinalizationController(
+            verify_fn=lambda ch: _verdict_for(ch, minor + [critical], support=0.5),
+            budget=LoopBudget(max_final_research_rounds=0,
+                              max_final_revision_rounds=0),
+            fixed_target_chars=2000)
+        out = ctrl.run({"1": "あ" * 2000})
+        note = out["chapters"]["1"].split("### 調査上の限界", 1)[1]
+        self.assertIn("ほか", note)
+        self.assertIn("主要3社の2025年の市場シェア", note)
 
     def test_an_accept_with_an_unchanged_body_is_kept(self):
         chapters = {"1": "あ" * 4000}
@@ -646,9 +784,9 @@ class TestReferenceList(unittest.TestCase):
             self.assertIn("資料2", refs)
             for other in ("資料0", "資料1", "資料3", "資料4"):
                 self.assertNotIn(other, refs)
-            # review C11: the quality statistics say what they count
-            self.assertIn("収集した 5 件の集計", text)
-            self.assertIn("本文で引用した 1 件", text)
+            # no extra line under the quality statistics: it would be an
+            # unfrozen addition that fails the semantic artifact check
+            self.assertNotIn("件の集計", text)
             # review C14: the generator keeps the session it rendered
             self.assertIs(gen.last_rendered_session, session)
 
@@ -718,6 +856,24 @@ class TestLengthSummary(unittest.TestCase):
             str(i): {"content": "あ" * 800} for i in range(5)})
         tool.report_generator = SimpleNamespace(last_rendered_session=shrunk)
         self.assertEqual(tool._length_summary(session)["body_chars"], 4000)
+
+    def test_the_hard_bound_warning_uses_the_reported_count(self):
+        # fix review F6/F9: the unverified hard-limit warning counted the
+        # raw session while result['length'] counted the rendered body
+        import inspect
+        import deep_research_tool.main as main_mod
+        src = inspect.getsource(main_mod.DeepResearchTool.run)
+        block = src[src.index('"LengthBounds"') - 1500: src.index('"LengthBounds"')]
+        self.assertIn('self._length_summary(session, result)["body_chars"]', block)
+
+    def test_the_shortfall_is_measured_after_deep_think(self):
+        # fix review F11: with DeepThink on the drafts leave 20% for the
+        # appended conclusion, so measuring before DeepThink always warned
+        import inspect
+        import deep_research_tool.main as main_mod
+        src = inspect.getsource(main_mod.DeepResearchTool.run)
+        self.assertGreater(src.index("self._note_length_shortfall(session"),
+                           src.index('self._mark_stage("deep_think"'))
 
     def test_the_band_comes_from_the_finalization_report(self):
         # review C8: tolerance 0 was read as 0.20, so the UI said 'within'
@@ -800,6 +956,35 @@ class TestVerifyOnlyLength(unittest.TestCase):
             self.assertGreater(result["length"]["body_chars"], 0)
             lr = (tool.finalization_outcome or {}).get("length_report") or {}
             self.assertEqual(result["length"]["body_chars"], lr.get("body_chars"))
+
+    def test_uncited_sources_keep_the_artifact_check_passing(self):
+        # fix review F7: a line added under the quality statistics when
+        # References lists only the cited sources failed the two-way
+        # artifact check, so every verified V1 run ended 'failed'
+        from deep_research_tool.tests.test_finalization_integration import (
+            CLAIM_SENTENCE, SUPPORTED_EVIDENCE, FakeSearch, build_tool,
+            long_body, make_llm, make_locker, make_plan, make_session)
+        from deep_research_tool.utils.helpers import ResearchWarnings
+        ResearchWarnings.reset()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            plan = make_plan([("1", "市場シェア", "A社のシェアを明らかにする")])
+            session = make_session(plan, {"1": {
+                "title": "市場シェア",
+                "content": long_body("1", "市場シェア", CLAIM_SENTENCE),
+                "evidence": SUPPORTED_EVIDENCE}})
+            extra = [("https://unused.example.com/x", "未使用の資料。" * 40)]
+            locker = make_locker(tmp, list(SUPPORTED_EVIDENCE) + extra)
+            locker.export_to_json()
+            path = tmp / f"session_{session.session_id}.json"
+            session.saved_artifacts = {"session": str(path)}
+            session.save(path)
+            tool = build_tool(tmp / "verify-job", make_llm(), FakeSearch())
+            res = tool.verify_report(session_path=str(path))
+            self.assertEqual(res.get("semantic_artifact_check"), "pass")
+            self.assertEqual(res.get("run_status"), "completed")
+            report = Path(res["report_path"]).read_text(encoding="utf-8")
+            self.assertNotIn("unused.example.com", report.split("References")[-1])
 
 
 if __name__ == "__main__":

@@ -1779,7 +1779,9 @@ class DeepResearchTool:
         # researched exclusively through the Coverage Ledger (critical
         # requirement gaps) inside the finalization loop; a still-short
         # but complete body ends with limitations, not padding.
-        self._note_length_shortfall(session, progress_callback)
+        # (Measured after the DeepThink stage below: with DeepThink on the
+        # research-stage writer leaves part of each share for the appended
+        # conclusion, so the drafts alone always look short.)
         _cancel_checkpoint()      # stage boundary: research finished
 
         # Save pre-DeepThink content snapshot for Fermi estimation context.
@@ -1806,6 +1808,8 @@ class DeepResearchTool:
                 )
                 self._mark_stage("deep_think",
                                  deep_think=self._save_stage_json("deep_think", deep_think_results))
+
+        self._note_length_shortfall(session, progress_callback)
 
         # Evidence export happens AFTER report finalization (further below)
         # so that evidence added by the final research rounds is included
@@ -2344,17 +2348,10 @@ class DeepResearchTool:
         rp_cfg = self.config.report
         if not self.config.enable_verification and (
                 rp_cfg.hard_min_body_chars or rp_cfg.hard_max_body_chars):
-            from .report.finalization import count_body_chars
-            if version_tag == "v1":
-                _body = "\n\n".join(
-                    sd.get("content", "")
-                    for sid, sd in session.section_contents.items()
-                    if not sid.startswith("_"))
-            else:
-                _body = "\n\n".join(ch.content
-                                    for ch in result.chapters.values())
-            _chars = count_body_chars(
-                _body, exclude_references=rp_cfg.exclude_references_from_count)
+            # the SAME count the result / UI reports (V1: the chapters as
+            # rendered — shrunk when a page target applied — plus the
+            # executive summary; V2/V3: the generated chapters)
+            _chars = self._length_summary(session, result)["body_chars"]
             if rp_cfg.hard_max_body_chars and \
                     _chars > rp_cfg.hard_max_body_chars:
                 ResearchWarnings.get_instance().add(
@@ -3546,7 +3543,9 @@ class DeepResearchTool:
                          for k, d in (rendered.section_contents or {}).items()
                          if not str(k).startswith("_") and isinstance(d, dict)]
                 texts.append(self._executive_summary_markdown(rendered))
-            body = sum(count_body_chars(t) for t in texts)
+            exclude = bool(getattr(rp, "exclude_references_from_count", True))
+            body = sum(count_body_chars(t, exclude_references=exclude)
+                       for t in texts)
         target = None
         if mode == "fixed":
             target = rp.preferred_body_chars or rp.target_characters
@@ -5435,9 +5434,25 @@ Output only the text (no JSON, no heading):"""
         lang = getattr(getattr(cfg, "research", None), "language", "ja")
         return rp.writing_budget_chars(lang)
 
-    # one sentence: a period between digits (12.75, 3.5%) does not end it
+    # one sentence. A '.' does not end it when it is a decimal point
+    # (12.75, ３．５), inside a token (U.S, e.g, example.com), before a
+    # lowercase word, a digit or punctuation ('No. 1', 'approx. 32%',
+    # 'Corp. and'), or after a common abbreviation ('Dr. Smith'). A run
+    # of terminators ('...', '?!', '！？') ends one sentence together, so
+    # no character is ever dropped.
+    _ABBREVIATIONS = (
+        "Mr", "Mrs", "Ms", "Dr", "St", "vs", "No", "Fig", "approx", "Inc",
+        "Corp", "Ltd", "Co", "etc", "Jan", "Feb", "Mar", "Apr", "Jun", "Jul",
+        "Aug", "Sep", "Sept", "Oct", "Nov", "Dec",
+        r"e\.g", r"i\.e", r"U\.S", r"U\.K", r"U\.N")
     _SENTENCE_RE = re.compile(
-        r"(?:[^。．.!?！？\n]|(?<=\d)[.．](?=\d))+[。．.!?！？]?\s*")
+        r"(?:[^。．.!?！？\n]"
+        r"|(?<=\d)[.．](?=\d)"
+        r"|\.(?!\s|$)"
+        r"|\.(?=[ \t]+[a-z0-9(%,;:])"
+        r"|(?:" + "|".join(f"(?<=\\b{a})" for a in _ABBREVIATIONS)
+        + r")\.(?=[ \t])"
+        r")+[。．.!?！？]*\s*")
     # citation markers written after an English period ("grew. [1] Next")
     _LEADING_CITES_RE = re.compile(r"^(?:\s*\[\d+(?:\s*[,，、]\s*\d+)*\])+\s*")
 

@@ -721,6 +721,12 @@ class FinalizationController:
         if self._fixed_band() is not None:
             room = max(300, int(self.fixed_target_chars * 0.15))
             used = count_body_chars("\n".join(lines))
+            # what does not fit is summarised: list the most severe points
+            # first (the verifier appends unanswered questions, failed
+            # verification, citation and freshness failures after every
+            # claim issue). Stable, so verifier order holds within a level.
+            rank = {"critical": 0, "important": 1}
+            unresolved.sort(key=lambda i: rank.get(i.severity, 2))
         for n, i in enumerate(unresolved):
             what = i.claim or i.reason or i.type
             line = (f"- 未解決: {what}（{i.reason or i.type}）" if ja
@@ -792,8 +798,14 @@ class FinalizationController:
                 fitted = self._fit_fixed_length(chapters, verdict)
                 if fitted is not verdict and not self._still_acceptable(fitted):
                     # the length pass changed the body and the re-verified
-                    # body no longer passes the gates: never ship it as a
-                    # clean ACCEPT — hedge, note and re-verify instead
+                    # body would no longer be accepted: never ship it as a
+                    # clean ACCEPT — hedge, note and re-verify instead.
+                    # That pass kept no room for the note that now
+                    # follows, so leave the fallback one pass to fit body
+                    # + note (it runs only if they overshoot the band).
+                    self._length_passes_used = min(
+                        self._length_passes_used,
+                        max(0, self.max_length_passes - 1))
                     return self._exit_with_limitations(chapters, fitted)
                 return self._finish(chapters, fitted, decision)
 
@@ -954,14 +966,22 @@ class FinalizationController:
 
     def _still_acceptable(self, verdict: StructuredVerdict) -> bool:
         """Whether a body changed after an ACCEPT decision still earns it:
-        the hard gates and the user-set floor (the ceiling is handled by
-        _finish)."""
-        if not passes_hard_gates(verdict, self.budget):
-            return False
-        if (self.hard_min_body_chars
-                and verdict.metrics.actual_body_chars < self.hard_min_body_chars):
-            return False
-        return True
+        decide() must still ACCEPT it once no research / revision budget is
+        left — the hard gates, the support threshold, critical / important
+        unsupported, contradicted or unanswered points, the user-set floor
+        and the fixed lower band all apply. (An over-band body with no
+        revision budget still decides ACCEPT, so this cannot loop; the
+        ceiling is handled by _finish.)"""
+        from dataclasses import replace
+        spent = replace(
+            self.budget,
+            research_rounds=self.budget.max_final_research_rounds,
+            revision_rounds=self.budget.max_final_revision_rounds)
+        return decide(verdict, spent, self.hard_max_body_chars,
+                      self.hard_min_body_chars,
+                      fixed_target_chars=self.fixed_target_chars,
+                      length_tolerance=self.length_tolerance
+                      ) == ResearchDecision.ACCEPT
 
     def _hedge(self, chapters: Dict[str, str],
                verdict: StructuredVerdict) -> bool:

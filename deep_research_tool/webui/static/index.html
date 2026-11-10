@@ -3310,15 +3310,16 @@ function lengthVerdict(len) {
   if (!len || len.body_chars === undefined || len.body_chars === null) return null;
   const n = Number(len.body_chars) || 0;
   const tgt = Number(len.target) || 0;
-  // the user-set absolute limits apply in either mode
+  // the user-set absolute limits apply in either mode and come first: a
+  // body over the ceiling is over even when it is under the fixed band
   const hmax = Number(len.hard_max) || 0, hmin = Number(len.hard_min) || 0;
+  if (hmax && n > hmax) return {cls: 'over', text: `上限 ${hmax.toLocaleString()}字を超過`};
+  if (hmin && n < hmin) return {cls: 'under', text: `下限 ${hmin.toLocaleString()}字に届かず（水増しはしていません）`};
   if (len.mode === 'fixed' && tgt) {
     if (len.over) return {cls: 'over', text: `目標を超過（約${(n / tgt).toFixed(1)}倍）`};
     if (len.under) return {cls: 'under', text: '目標に届かず（水増しはしていません）'};
+    return {cls: 'ok', text: '目標の範囲内'};
   }
-  if (hmax && n > hmax) return {cls: 'over', text: `上限 ${hmax.toLocaleString()}字を超過`};
-  if (hmin && n < hmin) return {cls: 'under', text: `下限 ${hmin.toLocaleString()}字に届かず（水増しはしていません）`};
-  if (len.mode === 'fixed' && tgt) return {cls: 'ok', text: '目標の範囲内'};
   return {cls: 'ok', text: tgt ? `適応モード（目安 約${tgt.toLocaleString()}字）` : '適応モード（情報量から決定）'};
 }
 // 「 → 実績 N字（超過）」 for the history chips ('' when not measured)

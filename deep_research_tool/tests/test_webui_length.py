@@ -96,6 +96,29 @@ def test_the_user_set_ceiling_is_checked_in_adaptive_mode(tmp_path):
         httpd.server_close()
 
 
+def test_the_ceiling_comes_before_the_fixed_band(tmp_path):
+    # fix review F8: fixed 4,000 with a 3,000 ceiling and a 3,100 body was
+    # shown as 不足 (under the band) while the server said over the ceiling
+    length = {"mode": "fixed", "body_chars": 3100, "target": 4000, "lower": 3200,
+              "upper": 4800, "within": False, "over": False, "under": True,
+              "hard_min": None, "hard_max": 3000}
+    httpd = _server(tmp_path, {"job-f": _job("job-f", length, 1.0)})
+    pw, browser = _browser()
+    try:
+        page, errors, _ = _load(browser, _url(httpd, "/#history"), None)
+        assert "実績 3,100字（超過）" in page.inner_text("#historyList .hist-params")
+        page.evaluate("showResults(historyCache.find(r => r.job_id === 'job-f').result, 'job-f', true); setView('result')")
+        page.wait_for_selector("#lengthBox")
+        assert "上限 3,000字を超過" in page.inner_text("#lengthBox")
+        assert "over" in page.get_attribute("#lengthBox", "class")
+        assert errors == []
+    finally:
+        browser.close()
+        pw.stop()
+        httpd.shutdown()
+        httpd.server_close()
+
+
 def test_verify_runs_show_the_measured_length(tmp_path):
     # review C16: verify-only runs compress a fixed body too
     job = _job("job-v", OVER, 1.0)
