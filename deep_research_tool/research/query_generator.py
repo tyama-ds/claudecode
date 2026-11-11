@@ -245,35 +245,123 @@ class QueryGenerator:
         }
 
     def _fit_plan_to_budget(self, plan: "ResearchPlan",
-                            drop_mains: bool = True) -> "ResearchPlan":
+                            protected=None) -> "ResearchPlan":
         """Deterministically cap the plan at _max_flat_sections().
 
         The prompt asks for a small plan; this guarantees it. Subsections
-        are folded into their parent's description first (their topics
-        stay in scope), then trailing main sections are dropped — unless
-        drop_mains is False (the main sections may be the user's own)."""
+        are folded into their parent's description (their topics stay in
+        scope) and trailing main sections are dropped — except the
+        sections in `protected` (ids of sections whose titles come from
+        the table of contents the user wrote, see _user_titled_sections):
+        those are always kept, and the cap grows to fit them."""
         max_flat = self._max_flat_sections()
         if max_flat is None or plan is None:
             return plan
         toc = plan.table_of_contents
         if len(toc.get_flat_sections()) <= max_flat:
             return plan
+        protected = set(protected or ())
         for item in toc.items:
-            if item.subsections:
-                topics = "、".join(sub.title for sub in item.subsections if sub.title)
-                if topics:
-                    sep = "（扱う論点: " if self.language == "ja" else " (covers: "
-                    end = "）" if self.language == "ja" else ")"
-                    item.description = f"{item.description}{sep}{topics}{end}"
-                item.subsections = []
-        if drop_mains and len(toc.items) > max_flat:
-            dropped = [i.title for i in toc.items[max_flat:]]
-            toc.items = toc.items[:max_flat]
+            keep = [sub for sub in item.subsections
+                    if item.section in protected and sub.section in protected]
+            folded = [sub for sub in item.subsections if sub not in keep]
+            topics = "、".join(sub.title for sub in folded if sub.title)
+            if topics:
+                sep = "（扱う論点: " if self.language == "ja" else " (covers: "
+                end = "）" if self.language == "ja" else ")"
+                item.description = f"{item.description}{sep}{topics}{end}"
+            item.subsections = keep
+        allowed = max(max_flat, sum(1 + len(i.subsections) for i in toc.items
+                                    if i.section in protected))
+        kept, used, dropped = [], 0, []
+        for item in toc.items:
+            size = 1 + len(item.subsections)
+            if item.section in protected or used + size <= allowed:
+                kept.append(item)
+                used += size
+            else:
+                dropped.append(item.title)
+        if dropped:
+            toc.items = kept
             print(f"[QueryGenerator] body budget {self.body_budget_chars:,} chars: "
                   f"dropped sections {dropped}")
         print(f"[QueryGenerator] plan fitted to the body budget: "
-              f"{len(toc.get_flat_sections())} section(s)")
+              f"{len(toc.get_flat_sections())} section(s)"
+              + (f", {len(protected)} from the user's table of contents"
+                 if protected else ""))
         return plan
+
+    # list markers removed before the user's text is split into items
+    _SEGMENT_MARKERS = re.compile(
+        r"[①-⑳]|第[0-9一二三四五六七八九十]+章|[（(][0-9]{1,2}[)）]"
+        r"|(?:^|(?<=[\s:：、,;]))(?:[0-9]{1,2}(?:\.[0-9]{1,2})*|[ivx]{1,4})[.、)）]?(?=\s|[^\x00-\x7f])"
+        r"|(?m:^[ \t　]*[・\-－*•●■◆◇○□])")
+    _SEGMENT_SPLIT = re.compile(r"[\n\r、,;/・。:：「」『』\[\]]|\s{2,}|(?<![0-9])\.(?![0-9])")
+    _SEGMENT_STRIP = re.compile(r"[\s　\-－*•●■◆◇○□()（）\"'“”‘’]")
+
+    @classmethod
+    def _norm_title(cls, text: str) -> str:
+        import unicodedata
+        t = re.sub(r"[①-⑳]", " ", text or "")       # before NFKC makes them digits
+        t = unicodedata.normalize("NFKC", t).lower()
+        t = cls._SEGMENT_MARKERS.sub(" ", t)
+        return cls._SEGMENT_STRIP.sub("", t)
+
+    @classmethod
+    def _toc_segments(cls, text: str) -> List[str]:
+        """The items of the user's text: list markers removed, split at
+        line breaks and separators, normalised. Items of 2-40 chars."""
+        import unicodedata
+        t = re.sub(r"[①-⑳]", "\n", text or "")      # before NFKC makes them digits
+        t = unicodedata.normalize("NFKC", t).lower()
+        t = cls._SEGMENT_MARKERS.sub("\n", t)
+        out = []
+        for seg in cls._SEGMENT_SPLIT.split(t):
+            seg = cls._SEGMENT_STRIP.sub("", seg)
+            if 2 <= len(seg) <= 40 and seg not in out:
+                out.append(seg)
+        return out
+
+    def _user_titled_sections(self, plan: "ResearchPlan", user_text: str,
+                              query: str = "") -> set:
+        """Ids of the plan's sections whose titles come from the user's
+        text. A title is the user's when one of the user's items appears
+        in it, or the title's own words (the title without the topic
+        words of the query) appear in one of the items — and that item
+        matches no other title of the same level (an item in many titles
+        is the topic, not a chapter)."""
+        segments = self._toc_segments(user_text)
+        if plan is None or not segments:
+            return set()
+        topic = sorted(self._toc_segments(query) + [self._norm_title(query)],
+                       key=len, reverse=True)
+
+        def core(title):
+            c = title
+            for t in topic:
+                if len(t) >= 2:
+                    c = c.replace(t, "")
+            return re.sub(r"^(?:の|と|における|に関する)+|(?:の|と)+$", "", c)
+
+        def owned(items):
+            titles = {it.section: self._norm_title(it.title) for it in items}
+            cores = {sid: core(t) for sid, t in titles.items()}
+            hits = set()
+            for seg in segments:
+                matched = [sid for sid, t in titles.items()
+                           if t and (seg in t
+                                     or (len(cores[sid]) >= 2 and cores[sid] in seg))]
+                if len(matched) == 1:
+                    hits.add(matched[0])
+            return hits
+
+        toc = plan.table_of_contents
+        mains = owned(toc.items)
+        subs = set()
+        for item in toc.items:
+            if item.section in mains and item.subsections:
+                subs |= owned(item.subsections)
+        return mains | subs
 
     def _is_generic_title(self, title: str) -> bool:
         """Check if a section title is too generic.
@@ -424,19 +512,22 @@ class QueryGenerator:
     # a list item the user wrote: 「1.」「2)」「(3)」「①」「第4章」 after a
     # boundary (a decimal such as 3.5 or a year such as 2023. is not one)
     _TOC_ITEM = re.compile(
-        r"[①-⑳Ⅰ-Ⅹ]"
+        r"[①-⑳]"
         r"|(?:^|(?<=[\s　、,，:：;；。／/]))"
         r"(?:[0-9０-９]{1,2}[.．、)）](?![0-9０-９])"
         r"|[（(][0-9０-９]{1,2}[)）]"
         r"|第?[0-9０-９一二三四五六七八九十]+章"
-        r"|(?:I|II|III|IV|V|VI|VII|VIII|IX|X)\.(?=\s))")
+        # Roman numerals only as list markers: 「Ⅱ．競合」, 'II. Players'
+        # (not 第Ⅲ相, ステージⅣ, Ⅱ型 or 'Phase II. and')
+        r"|[Ⅰ-Ⅹ][.．、)）]"
+        r"|(?:I|II|III|IV|V|VI|VII|VIII|IX|X)\.(?=\s+[^\sa-z]))")
     # a line that starts with a section number without punctuation, as in a
     # table of contents pasted from Word: 「1 市場概況」「1.1 市場規模」
     _TOC_NUMBER_LINE = re.compile(
         r"(?m)^[ \t　]*[0-9０-９]{1,2}(?:[.．][0-9０-９]{1,2})*[ \t　]+\S")
     # a bulleted line (「・項目」「- item」; '**bold**' is not a bullet)
     _TOC_BULLET_LINE = re.compile(
-        r"(?m)^[ \t　]*(?:[・－•●■◆◇○□]|[-*](?=[ \t　]))[ \t　]*\S")
+        r"(?m)^[ \t　]*(?:[・－•●■◆◇]|[-*](?=[ \t　]))[ \t　]*\S")
     _TOC_KEYWORDS = ("目次", "章立て", "章構成", "以下の構成", "下記の構成", "次の構成",
                      "以下の章", "以下のセクション",
                      "table of contents", "following structure", "following chapters",
@@ -455,7 +546,12 @@ class QueryGenerator:
         if any(k in lowered for k in self._TOC_KEYWORDS):
             return True
         items = len(self._TOC_ITEM.findall(text))
-        numbered = len(self._TOC_NUMBER_LINE.findall(text))
+        # bare-number lines ('1 市場概況') count only in a pasted ToC that
+        # also numbers a subsection ('1.1 市場規模'): '1 位 TSMC' or
+        # '5 years of history' lines are not a ToC
+        lines = self._TOC_NUMBER_LINE.findall(text)
+        numbered = (len(lines) if any(re.match(r"[ \t　]*[0-9０-９]{1,2}[.．][0-9０-９]", l)
+                                      for l in lines) else 0)
         bullets = len(self._TOC_BULLET_LINE.findall(text))
         return items >= 3 or numbered >= 3 or bullets >= 3
 
@@ -484,8 +580,8 @@ class QueryGenerator:
         # is told to follow is exempt from the body-budget cap (the
         # detector above also fires on topic text; a list of purposes the
         # planner never sees as a ToC protects nothing)
-        explicit_toc = (has_user_toc_preference
-                        and self._has_explicit_toc(query, requirements))
+        # the text the planner is actually told to follow (empty if none)
+        planner_toc_text = user_toc_text if has_user_toc_preference else ""
 
         if has_user_toc_preference:
             print(f"[QueryGenerator] User ToC preference detected, skipping validation")
@@ -505,13 +601,19 @@ class QueryGenerator:
 
             if plan is None:
                 continue
-            if not explicit_toc:
-                # a table of contents the USER wrote is never cut down.
-                # Text that only looks like one (the broad detector fired
-                # but no explicit list was found) may still name the
-                # user's chapters: fold subsections, never drop a chapter.
-                plan = self._fit_plan_to_budget(
-                    plan, drop_mains=not has_user_toc_preference)
+            # The user's own chapters are never cut. Which chapters are the
+            # user's is read from the plan itself: titles that carry the
+            # items of the text the planner was told to follow. A plan
+            # that follows a list the user wrote is kept whole; otherwise
+            # only the user's sections are protected and the rest capped.
+            protected = self._user_titled_sections(plan, planner_toc_text, query)
+            mains = plan.table_of_contents.items
+            follows_list = (
+                self._has_explicit_toc(planner_toc_text, "")
+                and len([m for m in mains if m.section in protected])
+                >= max(2, (len(mains) + 1) // 2))
+            if not follows_list:
+                plan = self._fit_plan_to_budget(plan, protected=protected)
 
             # Split long compound queries into focused sub-queries
             original_count = len(plan.search_queries)

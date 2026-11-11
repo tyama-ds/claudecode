@@ -216,16 +216,20 @@ class TestContentExtractorBudget(unittest.TestCase):
         self.assertEqual(ex._outline_points_range(), (4, 6))
 
 
-def _plan_json(mains=5, subs=3):
+def _plan_json(mains=5, subs=3, titles=None, sub_titles=None):
+    """A planner response; titles / sub_titles(i) name the sections the
+    way a planner that follows the user's table of contents does."""
     import json
     toc = []
     for i in range(1, mains + 1):
-        toc.append({"section": str(i), "title": f"炭素繊維 市場動向{i}",
+        title = titles[i - 1] if titles else f"炭素繊維 市場動向{i}"
+        subs_t = (sub_titles(i) if sub_titles else
+                  [f"炭素繊維 需要詳細{i}-{j}" for j in range(1, subs + 1)])
+        toc.append({"section": str(i), "title": title,
                     "description": f"説明{i}",
-                    "subsections": [{"section": f"{i}.{j}",
-                                     "title": f"炭素繊維 需要詳細{i}-{j}",
+                    "subsections": [{"section": f"{i}.{j}", "title": t,
                                      "description": "d"}
-                                    for j in range(1, subs + 1)]})
+                                    for j, t in enumerate(subs_t, 1)]})
     return json.dumps({"title": "市場", "summary": "s",
                        "table_of_contents": toc,
                        "search_queries": [f"市場 クエリ{i}" for i in range(30)],
@@ -281,7 +285,9 @@ class TestPlannerBudget(unittest.TestCase):
             self.assertEqual(len(plan.table_of_contents.get_flat_sections()), 5, query)
 
     def test_a_section_list_the_user_wrote_is_never_cut(self):
-        qg, _ = self._qg(4000, _plan_json(7, 1))
+        # the planner follows the user's list (titles carry its items)
+        qg, _ = self._qg(4000, _plan_json(
+            7, 1, titles=[f"炭素繊維の市場{i}" for i in range(1, 8)]))
         reqs = "目次は以下の通り:\n" + "\n".join(f"{i}. 市場{i}" for i in range(1, 8))
         plan = qg.create_research_plan("炭素繊維", requirements=reqs)
         self.assertEqual(len(plan.table_of_contents.get_flat_sections()), 14)
@@ -291,26 +297,66 @@ class TestPlannerBudget(unittest.TestCase):
         qg = QueryGenerator(MagicMock(), language="ja")
         for text in ("GPT-3.5以降のLLM市場", "経営層向け・簡潔に", "2023.の決算を重視",
                      "Focus on Asia, i.e. China", "市場規模は3.5兆円、成長率2.1%",
-                     "**重要**: a\n**必須**: b\n**任意**: c", "2024 年\n2025 年"):
+                     "**重要**: a\n**必須**: b\n**任意**: c", "2024 年\n2025 年",
+                     "国内製薬企業の第Ⅰ相・第Ⅱ相・第Ⅲ相試験", "Compare Phase I. Phase II. and Phase III. rates",
+                     "1 位 TSMC\n2 位 Samsung\n3 位 Intel", "○○\n○○\n○○"):
             self.assertFalse(qg._has_explicit_toc(text, ""), text)
         for text in ("1. 市場規模 2. 競合 3. 規制", "・市場規模\n・競合\n・規制",
                      "第1章 市場 第2章 競合 第3章 規制", "①市場②競合③規制",
                      "章立て: 市場と競合", "下記の構成で: 市場、競合、規制",
                      "1 市場概況\n1.1 市場規模\n2 主要企業",
                      "I. Market II. Players III. Pricing",
-                     "1.市場規模。2.競合。3.規制。", "1.市場規模/2.競合/3.規制"):
+                     "1.市場規模。2.競合。3.規制。", "1.市場規模/2.競合/3.規制",
+                     "Ⅰ．市場\nⅡ．競合\nⅢ．規制"):
             self.assertTrue(qg._has_explicit_toc("炭素繊維", text), text)
 
     def test_text_that_only_looks_like_a_toc_never_loses_a_chapter(self):
         # fix review F1: the broad detector fired (the planner was told to
         # follow the user's structure) but no explicit list was found —
         # subsections are folded, but no main section is dropped
-        qg, _ = self._qg(4000, _plan_json(7, 3))
+        chapters = ["市場", "競合", "価格", "規制", "技術", "課題", "提言"]
+        qg, _ = self._qg(4000, _plan_json(
+            7, 3, titles=[f"炭素繊維の{c}" for c in chapters]))
         plan = qg.create_research_plan(
             "炭素繊維", requirements="章の構成は市場、競合、価格、規制、技術、課題、提言で")
         toc = plan.table_of_contents
         self.assertEqual(len(toc.items), 7)
         self.assertTrue(all(not i.subsections for i in toc.items))
+
+    def test_the_users_chapters_are_found_in_any_list_format(self):
+        # post-merge review: whatever the format, chapters whose titles
+        # carry the user's items are kept; subsections the planner
+        # invented are folded, the user's own subsections are kept
+        chapters = ["市場概況", "主要企業", "価格動向", "規制", "技術動向", "課題", "提言"]
+        for reqs in ("下記の構成でまとめてください：" + "、".join(chapters),
+                     "".join(f"{'①②③④⑤⑥⑦'[i]}{c}" for i, c in enumerate(chapters)),
+                     "\n".join(f"{i}）{c}" for i, c in enumerate(chapters, 1))):
+            qg, _ = self._qg(4000, _plan_json(7, 2, titles=chapters))
+            plan = qg.create_research_plan("炭素繊維", requirements="目次: " + reqs)
+            self.assertEqual([i.title for i in plan.table_of_contents.items],
+                             chapters, reqs)
+        # a ToC pasted from Word, with the user's subsections
+        reqs = "目次\n1 市場概況\n1.1 市場規模\n1.2 成長率\n2 主要企業\n2.1 国内\n2.2 海外\n3 課題"
+        qg, _ = self._qg(4000, _plan_json(
+            3, 2, titles=["市場概況", "主要企業", "課題"],
+            sub_titles=lambda i: {1: ["市場規模", "成長率"], 2: ["国内", "海外"],
+                                  3: ["課題の詳細A", "課題の詳細B"]}[i]))
+        plan = qg.create_research_plan("炭素繊維", requirements=reqs)
+        flat = [s.title for s in plan.table_of_contents.get_flat_sections()]
+        self.assertEqual(len(flat), 9)          # a list the plan follows: kept whole
+
+    def test_topic_words_and_purposes_never_protect_a_plan(self):
+        # post-merge review G2/G3/G4: topic text that trips the broad
+        # detector (・, 第Ⅲ相, stock) with a purposes list, or Roman numerals
+        # in prose, must not switch the cap off
+        for query, reqs in (
+                ("国内EV市場の動向・見通し", "- 経営層向け\n- 日本市場に限定\n- 2030年までの見通し"),
+                ("国内製薬企業の第Ⅰ相・第Ⅱ相・第Ⅲ相試験パイプライン", ""),
+                ("Tesla stock outlook 2025", "- Audience: executives\n- Keep it concise\n- Compare vendors"),
+                ("炭素繊維 市場動向・主要プレイヤー", "1 位 TSMC\n2 位 Samsung\n3 位 Intel")):
+            qg, _ = self._qg(4000, _plan_json(5, 3))
+            plan = qg.create_research_plan(query, requirements=reqs)
+            self.assertEqual(len(plan.table_of_contents.get_flat_sections()), 5, query)
 
     def test_a_list_of_purposes_keeps_the_cap(self):
         # fix review F2/F10: '- ' bullets the planner never receives as a
@@ -373,6 +419,26 @@ class TestDeepThinkCap(unittest.TestCase):
             self.assertEqual(len(parts), n, parts)
             self.assertEqual(re.sub(r"\s+", "", "".join(parts)),
                              re.sub(r"\s+", "", text))          # nothing lost
+
+    def test_quotes_urls_and_tight_citations(self):
+        # post-merge review G0/G1/G7
+        import re
+        from deep_research_tool.main import DeepResearchTool
+        split = DeepResearchTool._split_sentences
+        cases = {
+            "Demand grew.[1] Supply fell.[2] Prices rose.[3]": 3,
+            "Demand grew.[SOURCE 1] Supply fell.[SOURCE 2] Prices rose.": 3,
+            'He said "growth will continue." Then prices fell.': 2,
+            "社長は「需要は回復した。今後も伸びる？」と述べた。次の文。": 2,
+            "See https://example.com/a?q=1&b=2 for data. Next one.": 2,
+        }
+        for text, n in cases.items():
+            parts = split(text)
+            self.assertEqual(len(parts), n, parts)
+            self.assertEqual(re.sub(r"\s+", "", "".join(parts)),
+                             re.sub(r"\s+", "", text))
+        self.assertTrue(split("Demand grew.[1] Supply fell.")[0]
+                        .strip().endswith("[1]"))
 
     def test_a_first_sentence_over_the_cap_adds_nothing(self):
         tool = self._tool(length_mode="fixed", preferred_body_chars=4000)

@@ -5448,26 +5448,41 @@ Output only the text (no JSON, no heading):"""
     _SENTENCE_RE = re.compile(
         r"(?:[^。．.!?！？\n]"
         r"|(?<=\d)[.．](?=\d)"
-        r"|\.(?!\s|$)"
+        # inside a token (U.S, e.g, example.com) — not before a citation
+        # or a closing quote / bracket, where the sentence does end
+        r"|\.(?![\s\[\]\"”’')」』）]|$)"
         r"|\.(?=[ \t]+[a-z0-9(%,;:])"
         r"|(?:" + "|".join(f"(?<=\\b{a})" for a in _ABBREVIATIONS)
         + r")\.(?=[ \t])"
-        r")+[。．.!?！？]*\s*")
-    # citation markers written after an English period ("grew. [1] Next")
-    _LEADING_CITES_RE = re.compile(r"^(?:\s*\[\d+(?:\s*[,，、]\s*\d+)*\])+\s*")
+        # a '?' inside a URL (?q=…) is not a question mark
+        r"|\?(?=[A-Za-z0-9=&%/#_-])"
+        r")+[。．.!?！？]*[\"”’)]*\s*")
+    # citation markers written after the period ("grew. [1] Next",
+    # "grew.[SOURCE 2] Next")
+    _LEADING_CITES_RE = re.compile(
+        r"^(?:\s*\[(?:SOURCE\s*)?\d+(?:\s*[,，、]\s*\d+)*\])+\s*")
+    _OPENERS, _CLOSERS = "「『（(", "」』）)"
 
     @classmethod
     def _split_sentences(cls, text: str) -> List[str]:
         """Whole sentences; trailing citation markers stay with the
-        sentence they belong to."""
+        sentence they belong to, and a 。 or ？ inside 「」『』（） does
+        not end the sentence around it."""
         out: List[str] = []
+        depth = 0
         for piece in cls._SENTENCE_RE.findall(text):
             lead = cls._LEADING_CITES_RE.match(piece)
             if lead and out:
                 out[-1] = out[-1].rstrip() + " " + lead.group(0).strip() + " "
                 piece = piece[lead.end():]
-            if piece.strip():
+            if not piece.strip():
+                continue
+            if depth > 0 and out:
+                out[-1] += piece           # still inside a quote / bracket
+            else:
                 out.append(piece)
+            depth = max(0, depth + sum(piece.count(c) for c in cls._OPENERS)
+                        - sum(piece.count(c) for c in cls._CLOSERS))
         return out
 
     def _fit_deep_think_conclusion(self, conclusion: str,
