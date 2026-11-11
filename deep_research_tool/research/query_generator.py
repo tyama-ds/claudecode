@@ -252,8 +252,8 @@ class QueryGenerator:
         are folded into their parent's description (their topics stay in
         scope) and trailing main sections are dropped — except the
         sections in `protected` (ids of sections whose titles come from
-        the table of contents the user wrote, see _user_titled_sections):
-        those are always kept, and the cap grows to fit them."""
+        what the user wrote, see _user_titled_sections): those are always
+        kept, counted first, and the cap grows only to fit them."""
         max_flat = self._max_flat_sections()
         if max_flat is None or plan is None:
             return plan
@@ -271,14 +271,19 @@ class QueryGenerator:
                 end = "）" if self.language == "ja" else ")"
                 item.description = f"{item.description}{sep}{topics}{end}"
             item.subsections = keep
-        allowed = max(max_flat, sum(1 + len(i.subsections) for i in toc.items
-                                    if i.section in protected))
-        kept, used, dropped = [], 0, []
+        # the user's sections are reserved first; the planner's own main
+        # sections fill what is left of the cap, in plan order
+        protected_flat = sum(1 + len(i.subsections) for i in toc.items
+                             if i.section in protected)
+        room = max(max_flat, protected_flat) - protected_flat
+        kept, dropped = [], []
         for item in toc.items:
             size = 1 + len(item.subsections)
-            if item.section in protected or used + size <= allowed:
+            if item.section in protected:
                 kept.append(item)
-                used += size
+            elif size <= room:
+                kept.append(item)
+                room -= size
             else:
                 dropped.append(item.title)
         if dropped:
@@ -310,7 +315,7 @@ class QueryGenerator:
     @classmethod
     def _toc_segments(cls, text: str) -> List[str]:
         """The items of the user's text: list markers removed, split at
-        line breaks and separators, normalised. Items of 2-40 chars."""
+        line breaks and separators, normalised. Items of 2-120 chars."""
         import unicodedata
         t = re.sub(r"[①-⑳]", "\n", text or "")      # before NFKC makes them digits
         t = unicodedata.normalize("NFKC", t).lower()
@@ -318,23 +323,35 @@ class QueryGenerator:
         out = []
         for seg in cls._SEGMENT_SPLIT.split(t):
             seg = cls._SEGMENT_STRIP.sub("", seg)
-            if 2 <= len(seg) <= 40 and seg not in out:
+            if 2 <= len(seg) <= 120 and seg not in out:
                 out.append(seg)
         return out
 
-    def _user_titled_sections(self, plan: "ResearchPlan", user_text: str,
-                              query: str = "") -> set:
-        """Ids of the plan's sections whose titles come from the user's
-        text. A title is the user's when one of the user's items appears
-        in it, or the title's own words (the title without the topic
-        words of the query) appear in one of the items — and that item
-        matches no other title of the same level (an item in many titles
-        is the topic, not a chapter)."""
-        segments = self._toc_segments(user_text)
-        if plan is None or not segments:
+    def _user_items(self, query: str, requirements: str) -> List[str]:
+        """The items the user wrote, from both fields the planner sees:
+        every item of the requirements, and the query's items only when
+        the query itself carries a list (a topic's own words — 「炭素繊維・
+        CFRP市場」 — are never the user's chapters)."""
+        items = self._toc_segments(requirements)
+        if self._has_explicit_toc(query, ""):
+            items += [s for s in self._toc_segments(query) if s not in items]
+        return items
+
+    def _user_titled_sections(self, plan: "ResearchPlan", query: str,
+                              requirements: str = "") -> set:
+        """Ids of the plan's sections whose titles come from what the user
+        wrote. Items are tried longest first, and each claims at most one
+        title: the one title that contains it, or whose own words (the
+        title without the query's topic words) it contains. An item that
+        fits several unclaimed titles is a topic word unless one of them
+        is exactly the item. Items that claimed a chapter are not reused
+        for subsections."""
+        items = self._user_items(query, requirements)
+        if plan is None or not items:
             return set()
-        topic = sorted(self._toc_segments(query) + [self._norm_title(query)],
-                       key=len, reverse=True)
+        topic = ([] if self._has_explicit_toc(query, "") else
+                 sorted(self._toc_segments(query) + [self._norm_title(query)],
+                        key=len, reverse=True))
 
         def core(title):
             c = title
@@ -343,24 +360,32 @@ class QueryGenerator:
                     c = c.replace(t, "")
             return re.sub(r"^(?:の|と|における|に関する)+|(?:の|と)+$", "", c)
 
-        def owned(items):
-            titles = {it.section: self._norm_title(it.title) for it in items}
+        used: set = set()
+
+        def claim(sections):
+            titles = {it.section: self._norm_title(it.title) for it in sections}
             cores = {sid: core(t) for sid, t in titles.items()}
-            hits = set()
-            for seg in segments:
-                matched = [sid for sid, t in titles.items()
-                           if t and (seg in t
-                                     or (len(cores[sid]) >= 2 and cores[sid] in seg))]
-                if len(matched) == 1:
-                    hits.add(matched[0])
-            return hits
+            claimed = set()
+            for seg in sorted((x for x in items if x not in used),
+                              key=len, reverse=True):
+                cands = [sid for sid, t in titles.items()
+                         if sid not in claimed and t
+                         and (seg in t or (len(cores[sid]) >= 2 and cores[sid] in seg))]
+                if len(cands) > 1:
+                    exact = [sid for sid in cands
+                             if titles[sid] == seg or cores[sid] == seg]
+                    cands = exact if len(exact) == 1 else []
+                if len(cands) == 1:
+                    claimed.add(cands[0])
+                    used.add(seg)
+            return claimed
 
         toc = plan.table_of_contents
-        mains = owned(toc.items)
+        mains = claim(toc.items)
         subs = set()
         for item in toc.items:
             if item.section in mains and item.subsections:
-                subs |= owned(item.subsections)
+                subs |= claim(item.subsections)
         return mains | subs
 
     def _is_generic_title(self, title: str) -> bool:
@@ -576,12 +601,6 @@ class QueryGenerator:
         """
         # Check if user has specified ToC preferences
         has_user_toc_preference, user_toc_text = self._detect_user_toc_preference(query, requirements)
-        # only a section list the user actually wrote AND that the planner
-        # is told to follow is exempt from the body-budget cap (the
-        # detector above also fires on topic text; a list of purposes the
-        # planner never sees as a ToC protects nothing)
-        # the text the planner is actually told to follow (empty if none)
-        planner_toc_text = user_toc_text if has_user_toc_preference else ""
 
         if has_user_toc_preference:
             print(f"[QueryGenerator] User ToC preference detected, skipping validation")
@@ -601,19 +620,12 @@ class QueryGenerator:
 
             if plan is None:
                 continue
-            # The user's own chapters are never cut. Which chapters are the
-            # user's is read from the plan itself: titles that carry the
-            # items of the text the planner was told to follow. A plan
-            # that follows a list the user wrote is kept whole; otherwise
-            # only the user's sections are protected and the rest capped.
-            protected = self._user_titled_sections(plan, planner_toc_text, query)
-            mains = plan.table_of_contents.items
-            follows_list = (
-                self._has_explicit_toc(planner_toc_text, "")
-                and len([m for m in mains if m.section in protected])
-                >= max(2, (len(mains) + 1) // 2))
-            if not follows_list:
-                plan = self._fit_plan_to_budget(plan, protected=protected)
+            # The user's own sections are never cut. Which sections are the
+            # user's is read from the plan itself: titles that carry items
+            # the user wrote (in either field). Everything else — the
+            # planner's own subsections and extra chapters — is capped.
+            protected = self._user_titled_sections(plan, query, requirements)
+            plan = self._fit_plan_to_budget(plan, protected=protected)
 
             # Split long compound queries into focused sub-queries
             original_count = len(plan.search_queries)
