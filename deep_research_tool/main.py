@@ -5460,7 +5460,9 @@ Output only the text (no JSON, no heading):"""
         + r")\.(?=[ \t])"
         # a '?' inside a URL (?q=…) is not a question mark
         r"|\?(?=[A-Za-z0-9=&%/#_-])"
-        r")+[。．.!?！？]*[\"”]*\s*")
+        # a closing quote joins only an ASCII sentence end ('…grew." Then'),
+        # never 。 — after 。 a quote opens the next sentence
+        r")+[。．.!?！？]*(?:(?<=[.!?])[\"”]+)?\s*")
     # citation markers written after the period ("grew. [1] Next",
     # "grew.[SOURCE 2] Next")
     _LEADING_CITES_RE = re.compile(
@@ -5479,8 +5481,8 @@ Output only the text (no JSON, no heading):"""
         """Whole sentences; trailing citation markers stay with the
         sentence they belong to.
 
-        - A 。 or ？ inside 「」『』（）“” (or a pair of ASCII quotes) does
-          not end the sentence around it — only while a closer that is
+        - A 。 or ？ inside 「」『』（）“” does not end the sentence around
+          it (ASCII '"' is not tracked: inch marks and stray quotes) — only while a closer that is
           not matched by a later opener is still ahead, so a stray
           opener never swallows the text; merging also stops at a line
           break or after _MAX_QUOTED chars.
@@ -5491,19 +5493,15 @@ Output only the text (no JSON, no heading):"""
         # net closers still ahead of each piece (closers minus openers):
         # an opener is only "open" while that many closers remain
         ahead = [0] * (len(pieces) + 1)
-        quotes_ahead = [0] * (len(pieces) + 1)
         for k in range(len(pieces) - 1, -1, -1):
             p = pieces[k]
             ahead[k] = max(0, ahead[k + 1] + sum(p.count(c) for c in cls._CLOSERS)
                            - sum(p.count(c) for c in cls._OPENERS))
-            quotes_ahead[k] = quotes_ahead[k + 1] + p.count('"')
         out: List[str] = []
-        depth, in_quote, carry = 0, False, ""
+        depth, carry = 0, ""
         for k, piece in enumerate(pieces):
             if depth > ahead[k]:
                 depth = ahead[k]
-            if in_quote and quotes_ahead[k] == 0:
-                in_quote = False
             lead = cls._LEADING_CITES_RE.match(piece)
             if lead and out:
                 out[-1] = out[-1].rstrip() + " " + lead.group(0).strip() + " "
@@ -5515,7 +5513,7 @@ Output only the text (no JSON, no heading):"""
             if cls._BARE_LIST_NUMBER.match(piece):
                 carry = piece
                 continue
-            open_now = (depth > 0 or in_quote)
+            open_now = depth > 0
             if out and ((open_now and len(out[-1]) < cls._MAX_QUOTED
                          and not out[-1].endswith("\n"))
                         or (cls._QUOTED_END.search(out[-1])
@@ -5523,11 +5521,9 @@ Output only the text (no JSON, no heading):"""
                 out[-1] += piece
             else:
                 out.append(piece)
-                depth, in_quote = 0, False
+                depth = 0
             depth = max(0, depth + sum(piece.count(c) for c in cls._OPENERS)
                         - sum(piece.count(c) for c in cls._CLOSERS))
-            if piece.count('"') % 2:
-                in_quote = not in_quote
         if carry:
             out.append(carry)
         return out

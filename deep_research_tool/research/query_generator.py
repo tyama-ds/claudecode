@@ -251,13 +251,14 @@ class QueryGenerator:
         The cap is max(_max_flat_sections(), the number of sections in the
         list the user wrote — `shape`, one entry per user chapter giving
         how many subsections the user wrote under it). The planner is told
-        to follow the user's list in order, so chapter i keeps as many of
-        its subsections as the user wrote under chapter i; the rest are
-        folded into the chapter's description (their topics stay in
-        scope). If chapters still exceed the cap, the planner's extras go:
-        chapters whose titles carry none of the user's items (`prefer`)
-        first, from the end, then from the end. Nothing the user wrote can
-        raise the cap beyond the count of what the user wrote."""
+        to follow the user's list in order. Trimming stops as soon as the
+        plan fits, and goes: the planner's own chapters (titles carrying
+        none of the user's items, `prefer`) while there are more chapters
+        than the user wrote; then subsections from the end — first those
+        beyond what the user wrote under that chapter — folded into the
+        chapter's description (their topics stay in scope); then chapters
+        from the end, the planner's own first. Nothing but the user's list
+        can raise the cap, and trimming never goes below it."""
         max_flat = self._max_flat_sections()
         if max_flat is None or plan is None:
             return plan
@@ -266,8 +267,12 @@ class QueryGenerator:
         toc = plan.table_of_contents
         if len(toc.get_flat_sections()) <= allowed:
             return plan
-        for idx, item in enumerate(toc.items):
-            keep = shape[idx] if idx < len(shape) else 0
+        prefer = list(prefer or [])
+
+        def total():
+            return sum(1 + len(it.subsections) for it in toc.items)
+
+        def fold(item, keep):
             folded = item.subsections[keep:]
             topics = "、".join(sub.title for sub in folded if sub.title)
             if topics:
@@ -275,20 +280,47 @@ class QueryGenerator:
                 end = "）" if self.language == "ja" else ")"
                 item.description = f"{item.description}{sep}{topics}{end}"
             item.subsections = item.subsections[:keep]
-        over = sum(1 + len(i.subsections) for i in toc.items) - allowed
-        if over > 0:
+
+        dropped = []
+        # 1. with a user list, the planner's own chapters (an overview put
+        #    in front, a summary at the end — titles carrying none of the
+        #    user's items) go first, while there are more chapters than the
+        #    user wrote; this also keeps the per-position quotas aligned
+        if shape:
+            for k in range(len(toc.items) - 1, -1, -1):
+                if total() <= allowed or len(toc.items) <= len(shape):
+                    break
+                if not self._title_has_item(toc.items[k].title, prefer):
+                    dropped.append(toc.items[k].title)
+                    del toc.items[k]
+        aligned = bool(shape) and len(toc.items) == len(shape)
+        # 2. fold subsections only as far as needed, from the end: first
+        #    those beyond what the user wrote under that chapter, then any
+        for pass_quota in (True, False):
+            for idx in range(len(toc.items) - 1, -1, -1):
+                over = total() - allowed
+                if over <= 0:
+                    break
+                item = toc.items[idx]
+                quota = shape[idx] if (pass_quota and aligned) else 0
+                excess = len(item.subsections) - quota
+                if excess > 0:
+                    fold(item, len(item.subsections) - min(excess, over))
+        # 3. then chapters, from the end: the planner's own first
+        if total() > allowed:
             order = list(range(len(toc.items) - 1, -1, -1))
-            prefer = list(prefer or [])
             extras = [k for k in order
                       if not self._title_has_item(toc.items[k].title, prefer)]
             drop = set()
+            over = total() - allowed
             for k in extras + [k for k in order if k not in extras]:
                 if over <= 0:
                     break
                 drop.add(k)
                 over -= 1 + len(toc.items[k].subsections)
-            dropped = [toc.items[k].title for k in sorted(drop)]
+            dropped += [toc.items[k].title for k in sorted(drop)]
             toc.items = [it for k, it in enumerate(toc.items) if k not in drop]
+        if dropped:
             print(f"[QueryGenerator] body budget {self.body_budget_chars:,} chars: "
                   f"dropped sections {dropped}")
         print(f"[QueryGenerator] plan fitted to the body budget: "
@@ -332,53 +364,95 @@ class QueryGenerator:
                 out.append(seg)
         return out
 
-    # a chapter line / a subsection line of a list the user wrote
-    _SHAPE_CHAPTER = re.compile(
-        r"^\s*(?:第?\d{1,2}章|\d{1,2}[.、)）]?(?=\s|[^\x00-\x7f])|[ivxIVX]{1,4}[.)]"
-        r"|[・\-*•●■◆◇](?=\s|[^\x00-\x7f])|\(\d{1,2}\))\s*\S")
-    _SHAPE_SUB = re.compile(
-        r"^\s*\d{1,2}\.\d{1,2}(?:\.\d{1,2})*[.)]?\s*\S"
-        r"|^\s{2,}(?:[・\-*•●■◆◇]|\d{1,2}[.)]|[a-z][.)])\s*\S")
     # a list announced in prose: 「目次：A、B、C」「章の構成は A、B で」
     _SHAPE_LEAD = re.compile(
-        r"(?:目次|章立て|章構成|構成|章|項目|table of contents|structure|outline|"
+        r"(?:目次|章立て|章構成|構成|(?<![文各])章|項目|table of contents|structure|outline|"
         r"sections?|chapters?)[^:：\n。]{0,15}?(?:[:：]|は(?=\S))", re.I)
     _SHAPE_CONJ = re.compile(r"(?<=\S\S)(?:と|および|及び|並びに|\s+and\s+|\s*&\s*)(?=\S\S)")
 
     def _user_toc_shape(self, query: str, requirements: str) -> List[int]:
         """The shape of the list the user wrote — one entry per chapter,
         the number of subsections under it — or [] when there is none.
-        The requirements are read first, then the query (only when it
-        carries a list itself: a topic is not a list)."""
+        Both fields are read (the query only counts when it carries a
+        list itself: a topic is not a list); the larger list wins."""
+        # the larger list wins: a short note list in the requirements must
+        # not hide a table of contents written in the query (and vice versa)
+        best: List[int] = []
         for text in (requirements, query):
+            shape = []
             if text and self._has_explicit_toc(text, ""):
                 shape = self._list_shape(text)
-                if len(shape) >= 2:
-                    return shape[:30]
-        for text in (requirements, query):
-            shape = self._prose_list_shape(text)
-            if len(shape) >= 2:
-                return shape[:30]
-        return []
+            if len(shape) < 2:
+                shape = self._prose_list_shape(text)
+            if len(shape) >= 2 and sum(1 + n for n in shape) > sum(1 + n for n in best):
+                best = shape
+        return best[:30]
+
+    # one marked line of a list: the marker's class decides its level
+    _SHAPE_LINE = re.compile(
+        r"^(?P<ind>[ \t]*)(?:"
+        r"(?P<dec>\d{1,2}\.\d{1,2}(?:\.\d{1,2})*[.)]?)(?=\s|[^\x00-\x7f])"
+        r"|(?P<sec>第\d{1,2}[節項])|(?P<chap>第\d{1,2}章)"
+        r"|(?P<num>\d{1,2}(?:[.、)）]|(?=\s)))|(?P<par>[(（]\d{1,2}[)）])|(?P<circ>◎)"
+        r"|(?P<rom>(?:I{1,3}|IV|VI{0,3}|IX|X|i{1,3}|iv|vi{0,3}|ix|x)[.)])"
+        r"|(?P<alpha>[A-Za-z][.)])|(?P<head>【(?=[^】\n]{1,40}】))"
+        r"|(?P<bul>[・\-*•●■◆◇□○]))\s*\S")
+    _SHAPE_HEADING = re.compile(
+        r"[【\[]?(?:目次|章立て|章構成|構成|table of contents|outline|structure)[】\]]?"
+        r"[^\n]{0,20}?[:：]?", re.I)
 
     def _list_shape(self, text: str) -> List[int]:
+        """Chapters and subsections of a written list. The first marker
+        style seen (「1.」「第1章」「I.」「・」「【】」…) is the chapter level;
+        a line with another style, or the same style indented deeper, is a
+        subsection of the last chapter; 「1.1」「第1節」 are always
+        subsections."""
         import unicodedata
-        t = re.sub(r"[①-⑳]", lambda m: f"\n{ord(m.group()) - 0x245F}. ", text or "")
+        t = re.sub(r"[①-⑳]", "\n◎", text or "")
+        t = re.sub(r"(?m)^　+", lambda m: "  " * len(m.group()), t)
         t = unicodedata.normalize("NFKC", t)
         # 「目次: 1. A」: the list starts after the lead-in
         t = re.sub(r"(?m)^\s*(?:目次|章立て|章構成|構成|table of contents|structure|outline|"
                    r"sections?|chapters?)[^:：\n]{0,15}[:：]\s*", "\n", t, flags=re.I)
         chapters: List[int] = []
+        level = None                      # (class, indent) of the chapter lines
         for line in t.splitlines():
             if not line.strip():
                 continue
-            if self._SHAPE_SUB.match(line):
+            m = self._SHAPE_LINE.match(line)
+            if not m:
+                continue
+            cls = m.lastgroup
+            if cls == "bul":
+                cls = "bul" + m.group("bul")
+            indent = len(m.group("ind").expandtabs(4))
+            if cls in ("dec", "sec"):
                 if chapters:
                     chapters[-1] += 1
-            elif self._SHAPE_CHAPTER.match(line):
+                continue
+            if level is None:
+                level = (cls, indent)
+            if cls == level[0] and indent <= level[1]:
                 chapters.append(0)
+            elif chapters:
+                chapters[-1] += 1
         if len(chapters) >= 2:
             return chapters
+        # unmarked lines under a heading: 「目次\n市場規模\n主要企業\n…」
+        lines = [l.strip() for l in unicodedata.normalize("NFKC", text or "").splitlines()]
+        for k, line in enumerate(lines):
+            if self._SHAPE_HEADING.fullmatch(line):
+                items = []
+                for nxt in lines[k + 1:]:
+                    if not nxt:
+                        if items:
+                            break
+                        continue
+                    if len(nxt) > 40 or re.search(r"[。.!?！？]$", nxt):
+                        break
+                    items.append(nxt)
+                if len(items) >= 2:
+                    return [0] * len(items)
         # one line: 「1. A 2. B 3. C」
         n = len(self._TOC_ITEM.findall(t))
         if n >= 2:

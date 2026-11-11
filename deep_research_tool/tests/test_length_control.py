@@ -421,6 +421,40 @@ class TestPlannerBudget(unittest.TestCase):
                              "4. 規制\n5. 価格\n6. 課題", [(t, ["a", "b"]) for t in reworded])
         self.assertEqual(got, [(t, []) for t in reworded])
 
+    def test_hierarchical_lists_in_any_style(self):
+        # #93 review round 5: subsections written as 第N節, a./A., (1), ①,
+        # indented ・, 【】/・, ■/・, 1/1.1 were read as chapters or skipped;
+        # an overview the planner put first shifted the per-chapter counts
+        user = [("国内市場", ["現状", "課題"]), ("海外市場", ["現状", "課題"]), ("提言", [])]
+        lists = {
+            "第N章/第N節": "目次\n第1章 国内市場\n第1節 現状\n第2節 課題\n第2章 海外市場\n第1節 現状\n第2節 課題\n第3章 提言",
+            "1./a.": "目次:\n1. 国内市場\na. 現状\nb. 課題\n2. 海外市場\na. 現状\nb. 課題\n3. 提言",
+            "1./(1)": "目次:\n1. 国内市場\n(1) 現状\n(2) 課題\n2. 海外市場\n(1) 現状\n(2) 課題\n3. 提言",
+            "1./①": "目次:\n1. 国内市場\n①現状\n②課題\n2. 海外市場\n①現状\n②課題\n3. 提言",
+            "I./A.": "Outline:\nI. 国内市場\nA. 現状\nB. 課題\nII. 海外市場\nA. 現状\nB. 課題\nIII. 提言",
+            "【】/・": "【国内市場】\n・現状\n・課題\n【海外市場】\n・現状\n・課題\n【提言】",
+            "1./　・": "1. 国内市場\n　・現状\n　・課題\n2. 海外市場\n　・現状\n　・課題\n3. 提言",
+            "3ページ+章/節": "3ページ程度でまとめてください。\n目次\n第1章 国内市場\n第1節 現状\n"
+                           "第2節 課題\n第2章 海外市場\n第1節 現状\n第2節 課題\n第3章 提言",
+        }
+        for name, reqs in lists.items():
+            self.assertEqual(self._run_plan("全固体電池", reqs, user), user, name)
+            overview = [("全固体電池の概要", ["定義", "歴史"])] + user
+            self.assertEqual(self._run_plan("全固体電池", reqs, overview), user, name)
+            extra = user[:2] + [("提言", ["x", "y"])]
+            self.assertEqual(self._run_plan("全固体電池", reqs, extra), user, name)
+        seven = ["市場規模", "主要企業", "技術動向", "規制", "価格", "課題", "提言"]
+        got = self._run_plan("国内EV市場", "目次:\n" + "\n".join(seven), [(t, []) for t in seven])
+        self.assertEqual([t for t, _ in got], seven)          # unmarked lines
+
+    def test_a_note_list_does_not_hide_the_toc_in_the_query(self):
+        chapters = ["市場規模", "主要企業", "技術動向", "規制", "課題", "今後の展望"]
+        got = self._run_plan(
+            "国内EV市場について、次の6章で調査: "
+            + " ".join(f"{i}. {c}" for i, c in enumerate(chapters, 1)),
+            "- 経営層向け\n- 簡潔に\n- 図表多め", [(c, []) for c in chapters])
+        self.assertEqual([t for t, _ in got], chapters)
+
     def test_nothing_but_the_users_list_raises_the_cap(self):
         # #93 review round 4: purposes (I6), a ・ inside a chapter name
         # (I7), the query's preamble (I8) never add sections
@@ -591,7 +625,11 @@ class TestDeepThinkCap(unittest.TestCase):
             "Is it growing? eBay says yes. Next.": 3,
             "（注：未確認の数値を含む。需要は回復した。価格は上昇した。（参考）次の文。": 4,
             '“Growth will continue. Prices will rise,” the CEO said. Next.': 2,
-            '"Growth will continue. Prices will rise," the CEO said. Next.': 2,
+            # ASCII quotes are not tracked (an inch mark must not swallow
+            # the text): a sentence inside them may split
+            '"Growth will continue. Prices will rise," the CEO said. Next.': 3,
+            '需要は回復した。"EV"の販売も伸びた。次の文。': 3,
+            'The 65" TV sold well. Next one. "Quoted" term here.': 3,
             "１．需要は回復した。\n２．供給は減少した。": 2,
             "  4. Demand rose.\n  5. Supply fell.": 2,
         }
