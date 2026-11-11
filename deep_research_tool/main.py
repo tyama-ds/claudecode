@@ -5453,7 +5453,9 @@ Output only the text (no JSON, no heading):"""
         r"|\.(?![\s\[\"”」』]|$)"
         # a list number at the start of a line ('1. Demand…')
         r"|(?:(?<=^\d)|(?<=\n\d)|(?<=^\d\d)|(?<=\n\d\d))\.(?=[ \t])"
-        r"|\.(?=[ \t]+[a-z0-9(%,;:])"
+        # before a lowercase word / number ('No. 1', 'approx. 32%') —
+        # but not before a list marker ('point. b) next', '… 2) next')
+        r"|\.(?=[ \t]+[a-z0-9(%,;:])(?![ \t]+(?:[a-z]|\d{1,2})\))"
         r"|(?:" + "|".join(f"(?<=\\b{a})" for a in _ABBREVIATIONS)
         + r")\.(?=[ \t])"
         # a '?' inside a URL (?q=…) is not a question mark
@@ -5465,44 +5467,69 @@ Output only the text (no JSON, no heading):"""
         r"^(?:\s*\[(?:SOURCE\s*)?\d+(?:\s*[,，、]\s*\d+)*\])+\s*")
     # Japanese quotes / brackets: a 。 or ？ inside them does not end the
     # sentence (ASCII '(' is not tracked: smileys, intervals, typos)
-    _OPENERS, _CLOSERS = "「『（", "」』）"
-    _MAX_QUOTED = 300            # an unclosed opener stops merging here
+    # quotes / brackets: a 。 or ？ inside them does not end the sentence
+    # around them (ASCII '(' is not tracked: smileys, intervals, typos)
+    _OPENERS, _CLOSERS = "「『（“", "」』）”"
+    _MAX_QUOTED = 300            # merging stops here whatever the brackets
+    _BARE_LIST_NUMBER = re.compile(r"^\s*[0-9０-９]{1,2}[.．]\s*$")
+    _QUOTED_END = re.compile(r"[?!？！.][\"”]\s*$")
 
     @classmethod
     def _split_sentences(cls, text: str) -> List[str]:
         """Whole sentences; trailing citation markers stay with the
-        sentence they belong to. A 。 or ？ inside 「」『』（） does not end
-        the sentence around it (an opener never closed later is ignored;
-        merging also stops at a line break or after _MAX_QUOTED chars),
-        and a piece that starts with a
-        lowercase letter continues the previous one ('"is it growing?"
-        he asked.')."""
-        out: List[str] = []
-        depth = 0
+        sentence they belong to.
+
+        - A 。 or ？ inside 「」『』（）“” (or a pair of ASCII quotes) does
+          not end the sentence around it — only while a closer that is
+          not matched by a later opener is still ahead, so a stray
+          opener never swallows the text; merging also stops at a line
+          break or after _MAX_QUOTED chars.
+        - A quoted question / exclamation followed by lowercase text
+          continues the sentence ('"is it growing?" he asked.').
+        - A bare list number ('4.', '１．') joins the item that follows."""
         pieces = cls._SENTENCE_RE.findall(text)
-        # closers still ahead of each piece: an opener with no closer after
-        # it (a typo) never merges anything
+        # net closers still ahead of each piece (closers minus openers):
+        # an opener is only "open" while that many closers remain
         ahead = [0] * (len(pieces) + 1)
+        quotes_ahead = [0] * (len(pieces) + 1)
         for k in range(len(pieces) - 1, -1, -1):
-            ahead[k] = ahead[k + 1] + sum(pieces[k].count(c) for c in cls._CLOSERS)
+            p = pieces[k]
+            ahead[k] = max(0, ahead[k + 1] + sum(p.count(c) for c in cls._CLOSERS)
+                           - sum(p.count(c) for c in cls._OPENERS))
+            quotes_ahead[k] = quotes_ahead[k + 1] + p.count('"')
+        out: List[str] = []
+        depth, in_quote, carry = 0, False, ""
         for k, piece in enumerate(pieces):
-            if depth > 0 and ahead[k] == 0:
-                depth = 0
+            if depth > ahead[k]:
+                depth = ahead[k]
+            if in_quote and quotes_ahead[k] == 0:
+                in_quote = False
             lead = cls._LEADING_CITES_RE.match(piece)
             if lead and out:
                 out[-1] = out[-1].rstrip() + " " + lead.group(0).strip() + " "
                 piece = piece[lead.end():]
             if not piece.strip():
                 continue
-            if out and ((depth > 0 and len(out[-1]) < cls._MAX_QUOTED
+            if carry:
+                piece, carry = carry + piece, ""
+            if cls._BARE_LIST_NUMBER.match(piece):
+                carry = piece
+                continue
+            open_now = (depth > 0 or in_quote)
+            if out and ((open_now and len(out[-1]) < cls._MAX_QUOTED
                          and not out[-1].endswith("\n"))
-                        or piece[:1].islower() and piece[:1].isascii()):
+                        or (cls._QUOTED_END.search(out[-1])
+                            and piece[:1].islower() and piece[:1].isascii())):
                 out[-1] += piece
             else:
                 out.append(piece)
-                depth = 0
+                depth, in_quote = 0, False
             depth = max(0, depth + sum(piece.count(c) for c in cls._OPENERS)
                         - sum(piece.count(c) for c in cls._CLOSERS))
+            if piece.count('"') % 2:
+                in_quote = not in_quote
+        if carry:
+            out.append(carry)
         return out
 
     def _fit_deep_think_conclusion(self, conclusion: str,

@@ -389,6 +389,51 @@ class TestPlannerBudget(unittest.TestCase):
             + "\n".join(f"{i}. {t}" for i, t in enumerate(long_titles, 1)))
         self.assertEqual([i.title for i in plan.table_of_contents.items], long_titles)
 
+    def _run_plan(self, query, reqs, mains):
+        import json as _json
+        toc = [{"section": str(i), "title": t, "description": "d",
+                "subsections": [{"section": f"{i}.{j}", "title": st, "description": "d"}
+                                for j, st in enumerate(subs, 1)]}
+               for i, (t, subs) in enumerate(mains, 1)]
+        qg, _ = self._qg(4000, _json.dumps(
+            {"title": "x", "summary": "s", "table_of_contents": toc,
+             "search_queries": [f"q{i}" for i in range(30)], "key_terms": [],
+             "suggested_sources": []}, ensure_ascii=False))
+        plan = qg.create_research_plan(query, requirements=reqs)
+        return [(i.title, [x.title for x in i.subsections])
+                for i in plan.table_of_contents.items]
+
+    def test_the_cap_grows_to_the_size_of_the_users_list(self):
+        # #93 review round 4: repeated subsection names (I0), 「課題と提言」
+        # and space-separated lists (I1), reworded titles (I14)
+        user = [("国内市場", ["現状", "課題"]), ("海外市場", ["現状", "課題"]), ("提言", [])]
+        self.assertEqual(self._run_plan(
+            "全固体電池", "目次:\n1. 国内市場\n1.1 現状\n1.2 課題\n2. 海外市場\n"
+            "2.1 現状\n2.2 課題\n3. 提言", user), user)
+        seven = ["市場規模", "主要企業", "技術動向", "規制", "価格", "課題", "提言"]
+        for reqs in ("目次: 市場規模、主要企業、技術動向、規制、価格、課題と提言",
+                     "目次：市場規模　主要企業　技術動向　規制　価格　課題　提言"):
+            got = self._run_plan("国内EV市場", reqs, [(t, []) for t in seven])
+            self.assertEqual([t for t, _ in got], seven, reqs)
+        reworded = ["国内EV市場の規模と成長", "主要プレイヤーの戦略", "技術開発の動向",
+                    "政策と規制の枠組み", "価格の推移", "今後の課題"]
+        got = self._run_plan("国内EV市場", "目次:\n1. 市場規模\n2. 主要企業\n3. 技術\n"
+                             "4. 規制\n5. 価格\n6. 課題", [(t, ["a", "b"]) for t in reworded])
+        self.assertEqual(got, [(t, []) for t in reworded])
+
+    def test_nothing_but_the_users_list_raises_the_cap(self):
+        # #93 review round 4: purposes (I6), a ・ inside a chapter name
+        # (I7), the query's preamble (I8) never add sections
+        for query, reqs, titles in (
+                ("国内EV市場の動向", "目的: 投資判断\n読者: 経営層\n必須の観点: 価格、補助金、充電網",
+                 ["投資判断の前提", "経営層向け概要", "価格", "補助金", "充電網"]),
+                ("国内EV市場", "目次:\n1. 市場・競合\n2. 価格・コスト\n3. 規制\n4. 技術\n5. 展望",
+                 ["市場・競合", "価格・コスト", "規制", "技術", "展望"]),
+                ("EV市場: 1. 規模 2. 企業 3. 規制", "",
+                 ["EV市場の概観", "規模", "企業", "規制", "展望"])):
+            got = self._run_plan(query, reqs, [(t, ["市場", "競合", "x"]) for t in titles])
+            self.assertEqual(sum(1 + len(s) for _, s in got), 5, (query, got))
+
     def test_topic_words_never_protect_subsections_or_late_chapters(self):
         # #93 review H2/H3/H5: topic words matched one chapter and one
         # subsection each; a 'お任せ' requirement with keyword 章構成 kept
@@ -532,6 +577,31 @@ class TestDeepThinkCap(unittest.TestCase):
         kept = tool._fit_deep_think_conclusion("「注目点。" + "需要は回復した。" * 60, 5)
         self.assertTrue(kept)                     # not swallowed whole
         self.assertLessEqual(len(kept), 160)
+
+    def test_splitter_round_four(self):
+        # #93 review round 4: no lowercase merge after a real sentence end
+        # (I9), a stray opener with a later bracket pair (I10), a quote
+        # spanning sentences (I11), full-width / indented list numbers (I12)
+        import re
+        from deep_research_tool.main import DeepResearchTool
+        split = DeepResearchTool._split_sentences
+        cases = {
+            "需要は回復した。iPhoneの販売も伸びた。次の文。": 3,
+            "a) first point. b) second point.": 2,
+            "Is it growing? eBay says yes. Next.": 3,
+            "（注：未確認の数値を含む。需要は回復した。価格は上昇した。（参考）次の文。": 4,
+            '“Growth will continue. Prices will rise,” the CEO said. Next.': 2,
+            '"Growth will continue. Prices will rise," the CEO said. Next.': 2,
+            "１．需要は回復した。\n２．供給は減少した。": 2,
+            "  4. Demand rose.\n  5. Supply fell.": 2,
+        }
+        for text, n in cases.items():
+            parts = split(text)
+            self.assertEqual(len(parts), n, parts)
+            self.assertEqual(re.sub(r"\s+", "", "".join(parts)),
+                             re.sub(r"\s+", "", text))
+            for p in parts:
+                self.assertIsNone(re.match(r"^\s*[0-9０-９]{1,2}[.．]\s*$", p), parts)
 
     def test_a_first_sentence_over_the_cap_adds_nothing(self):
         tool = self._tool(length_mode="fixed", preferred_body_chars=4000)
@@ -1153,6 +1223,15 @@ class TestManualExecutiveSummary(unittest.TestCase):
     the renderer printed it but the freeze never covered it."""
 
     def test_the_summary_is_frozen_and_the_check_passes(self):
+        self._run("markdown", "本調査は市場の構造と主要企業の動向を整理し、需要の見通しを示したものである。"
+                  "価格動向と規制の影響も併せて検討し、今後三年間の注目点をまとめた。")
+
+    def test_an_ampersand_in_the_pdf_summary(self):
+        # #93 review round 4 (I13): the PDF printed 'R&D' as 'R&D;'
+        self._run("pdf", "本調査は主要企業のR&D投資とM&Aの動向を整理し、需要の見通しを示したものである。"
+                  "価格動向と規制の影響も併せて検討し、今後三年間の注目点をまとめた。")
+
+    def _run(self, fmt, summary):
         from unittest.mock import patch
         from deep_research_tool.main import run_manual_research
         from deep_research_tool.tests.test_finalization_integration import (
@@ -1167,8 +1246,6 @@ class TestManualExecutiveSummary(unittest.TestCase):
                 "title": "市場シェア",
                 "content": long_body("1", "市場シェア", CLAIM_SENTENCE),
                 "evidence": SUPPORTED_EVIDENCE}})
-            summary = ("本調査は市場の構造と主要企業の動向を整理し、需要の見通しを示したものである。"
-                       "価格動向と規制の影響も併せて検討し、今後三年間の注目点をまとめた。")
             session.section_contents["_executive_summary"] = {
                 "executive_summary": summary,
                 "key_findings": ["主要企業の国内シェアは上位三社で過半を占めると整理される"],
@@ -1181,12 +1258,13 @@ class TestManualExecutiveSummary(unittest.TestCase):
                     patch("deep_research_tool.main.get_client", new=lambda **kw: llm):
                 result = run_manual_research(
                     evidence_file="dummy.csv", topic="市場調査", provider="openai",
-                    api_key="sk-test", output_format="markdown", output_dir=str(tmp),
+                    api_key="sk-test", output_format=fmt, output_dir=str(tmp),
                     manual_toc_sections=None, auto_toc=True)
             self.assertEqual(result.get("semantic_artifact_check"), "pass")
             self.assertEqual(result.get("run_status"), "completed")
-            report = Path(result["report_path"]).read_text(encoding="utf-8")
-            self.assertEqual(report.count(summary[:30]), 1)   # rendered once
+            if fmt == "markdown":
+                report = Path(result["report_path"]).read_text(encoding="utf-8")
+                self.assertEqual(report.count(summary[:30]), 1)   # rendered once
 
 if __name__ == "__main__":
     unittest.main()

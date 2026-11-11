@@ -244,57 +244,62 @@ class QueryGenerator:
                             f"- {en_sub}\n- Generate at least 15 search queries"),
         }
 
-    def _fit_plan_to_budget(self, plan: "ResearchPlan",
-                            protected=None) -> "ResearchPlan":
-        """Deterministically cap the plan at _max_flat_sections().
+    def _fit_plan_to_budget(self, plan: "ResearchPlan", shape=None,
+                            prefer=None) -> "ResearchPlan":
+        """Deterministically cap the plan.
 
-        The prompt asks for a small plan; this guarantees it. Subsections
-        are folded into their parent's description (their topics stay in
-        scope) and trailing main sections are dropped — except the
-        sections in `protected` (ids of sections whose titles come from
-        what the user wrote, see _user_titled_sections): those are always
-        kept, counted first, and the cap grows only to fit them."""
+        The cap is max(_max_flat_sections(), the number of sections in the
+        list the user wrote — `shape`, one entry per user chapter giving
+        how many subsections the user wrote under it). The planner is told
+        to follow the user's list in order, so chapter i keeps as many of
+        its subsections as the user wrote under chapter i; the rest are
+        folded into the chapter's description (their topics stay in
+        scope). If chapters still exceed the cap, the planner's extras go:
+        chapters whose titles carry none of the user's items (`prefer`)
+        first, from the end, then from the end. Nothing the user wrote can
+        raise the cap beyond the count of what the user wrote."""
         max_flat = self._max_flat_sections()
         if max_flat is None or plan is None:
             return plan
+        shape = [max(0, int(n)) for n in (shape or [])]
+        allowed = max(max_flat, sum(1 + n for n in shape))
         toc = plan.table_of_contents
-        if len(toc.get_flat_sections()) <= max_flat:
+        if len(toc.get_flat_sections()) <= allowed:
             return plan
-        protected = set(protected or ())
-        for item in toc.items:
-            keep = [sub for sub in item.subsections
-                    if item.section in protected and sub.section in protected]
-            folded = [sub for sub in item.subsections if sub not in keep]
+        for idx, item in enumerate(toc.items):
+            keep = shape[idx] if idx < len(shape) else 0
+            folded = item.subsections[keep:]
             topics = "、".join(sub.title for sub in folded if sub.title)
             if topics:
                 sep = "（扱う論点: " if self.language == "ja" else " (covers: "
                 end = "）" if self.language == "ja" else ")"
                 item.description = f"{item.description}{sep}{topics}{end}"
-            item.subsections = keep
-        # the user's sections are reserved first; the planner's own main
-        # sections fill what is left of the cap, in plan order
-        protected_flat = sum(1 + len(i.subsections) for i in toc.items
-                             if i.section in protected)
-        room = max(max_flat, protected_flat) - protected_flat
-        kept, dropped = [], []
-        for item in toc.items:
-            size = 1 + len(item.subsections)
-            if item.section in protected:
-                kept.append(item)
-            elif size <= room:
-                kept.append(item)
-                room -= size
-            else:
-                dropped.append(item.title)
-        if dropped:
-            toc.items = kept
+            item.subsections = item.subsections[:keep]
+        over = sum(1 + len(i.subsections) for i in toc.items) - allowed
+        if over > 0:
+            order = list(range(len(toc.items) - 1, -1, -1))
+            prefer = list(prefer or [])
+            extras = [k for k in order
+                      if not self._title_has_item(toc.items[k].title, prefer)]
+            drop = set()
+            for k in extras + [k for k in order if k not in extras]:
+                if over <= 0:
+                    break
+                drop.add(k)
+                over -= 1 + len(toc.items[k].subsections)
+            dropped = [toc.items[k].title for k in sorted(drop)]
+            toc.items = [it for k, it in enumerate(toc.items) if k not in drop]
             print(f"[QueryGenerator] body budget {self.body_budget_chars:,} chars: "
                   f"dropped sections {dropped}")
         print(f"[QueryGenerator] plan fitted to the body budget: "
               f"{len(toc.get_flat_sections())} section(s)"
-              + (f", {len(protected)} from the user's table of contents"
-                 if protected else ""))
+              + (f" (the user's list has {sum(1 + n for n in shape)})" if shape else ""))
         return plan
+
+    def _title_has_item(self, title: str, items) -> bool:
+        t = self._norm_title(title)
+        return bool(t) and any(len(x) >= 2 and (x in t or (len(t) >= 2 and t in x))
+                               for x in items)
 
     # list markers removed before the user's text is split into items
     _SEGMENT_MARKERS = re.compile(
@@ -327,66 +332,82 @@ class QueryGenerator:
                 out.append(seg)
         return out
 
+    # a chapter line / a subsection line of a list the user wrote
+    _SHAPE_CHAPTER = re.compile(
+        r"^\s*(?:第?\d{1,2}章|\d{1,2}[.、)）]?(?=\s|[^\x00-\x7f])|[ivxIVX]{1,4}[.)]"
+        r"|[・\-*•●■◆◇](?=\s|[^\x00-\x7f])|\(\d{1,2}\))\s*\S")
+    _SHAPE_SUB = re.compile(
+        r"^\s*\d{1,2}\.\d{1,2}(?:\.\d{1,2})*[.)]?\s*\S"
+        r"|^\s{2,}(?:[・\-*•●■◆◇]|\d{1,2}[.)]|[a-z][.)])\s*\S")
+    # a list announced in prose: 「目次：A、B、C」「章の構成は A、B で」
+    _SHAPE_LEAD = re.compile(
+        r"(?:目次|章立て|章構成|構成|章|項目|table of contents|structure|outline|"
+        r"sections?|chapters?)[^:：\n。]{0,15}?(?:[:：]|は(?=\S))", re.I)
+    _SHAPE_CONJ = re.compile(r"(?<=\S\S)(?:と|および|及び|並びに|\s+and\s+|\s*&\s*)(?=\S\S)")
+
+    def _user_toc_shape(self, query: str, requirements: str) -> List[int]:
+        """The shape of the list the user wrote — one entry per chapter,
+        the number of subsections under it — or [] when there is none.
+        The requirements are read first, then the query (only when it
+        carries a list itself: a topic is not a list)."""
+        for text in (requirements, query):
+            if text and self._has_explicit_toc(text, ""):
+                shape = self._list_shape(text)
+                if len(shape) >= 2:
+                    return shape[:30]
+        for text in (requirements, query):
+            shape = self._prose_list_shape(text)
+            if len(shape) >= 2:
+                return shape[:30]
+        return []
+
+    def _list_shape(self, text: str) -> List[int]:
+        import unicodedata
+        t = re.sub(r"[①-⑳]", lambda m: f"\n{ord(m.group()) - 0x245F}. ", text or "")
+        t = unicodedata.normalize("NFKC", t)
+        # 「目次: 1. A」: the list starts after the lead-in
+        t = re.sub(r"(?m)^\s*(?:目次|章立て|章構成|構成|table of contents|structure|outline|"
+                   r"sections?|chapters?)[^:：\n]{0,15}[:：]\s*", "\n", t, flags=re.I)
+        chapters: List[int] = []
+        for line in t.splitlines():
+            if not line.strip():
+                continue
+            if self._SHAPE_SUB.match(line):
+                if chapters:
+                    chapters[-1] += 1
+            elif self._SHAPE_CHAPTER.match(line):
+                chapters.append(0)
+        if len(chapters) >= 2:
+            return chapters
+        # one line: 「1. A 2. B 3. C」
+        n = len(self._TOC_ITEM.findall(t))
+        if n >= 2:
+            return [0] * n
+        return self._prose_list_shape(text)
+
+    def _prose_list_shape(self, text: str) -> List[int]:
+        import unicodedata
+        t = unicodedata.normalize("NFKC", text or "")
+        m = self._SHAPE_LEAD.search(t)
+        if not m:
+            return []
+        rest = re.split(r"[。\n]", t[m.end():], maxsplit=1)[0]
+        items = re.split(r"[、,，/／・;；]", rest)
+        if len(items) <= 1 and not re.search(r"[A-Za-z]", rest):
+            items = rest.split()            # 「市場規模　主要企業　…」
+        out = []
+        for it in items:
+            out += [x for x in self._SHAPE_CONJ.split(it.strip()) if len(x.strip()) >= 2]
+        return [0] * len(out) if len(out) >= 2 else []
+
     def _user_items(self, query: str, requirements: str) -> List[str]:
-        """The items the user wrote, from both fields the planner sees:
-        every item of the requirements, and the query's items only when
-        the query itself carries a list (a topic's own words — 「炭素繊維・
-        CFRP市場」 — are never the user's chapters)."""
+        """Items the user wrote (only to choose which planner chapters go
+        first when trimming): the requirements' items, and the query's
+        only when the query itself carries a list."""
         items = self._toc_segments(requirements)
         if self._has_explicit_toc(query, ""):
             items += [s for s in self._toc_segments(query) if s not in items]
         return items
-
-    def _user_titled_sections(self, plan: "ResearchPlan", query: str,
-                              requirements: str = "") -> set:
-        """Ids of the plan's sections whose titles come from what the user
-        wrote. Items are tried longest first, and each claims at most one
-        title: the one title that contains it, or whose own words (the
-        title without the query's topic words) it contains. An item that
-        fits several unclaimed titles is a topic word unless one of them
-        is exactly the item. Items that claimed a chapter are not reused
-        for subsections."""
-        items = self._user_items(query, requirements)
-        if plan is None or not items:
-            return set()
-        topic = ([] if self._has_explicit_toc(query, "") else
-                 sorted(self._toc_segments(query) + [self._norm_title(query)],
-                        key=len, reverse=True))
-
-        def core(title):
-            c = title
-            for t in topic:
-                if len(t) >= 2:
-                    c = c.replace(t, "")
-            return re.sub(r"^(?:の|と|における|に関する)+|(?:の|と)+$", "", c)
-
-        used: set = set()
-
-        def claim(sections):
-            titles = {it.section: self._norm_title(it.title) for it in sections}
-            cores = {sid: core(t) for sid, t in titles.items()}
-            claimed = set()
-            for seg in sorted((x for x in items if x not in used),
-                              key=len, reverse=True):
-                cands = [sid for sid, t in titles.items()
-                         if sid not in claimed and t
-                         and (seg in t or (len(cores[sid]) >= 2 and cores[sid] in seg))]
-                if len(cands) > 1:
-                    exact = [sid for sid in cands
-                             if titles[sid] == seg or cores[sid] == seg]
-                    cands = exact if len(exact) == 1 else []
-                if len(cands) == 1:
-                    claimed.add(cands[0])
-                    used.add(seg)
-            return claimed
-
-        toc = plan.table_of_contents
-        mains = claim(toc.items)
-        subs = set()
-        for item in toc.items:
-            if item.section in mains and item.subsections:
-                subs |= claim(item.subsections)
-        return mains | subs
 
     def _is_generic_title(self, title: str) -> bool:
         """Check if a section title is too generic.
@@ -620,12 +641,12 @@ class QueryGenerator:
 
             if plan is None:
                 continue
-            # The user's own sections are never cut. Which sections are the
-            # user's is read from the plan itself: titles that carry items
-            # the user wrote (in either field). Everything else — the
-            # planner's own subsections and extra chapters — is capped.
-            protected = self._user_titled_sections(plan, query, requirements)
-            plan = self._fit_plan_to_budget(plan, protected=protected)
+            # The cap grows to the size of the list the user wrote (never by
+            # matching titles); the planner's own extra subsections and
+            # chapters are what gets trimmed.
+            plan = self._fit_plan_to_budget(
+                plan, shape=self._user_toc_shape(query, requirements),
+                prefer=self._user_items(query, requirements))
 
             # Split long compound queries into focused sub-queries
             original_count = len(plan.search_queries)
