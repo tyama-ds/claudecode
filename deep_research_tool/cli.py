@@ -13,7 +13,10 @@ from rich.panel import Panel
 from rich.table import Table
 
 from . import __version__
-from .config import Config, LLMProvider, SearchMethod, ReportFormat, create_config
+from .config import (
+    CHART_MAX_TOTAL_LIMIT, CHART_STYLES, DEFAULT_CHART_MAX_TOTAL, DEFAULT_CHART_STYLE,
+    Config, LLMProvider, SearchMethod, ReportFormat, create_config,
+)
 from .main import DeepResearchTool
 
 
@@ -50,6 +53,13 @@ def print_config_summary(config: Config):
         table.add_row("Target Pages", str(config.report.target_pages))
     if config.report.target_characters:
         table.add_row("Target Characters", f"{config.report.target_characters:,}")
+
+    # chart settings only matter when figures are generated
+    if config.report.auto_figures:
+        rp = config.report
+        total = rp.chart_max_total or "unlimited"
+        table.add_row("Charts", f"{rp.chart_style}, max {rp.chart_max_per_section}/chapter, "
+                                f"{total} in total")
 
     console.print(table)
     console.print()
@@ -394,6 +404,23 @@ def cli():
     help="Chart rendering library (seaborn falls back to matplotlib if not installed)"
 )
 @click.option(
+    "--chart-style",
+    type=click.Choice(list(CHART_STYLES)),
+    default=DEFAULT_CHART_STYLE,
+    show_default=True,
+    help="How --auto-figures charts are drawn: enhanced (print-size PNGs, "
+         "number formats, notes computed from the data) or classic (the "
+         "v1.5 look)"
+)
+@click.option(
+    "--chart-max-total",
+    type=click.IntRange(0, CHART_MAX_TOTAL_LIMIT),
+    default=DEFAULT_CHART_MAX_TOTAL,
+    show_default=True,
+    help="Maximum charts in the whole report (0 = unlimited; the per-chapter "
+         "limit still applies)"
+)
+@click.option(
     "--verbose", "-v",
     is_flag=True,
     help="Verbose output"
@@ -506,6 +533,8 @@ def research(
     auto_figures: bool,
     live_word: bool,
     chart_library: str,
+    chart_style: str,
+    chart_max_total: int,
     verbose: bool,
     openai_key: Optional[str],
     local_base_url: Optional[str],
@@ -592,6 +621,8 @@ def research(
         auto_figures=auto_figures,
         live_report_word=live_word,
         chart_library=chart_library,
+        chart_style=chart_style,
+        chart_max_total=chart_max_total,
     )
 
     # Validate config

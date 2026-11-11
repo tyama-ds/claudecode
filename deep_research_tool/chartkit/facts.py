@@ -24,9 +24,10 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from .data_layer import _PER_POP
+from .data_layer import _PER_POP, entity_base_key
 
-_TIME_LABEL = re.compile(r"^(19|20)\d{2}(\s*Q[1-4])?$", re.I)
+# a period label of the data layer: '2024', '2024Q1', '2024H2', '2024-03'
+_TIME_LABEL = re.compile(r"^(19|20)\d{2}(\s*Q[1-4]|H[12]|-(0[1-9]|1[0-2]))?$", re.I)
 _MAX_WORDS = ("過去最高", "過去最大", "最高", "最大", "最多", "首位", "トップ", "1位", "一位",
               "最も多い", "最も大きい", "最も高い")
 _MIN_WORDS = ("過去最低", "過去最小", "最低", "最小", "最少", "最下位", "最も少ない", "最も小さい", "最も低い")
@@ -157,6 +158,19 @@ def _names(label: str, text: str) -> List[re.Match]:
     return list(re.finditer(lead + re.escape(label) + tail, text))
 
 
+def _label_mentions(label: str, text: str, period: bool) -> List[re.Match]:
+    """``_names`` for a label as shown and, for an entity, without its
+    legal form ('トヨタ自動車株式会社' is named 'トヨタ自動車が…')."""
+    import unicodedata
+    shown = unicodedata.normalize("NFKC", label).lower()
+    found = _names(shown, text)
+    if not found and not period:
+        short = entity_base_key(label)
+        if short and short != shown and len(short) >= 2:
+            found = _names(short, text)
+    return found
+
+
 def judgment_conflict(judgment: str, facts: Dict[str, Any]) -> Optional[str]:
     """Why the judgment plainly contradicts the data, or None: only
     '<label>が/は <max|min word>' ending there (see the module docstring),
@@ -164,7 +178,10 @@ def judgment_conflict(judgment: str, facts: Dict[str, Any]) -> Optional[str]:
     for '%') is never a contradiction; a rank chart ('位') is not checked
     (a smaller number is the better rank)."""
     import unicodedata
-    # the catalog lower-cases names ('NXP' → 'nxp'); full-width digits too
+    # labels keep the sources' spelling ('NXP', 'トヨタ自動車株式会社') and the
+    # LLM may write another case or drop the legal form: both sides are
+    # compared NFKC + lower case (full-width digits too). Messages print
+    # the label exactly as the chart shows it.
     text = unicodedata.normalize("NFKC", str(judgment or "")).lower()
     if not text or facts.get("kind") not in ("time", "comparison"):
         return None
@@ -176,7 +193,7 @@ def judgment_conflict(judgment: str, facts: Dict[str, Any]) -> Optional[str]:
     forecast = facts.get("forecast") or set()
     for lab, v in pts:
         period = bool(_TIME_LABEL.match(lab))
-        for m in _names(unicodedata.normalize("NFKC", lab).lower(), text):
+        for m in _label_mentions(lab, text, period):
             # a topic before the name in the same sentence is a scope
             # ('欧州メーカーはVolkswagenが首位、Nissanが最下位', '増加率は2020年が最大')
             prefix = re.split(r"[。．!?！？]", text[:m.start()])[-1]

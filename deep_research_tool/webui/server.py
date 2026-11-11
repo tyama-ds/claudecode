@@ -72,6 +72,7 @@ _CONFIG_PARAM_MAP = {
     "chart_library": "chart_library",
     "auto_figures": "auto_figures",
     "chart_max_per_section": "chart_max_per_section",
+    "chart_max_total": "chart_max_total",
     "chart_engine": "chart_engine",
     "chart_style": "chart_style",
     "enable_verification": "enable_verification",
@@ -197,8 +198,10 @@ def _profile(value, name):
 
 
 def _chart_style_param(value, key=None):
-    """'classic' | 'enhanced' (how spec charts are made and shown)."""
-    v = str(value or "classic").strip().lower()
+    """'enhanced' (default since v1.13.0) | 'classic' (how spec charts are
+    made and shown)."""
+    from ..config import DEFAULT_CHART_STYLE
+    v = str(value or DEFAULT_CHART_STYLE).strip().lower()
     if v not in ("classic", "enhanced"):
         raise ValueError("chart_style must be 'classic' or 'enhanced'")
     return v
@@ -298,6 +301,7 @@ _PARAM_CONVERTERS = {
     "local_concurrency": _int_range(1, 16),
     "llm_retry_attempts": _int_range(0, 10),
     "chart_max_per_section": _int_range(1, 12),
+    "chart_max_total": _int_range(0, 60),          # 0 = unlimited
     "chart_style": _chart_style_param,
     "ai_crawl_max_pages": _int_range(1, 200),
     "ai_crawl_site_depth": _int_range(0, 10),      # 0 = seeds only

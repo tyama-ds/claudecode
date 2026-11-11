@@ -318,6 +318,9 @@ def verify_frozen_in_artifact(manifest: Dict[str, Any],
                 # a footnote / reference prefix ('[^1]:', '3. [B] ') is
                 # plumbing; the text after it is checked like any line
                 line = _re.sub(r"^\s*(?:\[\^?\d+\]\s*[:：]|\d+\.\s+(?:\[[^\]]{0,12}\]\s*)?)", "", line)
+                # a figure number ('図3　', 'Figure 3. ') is added when the
+                # figures are placed; the title after it is frozen text
+                line = _re.sub(r"^\s*(?:\*\*)?(?:図\s*\d+[ 　]*|Figure\s+\d+\.\s*)", "", line)
                 norm = normalize_semantic_text(line)
                 if len(norm) < min_addition_chars:    # short boilerplate is structural
                     continue
@@ -410,10 +413,14 @@ def figure_semantics_markdown(collection, language: str = "ja",
             item["kind"], "図") if language == "ja" else item["kind"].title()
         head = item["title"] or item["id"]
         lines.append(f"### {label}: {head}")
-        if item["caption"]:
-            lines.append(item["caption"])
-        if item.get("alt"):
-            lines.append(item["alt"])
+        caption = item["caption"] or ""
+        if caption:
+            lines.append(caption)
+        chart_data = item.get("chart_data") or {}
+        judgment = _present(chart_data.get("judgment")) if chart_data else ""
+        alt = _alt_line(item.get("alt") or "", item["title"], caption, judgment)
+        if alt:
+            lines.append(alt)
         if item["kind"] == "table" and item.get("headers"):
             lines.append("")
             lines.append("| " + " | ".join(item["headers"]) + " |")
@@ -421,34 +428,88 @@ def figure_semantics_markdown(collection, language: str = "ja",
             # EVERY row is part of the verified text — no row cap
             for row in item.get("rows", []):
                 lines.append("| " + " | ".join(row) + " |")
-        chart_data = item.get("chart_data")
         if chart_data:
-            # chart series values/axes/unit join the verified text too
-            labels = chart_data.get("labels") or []
-            values = chart_data.get("values") or []
-            pairs = [f"{l}={v}" for l, v in zip(labels, values)]
-            series_map = chart_data.get("series") or {}
-            if isinstance(series_map, list):      # [{name, values}] shape
-                series_map = {str(s.get("name", i)): s.get("values") or []
-                              for i, s in enumerate(series_map) if isinstance(s, dict)}
-            for name, series in series_map.items():
-                if labels:
-                    pairs.extend(f"{name}:{l}={v}"
-                                 for l, v in zip(labels, series))
-                else:                              # line_xy: points carry their x
-                    pairs.extend(f"{name}:{v}" for v in series)
-            judgment = str(chart_data.get("judgment") or "")
-            if judgment and judgment not in (item["caption"] or ""):
-                lines.append(("見るべき点: " if language == "ja" else "Judgment: ")
+            # the judgment once: the chart caption already carries it
+            if judgment and judgment not in caption:
+                lines.append(("見るべき点: " if language == "ja" else "Key point: ")
                              + judgment)
-            if pairs:
-                head = "データ" if language == "ja" else "Data"
-                lines.append(f"{head}: " + "; ".join(pairs))
-            axes = " / ".join(x for x in (chart_data.get("x_axis"),
-                                          chart_data.get("y_axis"),
-                                          chart_data.get("unit")) if x)
+            # chart series values/unit join the verified text too: one line
+            # per series, label=value, missing values left out
+            lines.extend(_series_lines(chart_data, language))
+            axes = " / ".join(x for x in (_present(chart_data.get("x_axis")),
+                                          _present(chart_data.get("y_axis")),
+                                          _present(chart_data.get("unit"))) if x)
             if axes:
                 lines.append(("軸・単位: " if language == "ja"
                               else "Axes/unit: ") + axes)
         lines.append("")
     return "\n".join(lines).strip()
+
+
+# a value figure_semantics() stored for a gap (None / NaN) — never printed
+_MISSING = {"", "none", "nan", "null"}
+
+
+def _present(value) -> str:
+    """The text of a stored value, '' when it is a gap ('None')."""
+    text = "" if value is None else str(value).strip()
+    return "" if text.lower() in _MISSING else text
+
+
+def _alt_line(alt: str, title: str, caption: str, judgment: str) -> str:
+    """The alt text, only when it says something the title, caption and
+    judgment lines do not (a chart's alt is 'title: judgment')."""
+    alt = (alt or "").strip()
+    if not alt:
+        return ""
+    rest = alt
+    if title and rest.startswith(title):
+        rest = rest[len(title):].lstrip(" :：　")
+    if not rest or rest == title or rest in (caption or "") or rest == judgment:
+        return ""
+    return alt
+
+
+def _xy_label(x: str) -> str:
+    """A line_xy point's x as its label ('2023.0' → '2023')."""
+    try:
+        f = float(x)
+        return str(int(f)) if f.is_integer() else x
+    except (TypeError, ValueError):
+        return x
+
+
+def _series_lines(chart_data: Dict[str, Any], language: str) -> List[str]:
+    """'- name: label=value; …' — one compact line per series. A line_xy
+    point ('x:y') prints as x=y (its x IS its label: the label array is
+    not paired with points, some of which may have been dropped)."""
+    head = "データ" if language == "ja" else "Data"
+    out: List[str] = []
+    labels = [str(l) for l in (chart_data.get("labels") or [])]
+    values = chart_data.get("values") or []
+    if values and not isinstance(values, dict):          # legacy {labels, values}
+        pairs = [f"{l}={_present(v)}" for l, v in zip(labels, values) if _present(v)]
+        if pairs:
+            out.append(f"- {head}: " + "; ".join(pairs))
+    series_map = chart_data.get("series") or {}
+    if isinstance(series_map, list):                     # [{name, values}] shape
+        series_map = {str(s.get("name", i)): s.get("values") or []
+                      for i, s in enumerate(series_map) if isinstance(s, dict)}
+    xy = _present(chart_data.get("form")) == "line_xy"
+    for name, series in series_map.items():
+        pairs = []
+        for i, v in enumerate(series or []):
+            text = _present(v)
+            if not text:
+                continue
+            if xy or (not labels and ":" in text):       # a line_xy point 'x:y'
+                x, _sep, y = text.rpartition(":")
+                if _present(y) and _present(x):
+                    pairs.append(f"{_xy_label(x)}={y}")
+            elif i < len(labels):
+                pairs.append(f"{labels[i]}={text}")
+            else:
+                pairs.append(text)
+        if pairs:
+            out.append(f"- {name or head}: " + "; ".join(pairs))
+    return out

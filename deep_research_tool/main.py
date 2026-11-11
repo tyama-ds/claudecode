@@ -2127,16 +2127,16 @@ class DeepResearchTool:
                 language = getattr(self.config.research, "language", "en")
                 final_doc += warnings_collector.to_report_section(language)
 
-            # V2 HTML: the charts and images go into the markdown before it
-            # is converted, then are embedded in the page (the post-render
-            # insertion could not edit V2's HTML: the report had no figures)
+            # V2 HTML / PDF: the charts and images go into the markdown before
+            # it is converted, then are embedded in the page / drawn into the
+            # PDF (the post-render insertion cannot edit V2's HTML or a PDF)
             fmt_value = str(getattr(self.config.report.format, "value",
                                     self.config.report.format)).lower()
             # the tables reach the page through the verified 図表一覧 when there
             # is one; without verification they are inserted here
             v2_tables = [] if (figure_collection is None or extras_flags.get("figures_key")) \
                 else list(figure_collection.tables)
-            v2_html_figures = (fmt_value == "html" and figure_collection is not None
+            v2_html_figures = (fmt_value in ("html", "pdf") and figure_collection is not None
                                and fig_generator is not None
                                and bool(figure_collection.figures or figure_collection.charts or v2_tables))
             if v2_html_figures:
@@ -2164,6 +2164,20 @@ class DeepResearchTool:
                         1 for t in v2_tables if t.title and t.title in page)
                 except Exception as e:
                     print(f"[AutoFigures] embedding figures in the V2 HTML failed: {e}")
+            elif v2_html_figures or (figure_collection is not None and fmt_value == "pdf"):
+                # PDF — or the Markdown it fell back to: the figures are
+                # already in it, the post-render insertion (which cannot
+                # edit a PDF) must not run again
+                figures_embedded = True
+                if not v2_html_figures:
+                    images = 0
+                elif Path(report_path).suffix.lower() == ".pdf":
+                    images = int(getattr(generator, "pdf_images_embedded", 0) or 0)
+                else:
+                    images = sum(1 for f in list(figure_collection.figures) + list(figure_collection.charts)
+                                 if f.image_path and Path(f.image_path).exists())
+                v2_figures_placed = images + sum(
+                    1 for t in v2_tables if t.title and t.title in final_doc)
         else:
             # V1: common finalization on the session sections BEFORE the
             # deterministic render. The Fermi section joins the body
@@ -4880,16 +4894,19 @@ Output only the text (no JSON, no heading):"""
         from .chartkit.facts import apply_facts
         from .chartkit.grounding import PROBLEM_TEXT, ground_panel
         from .chartkit.render_png import FONT_STATE
-        from .report.figure_table_generator import Figure, FigureType
+        from .report.figure_table_generator import Figure, FigureType, judgment_label
         from .utils.concurrency import ContextThreadPoolExecutor
 
         rc, rp = self.config.research, self.config.report
         language = rc.language
         figures_dir = Path(figures_dir)
         figures_dir.mkdir(parents=True, exist_ok=True)
-        max_panels = max(1, int(getattr(rp, "chart_max_per_section", 6) or 6))
+        max_panels = max(1, int(getattr(rp, "chart_max_per_section", 3) or 3))
+        # report-wide cap (0 = unlimited): the charts kept are chosen across
+        # chapters below, so every chapter keeps its first chart first
+        max_total = max(0, int(getattr(rp, "chart_max_total", 0) or 0))
         # classic keeps the v1.5 look; enhanced = the recommended changes
-        style = str(getattr(rp, "chart_style", "classic") or "classic")
+        style = str(getattr(rp, "chart_style", "enhanced") or "enhanced")
         primary = tuple(DEFAULT_PRIMARY_DOMAINS) + tuple(getattr(rp, "chart_primary_domains", None) or [])
         policy = SourcePolicy.for_style(style, primary)
         llm = self.stage_llm_clients.get("evaluation", self.llm_client)
@@ -4929,7 +4946,8 @@ Output only the text (no JSON, no heading):"""
             if str(getattr(dp, "section_id", "") or "") not in section_ids
             and str(getattr(dp, "evidence_id", "") or "") not in claimed_ids)
         print(f"[AutoFigures] chart spec ({style}): {len(catalogs)}/{len(sections)} chapters have "
-              f"plottable series; up to {max_panels} panels each")
+              f"plottable series; up to {max_panels} panels each"
+              + (f", {max_total} in the report" if max_total else ""))
         if not catalogs:
             self._write_chart_yield(figures_dir, chart_yield)
             return []
@@ -4974,6 +4992,22 @@ Output only the text (no JSON, no heading):"""
         with ContextThreadPoolExecutor(max_workers=workers) as ex:
             results = list(ex.map(_spec_for, list(catalogs)))
 
+        # report-wide cap: which validated panels are left out (never silently:
+        # chart_yield.json records every one of them)
+        over_total = self._chart_total_cap(results, max_total)
+        if max_total:
+            n_valid = sum(len(r[2]) for r in results)
+            n_cut = sum(len(v) for v in over_total.values())
+            chart_yield["total_cap"] = {
+                "max_total": max_total, "validated": n_valid, "kept": n_valid - n_cut,
+                "dropped": n_cut,
+                "dropped_panels": [{"chapter": str(sid), "id": p.get("id"), "title": p.get("title")}
+                                   for sid, ps in over_total.items() for p in ps]}
+            if n_cut:
+                print(f"[AutoFigures] report-wide chart cap {max_total}: {n_cut} of {n_valid} "
+                      f"panel(s) left out: " + "; ".join(
+                          f"{sid}:{p.get('id')}" for sid, ps in over_total.items() for p in ps[:3]))
+
         def _source_text(evidence_id, url):
             ev = None
             try:
@@ -5010,9 +5044,12 @@ Output only the text (no JSON, no heading):"""
             if rejected:
                 print(f"[AutoFigures] {sid}: {len(rejected)} panel(s) rejected: "
                       + "; ".join(f"{pid}: {r}" for pid, r in rejected[:4]))
+            cut = {id(p) for p in over_total.get(sid, [])}
+            if cut:
+                y["over_total"] = len(cut)
             ids = []
             render_failed = 0
-            for panel in valid:
+            for panel in [p for p in valid if id(p) not in cut]:
                 if panel.get("name_fixes"):
                     print(f"[AutoFigures] {panel['id']}: legend names fixed: "
                           + "; ".join(panel["name_fixes"]))
@@ -5030,7 +5067,7 @@ Output only the text (no JSON, no heading):"""
                                         + f"　※{len(g['issues'])}点の値は出典本文で確認できませんでした（要確認）。")
                 try:
                     path = render_png(panel, figures_dir / f"chart_{panel['id']}.png", language=language,
-                                      style=style)
+                                      style=style, embed_text=False)
                 except Exception as e:
                     print(f"[AutoFigures] PNG render failed for {panel.get('id')}: {e}")
                     render_failed += 1
@@ -5048,7 +5085,12 @@ Output only the text (no JSON, no heading):"""
                     figure_id=panel["id"],
                     figure_type=FigureType.CHART,
                     title=str(panel.get("title") or ""),
-                    caption=(caption + ("　見るべき点: " + judgment if judgment else "")).strip(),
+                    # the caption block printed under the chart: caption text,
+                    # then the judgment ONCE (the report renderers put it on
+                    # its own line and add 「図N　タイトル」 above the image —
+                    # the number is never stored here: this text is frozen)
+                    caption=(caption + ("　" + judgment_label(language) + judgment
+                                        if judgment else "")).strip(),
                     source_url=src,
                     section_id=sid,
                     image_path=path,
@@ -5062,6 +5104,7 @@ Output only the text (no JSON, no heading):"""
                                   "form_rendered": p.get("form_rendered"),
                                   "name_fixes": p.get("name_fixes") or [],
                                   "grounding": p.get("grounding"),
+                                  "over_total": id(p) in cut,
                                   "rendered": p["id"] in ids} for p in valid]})
             if ids:
                 page_sections.append({"title": f"{sid}. {title}", "panel_ids": ids})
@@ -5070,6 +5113,8 @@ Output only the text (no JSON, no heading):"""
                     why = "チャート設計の応答を JSON として読めませんでした"
                 elif not info.get("proposed"):
                     why = "LLM が描く価値のあるパネルなしと判断しました"
+                elif valid and len(cut) == len(valid):
+                    why = f"レポート全体のチャート上限（{max_total} 件）を超えたため省きました"
                 elif render_failed:
                     why = (f"合格した {len(valid)} 件の画像の描画に失敗しました"
                            + (f"（ほか {len(rejected)} 件は検証で不採用）" if rejected else ""))
@@ -5120,6 +5165,29 @@ Output only the text (no JSON, no heading):"""
             print(f"[AutoFigures] charts.html failed: {e}")
         print(f"[AutoFigures] chart spec: {len(figures)} chart(s) across {len(page_sections)} chapter(s)")
         return figures
+
+    @staticmethod
+    def _chart_total_cap(results, max_total: int) -> dict:
+        """{chapter: [validated panels over the report-wide cap]}.
+
+        There is no value score per panel; the LLM lists a chapter's panels
+        best first. Panels are kept round-robin over the chapters in report
+        order — every chapter's 1st panel, then every 2nd, … — so each
+        chapter keeps one chart before any chapter gets a second (or a
+        third), and earlier chapters win the last places. 0 = no cap."""
+        if not max_total:
+            return {}
+        from .report.v2.generator import _section_sort_key
+        queues = sorted(((sid, list(valid)) for sid, _t, valid, _r, _e, _i in results if valid),
+                        key=lambda q: _section_sort_key(str(q[0])))
+        keep: set = set()
+        depth = max((len(v) for _s, v in queues), default=0)
+        for d in range(depth):
+            for _sid, valid in queues:
+                if d < len(valid) and len(keep) < max_total:
+                    keep.add(id(valid[d]))
+        over = {sid: [p for p in valid if id(p) not in keep] for sid, valid in queues}
+        return {sid: ps for sid, ps in over.items() if ps}
 
     @staticmethod
     def _write_chart_yield(figures_dir: Path, chart_yield: dict) -> None:

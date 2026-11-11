@@ -846,7 +846,12 @@ class ReportConfig:
     # Intelligent chart analysis settings
     intelligent_charts: bool = True  # Use ChartAnalyzer for smart chart recommendations
     chart_insights: bool = True  # Generate insights for charts
-    chart_max_per_section: int = 6  # Maximum charts per section
+    # Maximum charts per chapter (v1.13.0: default 6 -> 3)
+    chart_max_per_section: int = 3
+    # Maximum spec charts in the whole report (v1.13.0; 0 = unlimited,
+    # allowed 0..CHART_MAX_TOTAL_LIMIT); enforced by the report pipeline
+    # on top of the per-chapter cap
+    chart_max_total: int = 12
     # "spec": the LLM writes a chart SPEC per chapter (which series, which
     # form, emphasis, caption, judgment) over a deterministic data layer
     # with certainty tags; fixed renderers draw it (Chart.js HTML page +
@@ -856,13 +861,15 @@ class ReportConfig:
     chart_primary_domains: List[str] = field(default_factory=list)
     # How spec charts are made and shown (both keep "numbers only from the
     # data layer"; both get the same correctness fixes):
-    # "classic"  — the v1.5 look and making as they are (default)
-    # "enhanced" — the recommended changes: values checked against the
-    #   source text shown on the chart, research firms / PR wires are 二次
-    #   and actual beats forecast, the judgment and caption carry facts
-    #   computed from the data, PNGs drawn at their printed size with
-    #   number formats, automatic hbar for many labels and a layout QA pass
-    chart_style: str = "classic"
+    # "enhanced" — the recommended changes (default since v1.13.0): values
+    #   checked against the source text shown on the chart, research firms /
+    #   PR wires are 二次 and actual beats forecast, the judgment and caption
+    #   carry facts computed from the data, PNGs drawn at their printed size
+    #   with number formats, automatic hbar for many labels and a layout QA
+    #   pass
+    # "classic"  — the v1.5 look and making as they are (the default up to
+    #   v1.12; kept for users who choose it)
+    chart_style: str = "enhanced"
 
 
 @dataclass
@@ -970,6 +977,12 @@ class Config:
             errors.append(
                 "length_mode='fixed' requires preferred_body_chars or "
                 "target_characters to be set")
+        # chart caps (create_config validates too; this catches a
+        # ReportConfig built or changed directly)
+        try:
+            _chart_max_total(rp.chart_max_total)
+        except ValueError as e:
+            errors.append(str(e))
 
         # --- Finalization loop validation (None = UNSET, profile applies) ---
         rc = self.research
@@ -1035,14 +1048,36 @@ class Config:
 
 
 CHART_STYLES = ("classic", "enhanced")
+# the chart style used when none is chosen (v1.13.0: classic -> enhanced)
+DEFAULT_CHART_STYLE = "enhanced"
+# chart caps: per chapter (default) and for the whole report (default and
+# allowed maximum; 0 = unlimited)
+DEFAULT_CHART_MAX_PER_SECTION = 3
+DEFAULT_CHART_MAX_TOTAL = 12
+CHART_MAX_TOTAL_LIMIT = 60
 
 
 def _chart_style(value) -> str:
-    """'classic' (default) or 'enhanced'; anything else is an error."""
-    v = str(value or "classic").strip().lower()
+    """'enhanced' (default; also for an empty value) or 'classic';
+    anything else is an error."""
+    v = str(value or DEFAULT_CHART_STYLE).strip().lower()
     if v not in CHART_STYLES:
         raise ValueError(f"chart_style must be one of {CHART_STYLES}: {value!r}")
     return v
+
+
+def _chart_max_total(value) -> int:
+    """The report-wide chart cap: an integer 0..CHART_MAX_TOTAL_LIMIT
+    (0 = unlimited). None, bool, float and other non-integers are
+    errors, never silently rounded or clamped (None would read as 0 =
+    unlimited downstream)."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("chart_max_total must be an integer between 0 and "
+                         f"{CHART_MAX_TOTAL_LIMIT} (got {value!r})")
+    if not 0 <= value <= CHART_MAX_TOTAL_LIMIT:
+        raise ValueError("chart_max_total must be between 0 and "
+                         f"{CHART_MAX_TOTAL_LIMIT} (got {value}; 0 = unlimited)")
+    return value
 
 
 def create_config(
@@ -1223,10 +1258,11 @@ def create_config(
     # Intelligent chart analysis parameters
     intelligent_charts: bool = True,
     chart_insights: bool = True,
-    chart_max_per_section: int = 6,
+    chart_max_per_section: int = DEFAULT_CHART_MAX_PER_SECTION,
+    chart_max_total: Optional[int] = DEFAULT_CHART_MAX_TOTAL,
     chart_engine: str = "spec",
     chart_primary_domains: Optional[List[str]] = None,
-    chart_style: str = "classic",
+    chart_style: str = DEFAULT_CHART_STYLE,
     # Format strictness
     strict_format: bool = False,
     # Fermi estimation parameters
@@ -1441,10 +1477,14 @@ def create_config(
         derived_fill_missing: Fill missing data points via interpolation
         intelligent_charts: Use ChartAnalyzer for smart chart recommendations
         chart_insights: Generate insights and messages for charts
-        chart_max_per_section: Maximum charts per section
-        chart_style: How spec charts are made: "classic" (the v1.5 look,
-            default) or "enhanced" (source-checked values on the chart,
-            data-derived judgment / caption, print-size PNGs with layout QA)
+        chart_max_per_section: Maximum charts per chapter (default 3)
+        chart_max_total: Maximum spec charts in the whole report (default
+            12, allowed 0..60, 0 = unlimited; None = the default). Values
+            outside the range, bool and float raise ValueError
+        chart_style: How spec charts are made: "enhanced" (default since
+            v1.13.0: source-checked values on the chart, data-derived
+            judgment / caption, print-size PNGs with layout QA) or
+            "classic" (the v1.5 look)
         **kwargs: Additional keyword arguments
 
     Returns:
@@ -1680,6 +1720,8 @@ def create_config(
         intelligent_charts=intelligent_charts,
         chart_insights=chart_insights,
         chart_max_per_section=chart_max_per_section,
+        chart_max_total=_chart_max_total(
+            DEFAULT_CHART_MAX_TOTAL if chart_max_total is None else chart_max_total),
         chart_engine=chart_engine,
         chart_primary_domains=list(chart_primary_domains or []),
         chart_style=_chart_style(chart_style),

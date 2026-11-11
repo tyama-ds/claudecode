@@ -80,7 +80,8 @@ class TestDataLayer:
         assert "換算" in ts.note
         assert ts.sources[2]["url"] == gov                   # the primary source won
         cmp = next(s for s in cat.series.values() if s.kind == "comparison")
-        assert cat.labels[cmp.labels_ref] == ["toray", "teijin"]
+        # v1.13: labels keep the sources' spelling (canon() only groups)
+        assert cat.labels[cmp.labels_ref] == ["Toray", "Teijin"]
         assert cmp.values == [300.0, 200.0] and cmp.basis == ["公表", "二次"]
         assert cmp.year == 2024
         assert any("指標名なし" in d for d in cat.dropped)
@@ -131,7 +132,8 @@ class TestSpec:
         coll.charts.append(Figure(figure_id="x", figure_type=FigureType.CHART, title="t", caption="c",
                                   section_id="1", chart_data=sem))
         md = figure_semantics_markdown(coll)
-        assert "出荷:25Q1=202" in md and "見るべき点" in md
+        # v1.13.0: one compact line per series ("- name: label=value; …")
+        assert "- 出荷: 25Q1=202; 25Q2=190" in md and "見るべき点" in md
 
     def test_validate_rejects_the_handoff_cases(self):
         data = _load("data.json")
@@ -289,7 +291,9 @@ def _store():
         store.add(_dp("炭素繊維市場", "市場規模", y, v, "億円", gov, section_id="1"))
     for e, v in (("Toray", 300), ("Teijin", 200), ("Mitsubishi", 150)):
         store.add(_dp(e, "売上高", 2024, v, "億円", "https://news.example.com/z", section_id="1"))
-    for y, v in ((2023, 10), (2024, 12)):
+    # v1.13: three years (a single-series bar needs 3 categories; two
+    # points are no chart any more — see test_chart_data_v113)
+    for y, v in ((2022, 9), (2023, 10), (2024, 12)):
         store.add(_dp("航空機向け", "需要", y, v, "千トン", gov, section_id="2"))
     return store
 
@@ -347,7 +351,9 @@ class TestPipeline:
         from deep_research_tool.config import create_config
         cfg = create_config(provider="openai", openai_api_key="t")
         rp = cfg.report
-        assert rp.chart_engine == "spec" and rp.chart_max_per_section == 6
+        # v1.13.0: 3 charts per chapter (was 6) and 12 for the whole report
+        assert rp.chart_engine == "spec" and rp.chart_max_per_section == 3
+        assert rp.chart_max_total == 12
         assert rp.derived_fill_missing is False and rp.derived_market_shares is False
         assert rp.numerical_extract_from_sections is False
         from deep_research_tool.evidence.numerical_extractor import DerivedMetricsCalculator
@@ -453,8 +459,11 @@ class TestWordInsertion:
         d = docx.Document(str(out))
         assert len(d.inline_shapes) == 1
         texts = [p.text for p in d.paragraphs]
-        i_cap = texts.index("出所 2 件　見るべき点: 回復基調。")
-        assert texts.index("1. 市場規模の推移") < i_cap < texts.index("2. 競合")
+        # v1.13.0: 「図1　タイトル」 above the image; ONE caption block below
+        # it with the judgment on its own line
+        i_cap = texts.index("出所 2 件\n見るべき点: 回復基調。")
+        i_title = texts.index(f"図1　{valid[0]['title']}")
+        assert texts.index("1. 市場規模の推移") < i_title < i_cap < texts.index("2. 競合")
 
 
 class TestValueFormatting:

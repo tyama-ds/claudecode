@@ -15,12 +15,14 @@ import re
 from statistics import mean, pstdev
 from typing import Any, Dict, List, Optional, Tuple
 
-from .data_layer import _CURRENCY_WORDS, canon, parse_unit
+from .data_layer import _CURRENCY_WORDS, canon, entity_base_key, parse_unit
 
 FORMS = ("bar", "hbar", "stacked_bar", "stacked_hbar", "line_xy")
 ROLES = ("emphasis", "context", "context2", "part")
 MAX_SERIES = 8
 MIN_CV = 0.01
+MIN_LINE_POINTS = 3          # a line_xy panel needs this many distinct x positions
+MIN_BAR_CATEGORIES = 3       # a single-series bar / hbar needs this many values
 
 
 class SpecError(ValueError):
@@ -38,7 +40,8 @@ STYLE_GUIDE_JA = """あなたは比較判断用チャートの設計者です。
 2. form は bar / hbar / stacked_bar / stacked_hbar / line_xy から選ぶ。選択基準:
    量の比較=bar、項目が多い比較（6 以上）=hbar、構成比=stacked_hbar、時系列の推計比較=line_xy、能力と実績=stacked_bar。
 3. 1 パネル=1 つの問い。パネルは最大 {max_panels}、系列は最大 8、二軸は禁止。単位の違う系列を 1 パネルに混ぜない。
-   情報量のないパネル（値が 1 つだけ、全部同じ値、章の論点と無関係）は作らない。何も作れなければ [] を返す。
+   情報量のないパネル（値が 1 つだけ、全部同じ値、3 時点未満の折れ線、3 項目未満の単一系列の棒、章の論点と無関係）は
+   作らない。何も作れなければ [] を返す。
 4. 強調する系列は 1 つだけ role="emphasis"、残りは "context" または "context2"。構成比は "part"。
    単一系列で特定の項目だけ目立たせたい場合は highlight にそのラベルを列挙する。
 5. caption には出所と確度（公表/換算/導出/推定/二次）を必ず書く（カタログの basis と sources を使う）。
@@ -54,7 +57,7 @@ STYLE_GUIDE_JA = """あなたは比較判断用チャートの設計者です。
 STYLE_GUIDE_EN = """You design charts for comparison and judgment. From the data catalog, output a JSON array of panels.
 1. Never write numbers: series reference catalog keys through values_ref (e.g. ts3, cmp7); labels_ref must be the catalog's. Only combine series that share one labels_ref in a panel.
 2. form is one of bar / hbar / stacked_bar / stacked_hbar / line_xy (quantity comparison=bar, many items=hbar, composition=stacked_hbar, time series of estimates=line_xy, capacity vs actual=stacked_bar).
-3. One panel = one question. At most {max_panels} panels, at most 8 series, no dual axes, never mix units in one panel. Skip uninformative panels (single value, flat values, unrelated to the chapter). Return [] if nothing is worth plotting.
+3. One panel = one question. At most {max_panels} panels, at most 8 series, no dual axes, never mix units in one panel. Skip uninformative panels (single value, flat values, a line with fewer than 3 points, a single-series bar with fewer than 3 categories, unrelated to the chapter). Return [] if nothing is worth plotting.
 4. Exactly one role="emphasis" series at most; others "context" / "context2"; composition parts are "part". Use highlight for single-series bars.
 5. caption states sources and certainty (公表/換算/導出/推定/二次 from the catalog's basis and sources); judgment says in one sentence what to look at; the title includes the unit in parentheses.
 6. Output the JSON array only, no prose, no code fences.
@@ -163,7 +166,10 @@ def _series_keys(s: Dict[str, Any]) -> List[str]:
     entity of a time series, the year of a comparison."""
     d = s.get("_data") or {}
     if d.get("kind") == "time" and d.get("entity"):
-        return [canon(d["entity"])]
+        # the entity as shown and without its legal form ('トヨタ自動車株式会社'
+        # is named 'トヨタ自動車' just as well)
+        keys = [canon(d["entity"]), entity_base_key(d["entity"])]
+        return [k for i, k in enumerate(keys) if k and k not in keys[:i]]
     if d.get("kind") == "comparison" and d.get("year"):
         return [str(d["year"])]
     return []
@@ -360,6 +366,19 @@ def validate(panels: List[Dict[str, Any]]) -> None:
                     raise SpecError(f"{pid}/{s.get('name')}: line_xy の値は {{x, y}} の配列です")
                 if len(s.get("basis") or []) != len(vals):
                     raise SpecError(f"{pid}/{s.get('name')}: basis の長さが不一致です")
+            # informativeness, as for the other forms: a line through one
+            # or two points, or a flat single line, says nothing
+            ys = [float(v["y"]) for s in series for v in (s.get("values") or [])
+                  if isinstance(v.get("y"), (int, float)) and not isinstance(v.get("y"), bool)]
+            if len(ys) < 2:
+                raise SpecError(f"{pid}: 値が 1 つしかありません")
+            xs = {v.get("x") for s in series for v in (s.get("values") or [])
+                  if isinstance(v.get("y"), (int, float)) and not isinstance(v.get("y"), bool)}
+            if len(xs) < MIN_LINE_POINTS:
+                raise SpecError(f"{pid}: 折れ線（時系列）には {MIN_LINE_POINTS} 時点以上が必要です"
+                                f"（{len(xs)} 時点）。棒グラフか表にしてください")
+            if len(series) == 1 and _cv(ys) < MIN_CV:
+                raise SpecError(f"{pid}: 値がすべて同じです")
             continue
         labels = p.get("labels") or []
         if len(labels) < 1:
@@ -388,6 +407,10 @@ def validate(panels: List[Dict[str, Any]]) -> None:
                        if isinstance(v, (int, float)) and not isinstance(v, bool)]
         if len(all_numeric) < 2:
             raise SpecError(f"{pid}: 値が 1 つしかありません")
+        if len(series) == 1 and not form.startswith("stacked") and len(all_numeric) < MIN_BAR_CATEGORIES:
+            # two bars of one series are a sentence, not a chart
+            raise SpecError(f"{pid}: 単一系列の棒グラフには {MIN_BAR_CATEGORIES} 項目以上が必要です"
+                            f"（{len(all_numeric)} 項目）。本文で述べるか他の系列と組み合わせてください")
         if len(series) == 1 and not form.startswith("stacked") and _cv(all_numeric) < MIN_CV:
             raise SpecError(f"{pid}: 値がすべて同じです")
 

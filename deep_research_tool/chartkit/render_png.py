@@ -2,25 +2,31 @@
 PNG renderer (matplotlib) with the SAME rules as the HTML page, for the
 Markdown / Word / PDF outputs: one emphasised series in blue, context in
 grey, negative values red, category colours for parts and line_xy,
-striped fill for every value that is not 公表, value labels, the unit in
-the title, a single axis, a legend built from the roles, and the caption
-and judgment under the chart.
+striped fill for every bar value that is not 公表 (a hollow marker on a
+line), forecasts drawn dashed and hollow, value labels, the unit in the
+title, a single axis, a legend built from the roles (none for a single
+series), and the caption and judgment under the chart (left out with
+``embed_text=False``: the report then prints them once as text).
 
 Two styles (``report.chart_style``):
 
-- ``classic``  — the v1.5 look (10 in wide, the same fonts and layout)
+- ``classic``  — the v1.5 look (10 in wide, the same sizes and layout)
 - ``enhanced`` — drawn at the size it is printed (5.5 in, the width Word
-  and PDF use, so the text is not shrunk), thousands separators on the
-  value axis, a bar chart with many or long labels drawn as horizontal
-  bars, and a layout QA pass (overlapping tick labels rotated, the plot
-  enlarged when text spills out of the figure)
+  and PDF use, so the text is not shrunk), a bar chart with many or long
+  labels drawn as horizontal bars, and a layout QA pass (overlapping
+  tick labels rotated, the plot enlarged when text spills out of the
+  figure)
 
 Both styles get the correctness fixes: negative values are drawn (the
-value axis is no longer pinned at 0), overlapping point labels are
-dropped instead of printed over each other, long category names set the
-left margin, small numbers keep their digits (0.04, not 0.0), text never
-breaks inside a number, and rendering is serialized (pyplot keeps global
-state; the Web UI runs several jobs in one process).
+value axis is no longer pinned at 0), a line chart's value axis follows
+the data (0 only when the values are near 0), the value axis prints
+plain numbers with thousands separators (never a '1e6' offset), point /
+value labels never print over each other or over another series'
+markers, lines or bars (they move, or are dropped; the emphasised series
+keeps its labels), long category names set the left margin, small
+numbers keep their digits (0.04, not 0.0), text never breaks inside a
+number, proportional CJK fonts come first, and rendering is serialized
+(pyplot keeps global state; the Web UI runs several jobs in one process).
 """
 
 from __future__ import annotations
@@ -35,11 +41,18 @@ from typing import Any, Dict, List, Optional
 ROLE = {"emphasis": "#2a78d6", "context": "#888780", "context2": "#B4B2A9", "negative": "#e34948"}
 CAT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
 SEG = [("#85B7EB", "#042C53"), ("#F0997B", "#4A1B0C"), ("#B4B2A9", "#2C2C2A"), ("#A9D8C2", "#0E3D2A")]
-MARKERS = ["o", "s", "^", "D", "*", "x"]
-DASHES = ["-", "--", ":", "-.", (0, (4, 4)), (0, (1, 2))]
+# every marker can be drawn hollow (an 'x' could not)
+MARKERS = ["o", "s", "^", "D", "*", "v"]
 INK = "#52514e"
 GRID = "#e1e0d9"
+# notes under the legend (prelude.js prints the same words): a value that
+# is not 公表 is striped on a bar and hollow on a line; a forecast is dashed
+# and hollow (a bar: hollow, dotted, dashed outline)
 STRIPE_NOTE = "斜線＝換算・導出・推定・二次"
+HOLLOW_NOTE = "白抜き＝換算・導出・推定・二次"
+FORECAST_NOTE = "破線・白抜き＝予測値"
+FORECAST_DASH = (0, (4, 3))
+FORECAST_HATCH = "...."
 
 STYLES = ("classic", "enhanced")
 # classic: the v1.5 sizes; enhanced: drawn at the printed width (Word / PDF
@@ -53,18 +66,16 @@ _LAYOUT = {
                  "judgment": 8, "legend": 8, "wrap": 46, "bar_h": 3.4, "min_plot": 1.9, "cat_wrap": 16},
 }
 
-# classic: the v1.5 preference order (same font as before on every host);
-# enhanced: Noto / BIZ UD first (complete glyphs, made for documents)
-_JP_FONT_HINTS = {
-    "classic": ("IPAGothic", "IPAexGothic", "IPAPGothic", "Noto Sans CJK JP", "Noto Sans JP",
-                "NotoSansCJK", "NotoSansJP", "Source Han Sans", "Yu Gothic", "YuGothic",
-                "Hiragino Sans", "Meiryo", "MS Gothic", "TakaoGothic", "VL Gothic",
-                "WenQuanYi", "Unifont"),
-    "enhanced": ("Noto Sans CJK JP", "Noto Sans JP", "NotoSansCJK", "NotoSansJP", "BIZ UDPGothic",
-                 "IPAexGothic", "IPAGothic", "IPAPGothic", "Source Han Sans", "Yu Gothic",
-                 "YuGothic", "Hiragino Sans", "Meiryo", "MS Gothic", "TakaoGothic", "VL Gothic",
-                 "WenQuanYi", "Unifont"),
-}
+# both styles: proportional CJK fonts first (Noto / BIZ UDP / IPAex /
+# IPAP; a fixed-pitch font set '1,234' and Latin names with wide gaps),
+# the fixed-pitch ones (IPAGothic, MS Gothic…) only when nothing else is
+# installed. Hints match by substring: 'IPAGothic' does not match
+# 'IPAPGothic' or 'IPAexGothic'.
+_PROPORTIONAL_FIRST = ("Noto Sans CJK JP", "Noto Sans JP", "NotoSansCJK", "NotoSansJP", "BIZ UDPGothic",
+                       "IPAexGothic", "IPAPGothic", "Source Han Sans", "Yu Gothic", "YuGothic",
+                       "Hiragino Sans", "Meiryo", "MS PGothic", "TakaoPGothic", "VL PGothic",
+                       "IPAGothic", "MS Gothic", "TakaoGothic", "VL Gothic", "WenQuanYi", "Unifont")
+_JP_FONT_HINTS = {"classic": _PROPORTIONAL_FIRST, "enhanced": _PROPORTIONAL_FIRST}
 _font_cache: Dict[str, Optional[str]] = {}
 # pyplot (figure manager, rcParams) is process-global: one render at a time
 _RENDER_LOCK = threading.Lock()
@@ -83,9 +94,10 @@ def setup_japanese_font(plt, fm, style: str = "classic") -> Optional[str]:
         try:
             names = [f.name for f in fm.fontManager.ttflist]
             for hint in _JP_FONT_HINTS.get(style, _JP_FONT_HINTS["classic"]):
-                hit = next((n for n in names if hint.lower().replace(" ", "") in n.lower().replace(" ", "")), None)
-                if hit:
-                    name = hit
+                hits = [n for n in names if hint.lower().replace(" ", "") in n.lower().replace(" ", "")]
+                if hits:
+                    # a family's fixed-pitch variant ('… Mono') only when it is the only one
+                    name = next((n for n in hits if "mono" not in n.lower()), hits[0])
                     break
         except Exception:
             name = None
@@ -125,55 +137,95 @@ def _fmt(value: float, unit: str, signed: bool = False) -> str:
     return f"{value:,.1f}"
 
 
-# characters that must not start a line (Japanese line-breaking rules)
-_NO_LINE_START = set("、。，．・：；？！）］｝〕〉》」』】ー々ゝゞ～%％,.:;)]}")
+# characters that must not start a line (Japanese line-breaking rules:
+# closing punctuation, small kana, the long-vowel mark, iteration marks)
+_NO_LINE_START = set("、。，．・：；？！）］｝〕〉》」』】〙〗ー々ゝゞ～%％,.:;!?)]}”’"
+                     "ぁぃぅぇぉっゃゅょゎゕゖァィゥェォッャュョヮヵヶ")
+# … and that must not end one (opening brackets)
+_NO_LINE_END = set("（［｛〔〈《「『【〘〖([{“‘")
 # a number keeps its multiplier ('6億缶', '1.6億円', '3千5百'); a Latin word stays whole
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.,%％'’\-/:+]*(?:[千百万億兆京][0-9.,]*)*|\s+|.", re.S)
+# ASCII spaces and the ideographic space never start or end a line
+_EDGE_SPACE = " \u3000"
+
+
+def _break_at(chunk: str, room: int, width: int, level: int = 0) -> int:
+    """How many characters of ``chunk`` (longer than ``room``) go on this
+    line, at most ``room``: after the last hyphen that fits (textwrap's
+    rule), otherwise between CJK characters anywhere, but never inside a
+    Latin word or a number with its multiplier that fits a line (a URL
+    longer than a line is cut), never before closing punctuation and never
+    after an opening bracket. 0 when no such break fits.
+    ``level`` 1 drops the punctuation rules, 2 also the word rule (a line
+    that must break somewhere: cut at ``room``)."""
+    if level >= 2:
+        return room
+    hyphen = chunk.rfind("-", 0, room)
+    if hyphen > 0 and any(c != "-" for c in chunk[:hyphen]):
+        return hyphen + 1
+    whole = [(m.start(), m.end()) for m in _TOKEN.finditer(chunk) if 1 < m.end() - m.start() <= width]
+    for end in range(min(room, len(chunk) - 1), 0, -1):
+        if any(a < end < b for a, b in whole):
+            continue
+        if level == 0 and (chunk[end] in _NO_LINE_START or chunk[end - 1] in _NO_LINE_END):
+            continue
+        return end
+    return 0
 
 
 class _Wrapper(textwrap.TextWrapper):
-    """v1.5's textwrap, except where it cuts a word longer than a line:
-    after the last hyphen that fits (textwrap's own rule), otherwise never
-    inside a number with its multiplier or a Latin word ('6億缶', '1.5',
-    'Holdings' move to the next line whole; a URL longer than a line is
-    still cut), and a line never starts with closing punctuation."""
+    """textwrap's chunks and spaces (v1.5 wrapped with textwrap: words
+    move to the next line whole, Latin words break at spaces and hyphens),
+    except where a word is longer than the room left on a line: it is
+    broken by ``_break_at`` (CJK anywhere, Latin words and numbers kept
+    whole, Japanese line-breaking rules), or moved to the next line whole.
+    A line is never longer than the width."""
 
     def _handle_long_word(self, reversed_chunks, cur_line, cur_len, width):
-        space_left = 1 if width < 1 else width - cur_len
         chunk = reversed_chunks[-1]
-        end = space_left
-        if len(chunk) > space_left:
-            hyphen = chunk.rfind("-", 0, space_left)
-            if hyphen > 0 and any(c != "-" for c in chunk[:hyphen]):
-                end = hyphen + 1
-            else:
-                for m in _TOKEN.finditer(chunk):
-                    if m.start() < end < m.end() and len(m.group(0)) <= width:
-                        end = m.start()
-                        break
-                while 0 < end < len(chunk) and chunk[end] in _NO_LINE_START:
-                    end += 1                    # keep closing punctuation on this line
-        if end == 0 and space_left > 0:
-            # the whole word goes to the next line: end this one without
-            # its trailing space (a full line, space_left 0, is textwrap's own case)
-            while cur_line and not cur_line[-1].strip():
+        if not chunk.strip(_EDGE_SPACE):
+            reversed_chunks.pop()               # a run of spaces wider than a line
+            return
+        width = max(1, width)
+        room = width - cur_len
+        end = _break_at(chunk, room, width) if room > 0 else 0
+        if end <= 0 and any(c.strip(_EDGE_SPACE) for c in cur_line):
+            # the whole word goes to the next line: end this one without its
+            # trailing space (textwrap 3.11/3.12 kept it when the line was full)
+            while cur_line and not cur_line[-1].strip(_EDGE_SPACE):
                 cur_line.pop()
             return
+        if end <= 0:
+            # at the start of a line (or after nothing but spaces): break
+            # somewhere, at the latest at the full width
+            cur_line.clear()
+            room, level = width, 0
+            while end <= 0:
+                end = _break_at(chunk, room, width, level)
+                level += 1
         cur_line.append(chunk[:end])
         if end >= len(chunk):
-            reversed_chunks.pop()               # textwrap then drops the space after it
+            reversed_chunks.pop()
         else:
             reversed_chunks[-1] = chunk[end:]
 
 
 def _wrap(text: str, width: int) -> str:
-    """Wrap to ``width`` characters as v1.5 did ("\\n".join(textwrap.wrap()))
-    — the same chunks, spaces and hyphen breaks — with the long-word
-    exceptions of ``_Wrapper``."""
+    """Wrap to ``width`` characters (each character counts 1): Latin text
+    breaks at spaces and hyphens as textwrap does (v1.5 used textwrap),
+    CJK text between any two characters under the Japanese line-breaking
+    rules, a number with its multiplier ('6億缶', '1.5') and a Latin word
+    that fits a line are never split; no line starts or ends with a space
+    and none is longer than ``width``."""
     text = str(text or "")
     if not text:
         return ""
-    return "\n".join(_Wrapper(width=max(1, width)).wrap(text))
+    wrapper = _Wrapper(width=max(1, width))
+    text = wrapper._munge_whitespace(text).strip(_EDGE_SPACE)
+    if not text:
+        return ""
+    lines = (ln.strip(_EDGE_SPACE) for ln in wrapper.wrap(text))
+    return "\n".join(ln for ln in lines if ln)
 
 
 def _overlaps(a, b, pad: float = 1.0) -> bool:
@@ -201,6 +253,135 @@ def _drop_overlapping(fig, texts: List[Any]) -> int:
     return dropped
 
 
+def _forecast_bar(color: str) -> Dict[str, Any]:
+    """A forecast bar / segment: hollow, dotted and outlined dashed in its
+    colour (a value that is not 公表 is striped '////' instead)."""
+    return dict(facecolor="white", edgecolor=color, linewidth=1.0, linestyle=FORECAST_DASH,
+                hatch=FORECAST_HATCH)
+
+
+def _segment_hits(p, q, box, pad: float) -> bool:
+    """Does the segment p–q (display coordinates, ``pad`` px thick each
+    side) cross the box? (Liang–Barsky clipping)"""
+    x0, y0, x1, y1 = box.x0 - pad, box.y0 - pad, box.x1 + pad, box.y1 + pad
+    dx, dy = q[0] - p[0], q[1] - p[1]
+    t0, t1 = 0.0, 1.0
+    for d, room in ((-dx, p[0] - x0), (dx, x1 - p[0]), (-dy, p[1] - y0), (dy, y1 - p[1])):
+        if d == 0:
+            if room < 0:
+                return False
+            continue
+        t = room / d
+        if d < 0:
+            if t > t1:
+                return False
+            t0 = max(t0, t)
+        else:
+            if t < t0:
+                return False
+            t1 = min(t1, t)
+    return t0 <= t1
+
+
+def _mark_geometry(fig, ax, marks: List[Any]) -> Dict[int, Dict[str, List[Any]]]:
+    """Per series, in display coordinates: the boxes of its markers and
+    bars and the segments of its line."""
+    from matplotlib.transforms import Bbox
+    renderer = fig.canvas.get_renderer()
+    px = fig.dpi / 72.0
+    geo: Dict[int, Dict[str, List[Any]]] = {}
+    for s, kind, what in marks:
+        g = geo.setdefault(s, {"boxes": [], "segs": []})
+        if kind == "bar":
+            if what.figure is not None:
+                g["boxes"].append(what.get_window_extent(renderer=renderer))
+            continue
+        pts, ms, lw = what
+        disp = ax.transData.transform(pts)
+        r = ms * px / 2.0 + 1.0
+        g["boxes"].extend(Bbox.from_extents(x - r, y - r, x + r, y + r) for x, y in disp)
+        g["segs"].extend((p, q, lw * px / 2.0) for p, q in zip(disp, disp[1:]))
+    return geo
+
+
+def _hits_marks(bb, geo: Dict[int, Dict[str, List[Any]]], own: Optional[int], with_own: bool) -> bool:
+    for s, g in geo.items():
+        if s == own and not with_own:
+            continue
+        if any(_overlaps(bb, b, pad=-1.0) for b in g["boxes"]):
+            return True
+        if any(_segment_hits(p, q, bb, pad - 1.0) for p, q, pad in g["segs"]):
+            return True
+    return False
+
+
+def _avoid_marks(fig, ax, labels: List[Any], label_series: Dict[int, int], label_moves: Dict[int, List[Any]],
+                 marks: List[Any], protected: set, drop: bool) -> int:
+    """Point / value labels (in rank order: the emphasised series first)
+    never sit on another series' marker, line or bar, nor on a label
+    already placed. A point label tries its own place, then below / above,
+    then right of its point (a moved label also stays off its own line and
+    inside the plot); a bar's label stays at the bar end. A label with no
+    free place goes back to its own place, and with ``drop`` is removed —
+    except the emphasised series' (``protected``). A label of no series (a
+    stack total, a segment label) stays where it is, as an obstacle.
+    Returns how many were removed."""
+    labels = [t for t in labels if t.figure is not None and id(t) in label_series]
+    if not labels or not marks:
+        return 0
+    renderer = fig.canvas.get_renderer()
+    geo = _mark_geometry(fig, ax, marks)
+    plot = ax.get_window_extent(renderer=renderer)
+    handled = {id(t) for t in labels}
+    kept = [t.get_window_extent(renderer=renderer) for t in ax.texts
+            if id(t) not in handled and t.get_visible() and t.get_text()]
+
+    def place(t, where):
+        if where is not None:
+            t.xyann = where[0]
+            t.set_va(where[1])
+            t.set_ha(where[2])
+
+    removed = 0
+    for t in labels:
+        own = label_series.get(id(t))
+        places = label_moves.get(id(t)) or [None]
+        chosen = None
+        for k, where in enumerate(places):
+            place(t, where)
+            bb = t.get_window_extent(renderer=renderer)
+            if k > 0 and not (plot.x0 - 1 <= bb.x0 and bb.x1 <= plot.x1 + 1
+                              and plot.y0 - 1 <= bb.y0 and bb.y1 <= plot.y1 + 1):
+                continue
+            if _hits_marks(bb, geo, own, with_own=True):
+                continue
+            if any(_overlaps(bb, o, pad=-0.5) for o in kept):
+                continue
+            chosen = bb
+            break
+        if chosen is None:
+            place(t, places[0])
+            if drop and id(t) not in protected:
+                t.remove()
+                removed += 1
+                continue
+            chosen = t.get_window_extent(renderer=renderer)
+        kept.append(chosen)
+    return removed
+
+
+def _labels_on_marks(fig, ax, labels: List[Any], label_series: Dict[int, int], marks: List[Any]) -> int:
+    """(QA) drawn labels that sit on another series' marker, line or bar."""
+    live = [t for t in labels if t.figure is not None and t.get_visible() and t.get_text()
+            and id(t) in label_series]
+    if not live or not marks:
+        return 0
+    renderer = fig.canvas.get_renderer()
+    geo = _mark_geometry(fig, ax, marks)
+    return sum(1 for t in live
+               if _hits_marks(t.get_window_extent(renderer=renderer), geo, label_series.get(id(t)), False))
+
+
 def _value_range(series: List[Dict[str, Any]], line: bool) -> (float, float):
     vals: List[float] = []
     for s in series:
@@ -212,6 +393,55 @@ def _value_range(series: List[Dict[str, Any]], line: bool) -> (float, float):
     if not vals:
         return 0.0, 0.0
     return min(vals), max(vals)
+
+
+def _point_label(v: Any, labels: List[Any], j: int) -> str:
+    """The label a value is plotted at ('2024' for a line_xy point at x=2024.0)."""
+    if isinstance(v, dict):
+        x = v.get("x")
+        return str(int(x)) if isinstance(x, float) and x.is_integer() else str(x)
+    return str(labels[j]) if j < len(labels) else str(j)
+
+
+def forecast_flags(series: Dict[str, Any], labels: Optional[List[Any]] = None) -> List[bool]:
+    """One flag per value: True for a forecast. The source of each point
+    says so (``sources[j]["forecast"]``, always set by the data layer).
+    Only when a point has no source dict does the series note count, and
+    then only an exact entry '<label>: 予測値' — free text (a quoted source
+    sentence that mentions a forecast) never marks actual values."""
+    values = series.get("values") or []
+    sources = series.get("sources") or []
+    labels = list(labels or [])
+    noted = set()
+    for part in re.split(r"[；;]", str(series.get("note") or "")):
+        m = re.fullmatch(r"\s*([^:：]{1,20})\s*[:：]\s*予測値\s*", part)
+        if m:
+            noted.add(m.group(1).strip())
+    out = []
+    for j, v in enumerate(values):
+        src = sources[j] if j < len(sources) else None
+        if isinstance(src, dict) and "forecast" in src:
+            out.append(bool(src.get("forecast")))
+        else:
+            out.append(v is not None and _point_label(v, labels, j) in noted)
+    return out
+
+
+def _line_floor(lo: float, hi: float) -> float:
+    """Bottom of a line chart's value axis (no negative values): the data
+    range padded by 10 %, or 0 when the values are near 0 (the smallest is
+    at most a fifth of the largest) or the line is flat. prelude.js
+    (lineFromZero) applies the same rule."""
+    span = hi - lo
+    if hi <= 0 or span <= 0 or lo <= 0.2 * hi:
+        return 0.0
+    return max(0.0, lo - 0.1 * span)
+
+
+def _plain_number(v, _pos=None) -> str:
+    """A year / x value as written ('2024', never '2.024e3' or an offset)."""
+    r = round(v)
+    return str(int(r)) if abs(v - r) < 1e-9 else f"{v:g}"
 
 
 def _pick_form(panel: Dict[str, Any], style: str) -> str:
@@ -231,16 +461,22 @@ def _pick_form(panel: Dict[str, Any], style: str) -> str:
 
 
 def render_png(panel: Dict[str, Any], path: Path, language: str = "ja", dpi: Optional[int] = None,
-               style: str = "classic", qa: Optional[Dict[str, Any]] = None) -> Path:
+               style: str = "classic", qa: Optional[Dict[str, Any]] = None, embed_text: bool = True) -> Path:
     """Draw one RESOLVED panel to ``path`` (PNG). Returns the path.
     ``qa`` (a dict) receives the layout facts of the drawn figure: value
-    axis range, overlapping labels, text outside the image, pixel size."""
+    axis range, overlapping labels, labels on another series' marks, text
+    outside the image, pixel size.
+    ``embed_text`` False leaves the title, the 見るべき点 line and the
+    caption out of the image (a report prints them once as text around
+    it); the legend and its notes stay. True (the default) draws them, for
+    an image used on its own."""
     with _RENDER_LOCK:
-        return _render_locked(panel, Path(path), language, dpi, style if style in STYLES else "classic", qa)
+        return _render_locked(panel, Path(path), language, dpi, style if style in STYLES else "classic", qa,
+                              bool(embed_text))
 
 
 def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Optional[int],
-                   style: str, qa: Optional[Dict[str, Any]] = None) -> Path:
+                   style: str, qa: Optional[Dict[str, Any]] = None, embed_text: bool = True) -> Path:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -294,41 +530,83 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
             else:
                 fig_h = L["bar_h"]
             # room for the legend / caption / judgment lines under the plot
-            fig_h += 0.9
+            # (only the legend when the text is printed outside the image)
+            fig_h += 0.9 if embed_text else 0.45
         fig, ax = plt.subplots(figsize=(L["width"], fig_h))
-        any_striped = any(not _published(b) for s in series for b in (s.get("basis") or []))
+        forecast = [forecast_flags(s, labels) for s in series]
+        any_forecast = any(any(f) for f in forecast)
+        # a value that is neither 公表 nor a forecast: striped bar / hollow point
+        any_estimated = any(not _published(b) and not (j < len(f) and f[j])
+                            for s, f in zip(series, forecast) for j, b in enumerate(s.get("basis") or []))
         handles: List[Any] = []
         point_labels: List[Any] = []
         value_labels: List[Any] = []
         seg_labels: List[Any] = []
         label_rank: Dict[int, int] = {}     # id(text) -> 0 for the emphasised series
         role_rank = {"emphasis": 0, "part": 1, "context": 2, "context2": 3}
+        # what each series drew (markers / lines / bars) and which series a
+        # label belongs to: a label must not sit on another series' marks
+        marks: List[Any] = []
+        label_series: Dict[int, int] = {}
+        label_moves: Dict[int, List[Any]] = {}  # id(point label) -> its places, the first is its own
 
         if line:
+            lw0 = 2 if style == "classic" else 1.6
+            ms = 6 if style == "classic" else 4.5
             for i, s in enumerate(series):
                 color = CAT[i % len(CAT)]
-                pts = [(float(v["x"]), float(v["y"])) for v in (s.get("values") or []) if isinstance(v, dict)]
+                marker = MARKERS[i % len(MARKERS)]
+                basis = s.get("basis") or []
+                fcs = forecast[i]
+                pts = [(float(v["x"]), float(v["y"]), basis[j] if j < len(basis) else None,
+                        bool(j < len(fcs) and fcs[j]))
+                       for j, v in enumerate(s.get("values") or []) if isinstance(v, dict)]
                 if not pts:
                     continue
-                xs, ys = zip(*sorted(pts))
-                ax.plot(xs, ys, color=color, marker=MARKERS[i % len(MARKERS)], linestyle=DASHES[i % len(DASHES)],
-                        linewidth=2 if style == "classic" else 1.6, markersize=6 if style == "classic" else 4.5)
-                for x, y, b in zip(xs, ys, s.get("basis") or [None] * len(xs)):
-                    if not _published(b):
-                        ax.plot([x], [y], marker=MARKERS[i % len(MARKERS)],
-                                markersize=9 if style == "classic" else 7, markerfacecolor="none",
-                                markeredgecolor=color, linestyle="none")
+                pts.sort(key=lambda p: p[0])            # (basis / forecast stay with their point)
+                # actual values: a solid line in the series' own colour (a second
+                # series is not dashed: dashes mean a forecast); a segment into or
+                # out of a forecast is dashed; the emphasised series is drawn
+                # thicker, on top
+                emph = s.get("role") == "emphasis" and n_series > 1
+                lw = lw0 * (1.3 if emph else 1.0)
+                z = 3 if emph else 2
+                runs: List[Any] = []
+                for a, b in zip(pts, pts[1:]):
+                    dashed = a[3] or b[3]
+                    if runs and runs[-1][0] == dashed:
+                        runs[-1][1].append(b)
+                    else:
+                        runs.append((dashed, [a, b]))
+                for dashed, run in runs:
+                    ax.plot([p[0] for p in run], [p[1] for p in run], color=color, linewidth=lw,
+                            linestyle=FORECAST_DASH if dashed else "-", zorder=z)
+                # a forecast, or a value that is not 公表, is a hollow marker
+                solid = [(x, y) for x, y, b, f in pts if _published(b) and not f]
+                hollow = [(x, y) for x, y, b, f in pts if not _published(b) or f]
+                if solid:
+                    ax.plot(*zip(*solid), linestyle="none", marker=marker, markersize=ms, color=color,
+                            zorder=z + 0.5)
+                if hollow:
+                    ax.plot(*zip(*hollow), linestyle="none", marker=marker, markersize=ms + 1,
+                            markerfacecolor="white", markeredgecolor=color, markeredgewidth=1.4,
+                            zorder=z + 0.5)
+                marks.append((i, "line", ([(p[0], p[1]) for p in pts], ms + 1, lw)))
+                for x, y, _b, _f in pts:
                     # (v1.5 placement above the point; a negative point's label
                     # goes under it — above, it sat on the line)
-                    t = ax.annotate(fmt(y), (x, y), textcoords="offset points",
-                                    xytext=(0, 7) if y >= 0 else (0, -7),
-                                    va="baseline" if y >= 0 else "top",
-                                    ha="center", fontsize=L["value"], color=INK)
+                    up = (((0, 7), "baseline", "center"), ((0, -7), "top", "center"))
+                    places = list(up if y >= 0 else up[::-1]) + [((7, 0), "center", "left")]
+                    t = ax.annotate(fmt(y), (x, y), textcoords="offset points", xytext=places[0][0],
+                                    va=places[0][1], ha=places[0][2], fontsize=L["value"], color=INK)
                     point_labels.append(t)
                     label_rank[id(t)] = role_rank.get(s.get("role", "context"), 2)
-                handles.append(Line2D([0], [0], color=color, marker=MARKERS[i % len(MARKERS)],
-                                      linestyle=DASHES[i % len(DASHES)], label=s.get("name", "")))
+                    label_series[id(t)] = i
+                    label_moves[id(t)] = places
+                handles.append(Line2D([0], [0], color=color, marker=marker, markersize=ms, linewidth=lw,
+                                      label=s.get("name", "")))
             ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+            ax.xaxis.set_major_formatter(mticker.FuncFormatter(_plain_number))
             ax.set_ylabel(unit)
             # negative values (a fall in growth, a loss) must stay visible
             if lo < 0:
@@ -336,7 +614,9 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
                 ax.set_ylim(bottom=lo - 0.08 * span, top=panel.get("y_max") or None)
                 ax.axhline(0, color="#b9b8b1", linewidth=0.8)
             else:
-                ax.set_ylim(bottom=0, top=panel.get("y_max") or None)
+                # the data range, padded (a line is read by its change; 0 only
+                # when the values are near it)
+                ax.set_ylim(bottom=_line_floor(lo, hi), top=panel.get("y_max") or None)
             ax.grid(axis="y", color=GRID)
         elif seg_row:
             # one segment row PER LABEL (the HTML page draws the same rows);
@@ -349,14 +629,20 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
                 handles.append(Patch(facecolor=fill, label=s.get("name", "")))
                 vals = s.get("values") or []
                 basis = s.get("basis") or []
+                fcs = forecast[i]
                 for j in range(rows):
                     v = vals[j] if j < len(vals) else None
                     if not isinstance(v, (int, float)) or isinstance(v, bool):
                         continue
                     v = float(v)
                     b = basis[j] if j < len(basis) else None
-                    ax.barh([j], [v], left=lefts[j], color=fill, height=0.6,
-                            hatch="////" if not _published(b) else None, edgecolor="white", linewidth=0.5)
+                    if j < len(fcs) and fcs[j]:
+                        kw = _forecast_bar(text_color)
+                    else:
+                        kw = dict(color=fill, hatch="////" if not _published(b) else None, edgecolor="white",
+                                  linewidth=0.5)
+                    bc = ax.barh([j], [v], left=lefts[j], height=0.6, **kw)
+                    marks.append((i, "bar", bc.patches[0]))
                     if v > 0:
                         t = ax.text(lefts[j] + v / 2, j, f"{s.get('name', '')} {fmt(v)}",
                                     ha="center", va="center", fontsize=L["value"] + 1, color=text_color)
@@ -394,6 +680,7 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
                         colors.append(base)
                 numeric = [float(v) if isinstance(v, (int, float)) else 0.0 for v in vals]
                 present = [isinstance(v, (int, float)) for v in vals]
+                fcs = forecast[i]
                 if stacked:
                     pos = idx
                 else:
@@ -402,13 +689,17 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
                 for j in range(len(labels)):
                     if not present[j]:
                         continue
-                    kw = dict(color=colors[j], edgecolor="white", linewidth=0.5)
-                    if not _published(basis[j]):
-                        kw["hatch"] = "////"
-                    if horiz:
-                        ax.barh(pos[j], numeric[j], height=width, left=bottoms[j] if stacked else 0, **kw)
+                    if j < len(fcs) and fcs[j]:
+                        kw = _forecast_bar(colors[j])
                     else:
-                        ax.bar(pos[j], numeric[j], width=width, bottom=bottoms[j] if stacked else 0, **kw)
+                        kw = dict(color=colors[j], edgecolor="white", linewidth=0.5)
+                        if not _published(basis[j]):
+                            kw["hatch"] = "////"
+                    if horiz:
+                        bc = ax.barh(pos[j], numeric[j], height=width, left=bottoms[j] if stacked else 0, **kw)
+                    else:
+                        bc = ax.bar(pos[j], numeric[j], width=width, bottom=bottoms[j] if stacked else 0, **kw)
+                    marks.append((i, "bar", bc.patches[0]))
                     if not stacked:
                         if horiz:
                             gap = 0.01 * span
@@ -429,6 +720,7 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
                         value_labels.append(t)
                         # highlighted bars and the emphasised series keep their labels first
                         label_rank[id(t)] = 0 if (hl and labels[j] in hl) else role_rank.get(role, 2)
+                        label_series[id(t)] = i
                 if stacked:
                     bottoms = [bottoms[j] + (numeric[j] if present[j] else 0.0) for j in range(len(labels))]
                 handles.append(Patch(facecolor=base, label=s.get("name", "")))
@@ -463,22 +755,26 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
                 ax.axhline(0, color=GRID, linewidth=0.8)
             ax.set_axisbelow(True)
 
-        if style == "enhanced" and not seg_row:
-            # thousands separators on the value axis, as many decimals as
-            # the tick step needs (1.25 never prints as 1.2)
+        if not seg_row:
+            # both styles: plain numbers with thousands separators on the
+            # value axis (matplotlib's own formatter printed '0.5 … 3.5' and
+            # a '1e6' offset), as many decimals as the tick step needs (1.25
+            # never prints as 1.2); classic keeps its tick size
             axis = ax.xaxis if horiz else ax.yaxis
             axis.set_major_formatter(mticker.FuncFormatter(_step_formatter(axis)))
-            ax.tick_params(labelsize=L["tick"])
+            if style == "enhanced":
+                ax.tick_params(labelsize=L["tick"])
 
-        ax.set_title(str(panel.get("title", "")), fontsize=L["title"], loc="left", color="#0b0b0b", pad=10)
+        if embed_text:
+            ax.set_title(str(panel.get("title", "")), fontsize=L["title"], loc="left", color="#0b0b0b", pad=10)
         # Below the axes, bottom-up, in INCHES: judgment, caption, legend —
         # then the axes bottom margin is set above all of them so tick
         # labels, legend and text never overlap; a long caption or legend
         # makes the figure taller instead of squeezing the plot away.
         line_in = 0.16 if style == "classic" else 0.14
         text_x = 0.05 if style == "classic" else 0.02
-        judgment_text = str(panel.get("judgment", "") or "")
-        caption_text = str(panel.get("caption", "") or "")
+        judgment_text = str(panel.get("judgment", "") or "") if embed_text else ""
+        caption_text = str(panel.get("caption", "") or "") if embed_text else ""
         if style == "classic":
             # the v1.5 wrap ('見るべき点: ' + 70 characters), narrowed only
             # when the measured line would run past the image edge
@@ -489,11 +785,12 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
             # line is wrapped to the width that is left
             wrap_judgment = lambda w: _wrap("見るべき点: " + judgment_text, w) if judgment_text else ""  # noqa: E731
             j_width = int((L["width"] * (1 - text_x) - 0.15) * 72 / L["judgment"]) - 2
-        y_in = 0.4 if style == "classic" else 0.12
+        # (without the text the legend sits at the bottom edge)
+        y_in = 0.4 if style == "classic" and embed_text else 0.12
         # classic also keeps the v1.5 arithmetic in figure fractions, so an
         # unchanged layout lands on exactly the same pixels
         line_f = 0.16 / fig_h
-        y_f = 0.4 / fig_h
+        y_f = y_in / fig_h
         placed: List[Any] = []                       # (artist, y in inches, v1.5 y fraction)
         if judgment_text:
             t = fig.text(text_x, 0, "", fontsize=L["judgment"], color="#0b0b0b", va="bottom")
@@ -508,9 +805,18 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
             y_in += line_in * (caption.count("\n") + 1) + line_in * 0.6
             y_f += line_f * (caption.count("\n") + 1) + line_f * 0.6
         legend = None
-        if handles or any_striped:
-            if any_striped:
-                handles.append(Patch(facecolor="white", edgecolor=INK, hatch="////", label=STRIPE_NOTE))
+        # one series needs no legend (the title names it); the notes stay
+        handles = handles if n_series > 1 else []
+        if any_estimated:
+            handles.append(Line2D([0], [0], linestyle="none", marker="o", markersize=7, markerfacecolor="white",
+                                  markeredgecolor=INK, markeredgewidth=1.4, label=HOLLOW_NOTE) if line
+                           else Patch(facecolor="white", edgecolor=INK, hatch="////", label=STRIPE_NOTE))
+        if any_forecast:
+            handles.append(Line2D([0], [0], color=INK, linestyle=FORECAST_DASH, marker="o", markersize=7,
+                                  markerfacecolor="white", markeredgecolor=INK, markeredgewidth=1.4,
+                                  label=FORECAST_NOTE) if line
+                           else Patch(label=FORECAST_NOTE, **_forecast_bar(INK)))
+        if handles:
             ncol = min(4 if style == "classic" else 3, len(handles))
             renderer = fig.canvas.get_renderer()
             wrapped_names = False
@@ -543,7 +849,7 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
         ticks_in = 0.0 if seg_row else 0.45                # tick labels under the axes
         bottom_in = y_in + ticks_in + line_in * 0.5
         bottom_f = y_f + (0.0 if seg_row else 0.45 / fig_h) + line_f * 0.5
-        top = 0.86 if style == "classic" else 0.88
+        top = (0.86 if style == "classic" else 0.88) if embed_text else 0.95     # (no title: room above)
         # classic grows only where v1.5 hit its cap (bottom margin > 75 %:
         # the legend ran into the tick labels); enhanced keeps a minimum plot
         squeezed = (bottom_f > 0.75) if style == "classic" \
@@ -561,9 +867,14 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
                             left=0.09 if style == "classic" else 0.12, right=0.98)
 
         fig.canvas.draw()
-        # close points: drop the labels that would print over each other
-        # (the emphasised series keeps its labels)
-        _drop_overlapping(fig, sorted(point_labels, key=lambda t: label_rank.get(id(t), 1)))
+        by_rank = lambda ts: sorted(ts, key=lambda t: label_rank.get(id(t), 1))  # noqa: E731
+        protected = {k for k, r in label_rank.items() if r == 0}
+        # a label on another series' marker / line / bar moves (above →
+        # below → right) where it is free; then close points: drop the labels
+        # that would print over each other (the emphasised series keeps its labels)
+        _avoid_marks(fig, ax, by_rank(point_labels + value_labels), label_series, label_moves, marks,
+                     protected, drop=False)
+        _drop_overlapping(fig, by_rank(point_labels))
         _fit_left_margin(fig, ax)
         _fit_title(fig, ax)
         if seg_labels:
@@ -578,12 +889,17 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
         _fit_left_margin(fig, ax)                    # ticks may have widened meanwhile
         if not seg_row:
             _thin_value_ticks(fig, ax, horiz)        # the plot may have narrowed
-        # the plot may have narrowed: labels that touch now are dropped too
-        _drop_overlapping(fig, sorted(point_labels, key=lambda t: label_rank.get(id(t), 1)))
-        _drop_overlapping(fig, sorted(value_labels, key=lambda t: label_rank.get(id(t), 1)))
+        # the final layout: a label still on another series' marks moves or,
+        # unless it is the emphasised series', is dropped; labels that touch
+        # now (the plot may have narrowed) are dropped too
+        _avoid_marks(fig, ax, by_rank(point_labels + value_labels), label_series, label_moves, marks,
+                     protected, drop=True)
+        _drop_overlapping(fig, by_rank(point_labels))
+        _drop_overlapping(fig, by_rank(value_labels))
         _qa_layout(fig, ax, style)
         if qa is not None:
             qa.update(_layout_facts(fig, ax, horiz, seg_row, dpi or L["dpi"]))
+            qa["label_on_marks"] = _labels_on_marks(fig, ax, point_labels + value_labels, label_series, marks)
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(path, dpi=dpi or L["dpi"], facecolor="white")

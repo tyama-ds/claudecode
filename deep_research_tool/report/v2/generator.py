@@ -1129,18 +1129,265 @@ Output only the polished body (no preamble, no JSON, no code block):"""
         elif format_lower == "html":
             return self._save_as_html(markdown_content, output_dir, filename)
         elif format_lower == "pdf":
-            # PDF: save as markdown with note (PDF generation requires additional setup)
-            md_path = self._save_as_markdown(markdown_content, output_dir, filename)
-            ResearchWarnings.get_instance().add(
-                ResearchWarnings.CRITICAL,
-                "ReportGeneratorV2",
-                "PDF format requested but not supported in V2 generator. "
-                "Report saved as markdown (.md) instead. "
-                "Use report_generator_version='v1' for PDF support.",
-            )
-            return md_path
+            return self._save_as_pdf(markdown_content, output_dir, filename, strict_format=strict_format)
         else:
             return self._save_as_markdown(markdown_content, output_dir, filename)
+
+    # ------------------------------------------------------------------
+    # PDF (reportlab, as the V1 generator: Japanese font, tables, figures)
+    # ------------------------------------------------------------------
+
+    def _save_as_pdf(self, markdown_content: str, output_dir: Path, filename: str,
+                     strict_format: bool = False) -> Path:
+        """The final Markdown as a real PDF. A layout failure is retried
+        once with tables as row text and without images (as V1 does); when
+        no PDF can be made the report is saved as Markdown with a CRITICAL
+        warning — or, with strict_format, ReportFormatError is raised."""
+        filepath = output_dir / f"{filename}.pdf"
+        self.pdf_images_embedded = 0
+        self.pdf_figures_dropped = None
+        error = None
+        for safe in (False, True):
+            self._pdf_safe_mode = safe
+            try:
+                self._render_markdown_pdf(markdown_content, filepath)
+                if safe:
+                    # reported with the figure placement (as V1's PDF)
+                    self.pdf_figures_dropped = f"{type(error).__name__}: {error}"[:300]
+                    print(f"[ReportGeneratorV2] PDF layout failed ({self.pdf_figures_dropped}); "
+                          f"rebuilt with tables as text and without figure images")
+                return filepath
+            except ImportError as e:            # reportlab missing: no retry helps
+                error = e
+                break
+            except Exception as e:
+                error = e
+                logger.error(f"[ReportGeneratorV2] PDF rendering failed (safe={safe}): {e}")
+            finally:
+                self._pdf_safe_mode = False
+        try:
+            if filepath.exists():
+                filepath.unlink()            # never leave a partial PDF behind
+        except OSError:
+            pass
+        if strict_format:
+            debug_md_path = self._save_as_markdown(markdown_content, output_dir, f"{filename}_debug")
+            raise ReportFormatError(
+                f"PDF generation failed: {type(error).__name__}: {error}. "
+                f"Debug markdown saved to: {debug_md_path}",
+                debug_md_path=str(debug_md_path),
+                original_error=error,
+            )
+        md_path = self._save_as_markdown(markdown_content, output_dir, filename)
+        ResearchWarnings.get_instance().add(
+            ResearchWarnings.CRITICAL,
+            "ReportGeneratorV2",
+            f"PDF format requested but the V2 generator could not render the PDF "
+            f"({type(error).__name__}: {str(error)[:200]}). "
+            "Report saved as markdown (.md) instead.",
+        )
+        return md_path
+
+    def _render_markdown_pdf(self, markdown_content: str, filepath: Path) -> None:
+        """Markdown → PDF with the V1 generator's machinery (font
+        registration, link-aware paragraphs, table layout). A figure —
+        '**図N　…**' title, the image line, its caption lines — is kept on
+        one page."""
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import inch
+        from reportlab.lib.utils import ImageReader
+        from reportlab.platypus import (Image as RLImage, KeepTogether, Paragraph,
+                                        SimpleDocTemplate, Spacer, Table, TableStyle)
+        from ..generator import ReportGenerator, _paragraph
+        from ...utils.fonts import register_japanese_font
+
+        text = markdown_content or ""
+        self.pdf_images_embedded = 0
+        font = None
+        if self.language == "ja" or re.search(r"[぀-ヿ一-鿿]", text):
+            font = register_japanese_font()
+        base = font or "Helvetica"
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle("V2Title", parent=styles["Heading1"], fontName=base,
+                                     fontSize=20, leading=26, spaceAfter=18, alignment=1)
+        h_styles = {
+            1: ParagraphStyle("V2H1", parent=styles["Heading1"], fontName=base, fontSize=16,
+                              leading=21, spaceBefore=18, spaceAfter=8),
+            2: ParagraphStyle("V2H2", parent=styles["Heading2"], fontName=base, fontSize=13,
+                              leading=18, spaceBefore=12, spaceAfter=6),
+            3: ParagraphStyle("V2H3", parent=styles["Heading3"], fontName=base, fontSize=11.5,
+                              leading=16, spaceBefore=10, spaceAfter=4),
+        }
+        body_style = ParagraphStyle("V2Body", parent=styles["Normal"], fontName=base, fontSize=10.5,
+                                    leading=16, spaceBefore=3, spaceAfter=5, wordWrap="CJK")
+        bullet_style = ParagraphStyle("V2Bullet", parent=body_style, leftIndent=14, firstLineIndent=-10)
+        fig_title_style = ParagraphStyle("V2FigTitle", parent=body_style, fontSize=10, leading=13,
+                                         spaceBefore=10, spaceAfter=4, keepWithNext=1)
+        caption_style = ParagraphStyle("V2Caption", parent=body_style, fontSize=9, leading=12,
+                                       textColor=colors.HexColor("#555555"), spaceBefore=2,
+                                       spaceAfter=12)
+        doc = SimpleDocTemplate(str(filepath), pagesize=A4)
+
+        def esc(s) -> str:
+            return ("" if s is None else str(s)).replace("&", "&amp;").replace(
+                "<", "&lt;").replace(">", "&gt;")
+
+        def inline(s) -> str:
+            """Escaped text with **bold** / *italic* as markup (links are
+            made by _paragraph). A Japanese font has no bold / italic face:
+            the markers are dropped (reportlab would only put spaces around
+            the run)."""
+            out = esc(s)
+            bold, italic = (r"\1", r"\1") if font else (r"<b>\1</b>", r"<i>\1</i>")
+            out = re.sub(r"\*\*([^*\n]+)\*\*", bold, out)
+            out = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", italic, out)
+            return out
+
+        def image(path_text):
+            path = Path(path_text.strip())
+            if self._pdf_safe_mode or not path.is_file():
+                return None
+            reader = ImageReader(str(path))
+            reader.getRGBData()             # a cut-off file fails here, not in doc.build
+            iw, ih = reader.getSize()
+            w = min(5.5 * inch, doc.width)  # the width Word uses, never wider than the frame
+            h = w * ih / max(1, iw)
+            if h > 8.0 * inch:
+                w, h = w * 8.0 * inch / h, 8.0 * inch
+            return RLImage(str(path), width=w, height=h)
+
+        blocks = self._pdf_blocks(text)
+        story: list = []
+        i = 0
+        while i < len(blocks):
+            kind, payload = blocks[i]
+            if kind == "image":
+                img = None
+                try:
+                    img = image(payload[1])
+                except Exception as e:
+                    logger.warning(f"[ReportGeneratorV2] image skipped in PDF: {e}")
+                group = []
+                # the figure's title paragraph directly above it
+                if story and getattr(story[-1], "_v2_fig_title", False):
+                    group.append(story.pop())
+                if img is not None:
+                    group.append(img)
+                    self.pdf_images_embedded += 1
+                # its caption lines directly below it
+                while i + 1 < len(blocks) and blocks[i + 1][0] == "caption":
+                    i += 1
+                    group.append(_paragraph(Paragraph, "<br/>".join(inline(c) for c in blocks[i][1]),
+                                            caption_style))
+                if img is not None:
+                    story.append(KeepTogether(group))
+                else:                              # no image (safe mode): the text stays
+                    story.extend(group)
+            elif kind == "title":
+                story.append(_paragraph(Paragraph, inline(payload), title_style))
+            elif kind == "heading":
+                level, txt = payload
+                story.append(_paragraph(Paragraph, inline(txt), h_styles[min(max(level, 1), 3)]))
+            elif kind == "fig_title":
+                p = _paragraph(Paragraph, f"<b>{inline(payload)}</b>", fig_title_style)
+                p._v2_fig_title = True
+                story.append(p)
+            elif kind == "table":
+                header, *rows = payload
+                story.extend(ReportGenerator._pdf_table(
+                    self, header, rows, doc.width, body_style, inline, colors, Table,
+                    TableStyle, Paragraph))
+                story.append(Spacer(1, 6))
+            elif kind == "bullet":
+                story.append(_paragraph(Paragraph, "• " + inline(payload), bullet_style))
+            elif kind == "rule":
+                story.append(Spacer(1, 8))
+            elif kind == "caption":
+                story.append(_paragraph(Paragraph, "<br/>".join(inline(c) for c in payload),
+                                        caption_style))
+            else:                                  # para: its lines as written
+                story.append(_paragraph(Paragraph, "<br/>".join(inline(l) for l in payload),
+                                        body_style))
+            i += 1
+        if not story:
+            story.append(Paragraph("", body_style))
+        doc.build(story)
+
+    @staticmethod
+    def _pdf_blocks(text: str) -> List[Tuple[str, Any]]:
+        """The final Markdown as blocks for the PDF: ('title', t) for '# ',
+        ('heading', (level, t)), ('fig_title', t) for a '**図N　…**' /
+        '**Figure N. …**' line, ('image', (alt, path)), ('caption', [lines])
+        for the italic lines under an image, ('table', rows), ('bullet', t),
+        ('rule', None) and ('para', [lines])."""
+        blocks: List[Tuple[str, Any]] = []
+        para: List[str] = []
+        table: List[List[str]] = []
+        fig_title_re = re.compile(r"^\*\*((?:図\d+|Figure \d+\.?)(?:[\s　].*)?)\*\*$")
+
+        def flush_para():
+            if para:
+                blocks.append(("para", list(para)))
+                para.clear()
+
+        def flush_table():
+            if table:
+                blocks.append(("table", [list(r) for r in table]))
+                table.clear()
+
+        prev_blank = False
+        for raw in (text or "").split("\n"):
+            s = raw.strip()
+            if s.startswith("|") and s.endswith("|") and len(s) > 1:
+                flush_para()
+                cells = [c.strip() for c in s[1:-1].split("|")]
+                if all(re.fullmatch(r":?-{2,}:?", c or "--") for c in cells):
+                    continue                          # separator row
+                table.append(cells)
+                prev_blank = False
+                continue
+            flush_table()
+            if not s or (s.startswith("<!--") and s.endswith("-->")):
+                # (an HTML comment — '<!-- Chart not found: … -->' — is not text)
+                flush_para()
+                prev_blank = prev_blank or not s
+                continue
+            after_blank, prev_blank = prev_blank, False
+            m = re.match(r"^(#{1,6})\s+(.*)$", s)
+            img = re.match(r"^!\[(.*)\]\((.+)\)$", s)
+            if m:
+                flush_para()
+                level = len(m.group(1))
+                blocks.append(("title", m.group(2).strip()) if level == 1
+                              else ("heading", (level - 1, m.group(2).strip())))
+            elif img:
+                flush_para()
+                blocks.append(("image", (img.group(1), img.group(2))))
+            elif fig_title_re.match(s):
+                flush_para()
+                blocks.append(("fig_title", fig_title_re.match(s).group(1)))
+            elif re.fullmatch(r"(?:-{3,}|\*{3,}|_{3,})", s):
+                flush_para()
+                blocks.append(("rule", None))
+            elif re.match(r"^[-*+•]\s+", s):
+                flush_para()
+                blocks.append(("bullet", re.sub(r"^[-*+•]\s+", "", s)))
+            elif (blocks and not para
+                  and (blocks[-1][0] == "image" or (blocks[-1][0] == "caption" and not after_blank))
+                  and len(s) > 2 and s.startswith("*") and s.endswith("*") and not s.startswith("**")):
+                # the caption block under an image: its consecutive italic lines
+                line = s[1:-1]
+                if blocks[-1][0] == "caption":
+                    blocks[-1][1].append(line)
+                else:
+                    blocks.append(("caption", [line]))
+            else:
+                para.append(s)
+        flush_para()
+        flush_table()
+        return blocks
 
     def _save_as_markdown(self, content: str, output_dir: Path, filename: str) -> Path:
         """Save report as markdown file."""

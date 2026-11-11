@@ -26,7 +26,8 @@ from ..v2.generator import (
     _section_sort_key,
 )
 from ..v2.context import ReportContext, WritingStyle, TargetAudience
-from ..figure_table_generator import FigureTableCollection, Figure, TableData
+from ..figure_table_generator import (FigureTableCollection, Figure, TableData,
+                                      figure_caption_lines, figure_heading, keep_with_next)
 from ...utils.helpers import ResearchWarnings
 
 logger = logging.getLogger(__name__)
@@ -120,6 +121,7 @@ class DocxReportGeneratorV3(ReportGeneratorV2):
 
         doc = Document()
         self._setup_document_styles(doc)
+        self._figure_no = 0           # 図N: numbered in report order
 
         # Build evidence mapping for citation renumbering
         evidence_list = []
@@ -438,55 +440,73 @@ class DocxReportGeneratorV3(ReportGeneratorV2):
 
     def _add_figure_to_doc(self, doc, figure: Figure) -> None:
         """
-        Add a Figure (image/chart) to the document using doc.add_picture().
+        Add a Figure (image/chart) to the document using doc.add_picture():
+        「図N　タイトル」 above the image and ONE caption block below it
+        (caption text, then 見るべき点), kept on one page (keep_with_next
+        on the title and the image). N follows the report order.
 
-        Falls back to a text placeholder if the image file is missing.
+        Falls back to a text placeholder (no number) if the image is missing.
         """
         from docx.shared import Inches, Pt
         from docx.enum.text import WD_ALIGN_PARAGRAPH
 
         img_path = figure.image_path
         image_added = False
+        number = getattr(self, "_figure_no", 0) + 1
 
+        # the numbered title goes ABOVE the image: written first, removed
+        # again when no image could be added
+        title_para = doc.add_paragraph()
+        title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        title_run = title_para.add_run(_sanitize_for_xml(
+            figure_heading(number, figure.title, self.language)))
+        title_run.bold = True
+        title_run.font.size = Pt(10)
+        keep_with_next(title_para)
+
+        sources = []
         if img_path:
             path = Path(img_path) if not isinstance(img_path, Path) else img_path
             if path.exists():
-                try:
-                    para = doc.add_paragraph()
-                    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    run = para.add_run()
-                    run.add_picture(str(path), width=Inches(5.0))
-                    image_added = True
-                except Exception as e:
-                    logger.warning(f"[V3] Failed to add image {path}: {e}")
-
-        if not image_added and figure.image_data:
-            # Image data in memory (bytes)
+                sources.append((str(path), str(path)))
+        if figure.image_data:
+            sources.append((None, "bytes"))       # image data in memory
+        for source, label in sources:
+            para = doc.add_paragraph()
             try:
-                para = doc.add_paragraph()
                 para.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 run = para.add_run()
-                run.add_picture(io.BytesIO(figure.image_data), width=Inches(5.0))
+                run.add_picture(source if source is not None else io.BytesIO(figure.image_data),
+                                width=Inches(5.0))
+                keep_with_next(para)
                 image_added = True
+                break
             except Exception as e:
-                logger.warning(f"[V3] Failed to add image from bytes: {e}")
+                para._element.getparent().remove(para._element)  # noqa: SLF001
+                logger.warning(f"[V3] Failed to add image {label}: {e}")
 
-        if not image_added:
+        if image_added:
+            self._figure_no = number
+            lines = figure_caption_lines(figure)
+        else:
+            title_para._element.getparent().remove(title_para._element)  # noqa: SLF001
             # Placeholder text
             alt = figure.alt_text or figure.title or "Image"
             doc.add_paragraph(
                 _sanitize_for_xml(f"[Image: {alt}]")
             )
+            lines = [str(figure.caption).strip()] if str(figure.caption or "").strip() else []
 
-        # Caption
-        if figure.caption:
+        # Caption block
+        if lines:
             caption_para = doc.add_paragraph()
             caption_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            caption_run = caption_para.add_run(
-                _sanitize_for_xml(figure.caption)
-            )
-            caption_run.italic = True
-            caption_run.font.size = Pt(9)
+            for i, line in enumerate(lines):
+                caption_run = caption_para.add_run(_sanitize_for_xml(line))
+                caption_run.italic = True
+                caption_run.font.size = Pt(9)
+                if i < len(lines) - 1:
+                    caption_run.add_break()
 
     def _add_table_data_to_doc(self, doc, table_data: TableData) -> None:
         """

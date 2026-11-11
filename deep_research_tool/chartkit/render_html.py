@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+from .render_png import forecast_flags
+
 HERE = Path(__file__).parent
 VENDOR_CHARTJS = HERE / "vendor" / "chart.umd.js"
 
@@ -55,7 +57,9 @@ def _spec_json(panels: Sequence[Dict[str, Any]]) -> str:
     slim = []
     for p in panels:
         q = {k: p[k] for k in keep if k in p}
-        q["series"] = [{k: s.get(k) for k in ("name", "role", "values", "basis")}
+        # forecast: one flag per value (drawn dashed / hollow, as in the PNG)
+        q["series"] = [dict({k: s.get(k) for k in ("name", "role", "values", "basis")},
+                            forecast=forecast_flags(s, p.get("labels") or []))
                        for s in (p.get("series") or [])]
         slim.append(q)
     # no "<" at all inside the <script>: "</script" / "<!--" in a label
