@@ -5448,26 +5448,84 @@ Output only the text (no JSON, no heading):"""
     _SENTENCE_RE = re.compile(
         r"(?:[^。．.!?！？\n]"
         r"|(?<=\d)[.．](?=\d)"
-        r"|\.(?!\s|$)"
-        r"|\.(?=[ \t]+[a-z0-9(%,;:])"
+        # inside a token (U.S, e.g, example.com, Inc.'s, (etc.)) — not
+        # before a citation or a closing double quote, where it does end
+        r"|\.(?![\s\[\"”」』]|$)"
+        # a list number at the start of a line ('1. Demand…')
+        r"|(?:(?<=^\d)|(?<=\n\d)|(?<=^\d\d)|(?<=\n\d\d))\.(?=[ \t])"
+        # before a lowercase word / number ('No. 1', 'approx. 32%') —
+        # but not before a list marker ('point. b) next', '… 2) next')
+        r"|\.(?=[ \t]+[a-z0-9(%,;:])(?![ \t]+(?:[a-z]|\d{1,2})\))"
         r"|(?:" + "|".join(f"(?<=\\b{a})" for a in _ABBREVIATIONS)
         + r")\.(?=[ \t])"
-        r")+[。．.!?！？]*\s*")
-    # citation markers written after an English period ("grew. [1] Next")
-    _LEADING_CITES_RE = re.compile(r"^(?:\s*\[\d+(?:\s*[,，、]\s*\d+)*\])+\s*")
+        # a '?' inside a URL (?q=…) is not a question mark
+        r"|\?(?=[A-Za-z0-9=&%/#_-])"
+        # a closing quote joins only an ASCII sentence end ('…grew." Then'),
+        # never 。 — after 。 a quote opens the next sentence
+        r")+[。．.!?！？]*(?:(?<=[.!?])[\"”]+)?\s*")
+    # citation markers written after the period ("grew. [1] Next",
+    # "grew.[SOURCE 2] Next")
+    _LEADING_CITES_RE = re.compile(
+        r"^(?:\s*\[(?:SOURCE\s*)?\d+(?:\s*[,，、]\s*\d+)*\])+\s*")
+    # Japanese quotes / brackets: a 。 or ？ inside them does not end the
+    # sentence (ASCII '(' is not tracked: smileys, intervals, typos)
+    # quotes / brackets: a 。 or ？ inside them does not end the sentence
+    # around them (ASCII '(' is not tracked: smileys, intervals, typos)
+    _OPENERS, _CLOSERS = "「『（“", "」』）”"
+    _MAX_QUOTED = 300            # merging stops here whatever the brackets
+    _BARE_LIST_NUMBER = re.compile(r"^\s*[0-9０-９]{1,2}[.．]\s*$")
+    _QUOTED_END = re.compile(r"[?!？！.][\"”]\s*$")
 
     @classmethod
     def _split_sentences(cls, text: str) -> List[str]:
         """Whole sentences; trailing citation markers stay with the
-        sentence they belong to."""
+        sentence they belong to.
+
+        - A 。 or ？ inside 「」『』（）“” does not end the sentence around
+          it (ASCII '"' is not tracked: inch marks and stray quotes) — only while a closer that is
+          not matched by a later opener is still ahead, so a stray
+          opener never swallows the text; merging also stops at a line
+          break or after _MAX_QUOTED chars.
+        - A quoted question / exclamation followed by lowercase text
+          continues the sentence ('"is it growing?" he asked.').
+        - A bare list number ('4.', '１．') joins the item that follows."""
+        pieces = cls._SENTENCE_RE.findall(text)
+        # net closers still ahead of each piece (closers minus openers):
+        # an opener is only "open" while that many closers remain
+        ahead = [0] * (len(pieces) + 1)
+        for k in range(len(pieces) - 1, -1, -1):
+            p = pieces[k]
+            ahead[k] = max(0, ahead[k + 1] + sum(p.count(c) for c in cls._CLOSERS)
+                           - sum(p.count(c) for c in cls._OPENERS))
         out: List[str] = []
-        for piece in cls._SENTENCE_RE.findall(text):
+        depth, carry = 0, ""
+        for k, piece in enumerate(pieces):
+            if depth > ahead[k]:
+                depth = ahead[k]
             lead = cls._LEADING_CITES_RE.match(piece)
             if lead and out:
                 out[-1] = out[-1].rstrip() + " " + lead.group(0).strip() + " "
                 piece = piece[lead.end():]
-            if piece.strip():
+            if not piece.strip():
+                continue
+            if carry:
+                piece, carry = carry + piece, ""
+            if cls._BARE_LIST_NUMBER.match(piece):
+                carry = piece
+                continue
+            open_now = depth > 0
+            if out and ((open_now and len(out[-1]) < cls._MAX_QUOTED
+                         and not out[-1].endswith("\n"))
+                        or (cls._QUOTED_END.search(out[-1])
+                            and piece[:1].islower() and piece[:1].isascii())):
+                out[-1] += piece
+            else:
                 out.append(piece)
+                depth = 0
+            depth = max(0, depth + sum(piece.count(c) for c in cls._OPENERS)
+                        - sum(piece.count(c) for c in cls._CLOSERS))
+        if carry:
+            out.append(carry)
         return out
 
     def _fit_deep_think_conclusion(self, conclusion: str,
@@ -6332,7 +6390,7 @@ def run_manual_research(
         )
 
     def _finalize_manual(chapters, chapter_citation_callback=None,
-                         figure_collection=None):
+                         figure_collection=None, exec_md=""):
         from .report.finalization_runner import FinalizationRunner
         from .report.semantic_manifest import figure_semantics_markdown
         runner = FinalizationRunner(
@@ -6350,6 +6408,14 @@ def run_manual_research(
             session_id=session.session_id,
             chapter_citation_callback=chapter_citation_callback,
         )
+        if exec_md:
+            # V1 executive summary: verified with the body, rendered from
+            # _executive_summary (never written back), as in run()
+            key = "要旨" if config.research.language == "ja" \
+                else "Executive Summary"
+            chapters[key] = exec_md
+            runner.render_only_sections.add(key)
+            runner.citation_exempt_sections.add(key)
         if figure_collection is not None:
             key = "付録D" if config.research.language == "ja" \
                 else "Appendix D"
@@ -6490,10 +6556,18 @@ def run_manual_research(
                 for sid, sdata in session.section_contents.items()
                 if not sid.startswith("_") and sdata.get("content")
             }
+            exec_key = ("要旨" if config.research.language == "ja"
+                        else "Executive Summary")
+            from types import SimpleNamespace as _NS
+            exec_md = DeepResearchTool._executive_summary_markdown(
+                _NS(config=config), session)
             if chapters:
                 outcome = _finalize_manual(
-                    chapters, figure_collection=figure_collection)
+                    chapters, figure_collection=figure_collection,
+                    exec_md=exec_md)
                 for sid, text in outcome["chapters"].items():
+                    if sid == exec_key:
+                        continue      # rendered from _executive_summary
                     if sid in session.section_contents:
                         session.section_contents[sid]["content"] = text
                     else:
@@ -6538,7 +6612,15 @@ def run_manual_research(
         else:
             chapters_now = {sid: ch.content
                             for sid, ch in result.chapters.items()}
-        manifest = build_semantic_manifest(chapters_now, figure_collection)
+        manifest_extras = None
+        if version_tag == "v1":
+            # the executive summary the V1 renderer prints (as in run())
+            _exec = session.section_contents.get("_executive_summary") or {}
+            manifest_extras = {k: _exec.get(k) for k in (
+                "executive_summary", "key_findings", "recommendations")
+                if _exec.get(k)} or None
+        manifest = build_semantic_manifest(chapters_now, figure_collection,
+                                           extras=manifest_extras)
         semantic_freeze_hash = manifest_hash(manifest)
         check = check_artifact(manifest, report_path,
                                evidence_locker=evidence_locker,

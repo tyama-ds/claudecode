@@ -612,8 +612,9 @@ class FinalizationController:
         self.history: List[Dict[str, Any]] = []
         self.limitations: List[str] = []
         self._last_new_sources = 0
-        # length passes run so far (max_length_passes bounds the whole run,
-        # across the ACCEPT and limitations exits)
+        # length passes run so far. max_length_passes bounds the run across
+        # the ACCEPT and limitations exits, plus one pass when an ACCEPT
+        # pass broke the gates and the limitations note must still fit
         self._length_passes_used = 0
         # body chars a length pass must leave free for text appended after
         # it (the 調査上の限界 note); read by the runner's per-section
@@ -1010,7 +1011,8 @@ class FinalizationController:
                           reserve_fn: Callable = None) -> StructuredVerdict:
         """Bring an over-target fixed-mode body toward the target.
 
-        Up to max_length_passes compress passes over the whole run, each
+        Up to max_length_passes compress passes over the whole run (one
+        more when an ACCEPT pass falls back to limitations), each
         stating the section's target in characters, each followed by full
         re-verification. reserve_fn(verdict) gives the chars that will be
         appended afterwards (the limitations note): the body is fitted so

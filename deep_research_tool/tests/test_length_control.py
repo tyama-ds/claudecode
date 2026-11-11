@@ -216,16 +216,20 @@ class TestContentExtractorBudget(unittest.TestCase):
         self.assertEqual(ex._outline_points_range(), (4, 6))
 
 
-def _plan_json(mains=5, subs=3):
+def _plan_json(mains=5, subs=3, titles=None, sub_titles=None):
+    """A planner response; titles / sub_titles(i) name the sections the
+    way a planner that follows the user's table of contents does."""
     import json
     toc = []
     for i in range(1, mains + 1):
-        toc.append({"section": str(i), "title": f"炭素繊維 市場動向{i}",
+        title = titles[i - 1] if titles else f"炭素繊維 市場動向{i}"
+        subs_t = (sub_titles(i) if sub_titles else
+                  [f"炭素繊維 需要詳細{i}-{j}" for j in range(1, subs + 1)])
+        toc.append({"section": str(i), "title": title,
                     "description": f"説明{i}",
-                    "subsections": [{"section": f"{i}.{j}",
-                                     "title": f"炭素繊維 需要詳細{i}-{j}",
+                    "subsections": [{"section": f"{i}.{j}", "title": t,
                                      "description": "d"}
-                                    for j in range(1, subs + 1)]})
+                                    for j, t in enumerate(subs_t, 1)]})
     return json.dumps({"title": "市場", "summary": "s",
                        "table_of_contents": toc,
                        "search_queries": [f"市場 クエリ{i}" for i in range(30)],
@@ -281,36 +285,226 @@ class TestPlannerBudget(unittest.TestCase):
             self.assertEqual(len(plan.table_of_contents.get_flat_sections()), 5, query)
 
     def test_a_section_list_the_user_wrote_is_never_cut(self):
-        qg, _ = self._qg(4000, _plan_json(7, 1))
+        # the planner follows the user's list (titles carry its items)
+        qg, _ = self._qg(4000, _plan_json(
+            7, 1, titles=[f"炭素繊維の市場{i}" for i in range(1, 8)]))
         reqs = "目次は以下の通り:\n" + "\n".join(f"{i}. 市場{i}" for i in range(1, 8))
         plan = qg.create_research_plan("炭素繊維", requirements=reqs)
-        self.assertEqual(len(plan.table_of_contents.get_flat_sections()), 14)
+        toc = plan.table_of_contents
+        # all 7 of the user's chapters stay; the subsection the planner
+        # added to each is folded into the chapter's description
+        self.assertEqual([i.title for i in toc.items],
+                         [f"炭素繊維の市場{i}" for i in range(1, 8)])
+        self.assertEqual(len(toc.get_flat_sections()), 7)
+        self.assertIn("炭素繊維 需要詳細1-1", toc.items[0].description)
 
     def test_explicit_toc_detection(self):
         from deep_research_tool.research.query_generator import QueryGenerator
         qg = QueryGenerator(MagicMock(), language="ja")
         for text in ("GPT-3.5以降のLLM市場", "経営層向け・簡潔に", "2023.の決算を重視",
                      "Focus on Asia, i.e. China", "市場規模は3.5兆円、成長率2.1%",
-                     "**重要**: a\n**必須**: b\n**任意**: c", "2024 年\n2025 年"):
+                     "**重要**: a\n**必須**: b\n**任意**: c", "2024 年\n2025 年",
+                     "国内製薬企業の第Ⅰ相・第Ⅱ相・第Ⅲ相試験", "Compare Phase I. Phase II. and Phase III. rates",
+                     "1 位 TSMC\n2 位 Samsung\n3 位 Intel", "○○\n○○\n○○"):
             self.assertFalse(qg._has_explicit_toc(text, ""), text)
         for text in ("1. 市場規模 2. 競合 3. 規制", "・市場規模\n・競合\n・規制",
                      "第1章 市場 第2章 競合 第3章 規制", "①市場②競合③規制",
                      "章立て: 市場と競合", "下記の構成で: 市場、競合、規制",
                      "1 市場概況\n1.1 市場規模\n2 主要企業",
                      "I. Market II. Players III. Pricing",
-                     "1.市場規模。2.競合。3.規制。", "1.市場規模/2.競合/3.規制"):
+                     "1.市場規模。2.競合。3.規制。", "1.市場規模/2.競合/3.規制",
+                     "Ⅰ．市場\nⅡ．競合\nⅢ．規制"):
             self.assertTrue(qg._has_explicit_toc("炭素繊維", text), text)
 
     def test_text_that_only_looks_like_a_toc_never_loses_a_chapter(self):
         # fix review F1: the broad detector fired (the planner was told to
         # follow the user's structure) but no explicit list was found —
         # subsections are folded, but no main section is dropped
-        qg, _ = self._qg(4000, _plan_json(7, 3))
+        chapters = ["市場", "競合", "価格", "規制", "技術", "課題", "提言"]
+        qg, _ = self._qg(4000, _plan_json(
+            7, 3, titles=[f"炭素繊維の{c}" for c in chapters]))
         plan = qg.create_research_plan(
             "炭素繊維", requirements="章の構成は市場、競合、価格、規制、技術、課題、提言で")
         toc = plan.table_of_contents
         self.assertEqual(len(toc.items), 7)
         self.assertTrue(all(not i.subsections for i in toc.items))
+
+    def test_the_users_chapters_are_found_in_any_list_format(self):
+        # post-merge review: whatever the format, chapters whose titles
+        # carry the user's items are kept; subsections the planner
+        # invented are folded, the user's own subsections are kept
+        chapters = ["市場概況", "主要企業", "価格動向", "規制", "技術動向", "課題", "提言"]
+        for reqs in ("下記の構成でまとめてください：" + "、".join(chapters),
+                     "".join(f"{'①②③④⑤⑥⑦'[i]}{c}" for i, c in enumerate(chapters)),
+                     "\n".join(f"{i}）{c}" for i, c in enumerate(chapters, 1))):
+            qg, _ = self._qg(4000, _plan_json(7, 2, titles=chapters))
+            plan = qg.create_research_plan("炭素繊維", requirements="目次: " + reqs)
+            self.assertEqual([i.title for i in plan.table_of_contents.items],
+                             chapters, reqs)
+        # a ToC pasted from Word, with the user's subsections
+        reqs = "目次\n1 市場概況\n1.1 市場規模\n1.2 成長率\n2 主要企業\n2.1 国内\n2.2 海外\n3 課題"
+        qg, _ = self._qg(4000, _plan_json(
+            3, 2, titles=["市場概況", "主要企業", "課題"],
+            sub_titles=lambda i: {1: ["市場規模", "成長率"], 2: ["国内", "海外"],
+                                  3: ["課題の詳細A", "課題の詳細B"]}[i]))
+        plan = qg.create_research_plan("炭素繊維", requirements=reqs)
+        flat = [s.title for s in plan.table_of_contents.get_flat_sections()]
+        # the user's 3 chapters and 4 subsections stay; the 2 the planner
+        # invented under 課題 are folded
+        self.assertEqual(flat, ["市場概況", "市場規模", "成長率", "主要企業",
+                                "国内", "海外", "課題"])
+
+    def test_a_list_in_either_field_is_the_users(self):
+        # #93 review H0/H4/H12: a ToC in the query was cut when the
+        # requirements also tripped the broad detector, and vice versa
+        chapters = ["市場規模", "主要企業", "技術動向", "規制", "課題", "今後の展望"]
+        for query, reqs in (
+                ("国内EV市場について、次の6章で調査: "
+                 + " ".join(f"{i}. {c}" for i, c in enumerate(chapters, 1)),
+                 "経営層向け・簡潔に"),
+                ("国内EV市場の動向・見通し",
+                 "".join(f"{'①②③④⑤⑥'[i]}{c}" for i, c in enumerate(chapters)))):
+            qg, _ = self._qg(4000, _plan_json(6, 2, titles=chapters))
+            plan = qg.create_research_plan(query, requirements=reqs)
+            self.assertEqual([i.title for i in plan.table_of_contents.items],
+                             chapters, query)
+
+    def test_nested_and_long_items_are_still_the_users(self):
+        # #93 review H1 (技術 / 技術課題) and H13 (long English chapters)
+        nested = ["概要", "政策", "技術", "技術課題", "市場", "市場予測"]
+        qg, _ = self._qg(4000, _plan_json(6, 0, titles=nested))
+        plan = qg.create_research_plan(
+            "全固体電池", requirements="目次: " + " ".join(
+                f"{i}. {c}" for i, c in enumerate(nested, 1)))
+        self.assertEqual([i.title for i in plan.table_of_contents.items], nested)
+        long_titles = ["Market size and growth outlook through 2030",
+                       "Competitive landscape and market share analysis",
+                       "Regulatory environment in the United States and EU",
+                       "Technology roadmap for solid-state batteries",
+                       "Supply chain risks and raw material availability",
+                       "Strategic recommendations for new market entrants"]
+        qg, _ = self._qg(4000, _plan_json(6, 2, titles=long_titles))
+        plan = qg.create_research_plan(
+            "solid-state batteries", requirements="Use the following structure:\n"
+            + "\n".join(f"{i}. {t}" for i, t in enumerate(long_titles, 1)))
+        self.assertEqual([i.title for i in plan.table_of_contents.items], long_titles)
+
+    def _run_plan(self, query, reqs, mains):
+        import json as _json
+        toc = [{"section": str(i), "title": t, "description": "d",
+                "subsections": [{"section": f"{i}.{j}", "title": st, "description": "d"}
+                                for j, st in enumerate(subs, 1)]}
+               for i, (t, subs) in enumerate(mains, 1)]
+        qg, _ = self._qg(4000, _json.dumps(
+            {"title": "x", "summary": "s", "table_of_contents": toc,
+             "search_queries": [f"q{i}" for i in range(30)], "key_terms": [],
+             "suggested_sources": []}, ensure_ascii=False))
+        plan = qg.create_research_plan(query, requirements=reqs)
+        return [(i.title, [x.title for x in i.subsections])
+                for i in plan.table_of_contents.items]
+
+    def test_the_cap_grows_to_the_size_of_the_users_list(self):
+        # #93 review round 4: repeated subsection names (I0), 「課題と提言」
+        # and space-separated lists (I1), reworded titles (I14)
+        user = [("国内市場", ["現状", "課題"]), ("海外市場", ["現状", "課題"]), ("提言", [])]
+        self.assertEqual(self._run_plan(
+            "全固体電池", "目次:\n1. 国内市場\n1.1 現状\n1.2 課題\n2. 海外市場\n"
+            "2.1 現状\n2.2 課題\n3. 提言", user), user)
+        seven = ["市場規模", "主要企業", "技術動向", "規制", "価格", "課題", "提言"]
+        for reqs in ("目次: 市場規模、主要企業、技術動向、規制、価格、課題と提言",
+                     "目次：市場規模　主要企業　技術動向　規制　価格　課題　提言"):
+            got = self._run_plan("国内EV市場", reqs, [(t, []) for t in seven])
+            self.assertEqual([t for t, _ in got], seven, reqs)
+        reworded = ["国内EV市場の規模と成長", "主要プレイヤーの戦略", "技術開発の動向",
+                    "政策と規制の枠組み", "価格の推移", "今後の課題"]
+        got = self._run_plan("国内EV市場", "目次:\n1. 市場規模\n2. 主要企業\n3. 技術\n"
+                             "4. 規制\n5. 価格\n6. 課題", [(t, ["a", "b"]) for t in reworded])
+        self.assertEqual(got, [(t, []) for t in reworded])
+
+    def test_hierarchical_lists_in_any_style(self):
+        # #93 review round 5: subsections written as 第N節, a./A., (1), ①,
+        # indented ・, 【】/・, ■/・, 1/1.1 were read as chapters or skipped;
+        # an overview the planner put first shifted the per-chapter counts
+        user = [("国内市場", ["現状", "課題"]), ("海外市場", ["現状", "課題"]), ("提言", [])]
+        lists = {
+            "第N章/第N節": "目次\n第1章 国内市場\n第1節 現状\n第2節 課題\n第2章 海外市場\n第1節 現状\n第2節 課題\n第3章 提言",
+            "1./a.": "目次:\n1. 国内市場\na. 現状\nb. 課題\n2. 海外市場\na. 現状\nb. 課題\n3. 提言",
+            "1./(1)": "目次:\n1. 国内市場\n(1) 現状\n(2) 課題\n2. 海外市場\n(1) 現状\n(2) 課題\n3. 提言",
+            "1./①": "目次:\n1. 国内市場\n①現状\n②課題\n2. 海外市場\n①現状\n②課題\n3. 提言",
+            "I./A.": "Outline:\nI. 国内市場\nA. 現状\nB. 課題\nII. 海外市場\nA. 現状\nB. 課題\nIII. 提言",
+            "【】/・": "【国内市場】\n・現状\n・課題\n【海外市場】\n・現状\n・課題\n【提言】",
+            "1./　・": "1. 国内市場\n　・現状\n　・課題\n2. 海外市場\n　・現状\n　・課題\n3. 提言",
+            "3ページ+章/節": "3ページ程度でまとめてください。\n目次\n第1章 国内市場\n第1節 現状\n"
+                           "第2節 課題\n第2章 海外市場\n第1節 現状\n第2節 課題\n第3章 提言",
+        }
+        for name, reqs in lists.items():
+            self.assertEqual(self._run_plan("全固体電池", reqs, user), user, name)
+            overview = [("全固体電池の概要", ["定義", "歴史"])] + user
+            self.assertEqual(self._run_plan("全固体電池", reqs, overview), user, name)
+            extra = user[:2] + [("提言", ["x", "y"])]
+            self.assertEqual(self._run_plan("全固体電池", reqs, extra), user, name)
+        seven = ["市場規模", "主要企業", "技術動向", "規制", "価格", "課題", "提言"]
+        got = self._run_plan("国内EV市場", "目次:\n" + "\n".join(seven), [(t, []) for t in seven])
+        self.assertEqual([t for t, _ in got], seven)          # unmarked lines
+
+    def test_a_note_list_does_not_hide_the_toc_in_the_query(self):
+        chapters = ["市場規模", "主要企業", "技術動向", "規制", "課題", "今後の展望"]
+        got = self._run_plan(
+            "国内EV市場について、次の6章で調査: "
+            + " ".join(f"{i}. {c}" for i, c in enumerate(chapters, 1)),
+            "- 経営層向け\n- 簡潔に\n- 図表多め", [(c, []) for c in chapters])
+        self.assertEqual([t for t, _ in got], chapters)
+
+    def test_nothing_but_the_users_list_raises_the_cap(self):
+        # #93 review round 4: purposes (I6), a ・ inside a chapter name
+        # (I7), the query's preamble (I8) never add sections
+        for query, reqs, titles in (
+                ("国内EV市場の動向", "目的: 投資判断\n読者: 経営層\n必須の観点: 価格、補助金、充電網",
+                 ["投資判断の前提", "経営層向け概要", "価格", "補助金", "充電網"]),
+                ("国内EV市場", "目次:\n1. 市場・競合\n2. 価格・コスト\n3. 規制\n4. 技術\n5. 展望",
+                 ["市場・競合", "価格・コスト", "規制", "技術", "展望"]),
+                ("EV市場: 1. 規模 2. 企業 3. 規制", "",
+                 ["EV市場の概観", "規模", "企業", "規制", "展望"])):
+            got = self._run_plan(query, reqs, [(t, ["市場", "競合", "x"]) for t in titles])
+            self.assertEqual(sum(1 + len(s) for _, s in got), 5, (query, got))
+
+    def test_topic_words_never_protect_subsections_or_late_chapters(self):
+        # #93 review H2/H3/H5: topic words matched one chapter and one
+        # subsection each; a 'お任せ' requirement with keyword 章構成 kept
+        # a 20-section plan; late protected chapters pushed the plan over
+        qg, _ = self._qg(4000, _plan_json(
+            5, 3, titles=["炭素繊維の市場規模", "主要メーカーの動向", "用途別需要",
+                          "価格とコスト", "CFRP市場の展望"],
+            sub_titles=lambda i: [f"炭素繊維の生産量{i}", f"CFRP市場向け需要{i}",
+                                  f"詳細{i}"]))
+        plan = qg.create_research_plan("炭素繊維・CFRP市場")
+        self.assertEqual(len(plan.table_of_contents.get_flat_sections()), 5)
+        qg, _ = self._qg(4000, _plan_json(
+            5, 3, titles=["市場規模", "競合", "価格", "需要", "展望"]))
+        plan = qg.create_research_plan(
+            "国内EV市場の動向", requirements="章構成はお任せします。市場規模・競合・価格を重視。")
+        self.assertEqual(len(plan.table_of_contents.get_flat_sections()), 5)
+        qg, _ = self._qg(4000, _plan_json(
+            7, 0, titles=["概況", "需要", "供給", "価格", "市場規模", "競合", "規制"]))
+        plan = qg.create_research_plan(
+            "国内EV市場", requirements="必ず含める章: 市場規模、競合、規制")
+        titles = [i.title for i in plan.table_of_contents.items]
+        self.assertEqual(len(titles), 5)
+        for c in ("市場規模", "競合", "規制"):
+            self.assertIn(c, titles)
+
+    def test_topic_words_and_purposes_never_protect_a_plan(self):
+        # post-merge review G2/G3/G4: topic text that trips the broad
+        # detector (・, 第Ⅲ相, stock) with a purposes list, or Roman numerals
+        # in prose, must not switch the cap off
+        for query, reqs in (
+                ("国内EV市場の動向・見通し", "- 経営層向け\n- 日本市場に限定\n- 2030年までの見通し"),
+                ("国内製薬企業の第Ⅰ相・第Ⅱ相・第Ⅲ相試験パイプライン", ""),
+                ("Tesla stock outlook 2025", "- Audience: executives\n- Keep it concise\n- Compare vendors"),
+                ("炭素繊維 市場動向・主要プレイヤー", "1 位 TSMC\n2 位 Samsung\n3 位 Intel")):
+            qg, _ = self._qg(4000, _plan_json(5, 3))
+            plan = qg.create_research_plan(query, requirements=reqs)
+            self.assertEqual(len(plan.table_of_contents.get_flat_sections()), 5, query)
 
     def test_a_list_of_purposes_keeps_the_cap(self):
         # fix review F2/F10: '- ' bullets the planner never receives as a
@@ -373,6 +567,79 @@ class TestDeepThinkCap(unittest.TestCase):
             self.assertEqual(len(parts), n, parts)
             self.assertEqual(re.sub(r"\s+", "", "".join(parts)),
                              re.sub(r"\s+", "", text))          # nothing lost
+
+    def test_quotes_urls_and_tight_citations(self):
+        # post-merge review G0/G1/G7
+        import re
+        from deep_research_tool.main import DeepResearchTool
+        split = DeepResearchTool._split_sentences
+        cases = {
+            "Demand grew.[1] Supply fell.[2] Prices rose.[3]": 3,
+            "Demand grew.[SOURCE 1] Supply fell.[SOURCE 2] Prices rose.": 3,
+            'He said "growth will continue." Then prices fell.': 2,
+            "社長は「需要は回復した。今後も伸びる？」と述べた。次の文。": 2,
+            "See https://example.com/a?q=1&b=2 for data. Next one.": 2,
+        }
+        for text, n in cases.items():
+            parts = split(text)
+            self.assertEqual(len(parts), n, parts)
+            self.assertEqual(re.sub(r"\s+", "", "".join(parts)),
+                             re.sub(r"\s+", "", text))
+        self.assertTrue(split("Demand grew.[1] Supply fell.")[0]
+                        .strip().endswith("[1]"))
+
+    def test_abbreviation_quotes_lists_and_unclosed_brackets(self):
+        # #93 review H6/H10 (Inc.'s, (etc.), Corp.)), H7/H11 (a ? inside
+        # English quotes), H8 (an unclosed 「 swallowed the conclusion),
+        # H9 (a list number became its own sentence)
+        import re
+        from deep_research_tool.main import DeepResearchTool
+        split = DeepResearchTool._split_sentences
+        cases = {
+            "Acme Inc.'s revenue rose. Next.": 2,
+            "Prices rose (etc.) last year. Next.": 2,
+            "Toyota (Toyota Motor Corp.) grew. Next.": 2,
+            'He asked "is it growing?" and then left. Next.': 2,
+            "1. Demand rose.\n2. Supply fell.": 2,
+        }
+        for text, n in cases.items():
+            parts = split(text)
+            self.assertEqual(len(parts), n, parts)
+            self.assertEqual(re.sub(r"\s+", "", "".join(parts)),
+                             re.sub(r"\s+", "", text))
+        tool = self._tool(length_mode="fixed", preferred_body_chars=4000)
+        kept = tool._fit_deep_think_conclusion("「注目点。" + "需要は回復した。" * 60, 5)
+        self.assertTrue(kept)                     # not swallowed whole
+        self.assertLessEqual(len(kept), 160)
+
+    def test_splitter_round_four(self):
+        # #93 review round 4: no lowercase merge after a real sentence end
+        # (I9), a stray opener with a later bracket pair (I10), a quote
+        # spanning sentences (I11), full-width / indented list numbers (I12)
+        import re
+        from deep_research_tool.main import DeepResearchTool
+        split = DeepResearchTool._split_sentences
+        cases = {
+            "需要は回復した。iPhoneの販売も伸びた。次の文。": 3,
+            "a) first point. b) second point.": 2,
+            "Is it growing? eBay says yes. Next.": 3,
+            "（注：未確認の数値を含む。需要は回復した。価格は上昇した。（参考）次の文。": 4,
+            '“Growth will continue. Prices will rise,” the CEO said. Next.': 2,
+            # ASCII quotes are not tracked (an inch mark must not swallow
+            # the text): a sentence inside them may split
+            '"Growth will continue. Prices will rise," the CEO said. Next.': 3,
+            '需要は回復した。"EV"の販売も伸びた。次の文。': 3,
+            'The 65" TV sold well. Next one. "Quoted" term here.': 3,
+            "１．需要は回復した。\n２．供給は減少した。": 2,
+            "  4. Demand rose.\n  5. Supply fell.": 2,
+        }
+        for text, n in cases.items():
+            parts = split(text)
+            self.assertEqual(len(parts), n, parts)
+            self.assertEqual(re.sub(r"\s+", "", "".join(parts)),
+                             re.sub(r"\s+", "", text))
+            for p in parts:
+                self.assertIsNone(re.match(r"^\s*[0-9０-９]{1,2}[.．]\s*$", p), parts)
 
     def test_a_first_sentence_over_the_cap_adds_nothing(self):
         tool = self._tool(length_mode="fixed", preferred_body_chars=4000)
@@ -986,6 +1253,56 @@ class TestVerifyOnlyLength(unittest.TestCase):
             report = Path(res["report_path"]).read_text(encoding="utf-8")
             self.assertNotIn("unused.example.com", report.split("References")[-1])
 
+
+
+class TestManualExecutiveSummary(unittest.TestCase):
+    """#93 review G5/H15 (older bug): a verified V1 manual run failed the
+    artifact check whenever the researcher wrote an executive summary —
+    the renderer printed it but the freeze never covered it."""
+
+    def test_the_summary_is_frozen_and_the_check_passes(self):
+        self._run("markdown", "本調査は市場の構造と主要企業の動向を整理し、需要の見通しを示したものである。"
+                  "価格動向と規制の影響も併せて検討し、今後三年間の注目点をまとめた。")
+
+    def test_an_ampersand_in_the_pdf_summary(self):
+        # #93 review round 4 (I13): the PDF printed 'R&D' as 'R&D;'
+        self._run("pdf", "本調査は主要企業のR&D投資とM&Aの動向を整理し、需要の見通しを示したものである。"
+                  "価格動向と規制の影響も併せて検討し、今後三年間の注目点をまとめた。")
+
+    def _run(self, fmt, summary):
+        from unittest.mock import patch
+        from deep_research_tool.main import run_manual_research
+        from deep_research_tool.tests.test_finalization_integration import (
+            CLAIM_SENTENCE, SUPPORTED_EVIDENCE, FakeResearcher, long_body,
+            make_llm, make_locker, make_plan, make_session)
+        from deep_research_tool.utils.helpers import ResearchWarnings
+        ResearchWarnings.reset()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            plan = make_plan([("1", "市場シェア", "A社のシェアを明らかにする")])
+            session = make_session(plan, {"1": {
+                "title": "市場シェア",
+                "content": long_body("1", "市場シェア", CLAIM_SENTENCE),
+                "evidence": SUPPORTED_EVIDENCE}})
+            session.section_contents["_executive_summary"] = {
+                "executive_summary": summary,
+                "key_findings": ["主要企業の国内シェアは上位三社で過半を占めると整理される"],
+                "recommendations": ["需要の変化を四半期ごとに確認し計画を見直すことが望ましい"]}
+            locker = make_locker(tmp, SUPPORTED_EVIDENCE)
+            fake = FakeResearcher(session, locker)
+            fake.load_evidence_from_file = lambda **kw: None
+            llm = make_llm()
+            with patch("deep_research_tool.main.ManualResearcher", new=lambda **kw: fake), \
+                    patch("deep_research_tool.main.get_client", new=lambda **kw: llm):
+                result = run_manual_research(
+                    evidence_file="dummy.csv", topic="市場調査", provider="openai",
+                    api_key="sk-test", output_format=fmt, output_dir=str(tmp),
+                    manual_toc_sections=None, auto_toc=True)
+            self.assertEqual(result.get("semantic_artifact_check"), "pass")
+            self.assertEqual(result.get("run_status"), "completed")
+            if fmt == "markdown":
+                report = Path(result["report_path"]).read_text(encoding="utf-8")
+                self.assertEqual(report.count(summary[:30]), 1)   # rendered once
 
 if __name__ == "__main__":
     unittest.main()

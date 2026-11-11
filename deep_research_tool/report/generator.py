@@ -777,10 +777,11 @@ class ReportGenerator:
         exec_summary = renumbered_contents.get("_executive_summary", {})
         if exec_summary:
             story.append(Paragraph("Executive Summary", heading1_style))
-            story.append(Paragraph(
-                exec_summary.get("executive_summary", ""),
-                body_style
-            ))
+            # Paragraph reads markup: escape like the findings below
+            # ('R&D' was printed as 'R&D;' and failed the artifact check)
+            summary_safe = str(exec_summary.get("executive_summary", "") or "").replace(
+                "&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            story.append(Paragraph(summary_safe, body_style))
             for head, key in (("Key Findings", "key_findings"),
                               ("Recommendations", "recommendations")):
                 if exec_summary.get(key):
