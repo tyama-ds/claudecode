@@ -230,6 +230,98 @@ def _add_docx_picture(run, path, Inches) -> None:
     run.add_picture(str(path), width=Inches(5.5))
 
 
+# ============================================================================
+# Figure numbering and caption blocks (every report format)
+#
+# A placed figure (chart or image) gets "図N　タイトル" / "Figure N. Title"
+# ABOVE it and ONE caption block below it: the caption text, then the
+# 「見るべき点: …」 line once. N follows the order the figures appear in the
+# report. The number is a RENDERING detail added where the figure is
+# placed — never stored in Figure.title / Figure.caption, which are frozen
+# into the semantic manifest (and its hash).
+# ============================================================================
+
+JUDGMENT_LABELS = {"ja": "見るべき点: ", "en": "Key point: "}
+# where the judgment starts inside a stored caption ("…　見るべき点: …")
+_JUDGMENT_SPLIT_RE = re.compile(r"[\s　]*(?=(?:見るべき点|Key point)[ \t]*[:：])")
+
+# Back matter the report renderers write after the chapters. Any unnumbered
+# heading at a chapter's level or above ends the chapter; these end it
+# even as a deeper heading (generic words only as the whole heading, so a
+# chapter's own '### 品質の比較' is not mistaken for back matter).
+BACK_MATTER_RE = re.compile(
+    r"^\s*(?:付録|Appendix\b|処理中の警告|Processing Warnings\b|"
+    r"Verification Summary\b|検証(?:サマリー?|の概要)|"
+    r"(?:Source )?Quality Summary\b|(?:ソース|情報源)?品質(?:サマリー?|の概要)|"
+    r"フェルミ推定|Fermi Estimation\b|一貫性チェック|Consistency Check\b|"
+    r"その他の図表|Additional Figures\b|"
+    # the report-wide limitations note the finalization appends to the
+    # last chapter ends that chapter's own body
+    r"調査上の限界|Research Limitations\b|"
+    r"(?:参考文献|引用文献|References|Sources|Bibliography|用語集|Glossary|図表一覧|"
+    r"Figures and Tables)\s*$)", re.I)
+
+# a chapter heading's number ("1. 市場" / "1.2 競合")
+_CHAPTER_NUMBER_RE = re.compile(r"^(\d+(?:\.\d+)?)[.\s]")
+
+
+def judgment_label(language: str = "ja") -> str:
+    """The label of the judgment line under a chart (「見るべき点: 」)."""
+    return JUDGMENT_LABELS["ja"] if language == "ja" else JUDGMENT_LABELS["en"]
+
+
+def figure_heading(number: int, title: str, language: str = "ja") -> str:
+    """'図N　タイトル' (ja) / 'Figure N. Title' — printed above the figure."""
+    title = " ".join(str(title or "").split())
+    if language == "ja":
+        return f"図{number}　{title}" if title else f"図{number}"
+    return f"Figure {number}. {title}" if title else f"Figure {number}"
+
+
+def figure_caption_lines(fig) -> List[str]:
+    """The caption block printed under a figure: the caption text, then the
+    「見るべき点: …」 line (the pipeline stores both in Figure.caption, so
+    the judgment is printed exactly once). A caption that only repeats the
+    title (already printed above the figure) is not printed again."""
+    caption = str(getattr(fig, "caption", "") or "").strip()
+    title = str(getattr(fig, "title", "") or "").strip()
+    if not caption or caption == title:
+        return []
+    parts = _JUDGMENT_SPLIT_RE.split(caption, maxsplit=1)
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+def chapter_number(text: str) -> Optional[str]:
+    """The section id of a numbered chapter heading's text, else None."""
+    m = _CHAPTER_NUMBER_RE.match(str(text or "").strip())
+    return m.group(1) if m else None
+
+
+def _ends_chapter(heading_text: str, level: int, sid: Optional[str],
+                  current: Optional[Tuple[str, int]], seen: set) -> Tuple[bool, bool]:
+    """How a heading relates to the chapter being read: (closes it, starts
+    a new chapter). A numbered heading starts a chapter unless it is a
+    sub-heading of the current one ('### 1. 背景' inside chapter 3) or its
+    number was already used (a numbered item inside an appendix). Any
+    other heading at the chapter's level or above, or a back-matter
+    heading (付録 / References / 用語集 …), closes the chapter."""
+    if sid and sid not in seen and (
+            current is None or level <= current[1] or sid.startswith(current[0] + ".")):
+        return current is not None, True
+    if current is not None and (level <= current[1] or BACK_MATTER_RE.match(heading_text or "")):
+        return True, False
+    return False, False
+
+
+def keep_with_next(paragraph) -> None:
+    """A page break cannot fall between this paragraph and the next one
+    (figure title → image → caption stay on one page)."""
+    try:
+        paragraph.paragraph_format.keep_with_next = True
+    except Exception:
+        pass
+
+
 class FigureTableGenerator:
     """
     Generate figures and tables for research reports.
@@ -2343,29 +2435,46 @@ Example: line"""
     # Markdown Integration
     # ========================================================================
 
+    def _markdown_figure_block(self, fig, counter: list, missing_note: str = "Image") -> List[str]:
+        """One figure as Markdown: '**図N　タイトル**' above the image and
+        ONE caption block below it (caption text, then 見るべき点). Only a
+        figure whose image is there gets a number."""
+        lines: List[str] = []
+        shown = False
+        if fig.image_path:
+            image_path = Path(fig.image_path) if not isinstance(fig.image_path, Path) else fig.image_path
+            if image_path.exists():
+                counter[0] += 1
+                lines += [f'**{figure_heading(counter[0], fig.title, self.language)}**', '',
+                          f'![{fig.title}]({fig.image_path})', '']
+                shown = True
+            else:
+                lines += [f'<!-- {missing_note} not found: {fig.image_path} -->']
+        caption = figure_caption_lines(fig) if shown else \
+            ([str(fig.caption).strip()] if str(fig.caption or "").strip() else [])
+        lines += [f'*{c}*' for c in caption]
+        return lines
+
     def _insert_section_figures(
         self,
         result_lines: list,
         section_id: str,
         collection: 'FigureTableCollection',
         inserted_sections: set,
+        counter: Optional[list] = None,
     ) -> None:
-        """Insert figures, tables, and charts for a section into result_lines."""
+        """Insert figures, tables, and charts for a section into result_lines.
+        ``counter`` ([n]) numbers the figures in report order."""
         if section_id in inserted_sections:
             return
         inserted_sections.add(section_id)
+        counter = counter if counter is not None else [0]
 
         # Add figures for this section
         section_figures = collection.get_figures_for_section(section_id)
         for fig in section_figures:
             result_lines.append('')
-            if fig.image_path:
-                image_path = Path(fig.image_path) if not isinstance(fig.image_path, Path) else fig.image_path
-                if image_path.exists():
-                    result_lines.append(f'![{fig.title}]({fig.image_path})')
-                else:
-                    result_lines.append(f'<!-- Image not found: {fig.image_path} -->')
-            result_lines.append(f'*{fig.caption}*')
+            result_lines.extend(self._markdown_figure_block(fig, counter))
             if fig.source_url:
                 result_lines.append(f'Source: [{fig.source_title or fig.source_url}]({fig.source_url})')
             result_lines.append('')
@@ -2398,13 +2507,7 @@ Example: line"""
         section_charts = collection.get_charts_for_section(section_id)
         for chart in section_charts:
             result_lines.append('')
-            if chart.image_path:
-                image_path = Path(chart.image_path) if not isinstance(chart.image_path, Path) else chart.image_path
-                if image_path.exists():
-                    result_lines.append(f'![{chart.title}]({chart.image_path})')
-                else:
-                    result_lines.append(f'<!-- Chart not found: {chart.image_path} -->')
-            result_lines.append(f'*{chart.caption}*')
+            result_lines.extend(self._markdown_figure_block(chart, counter, missing_note="Chart"))
             result_lines.append('')
 
     def add_figures_to_markdown(
@@ -2412,32 +2515,50 @@ Example: line"""
         markdown_content: str,
         collection: FigureTableCollection,
     ) -> str:
-        """Add figures and tables to markdown content."""
+        """Add figures and tables to markdown content.
+
+        A chapter's figures go at the END of its body: before the next
+        chapter heading, an unnumbered heading at the chapter's level or
+        above, or a back-matter heading (付録 / References / 用語集 …) —
+        never under the heading before the text, and never after the
+        References. Figures are numbered 図1, 図2 … in report order."""
         lines = markdown_content.split('\n')
-        result_lines = []
-        current_section = None
-        inserted_sections = set()
+        result_lines: List[str] = []
+        current = None                 # (section id, heading level)
+        seen: set = set()
+        inserted_sections: set = set()
+        counter = [0]
+        rule = re.compile(r'^\s*(?:-{3,}|\*{3,}|_{3,})\s*$')
+
+        def flush():
+            nonlocal current
+            if current is None:
+                return
+            # after the chapter's last line: before the blank lines / the
+            # horizontal rule that separate it from what follows
+            cut = len(result_lines)
+            while cut > 0 and (not result_lines[cut - 1].strip() or rule.match(result_lines[cut - 1])):
+                cut -= 1
+            block: List[str] = []
+            self._insert_section_figures(block, current[0], collection, inserted_sections, counter)
+            result_lines[cut:cut] = block
+            current = None
 
         for line in lines:
-            # When a new section header is found, flush figures for previous section first
-            if line.startswith('## ') or line.startswith('### '):
-                match = re.match(r'^##+ (\d+(?:\.\d+)?)[.\s]', line)
-                if match:
-                    # Flush previous section before starting new one
-                    if current_section:
-                        self._insert_section_figures(result_lines, current_section, collection, inserted_sections)
-                    current_section = match.group(1)
-
+            m = re.match(r'^(#{2,6})\s+(.*)$', line)
+            if m:
+                level, text = len(m.group(1)), m.group(2).strip()
+                sid = chapter_number(text)
+                closes, starts = _ends_chapter(text, level, sid, current, seen)
+                if closes:
+                    flush()
+                if starts:
+                    current = (sid, level)
+                    seen.add(sid)
             result_lines.append(line)
 
-            # After section content, add figures and tables
-            if current_section and (line.strip() == '' or line.startswith('---')):
-                self._insert_section_figures(result_lines, current_section, collection, inserted_sections)
-                current_section = None
-
-        # Flush figures for the last section (if document ends without blank line)
-        if current_section:
-            self._insert_section_figures(result_lines, current_section, collection, inserted_sections)
+        # the last chapter, when nothing follows it
+        flush()
 
         # Append orphaned figures (section_id="" or unmatched) at the end
         orphan_figures = [f for f in collection.figures if f.section_id not in inserted_sections]
@@ -2448,19 +2569,11 @@ Example: line"""
             result_lines.append('')
             result_lines.append('---')
             result_lines.append('')
-            for fig in orphan_figures:
-                if fig.image_path:
-                    image_path = Path(fig.image_path) if not isinstance(fig.image_path, Path) else fig.image_path
+            for item in orphan_figures + orphan_charts:
+                if item.image_path:
+                    image_path = Path(item.image_path) if not isinstance(item.image_path, Path) else item.image_path
                     if image_path.exists():
-                        result_lines.append(f'![{fig.title}]({fig.image_path})')
-                        result_lines.append(f'*{fig.caption}*')
-                        result_lines.append('')
-            for chart in orphan_charts:
-                if chart.image_path:
-                    image_path = Path(chart.image_path) if not isinstance(chart.image_path, Path) else chart.image_path
-                    if image_path.exists():
-                        result_lines.append(f'![{chart.title}]({chart.image_path})')
-                        result_lines.append(f'*{chart.caption}*')
+                        result_lines.extend(self._markdown_figure_block(item, counter))
                         result_lines.append('')
             for table in orphan_tables:
                 result_lines.append(f'**{table.title}**')
@@ -2513,35 +2626,31 @@ Example: line"""
             doc = Document(docx_path)
             output_path = output_path or docx_path.parent / f"{docx_path.stem}_with_figures.docx"
 
-            # Track which section we're in.
-            # IMPORTANT: insertion positions must be indices into the body's
-            # block-level children (paragraphs AND tables), because
-            # _move_paragraph_after/_move_table_after reposition within that
-            # list. Indexing doc.paragraphs would drift by one for every
-            # table already present in the document.
-            body_children = list(doc.element.body)
+            # Where each chapter's body ends. A chapter ends at the next
+            # chapter heading, at an unnumbered heading at its level or
+            # above, or at a back-matter heading (付録 / Verification /
+            # Quality / References / 用語集 / 処理中の警告 …). The LAST
+            # chapter ends before that back matter — or, when nothing
+            # follows it, before the section properties (w:sectPr), never
+            # after them. Insertion is anchored on ELEMENTS (each new block
+            # goes right before its chapter's end), so the figures keep
+            # their order and indices cannot drift.
+            body = doc.element.body
+            ends = self._docx_chapter_ends(doc)
+            matched_sections = {sid for sid, _anchor in ends}
+            counter = [0]
+            language = self.language
 
-            current_section = None
-            insert_after = []
-            matched_sections = set()
+            def _place(elem, anchor):
+                if anchor is not None:
+                    anchor.addprevious(elem)
+                else:
+                    body.append(elem)
 
-            for paragraph in doc.paragraphs:
-                text = paragraph.text.strip()
-
-                # Detect section headers (match "1. " or "1.2. " format)
-                match = re.match(r'^(\d+(?:\.\d+)?)[.\s]', text)
-                if match and paragraph.style.name.startswith('Heading'):
-                    try:
-                        body_idx = body_children.index(paragraph._element)  # noqa: SLF001
-                    except ValueError:
-                        continue  # paragraph nested in a table etc.
-                    if current_section:
-                        insert_after.append((body_idx, current_section))
-                    current_section = match.group(1)
-
-            # Insert at end for last section
-            if current_section:
-                insert_after.append((len(body_children), current_section))
+            def _drop(*elems):
+                for e in elems:
+                    if e is not None and e.getparent() is not None:
+                        e.getparent().remove(e)
 
             def _image_exists(img_path) -> bool:
                 """Check if image path exists on disk."""
@@ -2560,116 +2669,128 @@ Example: line"""
                     return False
                 return True
 
-            skipped_elements = 0
+            def _add_image(item, anchor):
+                """図N　タイトル / the image / ONE caption block, kept on one
+                page (keep_with_next on the title and the image)."""
+                created = []
+                try:
+                    title_p = doc.add_paragraph()
+                    created.append(title_p._element)  # noqa: SLF001
+                    title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    title_run = title_p.add_run(figure_heading(counter[0] + 1, item.title, language))
+                    title_run.bold = True
+                    title_run.font.size = Pt(10)
+                    keep_with_next(title_p)
 
-            # Insert in reverse order to maintain indices
-            for insert_idx, section_id in reversed(insert_after):
-                matched_sections.add(section_id)
-                section_tables = collection.get_tables_for_section(section_id)
-                section_charts = collection.get_charts_for_section(section_id)
-                section_figures = collection.get_figures_for_section(section_id)
+                    p = doc.add_paragraph()
+                    created.append(p._element)  # noqa: SLF001
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    _add_docx_picture(p.add_run(), item.image_path, Inches)
+                    keep_with_next(p)
 
-                elements = []
+                    lines = figure_caption_lines(item)
+                    if lines:
+                        caption_p = doc.add_paragraph()
+                        created.append(caption_p._element)  # noqa: SLF001
+                        caption_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        for i, line in enumerate(lines):
+                            run = caption_p.add_run(line)
+                            run.font.size = Pt(9)
+                            run.italic = True
+                            if i < len(lines) - 1:
+                                run.add_break()
+                except Exception:
+                    _drop(*created)       # no title or caption without its image
+                    raise
+                counter[0] += 1
+                for elem in created:
+                    _place(elem, anchor)
 
-                # Add charts
-                for chart in reversed(section_charts):
-                    if _embeddable(chart.image_path):
-                        elements.append(('image', chart))
+            def _add_table(elem, anchor):
+                # Add table title
+                title_p = doc.add_paragraph()
+                title_run = title_p.add_run(elem.title)
+                title_run.bold = True
+                title_run.font.size = Pt(10)
+                keep_with_next(title_p)
+                docx_table = caption_p = None
+                try:
+                    # Add table
+                    docx_table = doc.add_table(
+                        rows=len(elem.rows) + 1,
+                        cols=len(elem.headers),
+                    )
+                    docx_table.style = 'Light Grid'
 
-                # Add tables
-                for table in reversed(section_tables):
-                    elements.append(('table', table))
+                    # Headers
+                    for j, header in enumerate(elem.headers):
+                        docx_table.rows[0].cells[j].text = str(header)
 
-                # Add figures
-                for fig in reversed(section_figures):
-                    if _embeddable(fig.image_path):
-                        elements.append(('image', fig))
+                    # Data rows
+                    for row_idx, row in enumerate(elem.rows):
+                        for col_idx, cell in enumerate(row):
+                            if col_idx < len(elem.headers):
+                                docx_table.rows[row_idx + 1].cells[col_idx].text = str(cell)
 
-                for elem_type, elem in elements:
-                  # One corrupt image or malformed table must not abort the
-                  # whole insertion (previously a single failure dropped
-                  # every figure in the report)
-                  try:
-                    if elem_type == 'image':
-                        # Add image
-                        p = doc.add_paragraph()
-                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        run = p.add_run()
-                        _add_docx_picture(run, elem.image_path, Inches)
-
-                        # Add caption
+                    # Add caption below the table
+                    if elem.caption and elem.caption != elem.title:
                         caption_p = doc.add_paragraph()
                         caption_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                         caption_run = caption_p.add_run(elem.caption)
                         caption_run.font.size = Pt(9)
                         caption_run.italic = True
+                except Exception:
+                    _drop(title_p._element, docx_table._tbl if docx_table is not None else None,  # noqa: SLF001
+                          caption_p._element if caption_p is not None else None)  # noqa: SLF001
+                    raise
 
-                        # Move to correct position
-                        self._move_paragraph_after(doc, p, insert_idx)
-                        self._move_paragraph_after(doc, caption_p, insert_idx + 1)
+                # title, table and caption at the chapter's end, in order
+                _place(title_p._element, anchor)  # noqa: SLF001
+                _place(docx_table._tbl, anchor)  # noqa: SLF001
+                if caption_p is not None:
+                    _place(caption_p._element, anchor)  # noqa: SLF001
 
-                    elif elem_type == 'table':
-                        # Add table title
-                        title_p = doc.add_paragraph()
-                        title_run = title_p.add_run(elem.title)
-                        title_run.bold = True
-                        title_run.font.size = Pt(10)
+            skipped_elements = 0
 
-                        # Add table
-                        docx_table = doc.add_table(
-                            rows=len(elem.rows) + 1,
-                            cols=len(elem.headers),
-                        )
-                        docx_table.style = 'Light Grid'
+            # chapters in report order: the figure numbers follow the report
+            for section_id, anchor in ends:
+                elements = []
+                # charts, then tables, then images (as before)
+                for chart in collection.get_charts_for_section(section_id):
+                    if _embeddable(chart.image_path):
+                        elements.append(('image', chart))
+                for table in collection.get_tables_for_section(section_id):
+                    elements.append(('table', table))
+                for fig in collection.get_figures_for_section(section_id):
+                    if _embeddable(fig.image_path):
+                        elements.append(('image', fig))
 
-                        # Headers
-                        for j, header in enumerate(elem.headers):
-                            docx_table.rows[0].cells[j].text = str(header)
+                for elem_type, elem in elements:
+                    # One corrupt image or malformed table must not abort the
+                    # whole insertion (previously a single failure dropped
+                    # every figure in the report)
+                    try:
+                        if elem_type == 'image':
+                            _add_image(elem, anchor)
+                        else:
+                            _add_table(elem, anchor)
+                    except Exception as elem_err:
+                        skipped_elements += 1
+                        label = getattr(elem, 'title', '') or getattr(elem, 'caption', '')
+                        print(f"[FigureTableGenerator] skipping one "
+                              f"{elem_type} ('{str(label)[:40]}') in section "
+                              f"{section_id}: {elem_err}")
 
-                        # Data rows
-                        for row_idx, row in enumerate(elem.rows):
-                            for col_idx, cell in enumerate(row):
-                                if col_idx < len(elem.headers):
-                                    docx_table.rows[row_idx + 1].cells[col_idx].text = str(cell)
-
-                        # Add caption below the table
-                        caption_p = None
-                        if elem.caption and elem.caption != elem.title:
-                            caption_p = doc.add_paragraph()
-                            caption_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                            caption_run = caption_p.add_run(elem.caption)
-                            caption_run.font.size = Pt(9)
-                            caption_run.italic = True
-
-                        # Move title, table, and caption to correct position
-                        self._move_paragraph_after(doc, title_p, insert_idx)
-                        self._move_table_after(doc, docx_table, insert_idx + 1)
-                        if caption_p:
-                            self._move_paragraph_after(doc, caption_p, insert_idx + 2)
-                  except Exception as elem_err:
-                    skipped_elements += 1
-                    label = getattr(elem, 'title', '') or getattr(elem, 'caption', '')
-                    print(f"[FigureTableGenerator] skipping one "
-                          f"{elem_type} ('{str(label)[:40]}') in section "
-                          f"{section_id}: {elem_err}")
-
-            # Append orphaned figures (section_id="" or unmatched) at end of document
+            # Append orphaned figures (section_id="" or unmatched) at end of
+            # the document body (before its section properties)
             orphan_figures = [f for f in collection.figures if f.section_id not in matched_sections]
             orphan_charts = [c for c in collection.charts if c.section_id not in matched_sections]
+            end_anchor = self._docx_body_end(body)
             for item in orphan_figures + orphan_charts:
                 if not _embeddable(item.image_path):
                     continue
                 try:
-                    p = doc.add_paragraph()
-                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    run = p.add_run()
-                    img_path = Path(item.image_path) if not isinstance(item.image_path, Path) else item.image_path
-                    _add_docx_picture(run, img_path, Inches)
-                    caption_p = doc.add_paragraph()
-                    caption_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    caption_run = caption_p.add_run(item.caption)
-                    caption_run.font.size = Pt(9)
-                    caption_run.italic = True
+                    _add_image(item, end_anchor)
                 except Exception as elem_err:
                     skipped_elements += 1
                     print(f"[FigureTableGenerator] skipping one orphan image: {elem_err}")
@@ -2684,6 +2805,56 @@ Example: line"""
         except Exception as e:
             print(f"[FigureTableGenerator] Error adding figures to DOCX: {e}")
             return None
+
+    @staticmethod
+    def _docx_body_end(body):
+        """The element new blocks go before at the end of the body: the
+        body-level section properties (w:sectPr), or None (append)."""
+        for child in reversed(list(body)):
+            if str(getattr(child, "tag", "")).endswith("}sectPr"):
+                return child
+        return None
+
+    @staticmethod
+    def _docx_heading_level(paragraph) -> Optional[int]:
+        """Heading level of a paragraph (Title = 0), None for body text."""
+        try:
+            name = paragraph.style.name or ""
+        except Exception:
+            return None
+        if name == "Title":
+            return 0
+        m = re.match(r"Heading\s*(\d*)$", name)
+        if not m:
+            return None
+        return int(m.group(1)) if m.group(1) else 1
+
+    def _docx_chapter_ends(self, doc) -> List[Tuple[str, Any]]:
+        """[(section id, element the chapter's body ends before)] in report
+        order. The anchor is the heading that follows the chapter, or —
+        for a chapter nothing follows — the body's w:sectPr (None when the
+        body has none: append)."""
+        body = doc.element.body
+        ends: List[Tuple[str, Any]] = []
+        current = None                 # (section id, heading level)
+        seen: set = set()
+        for paragraph in doc.paragraphs:
+            level = self._docx_heading_level(paragraph)
+            el = paragraph._element  # noqa: SLF001
+            if level is None or el.getparent() is not body:
+                continue               # body text, or a paragraph nested in a table
+            text = paragraph.text.strip()
+            sid = chapter_number(text)
+            closes, starts = _ends_chapter(text, level, sid, current, seen)
+            if closes:
+                ends.append((current[0], el))
+                current = None
+            if starts:
+                current = (sid, level)
+                seen.add(sid)
+        if current is not None:
+            ends.append((current[0], self._docx_body_end(body)))
+        return ends
 
     @staticmethod
     def _move_paragraph_after(doc, paragraph, index):

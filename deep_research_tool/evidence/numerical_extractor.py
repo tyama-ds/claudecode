@@ -1470,7 +1470,7 @@ class NumericalDataExtractor:
 3. unit: 単位（GPa, MPa, Pa, kN, N, kJ, J, W/(m·K), kg/m³, %, USD等）
 4. metric_name: 何の指標か（例: "引張強度", "ヤング率", "市場規模", "密度"）
 5. subject: 何についてか（例: "アルミニウム合金", "AI市場", "SUS304"）
-6. year: 年（あれば、例: 2024）
+6. year: 年（あれば、例: 2024）。四半期・半期・月の値は期間も書く（例: "2024Q1", "2024H1", "2024-03"）
 7. is_forecast: 予測値かどうか（true/false）
 8. data_type: currency/percentage/count/ratio/rate/time_series/measurement/stress/strain/force/energy/power/temperature/pressure/length/mass/velocity/density/frequency/voltage/current/resistance/capacitance/viscosity/thermal_conductivity/arbitrary/dimensionless/other
 9. category: market_size/growth_rate/market_share/revenue/profit/user_count/price/performance/forecast/comparison/mechanical_property/thermal_property/electrical_property/material_property/physical_constant/environmental/chemical_property/dimensional/energy_property/relative_value/other
@@ -1540,7 +1540,7 @@ Research Topic: {research_topic}
 3. unit: Unit (GPa, MPa, Pa, kN, N, kJ, J, W/(m·K), kg/m³, %, USD, etc.)
 4. metric_name: What metric (e.g., "tensile strength", "Young's modulus", "market size", "density")
 5. subject: What entity (e.g., "aluminum alloy", "AI market", "SUS304")
-6. year: Year (if available)
+6. year: Year (if available); for a quarterly, half-year or monthly value include the period (e.g. "2024Q1", "2024H1", "2024-03")
 7. is_forecast: Whether this is a forecast (true/false)
 8. data_type: currency/percentage/count/ratio/rate/time_series/measurement/stress/strain/force/energy/power/temperature/pressure/length/mass/velocity/density/frequency/voltage/current/resistance/capacitance/viscosity/thermal_conductivity/arbitrary/dimensionless/other
 9. category: market_size/growth_rate/market_share/revenue/profit/user_count/price/performance/forecast/comparison/mechanical_property/thermal_property/electrical_property/material_property/physical_constant/environmental/chemical_property/dimensional/energy_property/relative_value/other
@@ -1596,7 +1596,7 @@ Output format:
                     # a unit whose scale contradicts the original text
                     # ('50億ドル' as value 50 + 'billion USD') would plot the
                     # value 10x off: rebuild the unit from the text
-                    from ..chartkit.data_layer import coerce_year, repair_scale
+                    from ..chartkit.data_layer import coerce_year, quarter_of, repair_scale
                     raw_unit, _repaired = repair_scale(raw_value, item.get("raw_text", ""), raw_unit)
                     if _repaired:
                         self.scale_repairs = getattr(self, "scale_repairs", 0) + 1
@@ -1635,6 +1635,17 @@ Output format:
                     except ValueError:
                         category = MetricCategory.OTHER
 
+                    # a quarterly value ('2024Q1', '2024年第1四半期', 'FY2024 Q2')
+                    # keeps its quarter: dropped, it would sit on the annual
+                    # axis next to full-year values. Half-year / monthly
+                    # periods stay in date_context for the chart data layer.
+                    year_raw = item.get("year")
+                    period_raw = item.get("period") or item.get("quarter") or ""
+                    quarter = quarter_of(year_raw) or quarter_of(period_raw)
+                    date_context = " ".join(
+                        str(x).strip() for x in (year_raw, period_raw)
+                        if x and str(x).strip())
+
                     dp = NumericalDataPoint(
                         value=raw_value,
                         raw_text=item.get("raw_text", ""),
@@ -1646,8 +1657,9 @@ Output format:
                         category=category,
                         # an int (or None): a string year broke the derived
                         # metrics' sort and the store's JSON export
-                        year=coerce_year(item.get("year")),
-                        date_context=str(item.get("year", "")) if item.get("year") else "",
+                        year=coerce_year(year_raw),
+                        quarter=quarter,
+                        date_context=date_context,
                         is_forecast=item.get("is_forecast", False),
                         source_url=source_url,
                         source_title=source_title,

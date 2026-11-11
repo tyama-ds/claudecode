@@ -969,17 +969,22 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
           <span class="feat-sub">画像・表・数値抽出の同時実行数</span></div>
         <input type="number" id="feat_fig_workers" value="8" min="1" max="16" style="width:80px">
       </div>
-      <div class="feat-row" data-tip="章ごとに AI が設計するチャートの上限枚数です。数値はデータ層（出所・確度タグつき）からだけ取り、AI は「どの系列をどの形式で・何を見るべきか」だけを書きます。描けるパネルが無い章は 0 枚になります。">
+      <div class="feat-row" data-tip="章ごとに AI が設計するチャートの上限枚数です。数値はデータ層（出所・確度タグつき）からだけ取り、AI は「どの系列をどの形式で・何を見るべきか」だけを書きます。描けるパネルが無い章は 0 枚になります（v1.13.0 で既定を 6 → 3 に変更）。">
         <div class="feat-info"><span class="feat-name">📊 章あたりのチャート上限</span>
-          <span class="feat-sub">1 パネル＝1 つの問い。既定 6</span></div>
-        <input type="number" id="feat_chart_max" value="6" min="1" max="12" style="width:80px">
+          <span class="feat-sub">1 パネル＝1 つの問い。既定 3</span></div>
+        <input type="number" id="feat_chart_max" value="3" min="1" max="12" style="width:80px">
       </div>
-      <div class="feat-row" data-tip="チャートの描き方です。コア維持版（既定）は今までの見た目と作り方のまま、不具合（マイナス値が描けない・ラベルの重なり・桁の取り違え・図と矛盾する「見るべき点」など）だけを直します。改良版は、Word / PDF に貼る実寸（5.5 インチ）で描いて文字を縮めない、項目が多い棒グラフは横棒にする、桁区切り、出所・確度・予測値の注記をデータから付ける、調査会社・PR 配信の数値は「二次」扱い、同じ年なら実績を予測より優先、などの推奨の変更を加えます。">
+      <div class="feat-row" data-tip="レポート全体で描くチャートの上限枚数です。章ごとの上限とは別に、レポート全体でこの枚数を超える分のチャートは入れません。0 にすると全体の上限なし（章ごとの上限だけ）になります。">
+        <div class="feat-info"><span class="feat-name">📊 図表の上限（全体）</span>
+          <span class="feat-sub">レポート全体のチャート枚数。0＝上限なし。既定 12</span></div>
+        <input type="number" id="feat_chart_max_total" value="12" min="0" max="60" style="width:80px">
+      </div>
+      <div class="feat-row" data-tip="チャートの描き方です。改良版（既定）は、Word / PDF に貼る実寸（5.5 インチ）で描いて文字を縮めない、項目が多い棒グラフは横棒にする、桁区切り、出所・確度・予測値の注記をデータから付ける、調査会社・PR 配信の数値は「二次」扱い、同じ年なら実績を予測より優先、などの推奨の変更を加えます。コア維持版は v1.5 からの見た目と作り方のまま、不具合（マイナス値が描けない・ラベルの重なり・桁の取り違え・図と矛盾する「見るべき点」など）だけを直します。">
         <div class="feat-info"><span class="feat-name">🎨 チャートのスタイル</span>
-          <span class="feat-sub">コア維持版＝今の見た目 ／ 改良版＝推奨の変更</span></div>
+          <span class="feat-sub">改良版＝推奨の変更 ／ コア維持版＝以前の見た目</span></div>
         <select id="feat_chart_style" style="width:200px">
-          <option value="classic" selected>コア維持版（既定）</option>
-          <option value="enhanced">改良版（推奨の変更）</option>
+          <option value="enhanced" selected>改良版（既定）</option>
+          <option value="classic">コア維持版</option>
         </select>
       </div>
 
@@ -1948,6 +1953,48 @@ const FEATURE_FIELDS = {
   feat_engine_mocks: 'engine_mocks',       // UI only (never sent to the server)
 };
 
+// Chart settings (機能 tab). v1.13.0 changed two defaults: the style
+// classic -> enhanced and the charts per chapter 6 -> 3, and added the
+// report-wide cap (0 = unlimited). Settings saved before v1.13.0 always
+// stored what the fields showed, chosen or not, so in a save without
+// chart_settings_rev a value equal to the OLD default is not a choice and
+// the new default applies. A value saved from v1.13.0 on (chart_settings_rev
+// present) is always restored, 'classic' included.
+const CHART_SETTINGS_REV = 2;   // 1 = the implicit pre-v1.13.0 format
+const CHART_DEFAULTS = {style: 'enhanced', perSection: 3, total: 12};
+const CHART_OLD_DEFAULTS = {style: 'classic', perSection: 6};
+
+function clampInt(value, lo, hi, fallback) {
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fallback;
+}
+
+function chartMaxPerSection() {
+  return clampInt($('feat_chart_max') ? $('feat_chart_max').value : '', 1, 12, CHART_DEFAULTS.perSection);
+}
+function chartMaxTotal() {
+  // 0 is a valid value (unlimited): never `|| default`
+  return clampInt($('feat_chart_max_total') ? $('feat_chart_max_total').value : '', 0, 60, CHART_DEFAULTS.total);
+}
+
+function restoreChartSettings(saved) {
+  const current = Number(saved.chart_settings_rev) >= CHART_SETTINGS_REV;
+  const style = saved.chart_style;
+  if ($('feat_chart_style') && ['classic', 'enhanced'].includes(style)
+      && (current || style !== CHART_OLD_DEFAULTS.style)) {
+    $('feat_chart_style').value = style;
+  }
+  const per = parseInt(saved.chart_max_per_section, 10);
+  if ($('feat_chart_max') && Number.isFinite(per) && per >= 1
+      && (current || per !== CHART_OLD_DEFAULTS.perSection)) {
+    $('feat_chart_max').value = Math.min(12, per);
+  }
+  const total = parseInt(saved.chart_max_total, 10);
+  if ($('feat_chart_max_total') && Number.isFinite(total)) {
+    $('feat_chart_max_total').value = Math.min(60, Math.max(0, total));
+  }
+}
+
 function loadSettings() {
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem('drt_settings') || '{}'); } catch (e) {}
@@ -1966,8 +2013,7 @@ function loadSettings() {
     if (saved[key] !== undefined) $(el).checked = !!saved[key];
   }
   if (saved.figure_max_workers) $('feat_fig_workers').value = saved.figure_max_workers;
-  if (saved.chart_max_per_section && $('feat_chart_max')) $('feat_chart_max').value = saved.chart_max_per_section;
-  if ($('feat_chart_style') && ['classic', 'enhanced'].includes(saved.chart_style)) $('feat_chart_style').value = saved.chart_style;
+  restoreChartSettings(saved);
   if (saved.deep_think_max_workers) $('feat_dt_workers').value = saved.deep_think_max_workers;
   if (Array.isArray(saved.search_languages)) setSelectedLangs(saved.search_languages);
   if (Array.isArray(saved.search_regions)) setSelectedRegions(saved.search_regions);
@@ -1986,8 +2032,10 @@ function saveSettings() {
     s[key] = $(el).checked;
   }
   s.figure_max_workers = parseInt($('feat_fig_workers').value) || 8;
-  if ($('feat_chart_max')) s.chart_max_per_section = parseInt($('feat_chart_max').value) || 6;
-  if ($('feat_chart_style')) s.chart_style = $('feat_chart_style').value || 'classic';
+  if ($('feat_chart_max')) s.chart_max_per_section = chartMaxPerSection();
+  if ($('feat_chart_max_total')) s.chart_max_total = chartMaxTotal();
+  if ($('feat_chart_style')) s.chart_style = $('feat_chart_style').value || CHART_DEFAULTS.style;
+  s.chart_settings_rev = CHART_SETTINGS_REV;
   s.deep_think_max_workers = parseInt($('feat_dt_workers').value) || 4;
   s.search_languages = selectedLangs();
   s.search_regions = selectedRegions();
@@ -2019,8 +2067,9 @@ function settingsParams() {
     }
   }
   p.figure_max_workers = Math.min(16, Math.max(1, parseInt($('feat_fig_workers').value) || 8));
-  if ($('feat_chart_max')) p.chart_max_per_section = Math.min(12, Math.max(1, parseInt($('feat_chart_max').value) || 6));
-  if ($('feat_chart_style')) p.chart_style = $('feat_chart_style').value || 'classic';
+  if ($('feat_chart_max')) p.chart_max_per_section = chartMaxPerSection();
+  if ($('feat_chart_max_total')) p.chart_max_total = chartMaxTotal();
+  if ($('feat_chart_style')) p.chart_style = $('feat_chart_style').value || CHART_DEFAULTS.style;
   p.deep_think_max_workers = Math.min(8, Math.max(1, parseInt($('feat_dt_workers').value) || 4));
   // engine interpreter paths travel as one {engine_id: path} object
   const enginePython = engineSettingsPython();
@@ -4576,7 +4625,12 @@ function historyParams(ps, res) {
     let t = 'あり';
     const opts = [];
     if (ps.chart_max_per_section) opts.push(`グラフ最大 ${ps.chart_max_per_section}/章`);
-    if (ps.chart_style) opts.push(ps.chart_style === 'enhanced' ? '改良版' : 'コア維持版');
+    // 0 = no report-wide cap (a falsy value that is still a setting)
+    if (ps.chart_max_total !== undefined && ps.chart_max_total !== null && ps.chart_max_total !== '') {
+      opts.push(Number(ps.chart_max_total) === 0 ? '全体の上限なし' : `全体で最大 ${ps.chart_max_total}`);
+    }
+    if (ps.chart_style) opts.push(ps.chart_style === 'enhanced' ? '改良版'
+      : ps.chart_style === 'classic' ? 'コア維持版' : String(ps.chart_style));
     if (opts.length) t += `（${opts.join('・')}）`;
     // generated counts; when known, how many did not reach the report body
     if (f) {

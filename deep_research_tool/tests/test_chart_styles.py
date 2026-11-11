@@ -62,7 +62,10 @@ class TestSetting:
 
     def test_config_default_and_validation(self):
         from deep_research_tool.config import create_config
-        assert create_config(provider="openai", openai_api_key="t").report.chart_style == "classic"
+        # v1.13.0: the improved style is the default; classic stays selectable
+        assert create_config(provider="openai", openai_api_key="t").report.chart_style == "enhanced"
+        cfg = create_config(provider="openai", openai_api_key="t", chart_style="Classic")
+        assert cfg.report.chart_style == "classic"
         cfg = create_config(provider="openai", openai_api_key="t", chart_style="Enhanced")
         assert cfg.report.chart_style == "enhanced"
         with pytest.raises(ValueError):
@@ -78,7 +81,8 @@ class TestSetting:
     def test_ui_selector_round_trip(self):
         page = (Path(__file__).resolve().parent.parent / "webui" / "static" / "index.html").read_text(
             encoding="utf-8")
-        assert 'id="feat_chart_style"' in page and 'value="classic" selected' in page
+        # v1.13.0: 改良版 (enhanced) is the preselected default
+        assert 'id="feat_chart_style"' in page and 'value="enhanced" selected' in page
         assert "s.chart_style = $('feat_chart_style').value" in page
         assert "p.chart_style = $('feat_chart_style').value" in page
 
@@ -171,17 +175,18 @@ class TestSpecFixes:
         assert len(valid) == 1 and stats["over_limit"] == 1
 
     def test_line_xy_sources_stay_aligned_with_points(self):
-        data = {"years": ["2022", "2023", "2024"],
-                "ts1": _series([5, None, 7], "億円", basis=[PUB, None, PUB], kind="time",
+        data = {"years": ["2022", "2023", "2024", "2025"],
+                "ts1": _series([5, None, 7, 9], "億円", basis=[PUB, None, PUB, PUB], kind="time",
                                labels_ref="years",
-                               sources=[{"raw_text": "5億円"}, None, {"raw_text": "7億円"}])}
+                               sources=[{"raw_text": "5億円"}, None, {"raw_text": "7億円"},
+                                        {"raw_text": "9億円"}])}
         p = {"id": "x", "form": "line_xy", "title": "t", "labels_ref": "years",
              "series": [{"name": "s", "values_ref": "ts1", "role": "emphasis"}],
              "caption": "c", "judgment": "j"}
         valid, _ = validate_panels([p], data)
         s = valid[0]["series"][0]
-        assert [v["y"] for v in s["values"]] == [5.0, 7.0]
-        assert [x["raw_text"] for x in s["sources"]] == ["5億円", "7億円"]
+        assert [v["y"] for v in s["values"]] == [5.0, 7.0, 9.0]
+        assert [x["raw_text"] for x in s["sources"]] == ["5億円", "7億円", "9億円"]
 
 
 # --------------------------------------------------------------------------
@@ -447,7 +452,9 @@ class TestReportFigures:
         path = gen.generate_report(session=session, evidence_locker=locker,
                                    format=ReportFormat.HTML, verification_result=None)
         page = path.read_text(encoding="utf-8")
-        assert page.count('class="report-figure"><img src="data:image/png;base64,') == 2
+        # v1.13.0: 「図N　タイトル」 sits above the image inside the figure
+        assert page.count('class="report-figure"><div class="figure-title">図') == 2
+        assert page.count('<img src="data:image/png;base64,') == 2
         # (the table of contents lists the chapters first: anchor on the headings)
         assert page.index("<h2>1. 市場規模の推移</h2>") < page.index("見るべき点: 回復基調") \
             < page.index("<h2>2. 競合</h2>")
@@ -1056,7 +1063,13 @@ class TestR2ClassicIsV15:
     def test_fonts_and_heights(self, tmp_path):
         pytest.importorskip("matplotlib")
         from deep_research_tool.chartkit.render_png import _JP_FONT_HINTS
-        assert _JP_FONT_HINTS["classic"][0] == "IPAGothic"            # the v1.5 preference order
+        # v1.13: both styles prefer proportional CJK fonts; the fixed-pitch
+        # IPAGothic (v1.5's first choice) comes after all of them
+        for style in ("classic", "enhanced"):
+            hints = _JP_FONT_HINTS[style]
+            assert hints[0] == "Noto Sans CJK JP", style
+            assert max(hints.index(h) for h in ("Noto Sans CJK JP", "Noto Sans JP", "BIZ UDPGothic",
+                                                "IPAexGothic", "IPAPGothic")) < hints.index("IPAGothic")
         hbar = _panel("hbar", list("ABCDE"), [([5, 4, 3, 2, 1], "emphasis")])
         assert _qa(hbar, "classic", tmp_path)["size_px"] == (1500, round(max(3.2, 0.45 * 5 + 2.0) * 150))
         seg = _panel("stacked_hbar", ["X"], [([60], "part"), ([40], "part")], unit="%")
@@ -1086,12 +1099,22 @@ class TestR2ClassicIsV15:
         plt.Figure.savefig = spy
         try:
             render_png(copy.deepcopy(panel), tmp_path / "j.png", style="classic")
-            line = _panel("line_xy", ["2020", "2021"], [([1, 2], "emphasis")])
+            line = _panel("line_xy", ["2020", "2021", "2022"], [([1, 2, 3], "emphasis")])
             render_png(copy.deepcopy(line), tmp_path / "l.png", style="classic")
         finally:
             plt.Figure.savefig = orig
+        # embed_text=True (the default: an image used on its own) draws the judgment
         assert any(t == "見るべき点: " + judgment for t in seen["fig"])     # one line, as in v1.5
         assert set(seen["va"]) == {"baseline"}                              # point labels as in v1.5
+        # embed_text=False (report figures): no title, judgment or caption in the image
+        seen.clear()
+        plt.Figure.savefig = spy
+        try:
+            render_png(copy.deepcopy(panel), tmp_path / "j2.png", style="classic", embed_text=False)
+        finally:
+            plt.Figure.savefig = orig
+        assert not any(seen["fig"]), seen["fig"]
+        assert not any("見るべき点" in t for t in seen["fig"])
 
 
 class TestR2Data:
@@ -1380,8 +1403,10 @@ def test_r4_wrap_matches_textwrap_on_hyphens_tabs_and_indents():
     import textwrap
     from deep_research_tool.chartkit.render_png import _wrap
     for text, width in [("Fuji-Xerox Holdings market share", 10), ("well-known brand-new state-of-the-art", 12),
-                        ("  indented text here", 10), ("a\tb c", 10), ("line1\r\nline2", 10)]:
+                        ("a\tb c", 10), ("line1\r\nline2", 10)]:
         assert _wrap(text, width) == "\n".join(textwrap.wrap(text, width)), text
+    # v1.13: no line starts with a space, the first one neither (textwrap kept the indent)
+    assert _wrap("  indented text here", 10) == "indented\ntext here"
     # a number keeps its 億 / 万 multiplier at a line end
     for width in range(14, 20):
         assert "6\n億" not in _wrap("あいうえおかきくけこさしすせそ6億缶の出荷", width)
@@ -1574,12 +1599,15 @@ class TestR4Reports:
 # --------------------------------------------------------------------------
 
 def test_r5_long_hyphenated_words_break_at_the_hyphen_as_textwrap():
-    import textwrap
     from deep_research_tool.chartkit.render_png import _wrap
-    for text, width in [("FY2020-FY2025", 10), ("gpt-4o-mini", 10), ("claude-3-opus", 10), ("gemini-1.5-pro", 10),
-                        ("e-commerce", 8), ("2020-2025年度", 8), ("abcdefghi claude-3-opus x", 10),
-                        ("  Revenue growth", 8), ("x-ray imaging", 6)]:
-        assert _wrap(text, width) == "\n".join(textwrap.wrap(text, width)), text
+    # the intended strings, spelled out: textwrap itself differs between
+    # Python versions ('abcdefghi ' kept its trailing space before 3.13)
+    for text, width, expected in [("FY2020-FY2025", 10, "FY2020-\nFY2025"), ("gpt-4o-mini", 10, "gpt-4o-\nmini"),
+                                  ("claude-3-opus", 10, "claude-3-\nopus"), ("gemini-1.5-pro", 10, "gemini-\n1.5-pro"),
+                                  ("e-commerce", 8, "e-\ncommerce"), ("2020-2025年度", 8, "2020-\n2025年度"),
+                                  ("abcdefghi claude-3-opus x", 10, "abcdefghi\nclaude-3-\nopus x"),
+                                  ("  Revenue growth", 8, "Revenue\ngrowth"), ("x-ray imaging", 6, "x-ray\nimagin\ng")]:
+        assert _wrap(text, width) == expected, text
     assert _wrap("あいうえおHoldings", 8) == "あいうえお\nHoldings"          # a Latin word is not cut
 
 
@@ -1703,8 +1731,14 @@ class TestR5Followups:
 
     def test_wrap_never_starts_a_line_with_a_space(self):
         from deep_research_tool.chartkit.render_png import _wrap
-        assert _wrap("データセンター（DC） 向けGPU出荷", 10) == "データセンター（DC）\n向けGPU出荷"
-        assert _wrap("見るべき点: 北米が2025年に最大", 5).split("\n")[1] == "北米が"
+        # v1.13: a line is never longer than the width — closing punctuation
+        # that does not fit takes the word before it to the next line (the
+        # bracket / colon used to hang past the width)
+        assert _wrap("データセンター（DC） 向けGPU出荷", 10) == "データセンター\n（DC）\n向けGPU出荷"
+        assert _wrap("見るべき点: 北米が2025年に最大", 5) == "見るべき\n点: 北米\nが2025\n年に最大"
+        for text, width in [("データセンター（DC） 向けGPU出荷", 10), ("見るべき点: 北米が2025年に最大", 5)]:
+            lines = _wrap(text, width).split("\n")
+            assert all(ln == ln.strip() and len(ln) <= width for ln in lines), lines
 
     def test_row_labels_and_more_counters(self):
         # a header-scaled cell followed by the next row's label is not 'scale 1'

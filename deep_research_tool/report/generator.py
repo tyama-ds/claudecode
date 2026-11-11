@@ -743,6 +743,7 @@ class ReportGenerator:
             textColor=colors.HexColor("#555555"), spaceBefore=2, spaceAfter=12,
         )
         self.figures_inserted = 0
+        self._figure_no = 0            # 図N restarts with every rendered file
         placed: set = set()
 
         def _esc_text(s):
@@ -953,6 +954,7 @@ class ReportGenerator:
         # Build content sections
         sections_html = []
         self.figures_inserted = 0
+        self._figure_no = 0            # 図N restarts with every rendered file
         placed: set = set()
         if plan:
             for item in plan.table_of_contents.items:
@@ -1185,6 +1187,8 @@ class ReportGenerator:
         figure.report-figure {{ flex: 1 1 100%; max-width: 760px; margin: 0 auto; }}
         figure.report-figure img {{ box-shadow: none; border-radius: 0; }}
         figure.report-figure figcaption {{ text-align: left; }}
+        figure.report-figure {{ break-inside: avoid; page-break-inside: avoid; }}
+        figure.report-figure .figure-title {{ font-weight: bold; text-align: left; margin-bottom: 6px; }}
         .report-table {{ width: 100%; border-collapse: collapse; margin: 10px 0; }}
         .report-table th, .report-table td {{ padding: 6px 10px; border: 1px solid var(--border-color); text-align: left; }}
         .report-table caption {{ text-align: left; font-weight: bold; padding: 6px 0; }}
@@ -1342,17 +1346,21 @@ class ReportGenerator:
                 + [("table", t) for t in coll.tables if t.section_id not in placed]
                 + [("image", c) for c in coll.charts if c.section_id not in placed])
 
-    @staticmethod
-    def _figure_caption(fig) -> str:
-        # the caption alone, as the Markdown / Word insertion prints it (a
-        # chart carries its title in the image); every line of it is then
-        # a frozen fragment for the artifact check
-        return str(fig.caption or "").strip() or str(fig.title or "").strip()
+    def _next_figure_heading(self, fig) -> str:
+        """「図N　タイトル」 for the next figure placed (numbered in report
+        order; the counter restarts with every rendered file)."""
+        from .figure_table_generator import figure_heading
+        self._figure_no = getattr(self, "_figure_no", 0) + 1
+        return figure_heading(self._figure_no, fig.title, self.language)
 
     def _pdf_figure_flowables(self, items, avail_width, body_style, caption_style, esc,
                               colors, Table, TableStyle, Paragraph, KeepTogether, inch) -> list:
+        from reportlab.lib.styles import ParagraphStyle
         from reportlab.platypus import Image as RLImage
         from reportlab.lib.utils import ImageReader
+        from .figure_table_generator import figure_caption_lines
+        title_style = ParagraphStyle('FigureTitle', parent=body_style, fontSize=10, leading=13,
+                                     spaceBefore=10, spaceAfter=4, keepWithNext=1)
         out = []
         for kind, obj in items:
             try:
@@ -1368,10 +1376,15 @@ class ReportGenerator:
                     h = w * ih / max(1, iw)
                     if h > 8.0 * inch:
                         w, h = w * 8.0 * inch / h, 8.0 * inch
-                    block = [RLImage(str(path), width=w, height=h)]
-                    cap = self._figure_caption(obj)
-                    if cap:
-                        block.append(_paragraph(Paragraph, esc(cap), caption_style))
+                    image = RLImage(str(path), width=w, height=h)
+                    # 図N　タイトル above, ONE caption block below (caption,
+                    # then 見るべき点), all on one page
+                    block = [_paragraph(Paragraph, f"<b>{esc(self._next_figure_heading(obj))}</b>",
+                                        title_style), image]
+                    lines = figure_caption_lines(obj)
+                    if lines:
+                        block.append(_paragraph(Paragraph, "<br/>".join(esc(c) for c in lines),
+                                                caption_style))
                     out.append(KeepTogether(block))
                     self.figures_inserted += 1
                 elif obj.headers:
@@ -1438,6 +1451,7 @@ class ReportGenerator:
     def _html_figures(self, items) -> str:
         import base64
         import html as _html
+        from .figure_table_generator import figure_caption_lines
         text = _html_linked
         parts = []
         for kind, obj in items:
@@ -1449,10 +1463,17 @@ class ReportGenerator:
                     ext = path.suffix.lstrip(".").lower() or "png"
                     mime = {"jpg": "jpeg", "svg": "svg+xml"}.get(ext, ext)
                     data = base64.b64encode(path.read_bytes()).decode("ascii")
+                    # 図N　タイトル above the image, ONE caption block below
+                    # it (caption, then 見るべき点)
+                    lines = figure_caption_lines(obj)
+                    caption = (f'<figcaption>{"<br>".join(text(c) for c in lines)}</figcaption>'
+                               if lines else "")
                     parts.append(
-                        f'<figure class="report-figure"><img src="data:image/{mime};base64,{data}" '
+                        f'<figure class="report-figure">'
+                        f'<div class="figure-title">{text(self._next_figure_heading(obj))}</div>'
+                        f'<img src="data:image/{mime};base64,{data}" '
                         f'alt="{_html.escape(obj.alt_text or obj.title or "")}">'
-                        f'<figcaption>{text(self._figure_caption(obj))}</figcaption></figure>')
+                        f'{caption}</figure>')
                     self.figures_inserted += 1
                 elif obj.headers:
                     head = "".join(f"<th>{_html.escape('' if h is None else str(h))}</th>"
