@@ -392,3 +392,95 @@ class TestExtractionMaxTokens:
         assert out.metadata["extraction_complete"] is False
         assert len(out.metadata["failed_spans"]) == 1
         assert "Partial extraction" in out.extraction_notes
+
+
+# --------------------------------------------------------------------------
+# disk cache of extractions (cache_reuse)
+# --------------------------------------------------------------------------
+
+from deep_research_tool.research.fetch_cache import (  # noqa: E402
+    DEFAULT_EXTRACTION_MAX_CHUNKS, EXTRACTION_PROMPT_VERSION, FetchCache,
+    content_hash)
+
+_KEY_ARGS = ("本文", "1. 章", "炭素繊維市場", "fake", EXTRACTION_PROMPT_VERSION)
+
+
+class TestExtractionDiskCacheKey:
+    def test_defaults_keep_the_old_key(self, tmp_path):
+        cache = FetchCache(tmp_path / "c")
+        # the key the versions before the setting wrote
+        old = FetchCache._key("extract", content_hash("本文"), "1. 章",
+                              "炭素繊維市場", "fake", EXTRACTION_PROMPT_VERSION)
+        assert cache.extraction_key(*_KEY_ARGS) == old
+        assert cache.extraction_key(*_KEY_ARGS, max_chunks=None,
+                                    max_tokens=None) == old
+        assert cache.extraction_key(*_KEY_ARGS, max_chunks=8,
+                                    max_tokens=None) == old
+
+    def test_the_default_matches_the_extractor_and_config(self):
+        from deep_research_tool import config as cfg_mod
+        assert DEFAULT_EXTRACTION_MAX_CHUNKS == ContentExtractor.MAX_CHUNKS
+        assert DEFAULT_EXTRACTION_MAX_CHUNKS == cfg_mod.DEFAULT_EXTRACTION_MAX_CHUNKS
+
+    def test_changed_settings_give_other_keys(self, tmp_path):
+        cache = FetchCache(tmp_path / "c")
+        keys = [
+            cache.extraction_key(*_KEY_ARGS),
+            cache.extraction_key(*_KEY_ARGS, max_chunks=3),
+            cache.extraction_key(*_KEY_ARGS, max_chunks=2),
+            cache.extraction_key(*_KEY_ARGS, max_tokens=3000),
+            cache.extraction_key(*_KEY_ARGS, max_tokens=1500),
+            cache.extraction_key(*_KEY_ARGS, max_chunks=3, max_tokens=3000),
+        ]
+        assert len(set(keys)) == len(keys)
+        # same settings: same key
+        assert cache.extraction_key(*_KEY_ARGS, max_chunks=3, max_tokens=3000) \
+            == keys[-1]
+
+    def _researcher(self, tmp_path, llm, **kw):
+        from deep_research_tool.research.researcher import Researcher
+        r = Researcher(llm_client=llm, search_client=MagicMock(),
+                       output_dir=tmp_path / "out", language="ja",
+                       fetch_cache=FetchCache(tmp_path / "cache"), **kw)
+        r.content_extractor.eval_llm = llm
+        return r
+
+    def _run(self, r):
+        return r._extract_cached(LONG_PAGE, "https://example.com/a", "資料",
+                                 "1. 炭素繊維の需要", "炭素繊維市場")
+
+    def test_three_chunk_result_is_not_reused_after_going_back_to_eight(self, tmp_path):
+        llm = FakeLLM()
+        out = self._run(self._researcher(tmp_path, llm, extraction_max_chunks=3))
+        assert "[cache]" not in out.extraction_notes
+        three = len(llm.calls)
+        assert 1 <= three <= 3
+        # same settings in a new run: read from the disk cache
+        out = self._run(self._researcher(tmp_path, llm, extraction_max_chunks=3))
+        assert "[cache]" in out.extraction_notes and len(llm.calls) == three
+        # back to the default 8: extracted again, not the 3-chunk result
+        out = self._run(self._researcher(tmp_path, llm))
+        assert "[cache]" not in out.extraction_notes
+        assert len(llm.calls) == three + 8
+
+    def test_max_tokens_result_is_not_reused_without_it(self, tmp_path):
+        llm = FakeLLM()
+        self._run(self._researcher(tmp_path, llm, extraction_max_tokens=3000))
+        n = len(llm.calls)
+        out = self._run(self._researcher(tmp_path, llm))
+        assert "[cache]" not in out.extraction_notes
+        assert len(llm.calls) == n + 8
+        assert all("max_tokens" not in kw for kw in llm.calls[n:])
+
+    def test_default_run_reads_an_entry_stored_under_the_old_key(self, tmp_path):
+        cache = FetchCache(tmp_path / "cache")
+        old = FetchCache._key("extract", content_hash(LONG_PAGE), "1. 炭素繊維の需要",
+                              "炭素繊維市場", "fake", EXTRACTION_PROMPT_VERSION)
+        cache.put_extraction(old, {"processed_content": "以前の抽出結果",
+                                   "key_points": [], "quotes": [],
+                                   "relevance_score": 0.7,
+                                   "extraction_notes": "", "metadata": {}})
+        llm = FakeLLM()
+        out = self._run(self._researcher(tmp_path, llm))
+        assert out.processed_content == "以前の抽出結果"
+        assert llm.calls == []

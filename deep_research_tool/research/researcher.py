@@ -2473,16 +2473,21 @@ Return as JSON:
                         source_title: str, section_context: str,
                         research_query: str) -> ExtractedContent:
         """LLM extraction with a content-addressed DISK cache: identical
-        (content, section, query, model, prompt version) never costs a
-        second LLM call, even across runs."""
+        (content, section, query, model, prompt version, chunk cap, reply
+        cap) never costs a second LLM call, even across runs."""
         cache = self.fetch_cache
         key = None
         if cache is not None:
             from .fetch_cache import EXTRACTION_PROMPT_VERSION
             model = str(getattr(self.writing_llm, "model", "") or "")
-            key = cache.extraction_key(raw_content, section_context,
-                                       research_query, model,
-                                       EXTRACTION_PROMPT_VERSION)
+            extractor = self.content_extractor
+            key = cache.extraction_key(
+                raw_content, section_context, research_query, model,
+                EXTRACTION_PROMPT_VERSION,
+                # chunk cap / reply cap change the result: own key when
+                # non-default (defaults keep the key older versions wrote)
+                max_chunks=extractor.MAX_CHUNKS,
+                max_tokens=extractor.extraction_max_tokens)
             hit = cache.get_extraction(key)
             if hit and isinstance(hit.get("extracted"), dict):
                 d = hit["extracted"]

@@ -215,7 +215,7 @@ launch_gui()                     # 同上（Ctrl+C で終了）
 
 - **履歴**（`output/jobs_ledger.json`、再起動後も残る・APIキーは保存しない）から「条件を複製」「中断箇所から再開」「再出力」ができます。再開は完了済みの章を再利用し、未完了の章だけ再調査します（内訳を結果に表示）。v1.6.0 からは調査ループの後の工程（DeepThink・根拠の見直し・フェルミ推定・図表・検証・出力）も、完了していたものは保存した成果物から読み込んで飛ばし、エラーで止まった実行も再開できます（「[途中再開と通信断の再試行](#途中再開と通信断の再試行v160)」）。
 - **再出力**は保存済みの調査結果（検証済みの最終本文 `final_body_<session>.json` があればそれ）から、検索・LLM呼び出しなしで別形式・要約版を生成します。検証の状態は本文と一緒に保存され、そのまま表示されます。
-- **取得・抽出の再利用** — 取得済みページ（URL正規化）と抽出結果（内容ハッシュ＋観点＋モデル＋プロンプト版）を `output/.cache` に保存し、同じURL・同じ内容の再取得／再抽出を省きます。最新動向が必要なときは「鮮度を優先して更新確認する」で再取得します。
+- **取得・抽出の再利用** — 取得済みページ（URL正規化）と抽出結果（内容ハッシュ＋観点＋モデル＋プロンプト版。`extraction_max_chunks`・`extraction_max_tokens` を既定から変えたときはその値も）を `output/.cache` に保存し、同じURL・同じ内容の再取得／再抽出を省きます。最新動向が必要なときは「鮮度を優先して更新確認する」で再取得します。
 - **同時実行の上限を超えた開始は実行待ちキュー**に入り（順番表示・取り消し可・設定は保持）、順番が来ると自動で開始します。
 - 所要時間・API呼び出し・再利用回数は**計測値のみ**を表示し、短縮率や残り時間の推定は表示しません。
 - **並列の実測**: 実行パネルに「LLM 同時実行: 設定 / 現在 / 最大」と「並列の稼働（取得・抽出・検証の同時実行数）」を表示し、結果の「概要」に実行全体の最大値を残します。ローカル LLM で同時リクエスト上限を 2 以上にしたのに最大が 1 件のままだった場合は、要確認事項に「サーバー側が並列処理していない可能性」の警告を出します。
@@ -1085,18 +1085,22 @@ OpenAI Deep Research・Gemini・Copilot などで別途作った調査結果や�
 
 ### ローカルLLMで速く動かすための設定（v1.14.0）
 
-ローカルLLM（Qwen など）では、1 回の調査に数時間かかることがあります。時間の大半は、取得したページを LLM で読む「ページ抽出」です（1 ページを最大 8 チャンクに分け、チャンクごとに 1 回呼び出します）。次の設定で、呼び出しの回数と 1 回あたりの生成量を減らせます。**どれも指定しなければ、送るリクエストも呼び出し回数も従来と同じです。**
+ローカルLLM（Qwen など）では、1 回の調査に数時間かかることがあります。既定の `crawl_mode="standard"` では、時間の大半は取得したページを LLM で読む「ページ抽出」です（1 ページを最大 8 チャンクに分け、チャンクごとに 1 回呼び出します）。次の設定で、呼び出しの回数と 1 回あたりの生成量を減らせます。**どれも指定しなければ、送るリクエストも呼び出し回数も従来と同じです。**
 
 | 設定 | 既定 | 内容 | 出発点の例 |
 |---|---|---|---|
 | `local_think` | 指定なし | 思考モード（Qwen3 など）。`False` で思考を止める。Ollama には `think`、OpenAI 互換サーバーには `chat_template_kwargs.enable_thinking` を送る。応答に `<think>…</think>` が残っていたら取り除いてから使う | `False` |
 | `local_num_ctx` | 指定なし | Ollama のコンテキスト長（`options.num_ctx`）。既定値のままだと長いチャンクが切り詰められることがある。OpenAI 互換サーバーには送らない（コンテキスト長はサーバー側で決める） | `16384` |
-| `extraction_max_tokens` | 指定なし（クライアントの既定） | ページ抽出 1 回あたりの出力上限。抽出は要約の JSON を返すだけなので、長い上限は要らない | `3000` |
-| `extraction_max_chunks` | 8（1〜8） | 1 ページから読むチャンクの上限。調査中の章に関係の深いチャンクから選ぶ | `3` |
+| `extraction_max_tokens` | 指定なし（クライアントの既定） | ページ抽出 1 回あたりの出力上限。抽出は要約の JSON を返すだけなので、長い上限は要らない。**Web ページに効くのは `crawl_mode="standard"` のときだけ**（下の注記） | `3000` |
+| `extraction_max_chunks` | 8（1〜8） | 1 ページから読むチャンクの上限。調査中の章に関係の深いチャンクから選ぶ。**Web ページに効くのは `crawl_mode="standard"` のときだけ**（下の注記） | `3` |
 | `local_concurrency` | 1 | ローカルLLM への同時リクエスト数。サーバー側の並列数（Ollama の `OLLAMA_NUM_PARALLEL` など）に合わせる | `2` |
-| `crawl_mode` | `standard` | `fast_batch` で並列取得＋まとめて評価 | `"fast_batch"` |
+| `crawl_mode` | `standard` | `fast_batch` で並列取得＋数ページずつまとめて評価。この場合 Web ページはページ抽出を通らない | 例1は `standard`、例2は `"fast_batch"` |
 | `verification_profile` | `balanced` | `fast` で最終検証を軽くする | `"fast"` |
 | `research_iterations` | 3 | 章ごとの調査回数 | `2` |
+
+**`crawl_mode` と抽出設定の関係**: `extraction_max_tokens` と `extraction_max_chunks` は、ページをチャンクに分けて読む「ページ抽出」の設定です。Web ページがこの経路を通るのは `crawl_mode="standard"`（既定）のときだけです。`fast_batch`（`fast_parallel`・`aicrawl` も同じ）では、取得したページを別の評価処理（`fast_batch` なら数ページずつまとめて 1 回の呼び出し）で読むため、この 2 つは Web ページには効きません。ローカル文書・参考文書の抽出には、どの `crawl_mode` でも効きます。そこで、例を 2 つに分けています。
+
+例1: 既定の `crawl_mode="standard"` のまま、ページ抽出を軽くする
 
 ```python
 from deep_research_tool import run_research
@@ -1109,10 +1113,9 @@ result = run_research(
     local_base_url="http://localhost:11434",
     local_think=False,            # 思考モードを止める（思考に対応したモデルだけ）
     local_num_ctx=16384,          # Ollama のコンテキスト長
-    extraction_max_tokens=3000,   # ページ抽出 1 回の出力上限
-    extraction_max_chunks=3,      # 1 ページから読むチャンク数
+    extraction_max_tokens=3000,   # ページ抽出 1 回の出力上限（standard で効く）
+    extraction_max_chunks=3,      # 1 ページから読むチャンク数（standard で効く）
     local_concurrency=2,
-    crawl_mode="fast_batch",
     verification_profile="fast",
     research_iterations=2,
 )
@@ -1123,8 +1126,37 @@ deep-research research "調査テーマ" --provider local --local-backend ollama
     --local-base-url http://localhost:11434 \
     --local-think off --local-num-ctx 16384 \
     --extraction-max-tokens 3000 --extraction-max-chunks 3 \
+    --local-concurrency 2 --verification-profile fast --iterations 2
+```
+
+例2: `crawl_mode="fast_batch"` に切り替える（ページ抽出を通らないので、抽出の 2 設定は付けない）
+
+```python
+from deep_research_tool import run_research
+
+result = run_research(
+    query="調査テーマ",
+    provider="local",
+    local_model="qwen3:14b",
+    local_backend="ollama",
+    local_base_url="http://localhost:11434",
+    local_think=False,
+    local_num_ctx=16384,
+    local_concurrency=2,
+    crawl_mode="fast_batch",      # 並列取得＋数ページずつまとめて評価
+    verification_profile="fast",
+    research_iterations=2,
+)
+```
+
+```bash
+deep-research research "調査テーマ" --provider local --local-backend ollama \
+    --local-base-url http://localhost:11434 \
+    --local-think off --local-num-ctx 16384 \
     --local-concurrency 2 --crawl-mode fast_batch --verification-profile fast --iterations 2
 ```
+
+ローカル文書・参考文書も使う調査では、例2に `extraction_max_tokens` / `extraction_max_chunks` を加えると、その文書の抽出にだけ効きます。
 
 Web UI の API（`/api/research`）でも同じ名前で指定できます（`local_think` は `true` / `false`）。フォームには入力欄はまだありません。
 
@@ -1134,6 +1166,7 @@ Web UI の API（`/api/research`）でも同じ名前で指定できます（`lo
 - `local_think` は**思考に対応したモデルにだけ**指定してください。対応していないモデルに送ると、Ollama がエラーを返します（指定しなければ何も送りません）。
 - `extraction_max_tokens` が小さすぎると、抽出の JSON が途中で切れてそのチャンクは失敗扱いになります（結果に「Partial extraction」「All chunk extractions failed」の警告）。警告が増えたら値を上げてください。
 - `extraction_max_chunks` を小さくすると、長いページの後半など、選ばれなかった部分は読みません。
+- 抽出結果のキャッシュ（`output/.cache`）は、`extraction_max_chunks`・`extraction_max_tokens` の値ごとに別に保存されます。チャンク数を 3 にして実行したあと 8 に戻しても、3 チャンクで読んだ結果は使われません。既定値（8・指定なし）のときのキャッシュは従来のものがそのまま使えます。
 - `local_num_ctx` を大きくするとメモリを多く使います。サーバーのメモリに収まる範囲にしてください。
 
 ### ローカルLLMへの委譲（ロールルーティング）

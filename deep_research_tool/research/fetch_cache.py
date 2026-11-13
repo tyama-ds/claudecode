@@ -31,6 +31,11 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 EXTRACTION_PROMPT_VERSION = "extract-v1"
+# Chunk cap the extraction keys were written with before the cap became a
+# setting (ContentExtractor.MAX_CHUNKS). Keys made with this cap and no
+# max_tokens stay byte-identical to older keys, so existing caches remain
+# valid at the defaults.
+DEFAULT_EXTRACTION_MAX_CHUNKS = 8
 
 
 def content_hash(text: str) -> str:
@@ -144,9 +149,25 @@ class FetchCache:
 
     def extraction_key(self, text: str, section_context: str,
                        research_query: str, model: str,
-                       prompt_version: str = EXTRACTION_PROMPT_VERSION) -> str:
-        return self._key("extract", content_hash(text), section_context,
-                         research_query, model, prompt_version)
+                       prompt_version: str = EXTRACTION_PROMPT_VERSION,
+                       max_chunks: Optional[int] = None,
+                       max_tokens: Optional[int] = None) -> str:
+        """Key of one page extraction.
+
+        ``max_chunks`` (chunks read per page) and ``max_tokens`` (reply cap
+        of each chunk call) change what an extraction contains, so a
+        non-default value gets its own key. At the defaults (8 chunks or
+        None, no max_tokens) nothing is appended and the key equals the one
+        older versions wrote.
+        """
+        parts = ["extract", content_hash(text), section_context,
+                 research_query, model, prompt_version]
+        if max_chunks is not None and \
+                int(max_chunks) != DEFAULT_EXTRACTION_MAX_CHUNKS:
+            parts.append(f"max_chunks={int(max_chunks)}")
+        if max_tokens is not None:
+            parts.append(f"max_tokens={int(max_tokens)}")
+        return self._key(*parts)
 
     def get_extraction(self, key: str) -> Optional[Dict[str, Any]]:
         if not self.enabled:

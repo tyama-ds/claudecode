@@ -146,6 +146,10 @@
   "log": [
     {
       "date": "2026-11-13",
+      "summary": "v1.14.0 の確認で見つかった 2 点を修正: 抽出結果のディスクキャッシュのキーに extraction_max_chunks・extraction_max_tokens を含める（既定値では従来のキーのままで、既存のキャッシュはそのまま使える。チャンク数を 3 から 8 に戻したときに 3 チャンクの結果が再利用されていた）。crawl_mode=\"fast_batch\" では Web ページがチャンク抽出を通らず、抽出の 2 設定が効かないことを README に注記し、コード例を standard 用と fast_batch 用に分けた"
+    },
+    {
+      "date": "2026-11-13",
       "summary": "ローカルLLM利用時の調査時間を短縮する設定を追加（v1.14.0）: local_think（思考モード。Ollama は think、OpenAI互換は chat_template_kwargs.enable_thinking、指定時だけ送信）、local_num_ctx（Ollama の options.num_ctx）、extraction_max_tokens（ページ抽出 1 回の出力上限）、extraction_max_chunks（1 ページのチャンク数 1〜8）。応答に残った <think> ブロックは取り除く。Config・create_config・CLI・Web UI の API パラメータまで配線し、値の検証つき。未指定ならリクエストも呼び出し回数も従来どおり。README に「ローカルLLMで速く動かすための設定」を追加（出発点の値のみ、効果は未実測）"
     },
     {
