@@ -428,6 +428,21 @@ def build_config_kwargs(params: Dict[str, Any]) -> Dict[str, Any]:
     return kwargs
 
 
+# the page carries the presets / recommended settings from its first byte:
+# the server puts them into this element when it serves the page (the page
+# asks GET /api/presets only when it was served without them)
+PRESETS_PLACEHOLDER = '<script id="presetsData" type="application/json">null</script>'
+
+
+def page_with_presets(html: str) -> str:
+    """index.html with the presets payload in its placeholder element."""
+    data = json.dumps(presets_payload(), ensure_ascii=False)
+    # nothing in the JSON can end the <script> element
+    data = data.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    return html.replace(PRESETS_PLACEHOLDER,
+                        f'<script id="presetsData" type="application/json">{data}</script>', 1)
+
+
 def resolve_ui_mode(params: Dict[str, Any], keep=()):
     """(params, error) for a job-starting request.
 
@@ -1868,7 +1883,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if route in ("/", "/index.html"):
             index = STATIC_DIR / "index.html"
             if index.is_file():
-                self._send_file(index, "text/html; charset=utf-8")
+                page = page_with_presets(index.read_text(encoding="utf-8")).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(page)))
+                self.end_headers()
+                self.wfile.write(page)
             else:
                 self._send_json({"error": "index.html not found"}, 500)
         elif route in ("/evidence", "/evidence.html"):
@@ -2091,6 +2111,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                           if k not in ("question", "context", "known_values",
                                        "language")}
             job_params["query"] = f"フェルミ推定: {question}"
+            # the Fermi panel is a pro-mode item (history shows the mode)
+            job_params["ui_mode"] = "pro"
             job_params["fermi"] = {
                 "question": question, "context": params.get("context") or "",
                 "known_values": cleaned or None,
@@ -2251,8 +2273,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
                        "external_body_as_evidence",
                        # the mode is THIS request's, never the original run's
                        "use_recommended", "ui_mode"}
-            base_params = {k: v for k, v in dict((rec or {}).get("params_summary") or {}).items()
-                           if k not in control}
+            # simple mode takes nothing of the original run's settings (its
+            # model, its pro choices…): only this request + the recommended ones
+            inherited = {} if wants_recommended(params) else \
+                dict((rec or {}).get("params_summary") or {})
+            base_params = {k: v for k, v in inherited.items() if k not in control}
             base_params.update({k: v for k, v in params.items() if k not in control})
             urls = normalize_urls(params.get("urls") or [])
             if urls:
@@ -2328,6 +2353,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/resume":
                 base_params = dict(rec.get("params_summary") or {})
+                if params.get("overrides"):
+                    # changed settings are no longer the recommended ones
+                    base_params.pop("use_recommended", None)
+                    base_params["ui_mode"] = "pro"
                 base_params.update(params.get("overrides") or {})
                 base_params["resume_from"] = session_path
                 base_params["resume_output_dir"] = rec.get("output_dir")

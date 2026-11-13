@@ -1754,6 +1754,9 @@ catch (e) { document.body.dataset.uiMode = 'simple'; }
   </div>
 </main>
 
+<!-- 仕上がり / 時間のかけ方 / シンプルの推奨設定: the server fills this when it
+     serves the page (deep_research_tool/presets.py); null = ask /api/presets -->
+<script id="presetsData" type="application/json">null</script>
 <script>
 const $ = (id) => document.getElementById(id);
 // シンプル / プロ: <body data-ui-mode> was set before the first paint (head
@@ -2457,8 +2460,8 @@ function setRadio(name, value) {
 document.querySelectorAll('.mode-card input').forEach(input => {
   input.addEventListener('change', () => {
     syncModeCards(input.name);
-    if (input.name === 'deliverable') whenPresets(() => { applyDeliverablePreset(input.value); updateSummaryStrip(); });
-    if (input.name === 'research_preset') whenPresets(() => { applyResearchPreset(input.value); updateSummaryStrip(); });
+    if (input.name === 'deliverable') whenPresets(() => { applyDeliverablePreset(input.value); applyModeVisibility(); updateSummaryStrip(); });
+    if (input.name === 'research_preset') whenPresets(() => { applyResearchPreset(input.value); applyModeVisibility(); updateSummaryStrip(); });
     // the 機能 tab switch mirrors the run mode (research only = verification off)
     if (input.name === 'run_mode' && $('feat_verification'))
       $('feat_verification').checked = input.value !== 'research_only';
@@ -2743,6 +2746,7 @@ async function startResearch() {
   // シンプル: only the theme, sources, output and connection settings go
   // out, with use_recommended (the server fills every other setting)
   const simple = uiMode === 'simple';
+  if (simple && !PRESETS) await presetsReady;     // only a page served without them waits
   try {
     params = simple ? simpleParams() : collectParams();
   } catch (e) {
@@ -3695,7 +3699,14 @@ async function startFeedback() {
   if (uiMode === 'simple') {
     // シンプル: the recommended settings (server side) + this panel's own
     // choices; nothing of the hidden pro form goes out
-    Object.assign(params, simpleBaseParams(), {plan_review_timeout: 0});
+    if (!PRESETS) await presetsReady;
+    try {
+      Object.assign(params, simpleBaseParams(), {plan_review_timeout: 0});
+    } catch (e) {
+      err.className = 'banner error';
+      err.textContent = 'フィードバック再調査を開始できませんでした: ' + e.message;
+      return;
+    }
   } else {
     Object.assign(params, {
       plan_review_timeout: ($('plan_review_mode') && $('plan_review_mode').value === 'auto60') ? 60 : 0,
@@ -4167,23 +4178,43 @@ document.querySelectorAll('#exampleChips .chip').forEach(chip => {
 // form, the simple mode and API clients cannot drift apart. NOTE: the
 // research preset is not the verification preset (Fast/Balanced/Strict) —
 // it SETS that preset as one of its effects, and says so.
+// The server puts them into #presetsData when it serves the page, so they
+// are here before anything can be clicked; a page served without them
+// (opened as a file, a test fixture) asks /api/presets instead.
 // {label, desc, values: {request parameter: value}} by key; empty until loaded
 let DELIVERABLE_PRESETS = {};
 let RESEARCH_PRESETS = {};
 let PRESETS = null;               // the whole /api/presets answer
 let presetsError = null;
-const presetsReady = (async () => {
+let presetsSettled = false;       // loaded, or every attempt failed
+function usePresets(data) {
+  PRESETS = data;
+  DELIVERABLE_PRESETS = data.deliverable_presets || {};
+  RESEARCH_PRESETS = data.research_presets || {};
+  presetsError = null;
+}
+function embeddedPresets() {
   try {
-    const res = await fetch('/api/presets');
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    PRESETS = data;
-    DELIVERABLE_PRESETS = data.deliverable_presets || {};
-    RESEARCH_PRESETS = data.research_presets || {};
-    presetsError = null;
-  } catch (e) {
-    presetsError = e;
+    const el = $('presetsData');
+    const data = el ? JSON.parse(el.textContent || 'null') : null;
+    return data && typeof data === 'object' && data.recommended_params ? data : null;
+  } catch (e) { return null; }
+}
+const presetsReady = (async () => {
+  const embedded = embeddedPresets();
+  if (embedded) { usePresets(embedded); presetsSettled = true; return; }   // synchronous: no loading window
+  for (let attempt = 1; attempt <= 3 && !PRESETS; attempt++) {
+    try {
+      const res = await fetch('/api/presets');
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      usePresets(data);
+    } catch (e) {
+      presetsError = e;
+      if (attempt < 3) await new Promise(r => setTimeout(r, 1000 * attempt));
+    }
   }
+  presetsSettled = true;
 })();
 // a preset card chosen before the presets arrived is applied once they do
 function whenPresets(fn) { if (PRESETS) fn(); else presetsReady.then(fn); }
@@ -4217,6 +4248,10 @@ function applyResearchPreset(key) {
 }
 
 function renderPresetEffects() {
+  if (!PRESETS && presetsSettled) {
+    $('presetEffects').innerHTML = `<div style="color:var(--error)">仕上がり・時間のかけ方の内容をサーバーから取得できませんでした（${escapeHtml(presetsError ? (presetsError.message || String(presetsError)) : '不明なエラー')}）。カードを選んでも各項目の値は変わりません。ページを再読み込みしてください。</div>`;
+    return;
+  }
   const d = DELIVERABLE_PRESETS[radioValue('deliverable')];
   const r = RESEARCH_PRESETS[radioValue('research_preset')];
   $('presetEffects').innerHTML =
@@ -4799,6 +4834,7 @@ async function historyAction(act, row) {
     let params = {};
     if (uiMode === 'simple') {
       // シンプル: the recommended verification settings (server side)
+      if (!PRESETS) await presetsReady;
       try { params = simpleBaseParams(); } catch (e) { msg.textContent = '設定エラー: ' + e.message; return; }
     } else {
       try { params = collectParams(); } catch (e) { msg.textContent = '設定エラー: ' + e.message; return; }
@@ -5068,8 +5104,8 @@ function simpleParams() {
 function renderSimpleSummary() {
   const el = $('summaryStrip');
   if (!PRESETS) {
-    el.innerHTML = presetsError
-      ? `<div class="simple-rec"><span class="err">推奨設定を取得できませんでした（${escapeHtml(presetsError.message)}）。ページを再読み込みしてください。</span></div>`
+    el.innerHTML = presetsSettled
+      ? `<div class="simple-rec"><span class="err">推奨設定を取得できませんでした（${escapeHtml(presetsError ? presetsError.message : '不明なエラー')}）。ページを再読み込みしてください。</span></div>`
       : '<div class="simple-rec"><span>推奨設定を読み込んでいます…</span></div>';
     return;
   }
@@ -5162,11 +5198,31 @@ let proUndoSnapshot = null;
 // shared by both modes (the simple mode shows them): never reset
 const SHARED_FORM = {text: ['source_urls', 'preferred_domains'], check: ['url_crawl_depth'], radio: ['source_mode']};
 
+// the pro values the switch replaces: the form, and the ⚙設定 → 機能 boxes
+// the time preset / run mode also set (DeepThink, 検証)
+function proSwitchState() {
+  return {form: formSnapshot(),
+          deepThink: $('feat_deep_think') ? $('feat_deep_think').checked : null,
+          verification: $('feat_verification') ? $('feat_verification').checked : null};
+}
+function restoreProSwitchState(s) {
+  applySnapshot(s.form);
+  if ($('feat_deep_think') && s.deepThink !== null) $('feat_deep_think').checked = s.deepThink;
+  if ($('feat_verification') && s.verification !== null) $('feat_verification').checked = s.verification;
+  renderDelegationNotice();
+}
+
 function applyRecommendedToForm() {
+  if (!PRESETS && !presetsSettled) {
+    // a page served without the presets, still asking for them: apply on arrival
+    showProSwitchNote('loading');
+    presetsReady.then(() => { if (uiMode === 'pro') applyRecommendedToForm(); });
+    return;
+  }
   const rec = PRESETS && (PRESETS.recommended_params || {})[simpleProvider()];
   if (!rec) { showProSwitchNote(null); return; }
   const provider = simpleProvider();
-  const before = formSnapshot();
+  const before = proSwitchState();
   if (INITIAL_FORM) {
     const base = JSON.parse(JSON.stringify(INITIAL_FORM));
     Object.entries(SHARED_FORM).forEach(([part, keys]) => keys.forEach(k => { delete (base[part] || {})[k]; }));
@@ -5188,12 +5244,17 @@ function applyRecommendedToForm() {
   $('plan_review_mode').value = Number(rec.plan_review_timeout) > 0 ? 'auto60' : 'explicit';
   $('verifyCustomPane').style.display = radioValue('verification_profile') === 'custom' ? 'block' : 'none';
   renderPresetEffects(); applyModeVisibility(); updateSummaryStrip(); renderDelegationNotice();
-  proUndoSnapshot = JSON.stringify(before) !== JSON.stringify(formSnapshot()) ? before : null;
+  proUndoSnapshot = JSON.stringify(before) !== JSON.stringify(proSwitchState()) ? before : null;
   showProSwitchNote(rec, provider);
 }
 
 function showProSwitchNote(rec, provider) {
   const el = $('proSwitchNote');
+  if (rec === 'loading') {
+    el.className = 'banner notice';
+    el.textContent = '推奨設定を読み込んでいます。届いたらフォームに反映します…';
+    return;
+  }
   if (!rec) {
     el.className = 'banner error';
     el.textContent = '推奨設定を取得できなかったため、フォームはそのままです（ページを再読み込みしてください）';
@@ -5212,7 +5273,7 @@ function showProSwitchNote(rec, provider) {
   el.className = 'banner notice';
   el.innerHTML = `<b>シンプルモードの推奨設定をフォームに反映しました。</b> ${escapeHtml(items.join('・'))}。`
     + escapeHtml(extra)
-    + '⚙ 設定 → 機能 の値（シンプルモードでは使いません）は、プロモードの調査に使われます。保存したプリセットは「フォームの保存」から読み込めます。'
+    + '⚙ 設定 → 機能 の DeepThink は時間のかけ方に合わせました。そのほかの 機能 の値（シンプルモードでは使いません）は、プロモードの調査に使われます。保存したプリセットは「フォームの保存」から読み込めます。'
     + (proUndoSnapshot ? '<button type="button" class="secondary" data-act="undo">切り替え前の値に戻す</button>' : '')
     + '<button type="button" class="secondary" data-act="close">閉じる</button>';
 }
@@ -5221,7 +5282,7 @@ $('proSwitchNote').addEventListener('click', (e) => {
   if (!btn) return;
   const el = $('proSwitchNote');
   if (btn.dataset.act === 'undo' && proUndoSnapshot) {
-    applySnapshot(proUndoSnapshot);
+    restoreProSwitchState(proUndoSnapshot);
     proUndoSnapshot = null;
     el.className = 'banner notice';
     el.innerHTML = '切り替え前のプロモードの値に戻しました。<button type="button" class="secondary" data-act="close">閉じる</button>';
@@ -5412,6 +5473,9 @@ $('fermi_question').addEventListener('keydown', (e) => { if (e.key === 'Enter') 
 function applyHash() {
   const h = (location.hash || '').replace('#', '');
   if (h === 'fermi') {
+    // the Fermi panel is a pro item: this page shows pro (the saved choice
+    // is left as it is, and nothing is applied to the form)
+    if (uiMode !== 'pro') setUiMode('pro');
     setView('new');
     $('fermiDetails').open = true;
     $('fermiCard').scrollIntoView({block: 'start'});

@@ -264,6 +264,7 @@ class TestHistory:
             "job_id": "job-a", "query": "元の調査", "state": "completed", "started_at": 1.0,
             "output_dir": str(session.parent),
             "params_summary": {"verification_profile": "strict", "deep_think": True, "requirements": "経営層向け",
+                               "provider": "anthropic", "model": "claude-old-model", "local_num_ctx": 4096,
                                "use_recommended": True, "ui_mode": "simple"},
             "result": {"saved_artifacts": {"session": str(session)}}}}}), encoding="utf-8")
         manager = NoRunManager(output_dir=str(tmp_path))
@@ -277,13 +278,18 @@ class TestHistory:
         p = manager.launched[-1]
         assert p["ui_mode"] == "simple" and p["verification_profile"] == "balanced"
         assert p["deep_think"] is False and p["plan_review"] is True
-        assert p["requirements"] == "経営層向け" and p["feedback"]["text"] == "市場規模を補足"
+        assert p["feedback"]["text"] == "市場規模を補足"
+        # nothing of the original run's settings: its provider / model / pro choices
+        assert p["provider"] == "openai"
+        for gone in ("model", "requirements", "local_num_ctx"):
+            assert gone not in p, gone
         # pro: the original's settings + this request's; the original's mode is not inherited
         status, data = _post(ui_server, "/api/feedback", {
             "job_id": "job-a", "feedback": "市場規模を補足", "openai_api_key": "sk-test"})
         assert status == 202, data
         p = manager.launched[-1]
         assert p["ui_mode"] == "pro" and p["verification_profile"] == "strict" and p["deep_think"] is True
+        assert p["model"] == "claude-old-model" and p["requirements"] == "経営層向け"      # as before
         assert "use_recommended" not in p
         # 検証のみ再実行
         status, data = _post(ui_server, "/api/verify", {
@@ -293,6 +299,19 @@ class TestHistory:
         assert p["ui_mode"] == "simple" and p["verification_profile"] == "fast" and p["verify"]
         status, data = _post(ui_server, "/api/verify", {"job_id": "job-a", "use_recommended": True})
         assert status == 400 and data["missing"][0]["param"] == "openai_api_key"
+        # 中断箇所から再開 continues the run as it was; changed settings are not "recommended"
+        status, data = _post(ui_server, "/api/resume", {"job_id": "job-a", "openai_api_key": "sk-test"})
+        assert status == 202, data
+        assert manager.launched[-1]["ui_mode"] == "simple"
+        status, data = _post(ui_server, "/api/resume", {"job_id": "job-a", "overrides": {"deep_think": True}})
+        assert status == 202, data
+        p = manager.launched[-1]
+        assert p["ui_mode"] == "pro" and "use_recommended" not in p
+
+    def test_fermi_runs_are_recorded_as_pro(self, ui_server):
+        status, data = _post(ui_server, "/api/fermi", {"question": "国内の EV 充電器の数は？"})
+        assert status == 202, data
+        assert ui_server.job_manager.launched[-1]["ui_mode"] == "pro"
 
 
 def test_recommended_params_are_complete_requests():
@@ -455,13 +474,18 @@ def test_switching_to_pro_shows_what_simple_applied(ui_server):
         # the pro values it replaced come back once
         page.click("#uiModeToggle [data-set-mode=simple]")
         page.click("#uiModeToggle [data-set-mode=pro]")
+        page.check("input[name=research_preset][value=thorough]", force=True)     # turns DeepThink on
         page.evaluate("setRadio('verification_profile', 'strict'); document.getElementById('model').value = 'qwen3:32b'")
+        assert page.evaluate("document.getElementById('feat_deep_think').checked") is True
         page.click("#uiModeToggle [data-set-mode=simple]")
         page.click("#uiModeToggle [data-set-mode=pro]")
         assert page.evaluate("radioValue('verification_profile')") == "fast"
+        assert page.evaluate("document.getElementById('feat_deep_think').checked") is False
         page.click("#proSwitchNote button[data-act=undo]")
         assert page.evaluate("radioValue('verification_profile')") == "strict"
         assert page.evaluate("document.getElementById('model').value") == "qwen3:32b"
+        assert page.evaluate("radioValue('research_preset')") == "thorough"
+        assert page.evaluate("collectParams().deep_think") is True                  # DeepThink is back
         # a page opened in pro is the pro form as before (nothing applied)
         page2, errors2, _ = _load(browser, _url(ui_server, "/"), "localStorage.setItem('drt_ui_mode', 'pro')")
         assert page2.evaluate("radioValue('research_preset')") == "standard"
@@ -503,3 +527,72 @@ def test_the_history_tells_the_modes_apart(tmp_path, no_keys):
         pw.stop()
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_the_page_carries_the_presets_and_copes_without_them(ui_server):
+    # served by the server: the presets are in the page itself
+    with urllib.request.urlopen(_url(ui_server, "/"), timeout=10) as res:
+        html = res.read().decode("utf-8")
+    start = html.index('<script id="presetsData" type="application/json">') + len(
+        '<script id="presetsData" type="application/json">')
+    data = json.loads(html[start:html.index("</script>", start)])
+    assert data == _get(ui_server, "/api/presets")
+    pw, browser = _browser()
+    try:
+        # a page served WITHOUT them asks /api/presets: slow -> a start waits for it
+        page = browser.new_page()
+        errors, sent = [], []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        raw = INDEX.read_text(encoding="utf-8")
+        page.route("**/", lambda r: r.fulfill(status=200, content_type="text/html; charset=utf-8", body=raw))
+
+        def slow_presets(route):
+            import time
+            time.sleep(1.5)
+            route.continue_()
+        page.route("**/api/presets", slow_presets)
+
+        def research(route):
+            sent.append(json.loads(route.request.post_data))
+            route.fulfill(status=400, content_type="application/json", body=json.dumps({"error": "stop"}))
+        page.route("**/api/research", research)
+        page.goto(_url(ui_server, "/"), wait_until="domcontentloaded")
+        page.fill("#query", "炭素繊維")
+        page.click("#startBtn")
+        page.wait_for_timeout(2500)
+        assert sent and sent[-1]["use_recommended"] is True and sent[-1]["query"] == "炭素繊維"
+        assert "推奨設定（クラウドAPI）" in page.inner_text("#summaryStrip")
+        # failing: said in the simple summary, in pro under the cards, and by a feedback start
+        page2 = browser.new_page()
+        page2.on("pageerror", lambda e: errors.append(str(e)))
+        page2.route("**/", lambda r: r.fulfill(status=200, content_type="text/html; charset=utf-8", body=raw))
+        page2.route("**/api/presets", lambda r: r.fulfill(status=500, content_type="application/json",
+                                                         body=json.dumps({"error": "down"})))
+        page2.goto(_url(ui_server, "/"), wait_until="networkidle")
+        page2.wait_for_timeout(3800)                      # three attempts
+        assert "推奨設定を取得できませんでした" in page2.inner_text("#summaryStrip")
+        page2.evaluate("document.getElementById('feedback_text').value = 'x'; resultJobId = 'job-x'")
+        page2.evaluate("startFeedback()")
+        page2.wait_for_timeout(300)
+        assert "推奨設定をサーバーから取得できていません" in page2.inner_text("#feedbackError")
+        page2.click("#uiModeToggle [data-set-mode=pro]")
+        assert "取得できませんでした" in page2.inner_text("#presetEffects")
+        assert "フォームはそのまま" in page2.inner_text("#proSwitchNote")
+        assert errors == [], errors
+    finally:
+        browser.close()
+        pw.stop()
+
+
+def test_the_fermi_link_opens_the_panel_in_either_mode(ui_server):
+    pw, browser = _browser()
+    try:
+        page, errors, _ = _load(browser, _url(ui_server, "/#fermi"), None)
+        assert errors == [], errors
+        assert page.evaluate("uiMode") == "pro"
+        assert page.is_visible("#fermi_question")
+        # the saved choice is left alone
+        assert page.evaluate("localStorage.getItem('drt_ui_mode')") is None
+    finally:
+        browser.close()
+        pw.stop()
