@@ -118,6 +118,10 @@ _CONFIG_PARAM_MAP = {
     "local_model": "local_model",
     "local_timeout": "local_timeout",
     "local_concurrency": "local_concurrency",
+    "local_think": "local_think",
+    "local_num_ctx": "local_num_ctx",
+    "extraction_max_tokens": "extraction_max_tokens",
+    "extraction_max_chunks": "extraction_max_chunks",
     "llm_retry_attempts": "llm_retry_attempts",
     # reuse / freshness
     "cache_reuse": "cache_reuse",
@@ -230,6 +234,32 @@ def _int_range(lo, hi):
     return convert
 
 
+def _positive_int(value, name):
+    """A positive integer (no upper bound; strings of digits accepted)."""
+    try:
+        if isinstance(value, bool) or isinstance(value, float):
+            raise ValueError
+        n = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be an integer (got {value!r})")
+    if n < 1:
+        raise ValueError(f"{name} must be a positive integer (got {n})")
+    return n
+
+
+def _opt_bool(value, name):
+    """True / False from a JSON boolean or 'true' / 'false' / 'on' / 'off'
+    / '1' / '0' (an empty value never reaches here: it means unset)."""
+    if isinstance(value, bool):
+        return value
+    v = str(value).strip().lower()
+    if v in ("true", "on", "1", "yes"):
+        return True
+    if v in ("false", "off", "0", "no"):
+        return False
+    raise ValueError(f"{name} must be true or false (got {value!r})")
+
+
 def _engine_id(value, name):
     from ..engines import known_engine_ids
     v = str(value or "").strip() or "builtin"
@@ -299,6 +329,10 @@ _PARAM_CONVERTERS = {
     "local_llm_role": _local_llm_role,
     "local_timeout": _int_range(1, 3600),
     "local_concurrency": _int_range(1, 16),
+    "local_think": _opt_bool,
+    "local_num_ctx": _positive_int,
+    "extraction_max_tokens": _positive_int,
+    "extraction_max_chunks": _int_range(1, 8),
     "llm_retry_attempts": _int_range(0, 10),
     "chart_max_per_section": _int_range(1, 12),
     "chart_max_total": _int_range(0, 60),          # 0 = unlimited

@@ -1083,6 +1083,59 @@ OpenAI Deep Research・Gemini・Copilot などで別途作った調査結果や�
 - **検証のキャンセル／タイムアウトは「完了」ではない**: 検証を途中で止めた実行を再開すると、保存した下書きと判定結果から検証の続きを行います（止めた時点の本文を最終本文として流用することはありません）。最終化ループが追加調査で登録した根拠は、下書きの保存時と検証の終了時にセッション・根拠 JSON へ書き出されるので、再開後も下書きが引用する `[SOURCE N]` の番号はそのまま有効です。
 - **再開しない工程**: V2 / V3 の章の執筆は再開のたびにやり直します（下書きがあればそこから検証を続け、下書きがなければ本文が変わるので判定結果の再利用も効きません）。
 
+### ローカルLLMで速く動かすための設定（v1.14.0）
+
+ローカルLLM（Qwen など）では、1 回の調査に数時間かかることがあります。時間の大半は、取得したページを LLM で読む「ページ抽出」です（1 ページを最大 8 チャンクに分け、チャンクごとに 1 回呼び出します）。次の設定で、呼び出しの回数と 1 回あたりの生成量を減らせます。**どれも指定しなければ、送るリクエストも呼び出し回数も従来と同じです。**
+
+| 設定 | 既定 | 内容 | 出発点の例 |
+|---|---|---|---|
+| `local_think` | 指定なし | 思考モード（Qwen3 など）。`False` で思考を止める。Ollama には `think`、OpenAI 互換サーバーには `chat_template_kwargs.enable_thinking` を送る。応答に `<think>…</think>` が残っていたら取り除いてから使う | `False` |
+| `local_num_ctx` | 指定なし | Ollama のコンテキスト長（`options.num_ctx`）。既定値のままだと長いチャンクが切り詰められることがある。OpenAI 互換サーバーには送らない（コンテキスト長はサーバー側で決める） | `16384` |
+| `extraction_max_tokens` | 指定なし（クライアントの既定） | ページ抽出 1 回あたりの出力上限。抽出は要約の JSON を返すだけなので、長い上限は要らない | `3000` |
+| `extraction_max_chunks` | 8（1〜8） | 1 ページから読むチャンクの上限。調査中の章に関係の深いチャンクから選ぶ | `3` |
+| `local_concurrency` | 1 | ローカルLLM への同時リクエスト数。サーバー側の並列数（Ollama の `OLLAMA_NUM_PARALLEL` など）に合わせる | `2` |
+| `crawl_mode` | `standard` | `fast_batch` で並列取得＋まとめて評価 | `"fast_batch"` |
+| `verification_profile` | `balanced` | `fast` で最終検証を軽くする | `"fast"` |
+| `research_iterations` | 3 | 章ごとの調査回数 | `2` |
+
+```python
+from deep_research_tool import run_research
+
+result = run_research(
+    query="調査テーマ",
+    provider="local",
+    local_model="qwen3:14b",
+    local_backend="ollama",
+    local_base_url="http://localhost:11434",
+    local_think=False,            # 思考モードを止める（思考に対応したモデルだけ）
+    local_num_ctx=16384,          # Ollama のコンテキスト長
+    extraction_max_tokens=3000,   # ページ抽出 1 回の出力上限
+    extraction_max_chunks=3,      # 1 ページから読むチャンク数
+    local_concurrency=2,
+    crawl_mode="fast_batch",
+    verification_profile="fast",
+    research_iterations=2,
+)
+```
+
+```bash
+deep-research research "調査テーマ" --provider local --local-backend ollama \
+    --local-base-url http://localhost:11434 \
+    --local-think off --local-num-ctx 16384 \
+    --extraction-max-tokens 3000 --extraction-max-chunks 3 \
+    --local-concurrency 2 --crawl-mode fast_batch --verification-profile fast --iterations 2
+```
+
+Web UI の API（`/api/research`）でも同じ名前で指定できます（`local_think` は `true` / `false`）。フォームには入力欄はまだありません。
+
+注意:
+
+- 上の値は**出発点**です。速さは、モデル・量子化・GPU・サーバーの設定で大きく変わります。手元の環境で 1 回試してから調整してください（効果の大きさは実測していません）。
+- `local_think` は**思考に対応したモデルにだけ**指定してください。対応していないモデルに送ると、Ollama がエラーを返します（指定しなければ何も送りません）。
+- `extraction_max_tokens` が小さすぎると、抽出の JSON が途中で切れてそのチャンクは失敗扱いになります（結果に「Partial extraction」「All chunk extractions failed」の警告）。警告が増えたら値を上げてください。
+- `extraction_max_chunks` を小さくすると、長いページの後半など、選ばれなかった部分は読みません。
+- `local_num_ctx` を大きくするとメモリを多く使います。サーバーのメモリに収まる範囲にしてください。
+
 ### ローカルLLMへの委譲（ロールルーティング）
 
 メインのプロバイダが OpenAI / Anthropic のまま、**最終本文の検証（クレーム抽出・判定）** と **検証後の本文修正** だけをローカルLLMに任せる機能です。Web UI の「⚙ 設定 → ローカルLLM → ロールルーティング」（verify / draft / all）、CLI の `--local-llm-role`、`run_research(local_llm_role=...)` で指定します。サーバーURL（⚙設定、`--local-base-url`、または環境変数 `LOCAL_LLM_BASE_URL`）が必要です。
