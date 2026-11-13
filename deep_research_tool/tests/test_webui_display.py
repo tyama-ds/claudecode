@@ -180,6 +180,7 @@ def test_engine_cards_never_overflow_and_explain_on_hover(ui_server, width):
     pw, browser = _browser()
     try:
         page = browser.new_page(viewport={"width": width, "height": 900})
+        page.add_init_script("localStorage.setItem('drt_ui_mode', 'pro')")   # the engine cards are pro items
 
         def engines(route):
             data = json.loads(urllib.request.urlopen(_url(ui_server, "/api/engines")).read())
@@ -583,6 +584,7 @@ def test_engine_tip_closes_after_a_click_and_opens_on_keyboard_focus(ui_server):
     pw, browser = _browser()
     try:
         page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.add_init_script("localStorage.setItem('drt_ui_mode', 'pro')")   # the engine cards are pro items
         page.route("**/api/engines*", _engines_route(ui_server, False))
         page.goto(_url(ui_server, "/#new"), wait_until="networkidle")
         page.wait_for_timeout(800)
@@ -622,6 +624,7 @@ def test_engine_tips_stay_inside_the_window_with_many_engines(ui_server, width):
     pw, browser = _browser()
     try:
         page = browser.new_page(viewport={"width": width, "height": 900})
+        page.add_init_script("localStorage.setItem('drt_ui_mode', 'pro')")   # the engine cards are pro items
         page.route("**/api/engines*", _engines_route(ui_server, True))
         page.goto(_url(ui_server, "/#new"), wait_until="networkidle")
         page.wait_for_timeout(800)

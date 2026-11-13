@@ -86,7 +86,8 @@ def test_saved_state_never_stops_the_page(ui_server, init_script):
         assert "履歴はまだありません" in page.text_content("#historyList")
         assert not page.query_selector("#initErrorBanner")
         page.fill("#query", "炭素繊維の市場調査")
-        if page.is_checked("#plan_review"):
+        # the plan review checkbox is a pro-mode item (the page opens in シンプル)
+        if page.is_visible("#plan_review") and page.is_checked("#plan_review"):
             page.uncheck("#plan_review")
         page.click("#startBtn")
         page.wait_for_timeout(800)
@@ -100,7 +101,8 @@ def test_saved_verification_off_shows_research_only(ui_server):
     pw, browser = _browser()
     try:
         page, errors, _ = _load(browser, _url(ui_server, "/"),
-                                "localStorage.setItem('drt_settings', JSON.stringify({enable_verification: false}))")
+                                "localStorage.setItem('drt_settings', JSON.stringify({enable_verification: false}));"
+                                "localStorage.setItem('drt_ui_mode', 'pro')")       # the run mode cards are pro items
         assert errors == []
         assert page.evaluate("radioValue('run_mode')") == "research_only"
         assert "検証なし" in page.text_content("#startBtn")
