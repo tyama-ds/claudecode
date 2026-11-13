@@ -709,6 +709,7 @@ body[data-ui-mode="simple"] #viewNew.sel { grid-template-columns: minmax(0, 640p
 .simple-rec b { color: var(--text); }
 .simple-rec .err { color: var(--error); }
 .field-missing { border-color: var(--error) !important; box-shadow: 0 0 0 3px color-mix(in srgb, var(--error) 22%, transparent); }
+.missing-msg { color: var(--error); font-size: 12px; margin-top: 4px; line-height: 1.5; }
 .mode-badge { display: inline-block; font-size: 11px; font-weight: 700; border-radius: 999px; padding: 0 8px; margin-left: 4px;
   border: 1px solid var(--border); color: var(--muted); vertical-align: 1px; }
 .mode-badge.simple { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
@@ -2460,8 +2461,9 @@ function setRadio(name, value) {
 document.querySelectorAll('.mode-card input').forEach(input => {
   input.addEventListener('change', () => {
     syncModeCards(input.name);
-    if (input.name === 'deliverable') whenPresets(() => { applyDeliverablePreset(input.value); applyModeVisibility(); updateSummaryStrip(); });
-    if (input.name === 'research_preset') whenPresets(() => { applyResearchPreset(input.value); applyModeVisibility(); updateSummaryStrip(); });
+    const stillChosen = () => radioValue(input.name) === input.value;
+    if (input.name === 'deliverable') whenPresets(() => { if (stillChosen()) { applyDeliverablePreset(input.value); applyModeVisibility(); updateSummaryStrip(); } });
+    if (input.name === 'research_preset') whenPresets(() => { if (stillChosen()) { applyResearchPreset(input.value); applyModeVisibility(); updateSummaryStrip(); } });
     // the 機能 tab switch mirrors the run mode (research only = verification off)
     if (input.name === 'run_mode' && $('feat_verification'))
       $('feat_verification').checked = input.value !== 'research_only';
@@ -2746,7 +2748,11 @@ async function startResearch() {
   // シンプル: only the theme, sources, output and connection settings go
   // out, with use_recommended (the server fills every other setting)
   const simple = uiMode === 'simple';
-  if (simple && !PRESETS) await presetsReady;     // only a page served without them waits
+  if (simple && !PRESETS) {
+    // only a page served without the presets waits; no second click meanwhile
+    $('startBtn').disabled = true;
+    try { await presetsReady; } finally { $('startBtn').disabled = false; }
+  }
   try {
     params = simple ? simpleParams() : collectParams();
   } catch (e) {
@@ -3699,7 +3705,10 @@ async function startFeedback() {
   if (uiMode === 'simple') {
     // シンプル: the recommended settings (server side) + this panel's own
     // choices; nothing of the hidden pro form goes out
-    if (!PRESETS) await presetsReady;
+    if (!PRESETS) {
+      $('feedbackStartBtn').disabled = true;
+      try { await presetsReady; } finally { $('feedbackStartBtn').disabled = false; }
+    }
     try {
       Object.assign(params, simpleBaseParams(), {plan_review_timeout: 0});
     } catch (e) {
@@ -4245,6 +4254,37 @@ function applyResearchPreset(key) {
   $('v2_enable_polish').checked = p.v2_enable_polish;
   if (radioValue('source_mode') !== 'local') setRadio('crawl_mode', p.crawl_mode);
   renderPresetEffects();
+}
+
+// The fields a 仕上がり / 時間のかけ方 sets get the server's values for the
+// cards chosen when the page opens. Only a field still at the value written
+// in this file is set: one the browser restored or the user changed stays.
+// ⚙設定 → 機能 (DeepThink) is a saved setting and is not touched here.
+function fillPristineFromPresets() {
+  const values = {...(((DELIVERABLE_PRESETS[radioValue('deliverable')] || {}).values) || {}),
+                  ...(((RESEARCH_PRESETS[radioValue('research_preset')] || {}).values) || {})};
+  Object.entries(values).forEach(([key, v]) => {
+    if (key === 'deep_think') return;
+    if (key === 'verification_profile' || key === 'crawl_mode') {
+      if (key === 'crawl_mode' && radioValue('source_mode') === 'local') return;
+      const cur = document.querySelector(`input[name=${key}]:checked`);
+      if (cur && cur.defaultChecked && cur.value !== v) {
+        setRadio(key, v);
+        if (key === 'verification_profile') $('verifyCustomPane').style.display = v === 'custom' ? 'block' : 'none';
+      }
+      return;
+    }
+    const el = $(key);
+    if (!el) return;
+    if (el.type === 'checkbox') {
+      if (el.checked === el.defaultChecked) el.checked = !!v;
+    } else if (el.tagName === 'SELECT') {
+      const def = [...el.options].find(o => o.defaultSelected) || el.options[0];
+      if (def && el.value === def.value && v !== null && v !== undefined) el.value = String(v);
+    } else if (el.value === el.defaultValue) {
+      el.value = v === null || v === undefined ? '' : String(v);
+    }
+  });
 }
 
 function renderPresetEffects() {
@@ -4810,9 +4850,13 @@ async function historyAction(act, row) {
   if (act === 'dup') {
     if (uiMode === 'simple') {
       // only what the simple mode shows; the hidden pro form is not touched
-      applyParamsToSimple(rec.params_summary || {}, rec.query);
-      msg.textContent = '調査テーマ・資料・出力形式・言語を「新規調査」タブに反映しました。シンプルモードでは推奨設定で調査します'
-        + '（すべての条件を複製するには、プロモードで「条件を複製」を押してください。APIキーは含まれません）';
+      const ps = rec.params_summary || {};
+      applyParamsToSimple(ps, rec.query);
+      const hadFiles = Array.isArray(ps.local_documents) && ps.local_documents.length
+        && ['local', 'hybrid'].includes(ps.source_mode);
+      msg.textContent = '調査テーマ・使用する資料の種類・指定 URL・出力形式・言語を「新規調査」タブに反映しました。シンプルモードでは推奨設定で調査します'
+        + (hadFiles ? '。添付したファイルは複製されないため、もう一度追加してください' : '')
+        + '（ほかの条件も複製するには、プロモードで「条件を複製」を押してください。APIキーは含まれません）';
     } else {
       applyParamsToForm(rec.params_summary || {}, rec.query);
       msg.textContent = '条件を「新規調査」タブに反映しました（APIキーは含まれません。確認して開始してください）';
@@ -5117,24 +5161,31 @@ function renderSimpleSummary() {
   const source = radioValue('source_mode') || 'web';
   const web = source !== 'local' && source !== 'urls';
   const b = (v) => `<b>${escapeHtml(String(v))}</b>`;
-  const depth = [`検証 ${LABELS.verification_profile[rec.verification_profile] || rec.verification_profile || '—'}`];
-  if (web && rec.crawl_mode === 'fast_batch') depth.push('高速クロール');
+  // short enough for two lines at the form's width; the details (検証・
+  // クロール) are in the tooltip
+  const ver = LABELS.verification_profile[rec.verification_profile] || rec.verification_profile || '—';
+  const detail = [`仕上がり: ${d.label || rec.deliverable}（${d.desc || ''}）`,
+    `時間のかけ方: ${r.label || rec.research_preset}（${r.desc || ''}）`, `検証: ${ver}`];
   const recItems = [`仕上がり ${b(d.label || rec.deliverable || '—')}`,
-    `時間のかけ方 ${b(r.label || rec.research_preset || '—')}（${escapeHtml(depth.join('・'))}）`];
+    `時間 ${b(r.label || rec.research_preset || '—')}`];
   if (rec.extraction_max_chunks || rec.extraction_max_tokens) {
-    recItems.push(`ページ抽出 ${b(`${rec.extraction_max_chunks || 8}チャンク・出力上限 ${rec.extraction_max_tokens || '既定'}`)}`);
+    recItems.push(`抽出 ${b(`${rec.extraction_max_chunks || 8}チャンク/${rec.extraction_max_tokens || '既定'}`)}`);
+    detail.push(`ページ抽出: 1 ページ ${rec.extraction_max_chunks || 8} チャンク・出力上限 ${rec.extraction_max_tokens || '既定'}`
+      + (web && rec.crawl_mode === 'fast_batch' ? '（高速クロールの Web ページには効かず、添付した資料に効きます）' : ''));
   }
-  recItems.push(`計画の確認 ${b(rec.plan_review ? 'する' : 'しない')}`);
-  const runItems = [`AI ${b(PROVIDER_LABELS[provider])}（⚙ 設定）`,
-    `出力 ${b(SIMPLE_FORMAT_LABELS[radioValue('simple_output_format')] || 'Word')}`,
-    `言語 ${b(radioValue('simple_language') === 'en' ? 'English' : '日本語')}`,
+  recItems.push(`計画確認 ${b(rec.plan_review ? 'あり' : 'なし')}`);
+  detail.push(`計画の確認: ${rec.plan_review ? 'する' : 'しない'}`);
+  const runItems = [`AI ${b(PROVIDER_LABELS[provider])}`,
+    b(SIMPLE_FORMAT_LABELS[radioValue('simple_output_format')] || 'Word'),
+    b(radioValue('simple_language') === 'en' ? 'English' : '日本語'),
     `資料 ${b(LABELS.source_mode[source] || source)}`];
   if (source === 'local' || source === 'hybrid') runItems.push(`ファイル ${b(uploadedDocs.filter(x => x.readable).length + '件')}`);
   if (source === 'urls' || source === 'urls_web') {
-    runItems.push(`指定URL ${b($('source_urls').value.split('\n').map(s => s.trim()).filter(Boolean).length + '件')}`);
+    runItems.push(`URL ${b($('source_urls').value.split('\n').map(s => s.trim()).filter(Boolean).length + '件')}`);
   }
-  el.innerHTML = `<div class="simple-rec"><span>推奨設定（${kind === 'local' ? 'ローカルLLM' : 'クラウドAPI'}）: ${recItems.join(' ・ ')}</span>`
-    + `<span>${runItems.join(' ・ ')}</span></div>`;
+  el.innerHTML = `<div class="simple-rec" title="${escapeHtml(detail.join('\n'))}">`
+    + `<span>推奨設定（${kind === 'local' ? 'ローカルLLM' : 'クラウドAPI'}）: ${recItems.join('・')}</span>`
+    + `<span>${runItems.join('・')}（AI は ⚙ 設定）</span></div>`;
 }
 
 // a connection setting the run cannot start without: ⚙設定 opens on it
@@ -5143,6 +5194,7 @@ Object.entries(SETTINGS_FIELDS).forEach(([id, key]) => { CONNECTION_FIELD_IDS[ke
 Object.entries(SECRET_FIELDS).forEach(([id, key]) => { CONNECTION_FIELD_IDS[key] = id; });
 function clearMissingConnection() {
   document.querySelectorAll('.field-missing').forEach(el => el.classList.remove('field-missing'));
+  document.querySelectorAll('.missing-msg').forEach(el => el.remove());
   $('settingsMissing').className = 'banner';
   $('settingsMissing').textContent = '';
 }
@@ -5156,16 +5208,33 @@ function showMissingConnection(missing) {
   let first = null;
   (missing || []).forEach(m => {
     const el = $(CONNECTION_FIELD_IDS[m.param]);
-    if (el) { el.classList.add('field-missing'); first = first || el; }
+    if (!el) return;
+    el.classList.add('field-missing');
+    // the message next to the field too: the banner above scrolls away
+    // when the dialog brings a field further down into view
+    const msg = document.createElement('div');
+    msg.className = 'missing-msg';
+    msg.setAttribute('role', 'alert');
+    msg.textContent = m.message || m.param;
+    el.insertAdjacentElement('afterend', msg);
+    first = first || el;
   });
   if (first) { first.scrollIntoView({block: 'center'}); first.focus(); }
   else box.scrollIntoView({block: 'nearest'});
 }
 $('settingsBtn').addEventListener('click', clearMissingConnection);
 $('settingsSaveBtn').addEventListener('click', clearMissingConnection);
-$('settingsModal').addEventListener('input', (e) => { if (e.target && e.target.classList) e.target.classList.remove('field-missing'); });
+$('settingsModal').addEventListener('input', (e) => {
+  const t = e.target;
+  if (!t || !t.classList || !t.classList.contains('field-missing')) return;
+  t.classList.remove('field-missing');
+  const next = t.nextElementSibling;
+  if (next && next.classList.contains('missing-msg')) next.remove();
+});
 $('set_provider').addEventListener('change', () => {
   $('set_provider').classList.remove('field-missing');
+  const next = $('set_provider').nextElementSibling;
+  if (next && next.classList.contains('missing-msg')) next.remove();
   updateSummaryStrip(); renderDelegationNotice();
 });
 
@@ -5212,11 +5281,15 @@ function restoreProSwitchState(s) {
   renderDelegationNotice();
 }
 
+let recApplyPending = false;          // one deferred apply at a time
 function applyRecommendedToForm() {
   if (!PRESETS && !presetsSettled) {
     // a page served without the presets, still asking for them: apply on arrival
     showProSwitchNote('loading');
-    presetsReady.then(() => { if (uiMode === 'pro') applyRecommendedToForm(); });
+    if (!recApplyPending) {
+      recApplyPending = true;
+      presetsReady.then(() => { recApplyPending = false; if (uiMode === 'pro') applyRecommendedToForm(); });
+    }
     return;
   }
   const rec = PRESETS && (PRESETS.recommended_params || {})[simpleProvider()];
@@ -5244,11 +5317,18 @@ function applyRecommendedToForm() {
   $('plan_review_mode').value = Number(rec.plan_review_timeout) > 0 ? 'auto60' : 'explicit';
   $('verifyCustomPane').style.display = radioValue('verification_profile') === 'custom' ? 'block' : 'none';
   renderPresetEffects(); applyModeVisibility(); updateSummaryStrip(); renderDelegationNotice();
-  proUndoSnapshot = JSON.stringify(before) !== JSON.stringify(proSwitchState()) ? before : null;
-  showProSwitchNote(rec, provider);
+  const after = proSwitchState();
+  proUndoSnapshot = JSON.stringify(before) !== JSON.stringify(after) ? before : null;
+  // the ⚙設定 → 機能 boxes the switch changed (the time preset sets
+  // DeepThink, the run mode sets 検証)
+  const onOff = v => (v ? 'ON' : 'OFF');
+  const featChanges = [];
+  if (before.deepThink !== after.deepThink) featChanges.push(`DeepThink ${onOff(before.deepThink)}→${onOff(after.deepThink)}`);
+  if (before.verification !== after.verification) featChanges.push(`検証 ${onOff(before.verification)}→${onOff(after.verification)}`);
+  showProSwitchNote(rec, provider, featChanges);
 }
 
-function showProSwitchNote(rec, provider) {
+function showProSwitchNote(rec, provider, featChanges = []) {
   const el = $('proSwitchNote');
   if (rec === 'loading') {
     el.className = 'banner notice';
@@ -5262,7 +5342,8 @@ function showProSwitchNote(rec, provider) {
   }
   const d = DELIVERABLE_PRESETS[rec.deliverable] || {};
   const r = RESEARCH_PRESETS[rec.research_preset] || {};
-  const items = [`AI: ${PROVIDER_LABELS[provider] || provider}（モデルは標準）`, `仕上がり: ${d.label || rec.deliverable}`,
+  const items = [`AI: ${PROVIDER_LABELS[provider] || provider}（モデルは標準）`,
+    `実行モード: ${rec.run_mode === 'research_only' ? '調査のみ' : '検証入り調査'}`, `仕上がり: ${d.label || rec.deliverable}`,
     `時間のかけ方: ${r.label || rec.research_preset}`, `計画の確認: ${rec.plan_review ? 'する' : 'しない'}`,
     `出力: ${SIMPLE_FORMAT_LABELS[$('output_format').value] || $('output_format').value}`,
     `言語: ${$('language').value === 'en' ? 'English' : '日本語'}`];
@@ -5273,7 +5354,8 @@ function showProSwitchNote(rec, provider) {
   el.className = 'banner notice';
   el.innerHTML = `<b>シンプルモードの推奨設定をフォームに反映しました。</b> ${escapeHtml(items.join('・'))}。`
     + escapeHtml(extra)
-    + '⚙ 設定 → 機能 の DeepThink は時間のかけ方に合わせました。そのほかの 機能 の値（シンプルモードでは使いません）は、プロモードの調査に使われます。保存したプリセットは「フォームの保存」から読み込めます。'
+    + (featChanges.length ? escapeHtml(`⚙ 設定 → 機能 も推奨設定に合わせました（${featChanges.join('・')}。保存するまでこの画面だけの変更です）。`) : '')
+    + 'そのほかの ⚙ 設定 → 機能 の値（シンプルモードでは使いません）は、プロモードの調査に使われます。保存したプリセットは「フォームの保存」から読み込めます。'
     + (proUndoSnapshot ? '<button type="button" class="secondary" data-act="undo">切り替え前の値に戻す</button>' : '')
     + '<button type="button" class="secondary" data-act="close">閉じる</button>';
 }
@@ -5304,6 +5386,11 @@ function setUiMode(mode, opts = {}) {
   });
   if (opts.user) {
     try { localStorage.setItem(UI_MODE_KEY, mode); } catch (e) { /* storage unavailable */ }
+    // #fermi shows pro for that page only: once the user chose a mode, a
+    // reload must not override it
+    if (location.hash === '#fermi') {
+      try { history.replaceState(null, '', '#' + (document.body.dataset.view || 'new')); } catch (e) { /* ignore */ }
+    }
     if (from === 'simple' && mode === 'pro') applyRecommendedToForm();
   }
   if (mode === 'simple') {
@@ -5931,6 +6018,9 @@ document.addEventListener('pointerleave', () => document.querySelectorAll('.mode
   setTimeout(step, 300);
 })();
 
+// the starting values of the chosen 仕上がり / 時間のかけ方 come from the server
+// too (the field values in this file are only placeholders)
+try { fillPristineFromPresets(); } catch (e) { console.error('preset values not filled in', e); }
 // the pro form as the page opened: シンプル → プロ starts from it
 try { INITIAL_FORM = formSnapshot(); } catch (e) { console.error('initial form not recorded', e); }
 try { syncSavedRunMode(); } catch (e) { console.error('saved run mode not applied', e); }
@@ -5940,7 +6030,8 @@ try { setUiMode(uiMode); } catch (e) { console.error('ui mode not applied', e); 
 // the presets arrive from the server: redraw what names them
 presetsReady.then(() => {
   try {
-    renderPresetEffects(); updateSummaryStrip();
+    fillPristineFromPresets();               // a page that had to ask for them
+    renderPresetEffects(); applyModeVisibility(); updateSummaryStrip();
     if (historyCache && historyCache.length) renderHistory(historyCache);
   } catch (e) { console.error('presets not shown', e); }
 });

@@ -2377,8 +2377,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     self._send_json({"error": f"mode must be 'full' or 'summary' (got {mode})",
                                      "field": "mode"}, 400)
                     return
+                # no search / no LLM: the output of the source run, recorded
+                # with that run's mode (history badge)
+                source_mode = (rec.get("params_summary") or {}).get("ui_mode")
                 job = manager.start({
                     "query": f"再出力: {rec.get('query', '')}",
+                    **({"ui_mode": source_mode} if source_mode in ("simple", "pro") else {}),
                     "regenerate": {
                         "session_path": session_path,
                         "output_format": fmt,

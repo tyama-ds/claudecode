@@ -348,7 +348,8 @@ def test_the_page_opens_in_simple_and_the_choice_is_kept(ui_server):
         assert not page.is_visible("#plan_review")
         # the recommended settings, from the server, in one or two lines
         strip = page.inner_text("#summaryStrip")
-        assert "推奨設定（クラウドAPI）" in strip and "標準レポート" in strip and "Balanced" in strip
+        assert "推奨設定（クラウドAPI）" in strip and "標準レポート" in strip
+        assert "検証: Balanced" in page.get_attribute("#summaryStrip .simple-rec", "title")   # details on hover
         assert page.inner_text("#startBtn").strip() == "🚀 調査を開始"
         # ⚙設定: the connection tab only, with the simple mode's provider
         page.click("#settingsBtn")
@@ -356,7 +357,7 @@ def test_the_page_opens_in_simple_and_the_choice_is_kept(ui_server):
         page.select_option("#set_provider", "local")
         page.click("#settingsSaveBtn")
         strip = page.inner_text("#summaryStrip")
-        assert "推奨設定（ローカルLLM）" in strip and "短時間" in strip and "3チャンク・出力上限 3000" in strip
+        assert "推奨設定（ローカルLLM）" in strip and "短時間" in strip and "3チャンク/3000" in strip
 
         page.click("#uiModeToggle [data-set-mode=pro]")
         assert page.evaluate("document.body.dataset.uiMode") == "pro"
@@ -593,6 +594,179 @@ def test_the_fermi_link_opens_the_panel_in_either_mode(ui_server):
         assert page.is_visible("#fermi_question")
         # the saved choice is left alone
         assert page.evaluate("localStorage.getItem('drt_ui_mode')") is None
+    finally:
+        browser.close()
+        pw.stop()
+
+
+# ---------------------------------------------------------------------------
+# second review
+# ---------------------------------------------------------------------------
+
+class TestConnectionValues:
+    def test_a_blank_or_odd_key_is_not_a_key(self, ui_server, monkeypatch):
+        for bad in ("   ", False, 0, ["sk"], {"k": 1}):
+            status, data = _post(ui_server, "/api/research",
+                                 {"query": "q", "use_recommended": True, "openai_api_key": bad})
+            assert status == 400 and data["missing"][0]["param"] == "openai_api_key", bad
+        monkeypatch.setenv("OPENAI_API_KEY", "   ")             # a blank environment variable
+        status, data = _post(ui_server, "/api/research", {"query": "q", "use_recommended": True})
+        assert status == 400
+        # with a real environment key, a blank request value gives way to it
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        status, _ = _post(ui_server, "/api/research", {"query": "q", "use_recommended": True,
+                                                         "openai_api_key": "   ", "local_base_url": " "})
+        assert status == 202
+        params = ui_server.job_manager.launched[-1]
+        assert "openai_api_key" not in params and "local_base_url" not in params
+        assert create_config(**build_config_kwargs(params)).api.openai_api_key == "sk-env"
+        # text values are trimmed
+        _post(ui_server, "/api/research", {"query": "q", "use_recommended": True,
+                                           "openai_api_key": " sk-x ", "model": " gpt-x "})
+        params = ui_server.job_manager.launched[-1]
+        assert params["openai_api_key"] == "sk-x" and params["model"] == "gpt-x"
+
+    def test_a_re_output_keeps_the_mode_of_its_run(self, ui_server, tmp_path):
+        session = tmp_path / "job-s" / "session_s.json"
+        session.parent.mkdir(parents=True)
+        session.write_text("{}", encoding="utf-8")
+        (tmp_path / "jobs_ledger.json").write_text(json.dumps({"version": 1, "jobs": {
+            "job-s": {"job_id": "job-s", "query": "元", "state": "completed", "started_at": 1.0,
+                      "output_dir": str(session.parent), "params_summary": {"ui_mode": "simple"},
+                      "result": {"saved_artifacts": {"session": str(session)}}},
+            "job-o": {"job_id": "job-o", "query": "古い", "state": "completed", "started_at": 1.0,
+                      "output_dir": str(session.parent), "params_summary": {},
+                      "result": {"saved_artifacts": {"session": str(session)}}}}}), encoding="utf-8")
+        manager = NoRunManager(output_dir=str(tmp_path))
+        ui_server.job_manager = manager
+        assert _post(ui_server, "/api/regenerate", {"job_id": "job-s", "output_format": "docx"})[0] == 202
+        assert manager.launched[-1]["ui_mode"] == "simple"
+        assert _post(ui_server, "/api/regenerate", {"job_id": "job-o", "output_format": "docx"})[0] == 202
+        assert "ui_mode" not in manager.launched[-1]
+
+
+def test_the_form_starts_from_the_server_presets(ui_server, monkeypatch):
+    from deep_research_tool import presets
+    monkeypatch.setitem(presets.RESEARCH_PRESETS["standard"], "values",
+                        dict(presets.RESEARCH_PRESETS["standard"]["values"], iterations=3, max_pages_per_query=4))
+    monkeypatch.setitem(presets.DELIVERABLE_PRESETS["standard"], "values",
+                        dict(presets.DELIVERABLE_PRESETS["standard"]["values"], gap_fill_rounds=2))
+    pw, browser = _browser()
+    try:
+        page, errors, _ = _load(browser, _url(ui_server, "/"), "localStorage.setItem('drt_ui_mode', 'pro')")
+        assert errors == [], errors
+        form = page.evaluate("({it: iterations.value, mp: max_pages_per_query.value, gap: gap_fill_rounds.value})")
+        assert form == {"it": "3", "mp": "4", "gap": "2"}
+        sent = page.evaluate("collectParams()")
+        assert sent["iterations"] == 3 and sent["max_pages_per_query"] == 4 and sent["gap_fill_rounds"] == 2
+        # a saved DeepThink (⚙設定 → 機能) is not reset by it
+        page2, errors2, _ = _load(browser, _url(ui_server, "/"),
+                                  "localStorage.setItem('drt_ui_mode', 'pro');"
+                                  "localStorage.setItem('drt_settings', JSON.stringify({deep_think: true}))")
+        assert page2.evaluate("document.getElementById('feat_deep_think').checked") is True
+        assert errors2 == []
+    finally:
+        browser.close()
+        pw.stop()
+
+
+def test_the_review_fixes_on_the_page(ui_server, tmp_path):
+    pw, browser = _browser()
+    try:
+        # #fermi shows pro; once the user picks シンプル, a reload keeps it
+        page, errors, _ = _load(browser, _url(ui_server, "/#fermi"), None)
+        page.click("#uiModeToggle [data-set-mode=simple]")
+        assert page.evaluate("location.hash") != "#fermi"
+        page.reload(wait_until="networkidle")
+        page.wait_for_timeout(300)
+        assert page.evaluate("uiMode") == "simple"
+
+        # the summary stays within two lines at the form's width, cloud and local
+        for provider in ("openai", "local"):
+            page.evaluate(f"document.getElementById('set_provider').value = '{provider}'; updateSummaryStrip()")
+            lines = page.evaluate("""() => [...document.querySelectorAll('#summaryStrip .simple-rec > span')]
+                .map(s => Math.round(s.getBoundingClientRect().height / parseFloat(getComputedStyle(s).lineHeight)))""")
+            assert sum(lines) <= 2, (provider, lines)
+        assert "3チャンク/3000" in page.inner_text("#summaryStrip")
+        page.evaluate("document.getElementById('set_provider').value = 'openai'; updateSummaryStrip()")
+
+        # the missing key: the message is next to the field, in view
+        page.fill("#query", "q")
+        page.click("#startBtn")
+        page.wait_for_timeout(500)
+        msg = page.query_selector("#set_openai_key + .missing-msg")
+        assert msg and msg.is_visible() and "APIキー" in msg.inner_text()
+        page.fill("#set_openai_key", "s")
+        assert not page.query_selector("#set_openai_key + .missing-msg")
+        page.click("#settingsCloseBtn")
+
+        # a saved 検証 OFF: the switch says it turned 検証 on, and undo puts it back
+        page2, errors2, _ = _load(browser, _url(ui_server, "/"),
+                                  "localStorage.setItem('drt_settings', JSON.stringify({enable_verification: false}))")
+        page2.click("#uiModeToggle [data-set-mode=pro]")
+        note = page2.inner_text("#proSwitchNote")
+        assert "検証 OFF→ON" in note and "実行モード: 検証入り調査" in note
+        page2.click("#proSwitchNote button[data-act=undo]")
+        assert page2.evaluate("radioValue('run_mode')") == "research_only"
+        assert page2.evaluate("document.getElementById('feat_verification').checked") is False
+        assert errors == [] and errors2 == []
+    finally:
+        browser.close()
+        pw.stop()
+
+
+def test_simple_copy_of_a_run_with_files_says_to_add_them_again(tmp_path, no_keys):
+    (tmp_path / "jobs_ledger.json").write_text(json.dumps({"version": 1, "jobs": {"job-f": {
+        "job_id": "job-f", "query": "資料つきの調査", "state": "completed", "started_at": 1.0,
+        "params_summary": {"ui_mode": "simple", "source_mode": "hybrid",
+                           "local_documents": [str(tmp_path / "uploads" / "a.pdf")], "output_format": "pdf"}}}}),
+        encoding="utf-8")
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), WebUIHandler)
+    httpd.job_manager = NoRunManager(output_dir=str(tmp_path))
+    httpd.output_dir = str(tmp_path)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    pw, browser = _browser()
+    try:
+        page, errors, _ = _load(browser, _url(httpd, "/#history"), None)
+        page.click("#historyList .hist-row button[data-act=dup]")
+        page.wait_for_timeout(300)
+        assert page.evaluate("radioValue('source_mode')") == "hybrid"
+        assert page.evaluate("radioValue('simple_output_format')") == "pdf"
+        page.evaluate("setView('history')")
+        assert "もう一度追加してください" in page.inner_text("#historyList .hist-msg")
+        assert errors == [], errors
+    finally:
+        browser.close()
+        pw.stop()
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_a_page_without_the_presets_never_starts_twice(ui_server):
+    pw, browser = _browser()
+    try:
+        page = browser.new_page()
+        sent = []
+        raw = INDEX.read_text(encoding="utf-8")
+        page.route("**/", lambda r: r.fulfill(status=200, content_type="text/html; charset=utf-8", body=raw))
+
+        def slow(route):
+            import time
+            time.sleep(1.5)
+            route.continue_()
+        page.route("**/api/presets", slow)
+
+        def research(route):
+            sent.append(route.request.post_data)
+            route.fulfill(status=400, content_type="application/json", body=json.dumps({"error": "stop"}))
+        page.route("**/api/research", research)
+        page.goto(_url(ui_server, "/"), wait_until="domcontentloaded")
+        page.fill("#query", "q")
+        page.click("#startBtn")
+        assert page.evaluate("document.getElementById('startBtn').disabled") is True
+        page.click("#startBtn", force=True)
+        page.wait_for_timeout(2500)
+        assert len(sent) == 1
     finally:
         browser.close()
         pw.stop()

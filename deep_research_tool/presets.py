@@ -123,6 +123,14 @@ CONNECTION_KEYS = frozenset({
 
 SIMPLE_KEYS = SIMPLE_INPUT_KEYS | CONNECTION_KEYS
 
+# connection values that are text: blank or not a string = not given, so
+# the server's environment variable applies (as for an empty ⚙設定 field)
+_TEXT_CONNECTION_KEYS = frozenset({
+    "model", "openai_api_key", "anthropic_api_key", "local_api_key",
+    "openai_base_url", "anthropic_base_url", "local_base_url", "local_backend",
+    "local_model", "local_llm_role", "http_proxy", "https_proxy",
+})
+
 DEFAULT_PROVIDER = "openai"          # create_config's default
 
 
@@ -182,6 +190,10 @@ def apply_recommended(params: Dict[str, Any],
     """
     params = params or {}
     out = {k: v for k, v in params.items() if k in SIMPLE_KEYS}
+    for key in _TEXT_CONNECTION_KEYS & set(out):
+        value = out.pop(key)
+        if isinstance(value, str) and value.strip():
+            out[key] = value.strip()
     provider = str(out.get("provider") or DEFAULT_PROVIDER).strip().lower()
     out["provider"] = provider
     out.update(recommended_params(provider, out.get("source_mode")))
@@ -209,8 +221,12 @@ def missing_connection(params: Dict[str, Any]) -> List[Dict[str, str]]:
     params = params or {}
 
     def given(key: str, env: str) -> bool:
+        # what the run will really use: a non-blank text value, else the
+        # environment variable (blank / non-text values are not given)
         value = params.get(key)
-        return bool((str(value).strip() if value is not None else "") or os.getenv(env))
+        if isinstance(value, str) and value.strip():
+            return True
+        return bool((os.getenv(env) or "").strip())
 
     missing = []
     provider = str(params.get("provider") or DEFAULT_PROVIDER).strip().lower()
