@@ -337,6 +337,36 @@
   "updated": "2026-11-13",
   "images": [
     {
+      "file": "images/deep_research_tool/2026-11-13-history-mode.jpg",
+      "kind": "change",
+      "caption": "履歴に実行したモード（シンプル／プロ）を表示",
+      "date": "2026-11-13"
+    },
+    {
+      "file": "images/deep_research_tool/2026-11-13-pro-switch-note.jpg",
+      "kind": "change",
+      "caption": "シンプル→プロの切り替えで推奨設定をフォームに反映（切り替え前の値に一度だけ戻せる）",
+      "date": "2026-11-13"
+    },
+    {
+      "file": "images/deep_research_tool/2026-11-13-simple-missing-key.jpg",
+      "kind": "change",
+      "caption": "接続設定が足りないときは開始せずに ⚙ 設定を開き、足りない項目を赤枠で示す",
+      "date": "2026-11-13"
+    },
+    {
+      "file": "images/deep_research_tool/2026-11-13-simple-toggle.jpg",
+      "kind": "change",
+      "caption": "ヘッダーのシンプル／プロ切り替え、Word/PDF・日本語/English の 2 択、推奨設定の要約",
+      "date": "2026-11-13"
+    },
+    {
+      "file": "images/deep_research_tool/2026-11-13-simple-mode.jpg",
+      "kind": "gui",
+      "caption": "シンプルモードの新規調査画面（調査テーマ・資料・出力形式・言語・推奨設定の要約・開始ボタンだけを表示）",
+      "date": "2026-11-13"
+    },
+    {
       "file": "images/deep_research_tool/2026-11-11-chart-bars.jpg",
       "kind": "change",
       "caption": "棒グラフ（左: 変更前 / 右: 変更後）: 改良版を既定に（実寸で描画・桁区切り・注記をデータから）",
