@@ -467,6 +467,33 @@ def cli():
     help="Max simultaneous requests per local LLM client (default: 1)"
 )
 @click.option(
+    "--local-think",
+    type=click.Choice(["on", "off"]),
+    default=None,
+    help="Thinking mode of the local model (Qwen3 etc.): on / off. "
+         "Default: send nothing (server/model default)"
+)
+@click.option(
+    "--local-num-ctx",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Context window for an Ollama model (options.num_ctx). "
+         "Default: server default"
+)
+@click.option(
+    "--extraction-max-tokens",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Output cap of each page-chunk extraction call. "
+         "Default: the client's default"
+)
+@click.option(
+    "--extraction-max-chunks",
+    type=click.IntRange(1, 8),
+    default=None,
+    help="Most chunks one page is extracted from, 1-8 (default: 8)"
+)
+@click.option(
     "--local-model",
     default=None,
     help="Model name on the local LLM server used by --local-llm-role "
@@ -542,6 +569,10 @@ def research(
     local_backend: str,
     local_timeout: Optional[int],
     local_concurrency: Optional[int],
+    local_think: Optional[str],
+    local_num_ctx: Optional[int],
+    extraction_max_tokens: Optional[int],
+    extraction_max_chunks: Optional[int],
     local_model: Optional[str],
     local_llm_fallback: bool,
     anthropic_key: Optional[str],
@@ -567,6 +598,10 @@ def research(
         local_backend=local_backend,
         local_timeout=local_timeout,
         local_concurrency=local_concurrency,
+        local_think=None if local_think is None else local_think == "on",
+        local_num_ctx=local_num_ctx,
+        extraction_max_tokens=extraction_max_tokens,
+        extraction_max_chunks=extraction_max_chunks,
         local_model=local_model,
         local_llm_fallback=local_llm_fallback,
         model=model,

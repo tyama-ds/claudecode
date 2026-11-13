@@ -217,6 +217,15 @@ class APIConfig:
     # None = client defaults (600 seconds without data; 1 request at a time)
     local_timeout: Optional[int] = None
     local_concurrency: Optional[int] = None
+    # Thinking mode of a local model (Qwen3 and similar): None = send
+    # nothing (the server / model default — a model without thinking
+    # support rejects the setting, so it is only sent when chosen),
+    # True / False = turn it on / off. Ollama gets a top-level "think";
+    # an OpenAI-compatible server gets chat_template_kwargs.enable_thinking
+    local_think: Optional[bool] = None
+    # Context window for an Ollama model (options.num_ctx); None = the
+    # server default (Ollama may silently cut a long prompt to it)
+    local_num_ctx: Optional[int] = None
 
     # Transient network failures (dropped connection, timeout) of an LLM
     # request are retried with exponential backoff instead of ending the
@@ -559,6 +568,11 @@ class ResearchConfig:
     # Content settings
     max_content_length: int = 50000
     language: str = "ja"  # Default to Japanese
+    # Page extraction (one LLM call per chunk of a fetched page):
+    # output cap of each chunk call (None = the client's default) and the
+    # most chunks one page is read in (1..8; the most relevant are kept)
+    extraction_max_tokens: Optional[int] = None
+    extraction_max_chunks: int = 8
 
     # Evidence settings
     save_evidence: bool = True
@@ -984,6 +998,18 @@ class Config:
         except ValueError as e:
             errors.append(str(e))
 
+        # local LLM speed settings and page extraction (create_config
+        # validates too; this catches a config built or changed directly)
+        for check in (lambda: _local_think(self.api.local_think),
+                      lambda: _positive_int_or_none("local_num_ctx", self.api.local_num_ctx),
+                      lambda: _positive_int_or_none("extraction_max_tokens",
+                                                    self.research.extraction_max_tokens),
+                      lambda: _extraction_max_chunks(self.research.extraction_max_chunks)):
+            try:
+                check()
+            except ValueError as e:
+                errors.append(str(e))
+
         # --- Finalization loop validation (None = UNSET, profile applies) ---
         rc = self.research
         for name in ("max_final_research_rounds", "max_final_revision_rounds",
@@ -1080,6 +1106,41 @@ def _chart_max_total(value) -> int:
     return value
 
 
+EXTRACTION_MAX_CHUNKS_LIMIT = 8
+DEFAULT_EXTRACTION_MAX_CHUNKS = 8
+
+
+def _local_think(value) -> Optional[bool]:
+    """Thinking mode of a local model: None (send nothing), True or False.
+    Strings and numbers are errors, never read as a truth value."""
+    if value is None or isinstance(value, bool):
+        return value
+    raise ValueError(f"local_think must be True, False or None (got {value!r})")
+
+
+def _positive_int_or_none(name: str, value) -> Optional[int]:
+    """A positive integer, or None (= the default). bool, float and other
+    non-integers are errors, never silently rounded."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be a positive integer (got {value!r})")
+    if value < 1:
+        raise ValueError(f"{name} must be a positive integer (got {value})")
+    return value
+
+
+def _extraction_max_chunks(value) -> int:
+    """Chunks read per page: an integer 1..EXTRACTION_MAX_CHUNKS_LIMIT."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("extraction_max_chunks must be an integer between 1 and "
+                         f"{EXTRACTION_MAX_CHUNKS_LIMIT} (got {value!r})")
+    if not 1 <= value <= EXTRACTION_MAX_CHUNKS_LIMIT:
+        raise ValueError("extraction_max_chunks must be between 1 and "
+                         f"{EXTRACTION_MAX_CHUNKS_LIMIT} (got {value})")
+    return value
+
+
 def create_config(
     provider: str = "openai",
     openai_api_key: Optional[str] = None,
@@ -1091,6 +1152,8 @@ def create_config(
     local_backend: str = "ollama",
     local_timeout: Optional[int] = None,
     local_concurrency: Optional[int] = None,
+    local_think: Optional[bool] = None,
+    local_num_ctx: Optional[int] = None,
     local_model: Optional[str] = None,
     local_llm_fallback: bool = True,
     llm_retry_attempts: int = 3,
@@ -1151,6 +1214,8 @@ def create_config(
     use_enhanced_synthesis: bool = True,
     # Research content settings
     max_content_length: int = 50000,
+    extraction_max_tokens: Optional[int] = None,
+    extraction_max_chunks: int = DEFAULT_EXTRACTION_MAX_CHUNKS,
     save_evidence: bool = True,
     evidence_format: str = "json",
     plan_review: bool = True,
@@ -1300,6 +1365,14 @@ def create_config(
             no key; corporate LLM gateways often do
         local_backend: Local LLM backend type ('ollama', 'vllm', or
             'openai_compatible')
+        local_think: Thinking mode of the local model — None (default:
+            nothing is sent), True or False. Ollama receives a top-level
+            "think"; an OpenAI-compatible server receives
+            chat_template_kwargs={"enable_thinking": ...}. A <think> block
+            left in a reply is removed before it is used
+        local_num_ctx: Context window for an Ollama model (options.num_ctx),
+            a positive integer; None (default) = the server default.
+            Not sent to OpenAI-compatible servers
         model: Model name to use (optional, uses default for provider)
         search_method: Web search method ('duckduckgo' or 'selenium')
         browser: Selenium browser via kwargs ('chrome', 'edge', or 'firefox';
@@ -1370,6 +1443,12 @@ def create_config(
         translate_results: Whether to translate results to output language
         use_enhanced_synthesis: Use multi-pass content generation for better quality
         max_content_length: Maximum content length for extraction truncation (default: 50000)
+        extraction_max_tokens: Output cap (max_tokens) of each page-chunk
+            extraction call, a positive integer; None (default) = the
+            client's default
+        extraction_max_chunks: Most chunks one page is extracted from
+            (1-8, default 8); the chunks most relevant to the section are
+            kept
         save_evidence: Whether to save evidence exports (default: True)
         evidence_format: Evidence export format: 'json', 'csv', or 'both' (default: 'json')
         plan_review: Pause after the research plan (title / ToC / queries) is
@@ -1552,6 +1631,8 @@ def create_config(
         local_backend=LocalLLMBackend(local_backend),
         local_timeout=local_timeout,
         local_concurrency=local_concurrency,
+        local_think=_local_think(local_think),
+        local_num_ctx=_positive_int_or_none("local_num_ctx", local_num_ctx),
         llm_retry_attempts=llm_retry_attempts,          # validated below
         llm_retry_backoff_seconds=llm_retry_backoff_seconds,
         **({"temperature": float(temperature)} if temperature is not None else {}),
@@ -1616,6 +1697,11 @@ def create_config(
         max_queries_per_iteration=max_queries_per_iteration,
         max_pages_per_query=max_pages_per_query,
         max_content_length=max_content_length,
+        extraction_max_tokens=_positive_int_or_none(
+            "extraction_max_tokens", extraction_max_tokens),
+        extraction_max_chunks=_extraction_max_chunks(
+            DEFAULT_EXTRACTION_MAX_CHUNKS if extraction_max_chunks is None
+            else extraction_max_chunks),
         language=kwargs.get("language", "ja"),
         save_evidence=save_evidence,
         evidence_format=evidence_format,

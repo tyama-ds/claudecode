@@ -10,6 +10,7 @@ Supports:
 import os
 import json
 import math
+import re
 import threading
 import time
 from typing import Optional, List, Dict, Any
@@ -106,6 +107,8 @@ class LocalLLMClient(BaseLLMClient):
         https_proxy: str = None,
         verify_ssl: bool = True,
         max_concurrency: int = 1,
+        think: Optional[bool] = None,
+        num_ctx: Optional[int] = None,
     ):
         """
         Initialize LocalLLMClient.
@@ -124,7 +127,21 @@ class LocalLLMClient(BaseLLMClient):
             http_proxy: HTTP proxy URL
             https_proxy: HTTPS proxy URL
             verify_ssl: Verify SSL certificates
+            think: Thinking mode of the model. None (default) sends nothing
+                (a model without thinking support rejects the setting);
+                True / False is sent as Ollama's top-level "think" or as
+                chat_template_kwargs.enable_thinking on an
+                OpenAI-compatible server
+            num_ctx: Context window for Ollama's native API
+                (options.num_ctx); None (default) sends nothing
         """
+        if think is not None and not isinstance(think, bool):
+            raise ValueError("Local LLM think must be True, False or None")
+        if num_ctx is not None and (isinstance(num_ctx, bool) or not isinstance(num_ctx, int)
+                                    or num_ctx < 1):
+            raise ValueError("Local LLM num_ctx must be a positive integer")
+        self.think = think
+        self.num_ctx = num_ctx
         # Detect backend from model name if not specified
         if backend is None:
             backend = self._detect_backend(model)
@@ -576,6 +593,30 @@ class LocalLLMClient(BaseLLMClient):
         messages = [Message(role=MessageRole.USER, content=prompt)]
         return self.chat(messages, system_prompt=system_prompt, **kwargs)
 
+    _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+    @classmethod
+    def _strip_think(cls, content: str) -> str:
+        """The reply without a thinking-model's <think>...</think> block
+        (it would break the JSON parsing downstream).
+
+        Also covered: a reply that starts inside the block (the chat
+        template opened <think>, so only </think> is in the text) and a
+        block that never closes (generation stopped while thinking: the
+        answer was never written, so nothing is left)."""
+        if not isinstance(content, str) or "think>" not in content.lower():
+            return content
+        text = cls._THINK_BLOCK.sub("", content)
+        lower = text.lower()
+        close = lower.find("</think>")
+        if close != -1 and "<think>" not in lower[:close]:
+            text = text[close + len("</think>"):]
+            lower = text.lower()
+        opened = lower.find("<think>")
+        if opened != -1:
+            text = text[:opened]
+        return text.strip()
+
     def _send_chat_request(
         self,
         messages: List[Dict[str, str]],
@@ -607,12 +648,17 @@ class LocalLLMClient(BaseLLMClient):
                 "num_predict": kwargs.get("max_tokens", self.max_tokens),
             }
         }
+        # only when set: a model without thinking support rejects "think"
+        if self.think is not None:
+            payload["think"] = self.think
+        if self.num_ctx is not None:
+            payload["options"]["num_ctx"] = self.num_ctx
 
         try:
             data = self._post_with_retry(url, payload)
 
             # Extract response
-            content = data.get("message", {}).get("content", "")
+            content = self._strip_think(data.get("message", {}).get("content", ""))
 
             # Ollama provides eval_count and prompt_eval_count
             prompt_tokens = data.get("prompt_eval_count", 0)
@@ -665,6 +711,10 @@ class LocalLLMClient(BaseLLMClient):
             "stream_options": {"include_usage": True},
         }
 
+        # only when set: chat templates without the flag may reject it
+        if self.think is not None:
+            payload["chat_template_kwargs"] = {"enable_thinking": self.think}
+
         # Add optional parameters
         if "top_p" in kwargs:
             payload["top_p"] = kwargs["top_p"]
@@ -678,7 +728,7 @@ class LocalLLMClient(BaseLLMClient):
 
             # Extract response (OpenAI format)
             choice = data.get("choices", [{}])[0]
-            content = choice.get("message", {}).get("content", "")
+            content = self._strip_think(choice.get("message", {}).get("content", ""))
 
             # Extract usage
             usage_data = data.get("usage", {})

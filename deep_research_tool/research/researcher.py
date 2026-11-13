@@ -254,6 +254,8 @@ class Researcher:
         reference_documents: List[Dict[str, Any]] = None,
         max_body_chars: int = None,
         deep_think_share: float = 0.0,
+        extraction_max_tokens: int = None,
+        extraction_max_chunks: int = None,
     ):
         """
         Initialize Researcher.
@@ -312,6 +314,10 @@ class Researcher:
             max_content_length: Maximum content length for extraction truncation
             target_pages: Target output page count (used for dynamic content sizing)
             target_characters: Target output character count (overrides target_pages)
+            extraction_max_tokens: max_tokens of each page-chunk extraction
+                call (None = the client's default)
+            extraction_max_chunks: Most chunks one page is extracted from
+                (None = ContentExtractor.MAX_CHUNKS, 8)
             plan_review_callback: Optional callback(plan, revise_fn) invoked
                 after the research plan is generated and before the research
                 loop starts. revise_fn(current_plan, instructions) returns an
@@ -361,6 +367,9 @@ class Researcher:
             self.writing_llm, language,
             evaluation_llm_client=self.evaluation_llm,
             max_parallel_workers=parallel_max_workers,
+            # page extraction cost knobs (None = unchanged defaults)
+            extraction_max_tokens=extraction_max_tokens,
+            max_chunks=extraction_max_chunks,
         )
         self.content_extractor.max_selected_chars = max_content_length
         self._reset_timings()
@@ -2464,16 +2473,21 @@ Return as JSON:
                         source_title: str, section_context: str,
                         research_query: str) -> ExtractedContent:
         """LLM extraction with a content-addressed DISK cache: identical
-        (content, section, query, model, prompt version) never costs a
-        second LLM call, even across runs."""
+        (content, section, query, model, prompt version, chunk cap, reply
+        cap) never costs a second LLM call, even across runs."""
         cache = self.fetch_cache
         key = None
         if cache is not None:
             from .fetch_cache import EXTRACTION_PROMPT_VERSION
             model = str(getattr(self.writing_llm, "model", "") or "")
-            key = cache.extraction_key(raw_content, section_context,
-                                       research_query, model,
-                                       EXTRACTION_PROMPT_VERSION)
+            extractor = self.content_extractor
+            key = cache.extraction_key(
+                raw_content, section_context, research_query, model,
+                EXTRACTION_PROMPT_VERSION,
+                # chunk cap / reply cap change the result: own key when
+                # non-default (defaults keep the key older versions wrote)
+                max_chunks=extractor.MAX_CHUNKS,
+                max_tokens=extractor.extraction_max_tokens)
             hit = cache.get_extraction(key)
             if hit and isinstance(hit.get("extracted"), dict):
                 d = hit["extracted"]

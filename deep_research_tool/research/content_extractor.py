@@ -83,6 +83,8 @@ class ContentExtractor:
         evaluation_llm_client=None,
         target_chars_per_section: Optional[int] = None,
         max_parallel_workers: Optional[int] = None,
+        extraction_max_tokens: Optional[int] = None,
+        max_chunks: Optional[int] = None,
     ):
         """
         Initialize ContentExtractor.
@@ -94,6 +96,10 @@ class ContentExtractor:
                 evaluation-type calls (content extraction, source quality,
                 image relevance); defaults to llm_client
             target_chars_per_section: Target characters per section (for dynamic output sizing)
+            extraction_max_tokens: max_tokens of each chunk extraction call
+                (None = the client's default)
+            max_chunks: Most chunks one page is extracted from (None =
+                MAX_CHUNKS); _select_chunks keeps the most relevant ones
         """
         self.llm = llm_client
         self.eval_llm = evaluation_llm_client or llm_client
@@ -106,6 +112,10 @@ class ContentExtractor:
         # cap CHUNK_WORKERS still applies on top
         self.max_parallel_workers = max_parallel_workers
         self.max_selected_chars = None
+        # output cap of a chunk extraction call (None = client default)
+        self.extraction_max_tokens = extraction_max_tokens
+        if max_chunks is not None:
+            self.MAX_CHUNKS = int(max_chunks)     # instance override (1..8)
         self.extraction_cache = SingleFlightCache()
         self.timings = None
 
@@ -229,7 +239,13 @@ Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
 
         try:
             self._check_cancel()
-            response = self.eval_llm.generate(prompt)
+            # max_tokens only when set: otherwise the call is unchanged and
+            # the client's default applies. A reply cut at the cap leaves
+            # incomplete JSON, which fails to parse -> the chunk fails
+            if self.extraction_max_tokens:
+                response = self.eval_llm.generate(prompt, max_tokens=self.extraction_max_tokens)
+            else:
+                response = self.eval_llm.generate(prompt)
             data = extract_json_from_response(response.content)
             if data is not None:
                 return data
@@ -299,7 +315,8 @@ Rate relevance from 0 (not relevant) to 1 (highly relevant)."""
         key = (content_hash(raw_content), source_url, source_title, section_context,
                research_query, self.language, id(self.eval_llm),
                str(getattr(self.eval_llm, 'model', '')), 'extraction-v2-full-span',
-               self.CHUNK_SIZE, self.CHUNK_OVERLAP, self.MAX_CHUNKS, self.max_selected_chars)
+               self.CHUNK_SIZE, self.CHUNK_OVERLAP, self.MAX_CHUNKS, self.max_selected_chars,
+               self.extraction_max_tokens)
         def extract():
             operation = self._extract_relevant_content_uncached
             args = (raw_content, source_url, source_title, section_context, research_query)

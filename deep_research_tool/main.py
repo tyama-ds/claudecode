@@ -351,6 +351,8 @@ class DeepResearchTool:
             kwargs["backend"] = self.config.api.local_backend.value
             kwargs["local_timeout"] = self.config.api.local_timeout
             kwargs["local_concurrency"] = self.config.api.local_concurrency
+            kwargs["local_think"] = self.config.api.local_think
+            kwargs["local_num_ctx"] = self.config.api.local_num_ctx
 
         return get_client(**kwargs)
 
@@ -445,6 +447,8 @@ class DeepResearchTool:
                 )
                 kwargs["local_timeout"] = self.config.api.local_timeout
                 kwargs["local_concurrency"] = self.config.api.local_concurrency
+                kwargs["local_think"] = self.config.api.local_think
+                kwargs["local_num_ctx"] = self.config.api.local_num_ctx
 
             client = get_client(**kwargs)
             if provider == "local" and main_provider != LLMProvider.LOCAL:
@@ -479,6 +483,8 @@ class DeepResearchTool:
                     "backend": self.config.api.local_backend.value,
                     "local_timeout": self.config.api.local_timeout,
                     "local_concurrency": self.config.api.local_concurrency,
+                    "local_think": self.config.api.local_think,
+                    "local_num_ctx": self.config.api.local_num_ctx,
                 }
                 try:
                     local_client = get_client(**local_kwargs)
@@ -1688,6 +1694,9 @@ class DeepResearchTool:
                 self.config.research.language),
             max_body_chars=self.config.report.writing_ceiling_chars(),
             deep_think_share=self._deep_think_share(),
+            # page extraction cost (None / 8 = the defaults)
+            extraction_max_tokens=self.config.research.extraction_max_tokens,
+            extraction_max_chunks=self.config.research.extraction_max_chunks,
             plan_review_callback=plan_review_callback,
             cancel_check=_cancel_checkpoint,
             run_config=self._run_config_snapshot(),

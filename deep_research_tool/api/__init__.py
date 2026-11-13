@@ -30,6 +30,8 @@ def get_client(
     backend: str = None,
     local_timeout: int = None,
     local_concurrency: int = None,
+    local_think: bool = None,
+    local_num_ctx: int = None,
 ):
     """
     Factory function to get the appropriate LLM client.
@@ -48,6 +50,8 @@ def get_client(
         backend: Backend type for local LLM ('ollama', 'vllm', 'openai_compatible')
         local_timeout: Seconds without response data (default: 600 for local clients)
         local_concurrency: Per-client local request cap (default: 1)
+        local_think: Thinking mode for local clients (None = send nothing)
+        local_num_ctx: Ollama context window (None = server default)
 
     Returns:
         Configured LLM client instance
@@ -78,6 +82,10 @@ def get_client(
             kwargs["timeout"] = local_timeout
         if local_concurrency is not None:
             kwargs["max_concurrency"] = local_concurrency
+        if local_think is not None:
+            kwargs["think"] = local_think
+        if local_num_ctx is not None:
+            kwargs["num_ctx"] = local_num_ctx
         return LocalLLMClient(
             model=model,
             backend=backend,
