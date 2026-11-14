@@ -18,6 +18,15 @@ from typing import Any, Dict, List, Optional, Tuple
 from .data_layer import _CURRENCY_WORDS, canon, entity_base_key, parse_unit
 
 FORMS = ("bar", "hbar", "stacked_bar", "stacked_hbar", "line_xy")
+# the forms each chart style may draw. classic (the v1.5 look) is frozen at
+# the five above; new forms are added to enhanced only, so the two lists
+# (and the prompts / validation that read them) can part from here on
+FORMS_BY_STYLE = {"classic": FORMS, "enhanced": FORMS}
+
+
+def forms_for(style: Optional[str]) -> Tuple[str, ...]:
+    """The forms a style may draw (an unknown or missing style: classic)."""
+    return FORMS_BY_STYLE.get(str(style or "classic"), FORMS)
 ROLES = ("emphasis", "context", "context2", "part")
 MAX_SERIES = 8
 MIN_CV = 0.01
@@ -65,11 +74,17 @@ Schema: [{"id","form","title","labels_ref","series":[{"name","values_ref","role"
 """
 
 
+# the prompt of each style (the same text today; classic never changes)
+STYLE_GUIDES = {"classic": {"ja": STYLE_GUIDE_JA, "en": STYLE_GUIDE_EN},
+                "enhanced": {"ja": STYLE_GUIDE_JA, "en": STYLE_GUIDE_EN}}
+
+
 def build_messages(section_title: str, section_goal: str, catalog: List[Dict[str, Any]],
                    max_panels: int = 6, language: str = "ja",
-                   research_topic: str = "") -> Dict[str, str]:
+                   research_topic: str = "", style: str = "classic") -> Dict[str, str]:
     """{"system", "user"} for one chapter; the catalog carries no values."""
-    guide = STYLE_GUIDE_JA if language == "ja" else STYLE_GUIDE_EN
+    guides = STYLE_GUIDES.get(str(style or "classic"), STYLE_GUIDES["classic"])
+    guide = guides["ja"] if language == "ja" else guides["en"]
     system = guide.replace("{max_panels}", str(int(max_panels)))
     cat_json = json.dumps(catalog, ensure_ascii=False, indent=1)
     if language == "ja":
@@ -324,8 +339,10 @@ def _cv(values: List[float]) -> float:
     return (pstdev(values) / abs(m)) if abs(m) > 1e-12 else 1.0
 
 
-def validate(panels: List[Dict[str, Any]]) -> None:
-    """Raise SpecError on the first invalid (resolved) panel."""
+def validate(panels: List[Dict[str, Any]], style: Optional[str] = None) -> None:
+    """Raise SpecError on the first invalid (resolved) panel. ``style``
+    limits the forms to that style's (no style: the classic five)."""
+    allowed = forms_for(style)
     seen_ids = set()
     for p in panels:
         pid = str(p.get("id") or "")
@@ -335,7 +352,7 @@ def validate(panels: List[Dict[str, Any]]) -> None:
             raise SpecError(f"{pid}: id が重複しています")
         seen_ids.add(pid)
         form = p.get("form")
-        if form not in FORMS:
+        if form not in allowed:
             raise SpecError(f"{pid}: form が不正です（{form!r}）")
         series = p.get("series") or []
         if not 1 <= len(series) <= MAX_SERIES:
@@ -418,6 +435,7 @@ def validate(panels: List[Dict[str, Any]]) -> None:
 def validate_panels(panels: List[Dict[str, Any]], data: Dict[str, Any],
                     max_panels: Optional[int] = None,
                     stats: Optional[Dict[str, Any]] = None,
+                    style: Optional[str] = None,
                     ) -> Tuple[List[Dict[str, Any]], List[Tuple[Dict[str, Any], str]]]:
     """Resolve + validate panel by panel: (valid resolved panels, rejected
     [(panel, reason)]). One bad panel never discards the others.
@@ -430,7 +448,9 @@ def validate_panels(panels: List[Dict[str, Any]], data: Dict[str, Any],
     for p in panels:
         try:
             r = resolve([p], data)
-            validate(r)
+            # the form the LLM asked for (chart_yield.json: requested vs drawn)
+            r[0].setdefault("form_requested", p.get("form"))
+            validate(r, style=style)
             pid = str(r[0].get("id"))
             if pid in ids:          # two panels, one PNG path / canvas id
                 raise SpecError(f"{pid}: id が重複しています")

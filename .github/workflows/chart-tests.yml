@@ -34,4 +34,5 @@ jobs:
         run: |
           python -m pytest -q \
             deep_research_tool/tests/test_chartkit.py \
-            deep_research_tool/tests/test_chart_styles.py
+            deep_research_tool/tests/test_chart_styles.py \
+            deep_research_tool/tests/test_chart_stage0.py
