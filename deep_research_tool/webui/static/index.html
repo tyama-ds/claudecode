@@ -830,15 +830,15 @@ catch (e) { document.body.dataset.uiMode = 'simple'; }
       <div class="banner" id="settingsMissing" role="alert"></div>
       <p class="hint">プロバイダーごとにAPIキー・エンドポイントを設定できます。工程別のAI切り替えで複数プロバイダーを使う場合も、ここで各プロバイダーの認証情報を入力してください。設定はこのブラウザに保存されます（空欄=サーバー側の環境変数を使用）。</p>
 
-      <div class="prov-block" data-simple>
-        <div class="prov-title">使用するAI（シンプルモード）</div>
+      <div class="prov-block">
+        <div class="prov-title">使用するAI</div>
         <label for="set_provider">プロバイダー</label>
         <select id="set_provider">
           <option value="openai">OpenAI</option>
           <option value="anthropic">Anthropic</option>
           <option value="local">ローカルLLM</option>
         </select>
-        <p class="hint">シンプルモードの調査はこのAIで行います。モデルは各プロバイダーの標準です（ローカルLLMは下の「ローカルLLM → モデル名」、空欄ならバックエンドの既定）。プロモードでは「詳細設定 → AIモデルの設定」の値を使います。</p>
+        <p class="hint">調査はこのAIで行います（シンプル・プロとも）。モデルは、シンプルモードでは各プロバイダーの標準（ローカルLLMは下の「ローカルLLM → モデル名」、空欄ならバックエンドの既定）、プロモードでは「詳細設定 → AIモデルの設定」のモデル名です。</p>
       </div>
 
       <div class="prov-block">
@@ -1461,11 +1461,14 @@ catch (e) { document.body.dataset.uiMode = 'simple'; }
                 <div class="grid2">
                   <div>
                     <label>既定プロバイダー</label>
-                    <select id="provider">
+                    <!-- the provider is chosen in ⚙ 設定 only; this hidden mirror keeps
+                         form presets / 条件を複製 working (it is synced both ways) -->
+                    <select id="provider" hidden aria-hidden="true">
                       <option value="openai">OpenAI</option>
                       <option value="anthropic">Anthropic</option>
                       <option value="local">ローカルLLM</option>
                     </select>
+                    <div class="hint" style="margin:4px 0 0"><b id="providerNote">OpenAI</b>（<a href="#" id="providerSettingsLink">⚙ 設定で変更</a>）</div>
                   </div>
                   <div><label for="model">既定モデル（空欄=標準）</label><input type="text" id="model" placeholder="gpt-5-mini など"></div>
                   <div><label for="temperature">Temperature（0〜2、空欄=既定）</label><input type="number" id="temperature" min="0" max="2" step="0.1" placeholder="0.7"></div>
@@ -1514,7 +1517,7 @@ catch (e) { document.body.dataset.uiMode = 'simple'; }
             <textarea id="fermi_known" rows="3" placeholder="日本の人口=125000000&#10;乗用車保有台数=62000000"></textarea></div>
           <div><label for="fermi_language">出力言語</label>
             <select id="fermi_language"><option value="ja" selected>日本語</option><option value="en">English</option></select>
-            <p class="hint">プロバイダー・モデルは上の「詳細設定 → AIモデルの設定」、APIキーは右上の「⚙ 設定」の値を使います。</p></div>
+            <p class="hint">プロバイダーとAPIキーは右上の「⚙ 設定」、モデルは上の「詳細設定 → AIモデルの設定」の値を使います。</p></div>
         </div>
         <button type="button" class="primary" id="fermiRunBtn" style="margin-top:10px">🧮 推定を実行</button>
         <div class="banner" id="fermiError" role="alert"></div>
@@ -5005,6 +5008,7 @@ function applySnapshot(s) {
     if (inp) inp.value = spec.model || '';
   });
   $('verifyCustomPane').style.display = radioValue('verification_profile') === 'custom' ? 'block' : 'none';
+  if (typeof providerFromForm === 'function') providerFromForm();
   renderPresetEffects(); applyModeVisibility(); updateSummaryStrip(); renderDelegationNotice();
 }
 
@@ -5078,6 +5082,7 @@ function applyParamsToForm(params, query) {
     document.querySelector(`.stage-model[data-stage=${st}]`).value = spec.model || '';
   });
   $('verifyCustomPane').style.display = radioValue('verification_profile') === 'custom' ? 'block' : 'none';
+  if (p.provider !== undefined) providerFromForm();
   renderPresetEffects(); applyModeVisibility(); updateSummaryStrip(); renderDelegationNotice();
 }
 
@@ -5096,7 +5101,22 @@ function simpleProvider() {
   const v = $('set_provider') ? $('set_provider').value : '';
   return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, v) ? v : 'openai';
 }
-function currentProvider() { return uiMode === 'simple' ? simpleProvider() : $('provider').value; }
+// one provider for both modes: ⚙設定 (#set_provider). The form's #provider is
+// a hidden mirror so form presets / 条件を複製 / the undo still carry it.
+function currentProvider() { return simpleProvider(); }
+function providerToForm() {
+  $('provider').value = simpleProvider();
+  if ($('providerNote')) $('providerNote').textContent = PROVIDER_LABELS[simpleProvider()];
+}
+function providerFromForm() {
+  const v = $('provider').value;
+  if (Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, v) && v !== $('set_provider').value) {
+    $('set_provider').value = v;
+    updateSummaryStrip(); renderDelegationNotice();
+  }
+  providerToForm();
+}
+$('providerSettingsLink').addEventListener('click', (e) => { e.preventDefault(); openSettingsTab('tabAI'); $('set_provider').focus(); });
 
 function presetsUnavailable() {
   return new Error('推奨設定をサーバーから取得できていません' +
@@ -5232,6 +5252,7 @@ $('settingsModal').addEventListener('input', (e) => {
   if (next && next.classList.contains('missing-msg')) next.remove();
 });
 $('set_provider').addEventListener('change', () => {
+  providerToForm();
   $('set_provider').classList.remove('field-missing');
   const next = $('set_provider').nextElementSibling;
   if (next && next.classList.contains('missing-msg')) next.remove();
@@ -5265,7 +5286,7 @@ function applyParamsToSimple(p, query) {
 let INITIAL_FORM = null;            // formSnapshot() when the page opened
 let proUndoSnapshot = null;
 // shared by both modes (the simple mode shows them): never reset
-const SHARED_FORM = {text: ['source_urls', 'preferred_domains'], check: ['url_crawl_depth'], radio: ['source_mode']};
+const SHARED_FORM = {text: ['source_urls', 'preferred_domains', 'provider'], check: ['url_crawl_depth'], radio: ['source_mode']};
 
 // the pro values the switch replaces: the form, and the ⚙設定 → 機能 boxes
 // the time preset / run mode also set (DeepThink, 検証)
@@ -6021,6 +6042,8 @@ document.addEventListener('pointerleave', () => document.querySelectorAll('.mode
 // the starting values of the chosen 仕上がり / 時間のかけ方 come from the server
 // too (the field values in this file are only placeholders)
 try { fillPristineFromPresets(); } catch (e) { console.error('preset values not filled in', e); }
+// the form's provider mirrors ⚙設定 from the start
+try { providerToForm(); } catch (e) { console.error('provider not mirrored', e); }
 // the pro form as the page opened: シンプル → プロ starts from it
 try { INITIAL_FORM = formSnapshot(); } catch (e) { console.error('initial form not recorded', e); }
 try { syncSavedRunMode(); } catch (e) { console.error('saved run mode not applied', e); }
