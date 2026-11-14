@@ -686,9 +686,43 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
 .ext-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 4px; }
 .ext-table th, .ext-table td { text-align: left; padding: 4px 6px; border-top: 1px solid var(--border, #e2e8f0); vertical-align: top; }
 .ext-table-wrap { overflow-x: auto; }
+/* ==================== シンプル / プロ ==================== */
+/* one page, two views: an item marked data-pro is hidden in the simple
+   mode, one marked data-simple in the pro mode (the body carries the mode) */
+body[data-ui-mode="simple"] [data-pro] { display: none !important; }
+body:not([data-ui-mode="simple"]) [data-simple] { display: none !important; }
+body[data-ui-mode="simple"] #viewNew.sel { grid-template-columns: minmax(0, 640px); justify-content: center; }
+.ui-mode-toggle { display: inline-flex; flex-shrink: 0; border: 1px solid rgba(255,255,255,.3); border-radius: 10px; overflow: hidden; }
+.ui-mode-toggle button { background: transparent; color: #dbe7f1; border: 0; border-radius: 0; padding: 8px 14px;
+  font-size: 13px; font-weight: 700; }
+.ui-mode-toggle button + button { border-left: 1px solid rgba(255,255,255,.3); }
+.ui-mode-toggle button[aria-checked="true"] { background: #147d87; color: #fff; }
+.ui-mode-toggle button:hover:not([aria-checked="true"]) { background: rgba(255,255,255,.12); border-color: rgba(255,255,255,.3); color: #fff; }
+.ui-mode-toggle button:focus-visible { outline-color: #96dde1; outline-offset: -3px; }
+@media (max-width: 640px) {
+  .ui-mode-toggle { margin-left: auto; }
+  .ui-mode-toggle + .settings-btn { margin-left: 0; }
+  .ui-mode-toggle button { padding: 7px 11px; }
+}
+.mode-cards-2 { grid-template-columns: repeat(2, 1fr); }
+.simple-rec { display: grid; gap: 2px; font-size: 12px; color: var(--muted); line-height: 1.6; }
+.simple-rec b { color: var(--text); }
+.simple-rec .err { color: var(--error); }
+.field-missing { border-color: var(--error) !important; box-shadow: 0 0 0 3px color-mix(in srgb, var(--error) 22%, transparent); }
+.missing-msg { color: var(--error); font-size: 12px; margin-top: 4px; line-height: 1.5; }
+.mode-badge { display: inline-block; font-size: 11px; font-weight: 700; border-radius: 999px; padding: 0 8px; margin-left: 4px;
+  border: 1px solid var(--border); color: var(--muted); vertical-align: 1px; }
+.mode-badge.simple { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+#proSwitchNote button { margin-left: 6px; }
 </style>
 </head>
 <body>
+<script>
+// シンプル / プロ: set before the first paint (no flash of the other mode).
+// Nothing saved, or a browser that blocks site data: シンプル
+try { document.body.dataset.uiMode = localStorage.getItem('drt_ui_mode') === 'pro' ? 'pro' : 'simple'; }
+catch (e) { document.body.dataset.uiMode = 'simple'; }
+</script>
 <header>
   <canvas id="fxCanvas" aria-hidden="true"></canvas>
   <div class="logo">🔎</div>
@@ -760,6 +794,10 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
     </svg>
   </div>
   <button id="fxBtn" class="fx-btn" title="見た目のエフェクト（動作には影響しません）" aria-pressed="true">✨ エフェクト ON</button>
+  <div class="ui-mode-toggle" id="uiModeToggle" role="radiogroup" aria-label="画面のモード">
+    <button type="button" role="radio" data-set-mode="simple" aria-checked="true" title="調査テーマを入れるだけで、推奨設定で調査します">シンプル</button>
+    <button type="button" role="radio" data-set-mode="pro" aria-checked="false" title="すべての設定を表示します">プロ</button>
+  </div>
   <button id="settingsBtn" class="settings-btn">⚙ 設定</button>
 </header>
 
@@ -785,11 +823,23 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
     </div>
     <div class="modal-tabs">
       <button class="modal-tab sel" data-tab="tabAI">🤖 生成AI・プロキシ</button>
-      <button class="modal-tab" data-tab="tabFeatures">🧠 機能</button>
+      <button class="modal-tab" data-tab="tabFeatures" data-pro>🧠 機能</button>
     </div>
     <div class="modal-body">
      <div id="tabAI" class="tab-pane">
+      <div class="banner" id="settingsMissing" role="alert"></div>
       <p class="hint">プロバイダーごとにAPIキー・エンドポイントを設定できます。工程別のAI切り替えで複数プロバイダーを使う場合も、ここで各プロバイダーの認証情報を入力してください。設定はこのブラウザに保存されます（空欄=サーバー側の環境変数を使用）。</p>
+
+      <div class="prov-block" data-simple>
+        <div class="prov-title">使用するAI（シンプルモード）</div>
+        <label for="set_provider">プロバイダー</label>
+        <select id="set_provider">
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="local">ローカルLLM</option>
+        </select>
+        <p class="hint">シンプルモードの調査はこのAIで行います。モデルは各プロバイダーの標準です（ローカルLLMは下の「ローカルLLM → モデル名」、空欄ならバックエンドの既定）。プロモードでは「詳細設定 → AIモデルの設定」の値を使います。</p>
+      </div>
 
       <div class="prov-block">
         <div class="prov-title">OpenAI</div>
@@ -854,7 +904,7 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
 
      </div><!-- /tabAI -->
 
-     <div id="tabFeatures" class="tab-pane" style="display:none">
+     <div id="tabFeatures" class="tab-pane" style="display:none" data-pro>
       <p class="hint">調査の追加機能をON/OFFできます。各行にマウスを乗せると説明が表示されます。設定は保存され、次回以降の調査にも適用されます。</p>
 
       <div class="feat-row" data-tip="収集した情報に多段の推論・一貫性チェック・原典忠実度チェックを適用し、分析の深さを高めます。各章の末尾に統合された結論が追記されます。実行時間とAPIコストが増加します。">
@@ -1033,7 +1083,7 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
   <!-- ==================== 画面: 新規調査 ==================== -->
   <div class="view sel" data-view="new" id="viewNew">
     <div class="view-col">
-  <section class="card" id="presetCard">
+  <section class="card" id="presetCard" data-pro>
     <h2><span class="n">💾</span>フォームの保存（プリセット）</h2>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <select id="formPresetSelect" aria-label="保存した設定プリセット" style="width:auto;min-width:180px"><option value="">— 保存した設定を読み込む —</option></select>
@@ -1045,10 +1095,13 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
   <!-- ==================== 設定フォーム ==================== -->
   <section class="card" id="formCard">
     <h2><span class="n">1</span>新規調査</h2>
+    <!-- シンプル → プロ: what the simple mode applied, now in the form -->
+    <div class="banner" id="proSwitchNote" role="status" data-pro></div>
+    <p class="hint" data-simple style="margin-top:0">調査テーマを入れて開始すると、推奨設定で調査します。AI の接続（APIキー・ローカルLLMのURL）は右上の <b>⚙ 設定</b>、細かい設定は <b>プロ</b> モードで変えられます。</p>
 
     <!-- 0. 実行モード -->
-    <label id="runModeLabel">実行モード</label>
-    <div class="mode-cards mode-cards-3" id="runModes" role="radiogroup" aria-labelledby="runModeLabel">
+    <label id="runModeLabel" data-pro>実行モード</label>
+    <div class="mode-cards mode-cards-3" id="runModes" role="radiogroup" aria-labelledby="runModeLabel" data-pro>
       <label class="mode-card sel"><input type="radio" name="run_mode" value="research_verify" checked>
         <span class="t">検証入り調査</span><span class="d">　調査→執筆→根拠との照合と修正（既定）</span></label>
       <label class="mode-card"><input type="radio" name="run_mode" value="research_only">
@@ -1056,7 +1109,7 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
       <label class="mode-card"><input type="radio" name="run_mode" value="verify_only">
         <span class="t">検証のみ</span><span class="d">　既存のレポートを根拠と照合・修正（調査は行わない）</span></label>
     </div>
-    <div id="verifyOnlyBox" style="display:none;margin-top:8px;border:1px solid var(--border);border-radius:10px;padding:10px 12px">
+    <div id="verifyOnlyBox" data-pro style="display:none;margin-top:8px;border:1px solid var(--border);border-radius:10px;padding:10px 12px">
       <label for="verifyHistorySelect">検証する調査（履歴から選ぶ）</label>
       <select id="verifyHistorySelect"><option value="">— 保存済みの調査を選択 —</option></select>
       <label for="verifyReportFile">または レポートファイルをアップロード（md / txt / docx）</label>
@@ -1067,7 +1120,7 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
     </div>
 
     <!-- 0b. 調査エンジン（誰が調査するか） -->
-    <div id="engineBox">
+    <div id="engineBox" data-pro>
       <label id="engineLabel">調査エンジン</label>
       <div class="mode-cards mode-cards-3" id="engineModes" role="radiogroup" aria-labelledby="engineLabel">
         <label class="mode-card sel"><input type="radio" name="research_engine" value="builtin" checked>
@@ -1089,8 +1142,8 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
     </div>
     <p class="hint" id="queryHint">例を選んで書き換えることもできます。</p>
 
-    <label for="requirements">目的・読者・必須の観点（任意）</label>
-    <textarea id="requirements" placeholder="例: 経営層向けに簡潔に。直近5年の市場規模データを重視。主要3社の比較を必須。"></textarea>
+    <label for="requirements" data-pro>目的・読者・必須の観点（任意）</label>
+    <textarea id="requirements" data-pro placeholder="例: 経営層向けに簡潔に。直近5年の市場規模データを重視。主要3社の比較を必須。"></textarea>
 
     <!-- 2. どの資料を使うか -->
     <label id="sourceLabel">使用する資料</label>
@@ -1128,7 +1181,7 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
         <input type="file" id="fileInput" multiple accept=".pdf,.docx,.txt,.md,.csv,.xlsx,.pptx" style="display:none">
       </div>
       <div id="docList" class="doclist" aria-live="polite"></div>
-      <details style="margin-top:8px">
+      <details style="margin-top:8px" data-pro>
         <summary>サーバー側のファイルパスを直接指定（詳細）</summary>
         <div class="body">
           <p class="hint">この欄は<b>サーバーが動いているPC上のパス</b>です。ブラウザ端末のファイルは上のアップロードを使ってください。フォルダ指定可（pdf/docx/txt/md等を自動検出）。</p>
@@ -1139,9 +1192,27 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
       </details>
     </div>
 
+    <!-- シンプル: 出力形式と言語だけ（ほかは推奨設定） -->
+    <div class="grid2" data-simple>
+      <div><label id="simpleFormatLabel">出力形式</label>
+        <div class="mode-cards mode-cards-2" role="radiogroup" aria-labelledby="simpleFormatLabel">
+          <label class="mode-card sel"><input type="radio" name="simple_output_format" value="docx" checked>
+            <span class="t">Word (docx)</span></label>
+          <label class="mode-card"><input type="radio" name="simple_output_format" value="pdf">
+            <span class="t">PDF</span></label>
+        </div></div>
+      <div><label id="simpleLangLabel">言語</label>
+        <div class="mode-cards mode-cards-2" role="radiogroup" aria-labelledby="simpleLangLabel">
+          <label class="mode-card sel"><input type="radio" name="simple_language" value="ja" checked>
+            <span class="t">日本語</span></label>
+          <label class="mode-card"><input type="radio" name="simple_language" value="en">
+            <span class="t">English</span></label>
+        </div></div>
+    </div>
+
     <!-- 3. どの仕上がりにするか -->
-    <label id="deliverableLabel">仕上がり</label>
-    <div class="mode-cards mode-cards-3" id="deliverableModes" role="radiogroup" aria-labelledby="deliverableLabel">
+    <label id="deliverableLabel" data-pro>仕上がり</label>
+    <div class="mode-cards mode-cards-3" id="deliverableModes" role="radiogroup" aria-labelledby="deliverableLabel" data-pro>
       <label class="mode-card"><input type="radio" name="deliverable" value="summary">
         <span class="t">要約</span><span class="d">　要点中心・約4,000字</span></label>
       <label class="mode-card sel"><input type="radio" name="deliverable" value="standard" checked>
@@ -1149,7 +1220,7 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
       <label class="mode-card"><input type="radio" name="deliverable" value="detailed">
         <span class="t">詳細調査</span><span class="d">　長文・図表・根拠を厚く</span></label>
     </div>
-    <div class="grid2">
+    <div class="grid2" data-pro>
       <div><label for="language">言語</label>
         <select id="language"><option value="ja" selected>日本語</option><option value="en">English</option></select></div>
       <div><label for="output_format">出力形式</label>
@@ -1162,8 +1233,8 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
     </div>
 
     <!-- 4. どこまで時間をかけるか -->
-    <label id="presetLabel">調査全体のプリセット（時間のかけ方）　<span class="hint" style="display:inline">※検証モードのプリセットとは別です</span></label>
-    <div class="mode-cards mode-cards-3" id="presetModes" role="radiogroup" aria-labelledby="presetLabel">
+    <label id="presetLabel" data-pro>調査全体のプリセット（時間のかけ方）　<span class="hint" style="display:inline">※検証モードのプリセットとは別です</span></label>
+    <div class="mode-cards mode-cards-3" id="presetModes" role="radiogroup" aria-labelledby="presetLabel" data-pro>
       <label class="mode-card"><input type="radio" name="research_preset" value="quick">
         <span class="t">短時間</span><span class="d">　最小限の収集・高速検証</span></label>
       <label class="mode-card sel"><input type="radio" name="research_preset" value="standard" checked>
@@ -1171,7 +1242,7 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
       <label class="mode-card"><input type="radio" name="research_preset" value="thorough">
         <span class="t">詳細</span><span class="d">　多段推論・厳格検証</span></label>
     </div>
-    <div id="presetEffects" class="preset-effects" aria-live="polite"></div>
+    <div id="presetEffects" class="preset-effects" aria-live="polite" data-pro></div>
 
     <!-- 詳細設定（折り畳み） -->
 
@@ -1179,7 +1250,7 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
     <div class="start-box" id="startBox">
       <div class="summary-strip" id="summaryStrip" aria-live="polite"></div>
       <div class="banner" id="delegationNotice" aria-live="polite"></div>
-      <div style="display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin-top:8px">
+      <div style="display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin-top:8px" data-pro>
         <label class="check" style="margin:0"><input type="checkbox" id="plan_review" checked> 開始前に計画（目次・検索クエリ）を確認する</label>
         <select id="plan_review_mode" aria-label="計画確認の待ち方" style="width:auto">
           <option value="explicit" selected>承認・修正・中止を選ぶまで待つ</option>
@@ -1192,7 +1263,7 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
   </section>
 
     </div>
-    <div class="view-col">
+    <div class="view-col" data-pro>
   <!-- ==================== 詳細設定（この調査の条件） ==================== -->
   <section class="card" id="advancedCard">
     <h2><span class="n">🔧</span>詳細設定（この調査の条件）</h2>
@@ -1684,8 +1755,15 @@ body.fx-off .hg-sweep, body.fx-off .hg-blip, body.fx-off .hg-flow path, body.fx-
   </div>
 </main>
 
+<!-- 仕上がり / 時間のかけ方 / シンプルの推奨設定: the server fills this when it
+     serves the page (deep_research_tool/presets.py); null = ask /api/presets -->
+<script id="presetsData" type="application/json">null</script>
 <script>
 const $ = (id) => document.getElementById(id);
+// シンプル / プロ: <body data-ui-mode> was set before the first paint (head
+// of <body>); setUiMode() below changes it. Saved under drt_ui_mode.
+const UI_MODE_KEY = 'drt_ui_mode';
+let uiMode = document.body.dataset.uiMode === 'pro' ? 'pro' : 'simple';
 // An error while the page starts used to stop the rest of this script with
 // no sign of it: the buttons did nothing, 履歴 stayed empty and 調査を開始
 // sent nothing (a saved 検証 OFF did this from v1.7.0 on). Show it, with a
@@ -2017,6 +2095,8 @@ function loadSettings() {
   if (saved.deep_think_max_workers) $('feat_dt_workers').value = saved.deep_think_max_workers;
   if (Array.isArray(saved.search_languages)) setSelectedLangs(saved.search_languages);
   if (Array.isArray(saved.search_regions)) setSelectedRegions(saved.search_regions);
+  // the simple mode's provider (not a request parameter of the pro form)
+  if (['openai', 'anthropic', 'local'].includes(saved.simple_provider)) $('set_provider').value = saved.simple_provider;
   syncLangUI();
   return saved;
 }
@@ -2039,6 +2119,7 @@ function saveSettings() {
   s.deep_think_max_workers = parseInt($('feat_dt_workers').value) || 4;
   s.search_languages = selectedLangs();
   s.search_regions = selectedRegions();
+  s.simple_provider = $('set_provider').value || 'openai';
   try { localStorage.setItem('drt_settings', JSON.stringify(s)); } catch (e) { /* storage unavailable */ }
   return s;
 }
@@ -2380,8 +2461,9 @@ function setRadio(name, value) {
 document.querySelectorAll('.mode-card input').forEach(input => {
   input.addEventListener('change', () => {
     syncModeCards(input.name);
-    if (input.name === 'deliverable') applyDeliverablePreset(input.value);
-    if (input.name === 'research_preset') applyResearchPreset(input.value);
+    const stillChosen = () => radioValue(input.name) === input.value;
+    if (input.name === 'deliverable') whenPresets(() => { if (stillChosen()) { applyDeliverablePreset(input.value); applyModeVisibility(); updateSummaryStrip(); } });
+    if (input.name === 'research_preset') whenPresets(() => { if (stillChosen()) { applyResearchPreset(input.value); applyModeVisibility(); updateSummaryStrip(); } });
     // the 機能 tab switch mirrors the run mode (research only = verification off)
     if (input.name === 'run_mode' && $('feat_verification'))
       $('feat_verification').checked = input.value !== 'research_only';
@@ -2663,8 +2745,16 @@ function collectParams() {
 async function startResearch() {
   let params;
   clearFieldErrors();
+  // シンプル: only the theme, sources, output and connection settings go
+  // out, with use_recommended (the server fills every other setting)
+  const simple = uiMode === 'simple';
+  if (simple && !PRESETS) {
+    // only a page served without the presets waits; no second click meanwhile
+    $('startBtn').disabled = true;
+    try { await presetsReady; } finally { $('startBtn').disabled = false; }
+  }
   try {
-    params = collectParams();
+    params = simple ? simpleParams() : collectParams();
   } catch (e) {
     $('formError').className = 'banner error';
     $('formError').textContent = '設定エラー: ' + e.message;
@@ -2672,7 +2762,7 @@ async function startResearch() {
     return;
   }
   $('formError').className = 'banner';
-  if (params.run_mode === 'verify_only') {
+  if (!simple && params.run_mode === 'verify_only') {
     await startVerifyOnly(params);
     return;
   }
@@ -2683,7 +2773,9 @@ async function startResearch() {
   }
   if (params.source_mode === 'local' && !params.local_documents) {
     $('formError').className = 'banner error';
-    $('formError').textContent = '「手元の資料のみ」では、読み取り可能なファイルのアップロードまたはサーバー側パスの指定が必要です';
+    $('formError').textContent = simple
+      ? '「手元の資料のみ」では、読み取れるファイルを 1 つ以上追加してください'
+      : '「手元の資料のみ」では、読み取り可能なファイルのアップロードまたはサーバー側パスの指定が必要です';
     return;
   }
   if (uploadedDocs.some(d => !d.readable) && params.source_mode !== 'web') {
@@ -2700,6 +2792,8 @@ async function startResearch() {
     if (!res.ok) {
       const err = new Error(data.error || 'failed');
       if (data.field) err.field = data.field;
+      // a connection setting is missing: open ⚙設定 on it
+      if (Array.isArray(data.missing)) showMissingConnection(data.missing);
       throw err;
     }
     selectedJobId = data.job_id;   // focus the new job
@@ -3605,21 +3699,42 @@ async function startFeedback() {
     external_body_as_evidence: $('feedback_ext_body').checked,
     preferred_domains: $('feedback_domains').value.split(/[,\n]/).map(s => s.trim()).filter(Boolean),
     plan_review: $('feedback_plan_review').checked,
-    plan_review_timeout: ($('plan_review_mode') && $('plan_review_mode').value === 'auto60') ? 60 : 0,
     enable_verification: verify,
     run_mode: verify ? 'research_verify' : 'research_only',
-    research_engine: radioValue('research_engine') || 'builtin',
-    provider: $('provider').value, model: $('model').value.trim(), language: $('language').value,
-    output_format: $('output_format').value,
-    ...collectVerificationParams(), ...settingsParams(),
   };
-  if (params.research_engine !== 'builtin') { params.plan_review = false; const opts = collectEngineOptions(); if (Object.keys(opts).length) params.engine_options = opts; }
+  if (uiMode === 'simple') {
+    // シンプル: the recommended settings (server side) + this panel's own
+    // choices; nothing of the hidden pro form goes out
+    if (!PRESETS) {
+      $('feedbackStartBtn').disabled = true;
+      try { await presetsReady; } finally { $('feedbackStartBtn').disabled = false; }
+    }
+    try {
+      Object.assign(params, simpleBaseParams(), {plan_review_timeout: 0});
+    } catch (e) {
+      err.className = 'banner error';
+      err.textContent = 'フィードバック再調査を開始できませんでした: ' + e.message;
+      return;
+    }
+  } else {
+    Object.assign(params, {
+      plan_review_timeout: ($('plan_review_mode') && $('plan_review_mode').value === 'auto60') ? 60 : 0,
+      research_engine: radioValue('research_engine') || 'builtin',
+      provider: $('provider').value, model: $('model').value.trim(), language: $('language').value,
+      output_format: $('output_format').value,
+      ...collectVerificationParams(), ...settingsParams(),
+    });
+    if (params.research_engine !== 'builtin') { params.plan_review = false; const opts = collectEngineOptions(); if (Object.keys(opts).length) params.engine_options = opts; }
+  }
   $('feedbackStartBtn').disabled = true;
   err.className = 'banner'; err.textContent = '';
   try {
     const res = await fetch('/api/feedback', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(params)});
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'failed');
+    if (!res.ok) {
+      if (Array.isArray(data.missing)) showMissingConnection(data.missing);
+      throw new Error(data.error || 'failed');
+    }
     startedHere.add(data.job_id);
     selectedJobId = data.job_id;
     seenStates[data.job_id] = data.state;
@@ -4066,49 +4181,69 @@ document.querySelectorAll('#exampleChips .chip').forEach(chip => {
   });
 });
 
-// 仕上がり（要約／標準／詳細）: what it changes is listed in presetEffects
-const DELIVERABLE_PRESETS = {
-  summary:  {label: '要約', length_mode: 'fixed', preferred_body_chars: 4000,
-             auto_figures: false, gap_fill_rounds: 0,
-             desc: '文章量=固定 約4,000字／図表の自動生成=OFF／不足時の再調査=0回'},
-  standard: {label: '標準レポート', length_mode: 'adaptive', preferred_body_chars: '',
-             auto_figures: true, gap_fill_rounds: 1,
-             desc: '文章量=適応（情報量から算出）／図表の自動生成=ON／不足時の再調査=1回'},
-  detailed: {label: '詳細調査', length_mode: 'adaptive', preferred_body_chars: 20000,
-             auto_figures: true, gap_fill_rounds: 2,
-             desc: '文章量=適応（目標 約20,000字・水増しなし）／図表の自動生成=ON／不足時の再調査=2回'},
-};
-// 調査全体プリセット（短時間／標準／詳細）: time budget knobs. NOTE: this is
-// different from the verification preset (Fast/Balanced/Strict) — it SETS
-// that preset as one of its effects, and says so.
-const RESEARCH_PRESETS = {
-  quick: {label: '短時間', iterations: 1, max_iterations: 2, max_pages_per_query: 2,
-          ai_crawl_max_pages: 8, verification_profile: 'fast', deep_think: false,
-          v2_enable_polish: false, crawl_mode: 'fast_batch',
-          desc: '章ごとの調査回数=1〜2／ページ数/クエリ=2／クロール=高速（並列取得）／検証モード=Fast（追加調査・自動修正なし）／DeepThink=OFF／推敲パス=OFF'},
-  standard: {label: '標準', iterations: 2, max_iterations: 4, max_pages_per_query: 3,
-             ai_crawl_max_pages: 15, verification_profile: 'balanced', deep_think: false,
-             v2_enable_polish: true, crawl_mode: 'standard',
-             desc: '章ごとの調査回数=2〜4／ページ数/クエリ=3／クロール=標準／検証モード=Balanced（追加調査1回・自動修正1回）／DeepThink=OFF／推敲パス=ON'},
-  thorough: {label: '詳細', iterations: 3, max_iterations: 6, max_pages_per_query: 5,
-             ai_crawl_max_pages: 25, verification_profile: 'strict', deep_think: true,
-             v2_enable_polish: true, crawl_mode: 'standard',
-             desc: '章ごとの調査回数=3〜6／ページ数/クエリ=5／クロール=標準／検証モード=Strict（追加調査2回・自動修正2回・長時間化の可能性）／DeepThink=ON／推敲パス=ON'},
-};
+// 仕上がり（要約／標準／詳細）and 調査全体プリセット（短時間／標準／詳細）,
+// and the simple mode's recommended settings: defined ONLY on the server
+// (deep_research_tool/presets.py) and read from GET /api/presets, so the
+// form, the simple mode and API clients cannot drift apart. NOTE: the
+// research preset is not the verification preset (Fast/Balanced/Strict) —
+// it SETS that preset as one of its effects, and says so.
+// The server puts them into #presetsData when it serves the page, so they
+// are here before anything can be clicked; a page served without them
+// (opened as a file, a test fixture) asks /api/presets instead.
+// {label, desc, values: {request parameter: value}} by key; empty until loaded
+let DELIVERABLE_PRESETS = {};
+let RESEARCH_PRESETS = {};
+let PRESETS = null;               // the whole /api/presets answer
+let presetsError = null;
+let presetsSettled = false;       // loaded, or every attempt failed
+function usePresets(data) {
+  PRESETS = data;
+  DELIVERABLE_PRESETS = data.deliverable_presets || {};
+  RESEARCH_PRESETS = data.research_presets || {};
+  presetsError = null;
+}
+function embeddedPresets() {
+  try {
+    const el = $('presetsData');
+    const data = el ? JSON.parse(el.textContent || 'null') : null;
+    return data && typeof data === 'object' && data.recommended_params ? data : null;
+  } catch (e) { return null; }
+}
+const presetsReady = (async () => {
+  const embedded = embeddedPresets();
+  if (embedded) { usePresets(embedded); presetsSettled = true; return; }   // synchronous: no loading window
+  for (let attempt = 1; attempt <= 3 && !PRESETS; attempt++) {
+    try {
+      const res = await fetch('/api/presets');
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      usePresets(data);
+    } catch (e) {
+      presetsError = e;
+      if (attempt < 3) await new Promise(r => setTimeout(r, 1000 * attempt));
+    }
+  }
+  presetsSettled = true;
+})();
+// a preset card chosen before the presets arrived is applied once they do
+function whenPresets(fn) { if (PRESETS) fn(); else presetsReady.then(fn); }
 
 function applyDeliverablePreset(key) {
   const p = DELIVERABLE_PRESETS[key];
   if (!p) return;
-  $('length_mode').value = p.length_mode;
-  $('preferred_body_chars').value = p.preferred_body_chars === '' ? '' : String(p.preferred_body_chars);
-  $('auto_figures').checked = p.auto_figures;
-  $('gap_fill_rounds').value = String(p.gap_fill_rounds);
+  const v = p.values || {};
+  $('length_mode').value = v.length_mode;
+  $('preferred_body_chars').value = v.preferred_body_chars === null || v.preferred_body_chars === undefined
+    ? '' : String(v.preferred_body_chars);
+  $('auto_figures').checked = v.auto_figures;
+  $('gap_fill_rounds').value = String(v.gap_fill_rounds);
   renderPresetEffects();
 }
 
 function applyResearchPreset(key) {
-  const p = RESEARCH_PRESETS[key];
-  if (!p) return;
+  const preset = RESEARCH_PRESETS[key];
+  if (!preset) return;
+  const p = preset.values || {};
   $('iterations').value = String(p.iterations);
   $('max_iterations').value = String(p.max_iterations);
   $('max_pages_per_query').value = String(p.max_pages_per_query);
@@ -4121,7 +4256,42 @@ function applyResearchPreset(key) {
   renderPresetEffects();
 }
 
+// The fields a 仕上がり / 時間のかけ方 sets get the server's values for the
+// cards chosen when the page opens. Only a field still at the value written
+// in this file is set: one the browser restored or the user changed stays.
+// ⚙設定 → 機能 (DeepThink) is a saved setting and is not touched here.
+function fillPristineFromPresets() {
+  const values = {...(((DELIVERABLE_PRESETS[radioValue('deliverable')] || {}).values) || {}),
+                  ...(((RESEARCH_PRESETS[radioValue('research_preset')] || {}).values) || {})};
+  Object.entries(values).forEach(([key, v]) => {
+    if (key === 'deep_think') return;
+    if (key === 'verification_profile' || key === 'crawl_mode') {
+      if (key === 'crawl_mode' && radioValue('source_mode') === 'local') return;
+      const cur = document.querySelector(`input[name=${key}]:checked`);
+      if (cur && cur.defaultChecked && cur.value !== v) {
+        setRadio(key, v);
+        if (key === 'verification_profile') $('verifyCustomPane').style.display = v === 'custom' ? 'block' : 'none';
+      }
+      return;
+    }
+    const el = $(key);
+    if (!el) return;
+    if (el.type === 'checkbox') {
+      if (el.checked === el.defaultChecked) el.checked = !!v;
+    } else if (el.tagName === 'SELECT') {
+      const def = [...el.options].find(o => o.defaultSelected) || el.options[0];
+      if (def && el.value === def.value && v !== null && v !== undefined) el.value = String(v);
+    } else if (el.value === el.defaultValue) {
+      el.value = v === null || v === undefined ? '' : String(v);
+    }
+  });
+}
+
 function renderPresetEffects() {
+  if (!PRESETS && presetsSettled) {
+    $('presetEffects').innerHTML = `<div style="color:var(--error)">仕上がり・時間のかけ方の内容をサーバーから取得できませんでした（${escapeHtml(presetsError ? (presetsError.message || String(presetsError)) : '不明なエラー')}）。カードを選んでも各項目の値は変わりません。ページを再読み込みしてください。</div>`;
+    return;
+  }
   const d = DELIVERABLE_PRESETS[radioValue('deliverable')];
   const r = RESEARCH_PRESETS[radioValue('research_preset')];
   $('presetEffects').innerHTML =
@@ -4134,12 +4304,15 @@ function renderPresetEffects() {
 function applyModeVisibility() {
   const runMode = radioValue('run_mode') || 'research_verify';
   $('verifyOnlyBox').style.display = runMode === 'verify_only' ? 'block' : 'none';
-  $('startBtn').textContent = runMode === 'verify_only' ? '🔍 検証を開始' :
+  // the simple mode always runs the built-in loop with verification: the
+  // pro form's hidden run mode / engine never change what it shows
+  const simple = uiMode === 'simple';
+  $('startBtn').textContent = simple ? '🚀 調査を開始' : runMode === 'verify_only' ? '🔍 検証を開始' :
     (runMode === 'research_only' ? '🚀 調査を開始（検証なし）' : '🚀 調査を開始');
   // --- research engine: an external engine plans / searches / writes by
   // itself, from the Web only — local documents and the plan review are
   // shown greyed with the reason, never silently ignored
-  const engine = radioValue('research_engine') || 'builtin';
+  const engine = simple ? 'builtin' : (radioValue('research_engine') || 'builtin');
   const external = engine !== 'builtin';
   const eng = engineById[engine] || null;
   if ($('engineBox')) $('engineBox').style.display = runMode === 'verify_only' ? 'none' : '';
@@ -4201,7 +4374,8 @@ const STAGE_FORM_LABELS = {planning: '計画', crawling: 'クロール判断', e
 
 function delegationItems() {
   // what the NEXT run would delegate, from the live form + ⚙設定 values
-  const provider = $('provider').value;
+  // (the simple mode: its ⚙設定 provider, and no per-stage overrides)
+  const provider = currentProvider();
   const items = [];
   if (provider === 'local') return items;
   const role = $('set_local_role').value;
@@ -4209,9 +4383,11 @@ function delegationItems() {
   if (role && role !== 'off') {
     items.push(`${DELEGATION_ROLE_LABELS[role] || role} → ローカルLLM（⚙設定 → ロールルーティング = ${role}${url ? '、' + url : '、URL 未設定: 環境変数 LOCAL_LLM_BASE_URL がなければ開始時に設定エラー'}）`);
   }
-  document.querySelectorAll('.stage-provider').forEach(sel => {
-    if (sel.value === 'local') items.push(`${STAGE_FORM_LABELS[sel.dataset.stage] || sel.dataset.stage} → ローカルLLM（工程別のAI切り替え${url ? '、' + url : ''}）`);
-  });
+  if (uiMode !== 'simple') {
+    document.querySelectorAll('.stage-provider').forEach(sel => {
+      if (sel.value === 'local') items.push(`${STAGE_FORM_LABELS[sel.dataset.stage] || sel.dataset.stage} → ローカルLLM（工程別のAI切り替え${url ? '、' + url : ''}）`);
+    });
+  }
   return items;
 }
 
@@ -4254,6 +4430,7 @@ function renderRouting(rt) {
 }
 
 function updateSummaryStrip() {
+  if (uiMode === 'simple') { renderSimpleSummary(); return; }
   const source = radioValue('source_mode');
   const d = DELIVERABLE_PRESETS[radioValue('deliverable')];
   const r = RESEARCH_PRESETS[radioValue('research_preset')];
@@ -4537,7 +4714,7 @@ function renderHistory(records) {
     const canReout = !!saved.session;
     return `<div class="hist-row" data-job="${escapeHtml(r.job_id)}">
       <div class="q">${escapeHtml(r.query || '(無題)')}</div>
-      <div class="meta">${HIST_STATE[r.state] || escapeHtml(r.state || '')} ・ ${fmtDate(r.started_at || r.created_at)} ・ ${fmtSec(r.elapsed_seconds)}
+      <div class="meta">${HIST_STATE[r.state] || escapeHtml(r.state || '')} ・ ${fmtDate(r.started_at || r.created_at)} ・ ${fmtSec(r.elapsed_seconds)}${uiModeBadge(ps.ui_mode)}
         ${ps.parent_job_id ? `<div style="margin-top:2px">↳ フィードバック再調査（元: ${escapeHtml((records.find(x => x.job_id === ps.parent_job_id) || {}).query || ps.parent_job_id)}${res.revision ? '・' + escapeHtml(res.revision.mode_label || res.revision.mode) : ''}）</div>` : ''}
         ${axes.verification ? '<div>' + statusBadges(axes, res) + '</div>' : ''}</div>
       ${historyParams(ps, res)}
@@ -4671,8 +4848,19 @@ async function historyAction(act, row) {
     return;
   }
   if (act === 'dup') {
-    applyParamsToForm(rec.params_summary || {}, rec.query);
-    msg.textContent = '条件を「新規調査」タブに反映しました（APIキーは含まれません。確認して開始してください）';
+    if (uiMode === 'simple') {
+      // only what the simple mode shows; the hidden pro form is not touched
+      const ps = rec.params_summary || {};
+      applyParamsToSimple(ps, rec.query);
+      const hadFiles = Array.isArray(ps.local_documents) && ps.local_documents.length
+        && ['local', 'hybrid'].includes(ps.source_mode);
+      msg.textContent = '調査テーマ・使用する資料の種類・指定 URL・出力形式・言語を「新規調査」タブに反映しました。シンプルモードでは推奨設定で調査します'
+        + (hadFiles ? '。添付したファイルは複製されないため、もう一度追加してください' : '')
+        + '（ほかの条件も複製するには、プロモードで「条件を複製」を押してください。APIキーは含まれません）';
+    } else {
+      applyParamsToForm(rec.params_summary || {}, rec.query);
+      msg.textContent = '条件を「新規調査」タブに反映しました（APIキーは含まれません。確認して開始してください）';
+    }
     setView('new', {user: true});
     return;
   }
@@ -4688,14 +4876,23 @@ async function historyAction(act, row) {
     // verification settings (no research loop)
     msg.textContent = '検証のみのジョブを開始しています…';
     let params = {};
-    try { params = collectParams(); } catch (e) { msg.textContent = '設定エラー: ' + e.message; return; }
-    delete params.query; delete params.local_documents;
-    params.enable_verification = true;
+    if (uiMode === 'simple') {
+      // シンプル: the recommended verification settings (server side)
+      if (!PRESETS) await presetsReady;
+      try { params = simpleBaseParams(); } catch (e) { msg.textContent = '設定エラー: ' + e.message; return; }
+    } else {
+      try { params = collectParams(); } catch (e) { msg.textContent = '設定エラー: ' + e.message; return; }
+      delete params.query; delete params.local_documents;
+      params.enable_verification = true;
+    }
     try {
       const res = await fetch('/api/verify', {method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({...params, job_id: jobId})});
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'failed');
+      if (!res.ok) {
+        if (Array.isArray(data.missing)) showMissingConnection(data.missing);
+        throw new Error(data.error || 'failed');
+      }
       msg.textContent = '検証のみを開始しました（保存済みの本文と根拠を使用。不足する根拠は Web で補います）';
       selectedJobId = data.job_id;
       startedHere.add(data.job_id);
@@ -4884,6 +5081,344 @@ function applyParamsToForm(params, query) {
   renderPresetEffects(); applyModeVisibility(); updateSummaryStrip(); renderDelegationNotice();
 }
 
+// ==================== シンプル / プロ ====================
+// シンプル: the theme, the sources (files added here / URLs), Word or PDF,
+// 日本語 or English and the ⚙設定 connection go out with use_recommended;
+// the server fills every other setting with its recommended settings
+// (deep_research_tool/presets.py). プロ: the whole form, as before. A value
+// changed in the pro form is never sent from the simple mode: the request
+// is built from the simple inputs only, and the server drops anything else.
+const PROVIDER_LABELS = {openai: 'OpenAI', anthropic: 'Anthropic', local: 'ローカルLLM'};
+const SIMPLE_FORMAT_LABELS = {docx: 'Word', pdf: 'PDF'};
+
+// the provider of the next run: ⚙設定 in the simple mode, the form in pro
+function simpleProvider() {
+  const v = $('set_provider') ? $('set_provider').value : '';
+  return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, v) ? v : 'openai';
+}
+function currentProvider() { return uiMode === 'simple' ? simpleProvider() : $('provider').value; }
+
+function presetsUnavailable() {
+  return new Error('推奨設定をサーバーから取得できていません' +
+    (presetsError ? `（${presetsError.message}）` : '') + '。ページを再読み込みしてください');
+}
+
+// keep only what a simple-mode run may carry (the server's list) + the flag
+function onlySimpleKeys(p) {
+  if (!PRESETS || !Array.isArray(PRESETS.simple_keys)) throw presetsUnavailable();
+  const keys = new Set(PRESETS.simple_keys);
+  const out = {use_recommended: true};
+  Object.entries(p).forEach(([k, v]) => { if (keys.has(k) && v !== undefined) out[k] = v; });
+  return out;
+}
+
+// the ⚙設定 connection + the simple choices (also used by the feedback
+// re-research and 検証のみ再実行 while in the simple mode)
+function simpleBaseParams() {
+  return onlySimpleKeys({
+    ...settingsParams(),
+    provider: simpleProvider(),
+    output_format: radioValue('simple_output_format') || 'docx',
+    language: radioValue('simple_language') || 'ja',
+  });
+}
+
+// a new research from the simple form
+function simpleParams() {
+  const source = radioValue('source_mode') || 'web';
+  const p = {...simpleBaseParams(), query: $('query').value.trim(), source_mode: source};
+  if (source === 'urls' || source === 'urls_web') {
+    p.source_urls = $('source_urls').value.split('\n').map(s => s.trim()).filter(Boolean);
+    if (!p.source_urls.length) throw fieldError('source_urls', '指定 URL を 1 つ以上入力してください');
+    p.url_crawl_depth = $('url_crawl_depth').checked ? 1 : 0;
+    if (source === 'urls_web') {
+      const domains = $('preferred_domains').value.split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+      if (domains.length) p.preferred_domains = domains;
+    }
+  }
+  if (source === 'local' || source === 'hybrid') {
+    // the files added here (the server-side path box is a pro item)
+    const docs = uploadedDocs.filter(d => d.readable).map(d => d.path);
+    if (docs.length) p.local_documents = docs;
+  }
+  return onlySimpleKeys(p);
+}
+
+// the recommended settings of the next simple run, in one or two lines
+function renderSimpleSummary() {
+  const el = $('summaryStrip');
+  if (!PRESETS) {
+    el.innerHTML = presetsSettled
+      ? `<div class="simple-rec"><span class="err">推奨設定を取得できませんでした（${escapeHtml(presetsError ? presetsError.message : '不明なエラー')}）。ページを再読み込みしてください。</span></div>`
+      : '<div class="simple-rec"><span>推奨設定を読み込んでいます…</span></div>';
+    return;
+  }
+  const provider = simpleProvider();
+  const kind = (PRESETS.provider_kinds || {})[provider] || 'cloud';
+  const rec = (PRESETS.recommended_params || {})[provider] || {};
+  const d = DELIVERABLE_PRESETS[rec.deliverable] || {};
+  const r = RESEARCH_PRESETS[rec.research_preset] || {};
+  const source = radioValue('source_mode') || 'web';
+  const web = source !== 'local' && source !== 'urls';
+  const b = (v) => `<b>${escapeHtml(String(v))}</b>`;
+  // short enough for two lines at the form's width; the details (検証・
+  // クロール) are in the tooltip
+  const ver = LABELS.verification_profile[rec.verification_profile] || rec.verification_profile || '—';
+  const detail = [`仕上がり: ${d.label || rec.deliverable}（${d.desc || ''}）`,
+    `時間のかけ方: ${r.label || rec.research_preset}（${r.desc || ''}）`, `検証: ${ver}`];
+  const recItems = [`仕上がり ${b(d.label || rec.deliverable || '—')}`,
+    `時間 ${b(r.label || rec.research_preset || '—')}`];
+  if (rec.extraction_max_chunks || rec.extraction_max_tokens) {
+    recItems.push(`抽出 ${b(`${rec.extraction_max_chunks || 8}チャンク/${rec.extraction_max_tokens || '既定'}`)}`);
+    detail.push(`ページ抽出: 1 ページ ${rec.extraction_max_chunks || 8} チャンク・出力上限 ${rec.extraction_max_tokens || '既定'}`
+      + (web && rec.crawl_mode === 'fast_batch' ? '（高速クロールの Web ページには効かず、添付した資料に効きます）' : ''));
+  }
+  recItems.push(`計画確認 ${b(rec.plan_review ? 'あり' : 'なし')}`);
+  detail.push(`計画の確認: ${rec.plan_review ? 'する' : 'しない'}`);
+  const runItems = [`AI ${b(PROVIDER_LABELS[provider])}`,
+    b(SIMPLE_FORMAT_LABELS[radioValue('simple_output_format')] || 'Word'),
+    b(radioValue('simple_language') === 'en' ? 'English' : '日本語'),
+    `資料 ${b(LABELS.source_mode[source] || source)}`];
+  if (source === 'local' || source === 'hybrid') runItems.push(`ファイル ${b(uploadedDocs.filter(x => x.readable).length + '件')}`);
+  if (source === 'urls' || source === 'urls_web') {
+    runItems.push(`URL ${b($('source_urls').value.split('\n').map(s => s.trim()).filter(Boolean).length + '件')}`);
+  }
+  el.innerHTML = `<div class="simple-rec" title="${escapeHtml(detail.join('\n'))}">`
+    + `<span>推奨設定（${kind === 'local' ? 'ローカルLLM' : 'クラウドAPI'}）: ${recItems.join('・')}</span>`
+    + `<span>${runItems.join('・')}（AI は ⚙ 設定）</span></div>`;
+}
+
+// a connection setting the run cannot start without: ⚙設定 opens on it
+const CONNECTION_FIELD_IDS = {provider: 'set_provider'};
+Object.entries(SETTINGS_FIELDS).forEach(([id, key]) => { CONNECTION_FIELD_IDS[key] = id; });
+Object.entries(SECRET_FIELDS).forEach(([id, key]) => { CONNECTION_FIELD_IDS[key] = id; });
+function clearMissingConnection() {
+  document.querySelectorAll('.field-missing').forEach(el => el.classList.remove('field-missing'));
+  document.querySelectorAll('.missing-msg').forEach(el => el.remove());
+  $('settingsMissing').className = 'banner';
+  $('settingsMissing').textContent = '';
+}
+function showMissingConnection(missing) {
+  clearMissingConnection();
+  openSettingsTab('tabAI');
+  const box = $('settingsMissing');
+  box.className = 'banner error';
+  box.textContent = '接続設定が足りないため、調査を開始できませんでした。\n'
+    + (missing || []).map(m => '・' + (m.message || m.param)).join('\n');
+  let first = null;
+  (missing || []).forEach(m => {
+    const el = $(CONNECTION_FIELD_IDS[m.param]);
+    if (!el) return;
+    el.classList.add('field-missing');
+    // the message next to the field too: the banner above scrolls away
+    // when the dialog brings a field further down into view
+    const msg = document.createElement('div');
+    msg.className = 'missing-msg';
+    msg.setAttribute('role', 'alert');
+    msg.textContent = m.message || m.param;
+    el.insertAdjacentElement('afterend', msg);
+    first = first || el;
+  });
+  if (first) { first.scrollIntoView({block: 'center'}); first.focus(); }
+  else box.scrollIntoView({block: 'nearest'});
+}
+$('settingsBtn').addEventListener('click', clearMissingConnection);
+$('settingsSaveBtn').addEventListener('click', clearMissingConnection);
+$('settingsModal').addEventListener('input', (e) => {
+  const t = e.target;
+  if (!t || !t.classList || !t.classList.contains('field-missing')) return;
+  t.classList.remove('field-missing');
+  const next = t.nextElementSibling;
+  if (next && next.classList.contains('missing-msg')) next.remove();
+});
+$('set_provider').addEventListener('change', () => {
+  $('set_provider').classList.remove('field-missing');
+  const next = $('set_provider').nextElementSibling;
+  if (next && next.classList.contains('missing-msg')) next.remove();
+  updateSummaryStrip(); renderDelegationNotice();
+});
+
+// the history: which mode a run was started from (older records: nothing)
+function uiModeBadge(mode) {
+  if (mode === 'simple') return ' ・ <span class="mode-badge simple" title="シンプルモード（推奨設定）で実行">シンプル</span>';
+  if (mode === 'pro') return ' ・ <span class="mode-badge" title="プロモード（フォームの設定）で実行">プロ</span>';
+  return '';
+}
+
+// 条件を複製 in the simple mode: only what this mode shows
+function applyParamsToSimple(p, query) {
+  p = p || {};
+  if (query !== undefined) $('query').value = query || '';
+  if (p.source_mode) setRadio('source_mode', p.source_mode);
+  if (Array.isArray(p.source_urls)) $('source_urls').value = p.source_urls.join('\n');
+  if (p.url_crawl_depth !== undefined && p.url_crawl_depth !== null)
+    $('url_crawl_depth').checked = p.url_crawl_depth === true || Number(p.url_crawl_depth) > 0;
+  if (Array.isArray(p.preferred_domains)) $('preferred_domains').value = p.preferred_domains.join(', ');
+  if (Object.prototype.hasOwnProperty.call(SIMPLE_FORMAT_LABELS, p.output_format)) setRadio('simple_output_format', p.output_format);
+  if (p.language === 'ja' || p.language === 'en') setRadio('simple_language', p.language);
+  applyModeVisibility(); updateSummaryStrip(); renderDelegationNotice();
+}
+
+// シンプル → プロ: the pro form starts from the page's initial values + the
+// recommended settings + the simple choices, so what the simple mode used is
+// what the form shows. The pro values it replaces can be put back once.
+let INITIAL_FORM = null;            // formSnapshot() when the page opened
+let proUndoSnapshot = null;
+// shared by both modes (the simple mode shows them): never reset
+const SHARED_FORM = {text: ['source_urls', 'preferred_domains'], check: ['url_crawl_depth'], radio: ['source_mode']};
+
+// the pro values the switch replaces: the form, and the ⚙設定 → 機能 boxes
+// the time preset / run mode also set (DeepThink, 検証)
+function proSwitchState() {
+  return {form: formSnapshot(),
+          deepThink: $('feat_deep_think') ? $('feat_deep_think').checked : null,
+          verification: $('feat_verification') ? $('feat_verification').checked : null};
+}
+function restoreProSwitchState(s) {
+  applySnapshot(s.form);
+  if ($('feat_deep_think') && s.deepThink !== null) $('feat_deep_think').checked = s.deepThink;
+  if ($('feat_verification') && s.verification !== null) $('feat_verification').checked = s.verification;
+  renderDelegationNotice();
+}
+
+let recApplyPending = false;          // one deferred apply at a time
+function applyRecommendedToForm() {
+  if (!PRESETS && !presetsSettled) {
+    // a page served without the presets, still asking for them: apply on arrival
+    showProSwitchNote('loading');
+    if (!recApplyPending) {
+      recApplyPending = true;
+      presetsReady.then(() => { recApplyPending = false; if (uiMode === 'pro') applyRecommendedToForm(); });
+    }
+    return;
+  }
+  const rec = PRESETS && (PRESETS.recommended_params || {})[simpleProvider()];
+  if (!rec) { showProSwitchNote(null); return; }
+  const provider = simpleProvider();
+  const before = proSwitchState();
+  if (INITIAL_FORM) {
+    const base = JSON.parse(JSON.stringify(INITIAL_FORM));
+    Object.entries(SHARED_FORM).forEach(([part, keys]) => keys.forEach(k => { delete (base[part] || {})[k]; }));
+    applySnapshot(base);
+  }
+  $('provider').value = provider;
+  $('model').value = '';
+  $('output_format').value = radioValue('simple_output_format') || 'docx';
+  $('language').value = radioValue('simple_language') || 'ja';
+  const runMode = rec.run_mode || 'research_verify';
+  setRadio('run_mode', runMode);
+  if ($('feat_verification')) $('feat_verification').checked = runMode !== 'research_only';
+  setRadio('research_engine', rec.research_engine || 'builtin');
+  setRadio('deliverable', rec.deliverable);
+  applyDeliverablePreset(rec.deliverable);
+  setRadio('research_preset', rec.research_preset);
+  applyResearchPreset(rec.research_preset);
+  $('plan_review').checked = !!rec.plan_review;
+  $('plan_review_mode').value = Number(rec.plan_review_timeout) > 0 ? 'auto60' : 'explicit';
+  $('verifyCustomPane').style.display = radioValue('verification_profile') === 'custom' ? 'block' : 'none';
+  renderPresetEffects(); applyModeVisibility(); updateSummaryStrip(); renderDelegationNotice();
+  const after = proSwitchState();
+  proUndoSnapshot = JSON.stringify(before) !== JSON.stringify(after) ? before : null;
+  // the ⚙設定 → 機能 boxes the switch changed (the time preset sets
+  // DeepThink, the run mode sets 検証)
+  const onOff = v => (v ? 'ON' : 'OFF');
+  const featChanges = [];
+  if (before.deepThink !== after.deepThink) featChanges.push(`DeepThink ${onOff(before.deepThink)}→${onOff(after.deepThink)}`);
+  if (before.verification !== after.verification) featChanges.push(`検証 ${onOff(before.verification)}→${onOff(after.verification)}`);
+  showProSwitchNote(rec, provider, featChanges);
+}
+
+function showProSwitchNote(rec, provider, featChanges = []) {
+  const el = $('proSwitchNote');
+  if (rec === 'loading') {
+    el.className = 'banner notice';
+    el.textContent = '推奨設定を読み込んでいます。届いたらフォームに反映します…';
+    return;
+  }
+  if (!rec) {
+    el.className = 'banner error';
+    el.textContent = '推奨設定を取得できなかったため、フォームはそのままです（ページを再読み込みしてください）';
+    return;
+  }
+  const d = DELIVERABLE_PRESETS[rec.deliverable] || {};
+  const r = RESEARCH_PRESETS[rec.research_preset] || {};
+  const items = [`AI: ${PROVIDER_LABELS[provider] || provider}（モデルは標準）`,
+    `実行モード: ${rec.run_mode === 'research_only' ? '調査のみ' : '検証入り調査'}`, `仕上がり: ${d.label || rec.deliverable}`,
+    `時間のかけ方: ${r.label || rec.research_preset}`, `計画の確認: ${rec.plan_review ? 'する' : 'しない'}`,
+    `出力: ${SIMPLE_FORMAT_LABELS[$('output_format').value] || $('output_format').value}`,
+    `言語: ${$('language').value === 'en' ? 'English' : '日本語'}`];
+  let extra = '';
+  if (rec.extraction_max_chunks || rec.extraction_max_tokens) {
+    extra = `ページ抽出の設定（チャンク ${rec.extraction_max_chunks || 8}・出力上限 ${rec.extraction_max_tokens || '既定'}）はこのフォームに項目がないため、プロモードの調査では送りません（チャンク 8・上限はクライアントの既定）。`;
+  }
+  el.className = 'banner notice';
+  el.innerHTML = `<b>シンプルモードの推奨設定をフォームに反映しました。</b> ${escapeHtml(items.join('・'))}。`
+    + escapeHtml(extra)
+    + (featChanges.length ? escapeHtml(`⚙ 設定 → 機能 も推奨設定に合わせました（${featChanges.join('・')}。保存するまでこの画面だけの変更です）。`) : '')
+    + 'そのほかの ⚙ 設定 → 機能 の値（シンプルモードでは使いません）は、プロモードの調査に使われます。保存したプリセットは「フォームの保存」から読み込めます。'
+    + (proUndoSnapshot ? '<button type="button" class="secondary" data-act="undo">切り替え前の値に戻す</button>' : '')
+    + '<button type="button" class="secondary" data-act="close">閉じる</button>';
+}
+$('proSwitchNote').addEventListener('click', (e) => {
+  const btn = e.target.closest && e.target.closest('button[data-act]');
+  if (!btn) return;
+  const el = $('proSwitchNote');
+  if (btn.dataset.act === 'undo' && proUndoSnapshot) {
+    restoreProSwitchState(proUndoSnapshot);
+    proUndoSnapshot = null;
+    el.className = 'banner notice';
+    el.innerHTML = '切り替え前のプロモードの値に戻しました。<button type="button" class="secondary" data-act="close">閉じる</button>';
+    return;
+  }
+  el.className = 'banner';
+  el.textContent = '';
+});
+
+function setUiMode(mode, opts = {}) {
+  mode = mode === 'pro' ? 'pro' : 'simple';
+  const from = uiMode;
+  uiMode = mode;
+  document.body.dataset.uiMode = mode;
+  document.querySelectorAll('#uiModeToggle [data-set-mode]').forEach(b => {
+    const on = b.dataset.setMode === mode;
+    b.setAttribute('aria-checked', String(on));
+    b.tabIndex = on ? 0 : -1;
+  });
+  if (opts.user) {
+    try { localStorage.setItem(UI_MODE_KEY, mode); } catch (e) { /* storage unavailable */ }
+    // #fermi shows pro for that page only: once the user chose a mode, a
+    // reload must not override it
+    if (location.hash === '#fermi') {
+      try { history.replaceState(null, '', '#' + (document.body.dataset.view || 'new')); } catch (e) { /* ignore */ }
+    }
+    if (from === 'simple' && mode === 'pro') applyRecommendedToForm();
+  }
+  if (mode === 'simple') {
+    $('proSwitchNote').className = 'banner';
+    // ⚙設定 has only its connection tab in this mode
+    const featTab = document.querySelector('.modal-tab[data-tab="tabFeatures"]');
+    const aiTab = document.querySelector('.modal-tab[data-tab="tabAI"]');
+    if (featTab && featTab.classList.contains('sel') && aiTab) aiTab.click();
+  }
+  if (from !== mode) {
+    clearFieldErrors();
+    $('formError').className = 'banner';
+    $('formError').textContent = '';
+  }
+  applyModeVisibility(); updateSummaryStrip(); renderDelegationNotice();
+}
+document.querySelectorAll('#uiModeToggle [data-set-mode]').forEach(b => {
+  b.addEventListener('click', () => setUiMode(b.dataset.setMode, {user: true}));
+});
+$('uiModeToggle').addEventListener('keydown', (e) => {
+  if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
+  e.preventDefault();
+  const next = uiMode === 'simple' ? 'pro' : 'simple';
+  setUiMode(next, {user: true});
+  const btn = document.querySelector(`#uiModeToggle [data-set-mode="${next}"]`);
+  if (btn) btn.focus();
+});
+
 // ==================== ローカルLLM 並列処理テスト（⚙ 設定） ====================
 $('llmParallelTestBtn').addEventListener('click', async () => {
   const out = $('llmParallelTestResult');
@@ -5025,6 +5560,9 @@ $('fermi_question').addEventListener('keydown', (e) => { if (e.key === 'Enter') 
 function applyHash() {
   const h = (location.hash || '').replace('#', '');
   if (h === 'fermi') {
+    // the Fermi panel is a pro item: this page shows pro (the saved choice
+    // is left as it is, and nothing is applied to the form)
+    if (uiMode !== 'pro') setUiMode('pro');
     setView('new');
     $('fermiDetails').open = true;
     $('fermiCard').scrollIntoView({block: 'start'});
@@ -5480,7 +6018,23 @@ document.addEventListener('pointerleave', () => document.querySelectorAll('.mode
   setTimeout(step, 300);
 })();
 
+// the starting values of the chosen 仕上がり / 時間のかけ方 come from the server
+// too (the field values in this file are only placeholders)
+try { fillPristineFromPresets(); } catch (e) { console.error('preset values not filled in', e); }
+// the pro form as the page opened: シンプル → プロ starts from it
+try { INITIAL_FORM = formSnapshot(); } catch (e) { console.error('initial form not recorded', e); }
 try { syncSavedRunMode(); } catch (e) { console.error('saved run mode not applied', e); }
+// シンプル / プロ: the toggle and what each mode shows (nothing is applied
+// to the form when the page opens: a saved プロ starts as it always did)
+try { setUiMode(uiMode); } catch (e) { console.error('ui mode not applied', e); }
+// the presets arrive from the server: redraw what names them
+presetsReady.then(() => {
+  try {
+    fillPristineFromPresets();               // a page that had to ask for them
+    renderPresetEffects(); applyModeVisibility(); updateSummaryStrip();
+    if (historyCache && historyCache.length) renderHistory(historyCache);
+  } catch (e) { console.error('presets not shown', e); }
+});
 // initial load: pick up any jobs already running on the server
 pollJobs();
 // the 調査エンジン cards (availability is checked by the server)

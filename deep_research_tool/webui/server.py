@@ -26,6 +26,8 @@ from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
 from .. import __version__
+from ..presets import (apply_recommended, missing_connection, presets_payload,
+                       wants_recommended)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -424,6 +426,43 @@ def build_config_kwargs(params: Dict[str, Any]) -> Dict[str, Any]:
         kwargs["stage_llm"] = cleaned_stages
 
     return kwargs
+
+
+# the page carries the presets / recommended settings from its first byte:
+# the server puts them into this element when it serves the page (the page
+# asks GET /api/presets only when it was served without them)
+PRESETS_PLACEHOLDER = '<script id="presetsData" type="application/json">null</script>'
+
+
+def page_with_presets(html: str) -> str:
+    """index.html with the presets payload in its placeholder element."""
+    data = json.dumps(presets_payload(), ensure_ascii=False)
+    # nothing in the JSON can end the <script> element
+    data = data.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    return html.replace(PRESETS_PLACEHOLDER,
+                        f'<script id="presetsData" type="application/json">{data}</script>', 1)
+
+
+def resolve_ui_mode(params: Dict[str, Any], keep=()):
+    """(params, error) for a job-starting request.
+
+    With ``use_recommended`` the run gets the recommended settings (only
+    the simple-mode inputs and the connection settings of the request
+    survive) and is recorded as ui_mode "simple"; a missing connection
+    setting is returned as the error body (HTTP 400) instead. Any other
+    request keeps its parameters as they are and is recorded as "pro".
+    """
+    if wants_recommended(params):
+        out = apply_recommended(params, keep=keep)
+        missing = missing_connection(out)
+        if missing:
+            return out, {"error": "接続設定が足りません: " +
+                         " / ".join(m["message"] for m in missing),
+                         "field": "connection", "missing": missing}
+        return out, None
+    out = dict(params)
+    out["ui_mode"] = "pro"
+    return out, None
 
 
 def engine_request_error(params: Dict[str, Any]):
@@ -1844,7 +1883,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if route in ("/", "/index.html"):
             index = STATIC_DIR / "index.html"
             if index.is_file():
-                self._send_file(index, "text/html; charset=utf-8")
+                page = page_with_presets(index.read_text(encoding="utf-8")).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(page)))
+                self.end_headers()
+                self.wfile.write(page)
             else:
                 self._send_json({"error": "index.html not found"}, 500)
         elif route in ("/evidence", "/evidence.html"):
@@ -1859,6 +1903,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
             self._serve_evidence((query.get("job_id") or [""])[0])
         elif route == "/api/version":
             self._send_json({"version": __version__})
+        elif route == "/api/presets":
+            # 仕上がり / 時間のかけ方 and the simple mode's recommended
+            # settings: defined only on the server, the page just shows them
+            self._send_json(presets_payload())
         elif route == "/api/engines":
             # the 調査エンジン cards: availability is checked live (the
             # engine's interpreter / package), mocks only on request
@@ -2063,6 +2111,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                           if k not in ("question", "context", "known_values",
                                        "language")}
             job_params["query"] = f"フェルミ推定: {question}"
+            # the Fermi panel is a pro-mode item (history shows the mode)
+            job_params["ui_mode"] = "pro"
             job_params["fermi"] = {
                 "question": question, "context": params.get("context") or "",
                 "known_values": cleaned or None,
@@ -2121,6 +2171,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
                           if k not in ("job_id", "session_path", "report_path",
                                        "evidence_path", "resume_from", "regenerate",
                                        "fermi", "verify")}
+            # simple mode: the recommended verification settings
+            job_params, mode_error = resolve_ui_mode(job_params)
+            if mode_error is not None:
+                self._send_json(mode_error, 400)
+                return
             label = (rec or {}).get("query") if rec else Path(spec["report_path"]).name
             user_query = (params.get("query") or "").strip()
             # the job's display label; verify_report gets the USER's topic
@@ -2215,9 +2270,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
                        "reference_jobs", "preferred_domains", "query", "local_documents",
                        "resume_from", "verify", "fermi", "regenerate", "parent_job_id",
                        "source_urls", "source_mode", "external_reports", "external_fetch_urls",
-                       "external_body_as_evidence"}
-            base_params = {k: v for k, v in dict((rec or {}).get("params_summary") or {}).items()
-                           if k not in control}
+                       "external_body_as_evidence",
+                       # the mode is THIS request's, never the original run's
+                       "use_recommended", "ui_mode"}
+            # simple mode takes nothing of the original run's settings (its
+            # model, its pro choices…): only this request + the recommended ones
+            inherited = {} if wants_recommended(params) else \
+                dict((rec or {}).get("params_summary") or {})
+            base_params = {k: v for k, v in inherited.items() if k not in control}
             base_params.update({k: v for k, v in params.items() if k not in control})
             urls = normalize_urls(params.get("urls") or [])
             if urls:
@@ -2239,6 +2299,18 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 "external_fetch_urls": bool(params.get("external_fetch_urls", True)),
                 "external_body_as_evidence": bool(params.get("external_body_as_evidence", True)),
             }
+            # simple mode: the recommended settings, but the feedback panel's
+            # own choices (shown the same in both modes) still apply
+            mode_request = dict(base_params)
+            if "use_recommended" in params:
+                mode_request["use_recommended"] = params["use_recommended"]
+            base_params, mode_error = resolve_ui_mode(
+                mode_request,
+                keep=("feedback", "parent_job_id", "plan_review",
+                      "plan_review_timeout", "enable_verification", "run_mode"))
+            if mode_error is not None:
+                self._send_json(mode_error, 400)
+                return
             try:
                 build_config_kwargs(base_params)
             except FieldError as e:
@@ -2281,6 +2353,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/resume":
                 base_params = dict(rec.get("params_summary") or {})
+                if params.get("overrides"):
+                    # changed settings are no longer the recommended ones
+                    base_params.pop("use_recommended", None)
+                    base_params["ui_mode"] = "pro"
                 base_params.update(params.get("overrides") or {})
                 base_params["resume_from"] = session_path
                 base_params["resume_output_dir"] = rec.get("output_dir")
@@ -2301,8 +2377,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     self._send_json({"error": f"mode must be 'full' or 'summary' (got {mode})",
                                      "field": "mode"}, 400)
                     return
+                # no search / no LLM: the output of the source run, recorded
+                # with that run's mode (history badge)
+                source_mode = (rec.get("params_summary") or {}).get("ui_mode")
                 job = manager.start({
                     "query": f"再出力: {rec.get('query', '')}",
+                    **({"ui_mode": source_mode} if source_mode in ("simple", "pro") else {}),
                     "regenerate": {
                         "session_path": session_path,
                         "output_format": fmt,
@@ -2362,6 +2442,13 @@ class WebUIHandler(BaseHTTPRequestHandler):
 
         if not (params.get("query") or "").strip():
             self._send_json({"error": "query is required"}, 400)
+            return
+
+        # simple mode (use_recommended): the recommended settings replace
+        # whatever else the request carried; the mode goes to the history
+        params, mode_error = resolve_ui_mode(params)
+        if mode_error is not None:
+            self._send_json(mode_error, 400)
             return
 
         # Server-side validation BEFORE the job starts: invalid length /
