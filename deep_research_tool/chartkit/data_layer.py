@@ -1101,7 +1101,8 @@ def build_section_catalog(points: Iterable[Any], section_id: str,
                           primary_domains: Any = DEFAULT_PRIMARY_DOMAINS,
                           min_points_time: int = 2,
                           min_entities: int = 2,
-                          max_series: int = 60) -> SectionCatalog:
+                          max_series: int = 60,
+                          drop_mixed_periods: bool = False) -> SectionCatalog:
     """Turn the store's points that belong to ``section_id`` into labelled
     series. ``section_evidence_ids`` (the locker's section map) also claims
     points of a document that several chapters use: extraction records
@@ -1110,7 +1111,11 @@ def build_section_catalog(points: Iterable[Any], section_id: str,
 
     Points are grouped by (metric key, base unit, period granularity) and
     entity key (``metric_key`` / ``entity_base_key`` + aliases); series
-    names, labels and units are the sources' most frequent spellings."""
+    names, labels and units are the sources' most frequent spellings.
+
+    ``drop_mixed_periods`` (the enhanced style): a comparison whose values
+    cover different periods (CAGR 2019-2024 next to CAGR 2015-2024, all
+    without a single year) is left out instead of drawn side by side."""
     primary_domains = _policy(primary_domains)
     evidence_ids = set(section_evidence_ids or [])
     cat = SectionCatalog(section_id=section_id)
@@ -1123,6 +1128,8 @@ def build_section_catalog(points: Iterable[Any], section_id: str,
     st = cat.stats
     st.update({"points": len(mine), "no_metric": 0, "period_unknown": 0, "time_too_short": 0,
                "comparison_too_few": 0, "granularity_split": 0, "series": 0, "capped": 0})
+    if drop_mixed_periods:
+        st["period_mixed"] = 0
     if not mine:
         return cat
 
@@ -1207,6 +1214,12 @@ def build_section_catalog(points: Iterable[Any], section_id: str,
                 st["comparison_too_few"] += 1
                 continue
             chosen = {e: _choose(pts, primary_domains) for e, pts in by_entity2.items()}
+            if drop_mixed_periods and tl is None:
+                periods = {str(getattr(c, "date_context", "") or "").strip() for c in chosen.values()}
+                if len(periods) > 1:
+                    cat.dropped.append(f"{shown_metric}: 期間の違う値（{'・'.join(sorted(p or '期間不明' for p in periods))}）は1つの比較にしない")
+                    st["period_mixed"] += 1
+                    continue
             scale = _pick_display_scale([(0.0, parse_unit(getattr(c, "unit", ""))[2]) for c in chosen.values()])
             # entities ordered by value (desc) in the display scale; the key
             # breaks ties so the order never depends on the input order

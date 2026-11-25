@@ -28,9 +28,22 @@ def kpi_card(k: Dict[str, Any]) -> str:
             f'<p class="ks">{e(str(k.get("sub", "")))}</p></div>')
 
 
+# the forms prelude.js can draw
+_DRAWN_FORMS = ("bar", "hbar", "stacked_bar", "stacked_hbar", "line_xy")
+
+
+def _drawn_form(p: Dict[str, Any]) -> str:
+    """The form the PNG was drawn in (enhanced turns a crowded bar chart into
+    horizontal bars: form_rendered), so the page and the report agree."""
+    form = p.get("form_rendered") or p.get("form", "bar")
+    if form not in _DRAWN_FORMS:
+        raise ValueError(f"{p.get('id')}: この形式は描画できません（{form!r}）")
+    return form
+
+
 def panel_html(p: Dict[str, Any]) -> str:
     e = html.escape
-    form = p.get("form", "bar")
+    form = _drawn_form(p)
     default_h = 80 if form == "stacked_hbar" else (
         max(260, len(p.get("series") or []) * len(p.get("labels") or []) * 40 + 80) if form == "hbar" else 260)
     h = _px(p.get("height"), default_h)
@@ -57,6 +70,7 @@ def _spec_json(panels: Sequence[Dict[str, Any]]) -> str:
     slim = []
     for p in panels:
         q = {k: p[k] for k in keep if k in p}
+        q["form"] = _drawn_form(p)
         # forecast: one flag per value (drawn dashed / hollow, as in the PNG)
         q["series"] = [dict({k: s.get(k) for k in ("name", "role", "values", "basis")},
                             forecast=forecast_flags(s, p.get("labels") or []))

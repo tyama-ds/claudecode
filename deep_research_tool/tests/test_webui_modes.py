@@ -770,3 +770,37 @@ def test_a_page_without_the_presets_never_starts_twice(ui_server):
     finally:
         browser.close()
         pw.stop()
+
+
+def test_one_provider_setting_for_both_modes(ui_server):
+    pw, browser = _browser()
+    try:
+        page, errors, _ = _load(browser, _url(ui_server, "/"), "localStorage.setItem('drt_ui_mode', 'pro')")
+        # pro: the provider is chosen in ⚙設定 (visible), the form only shows it
+        assert not page.is_visible("#provider")
+        page.evaluate("document.getElementById('providerSettingsLink').click()")   # inside the folded 詳細設定
+        assert page.is_visible("#set_provider")
+        page.select_option("#set_provider", "anthropic")
+        page.click("#settingsSaveBtn")
+        assert page.text_content("#providerNote") == "Anthropic"
+        assert page.evaluate("collectParams().provider") == "anthropic"
+        # a form preset / 条件を複製 carrying a provider sets ⚙設定
+        page.evaluate("applyParamsToForm({provider: 'local'}, 'q')")
+        assert page.evaluate("document.getElementById('set_provider').value") == "local"
+        # simple uses the same one; switching back to pro keeps it
+        page.click("#uiModeToggle [data-set-mode=simple]")
+        assert page.evaluate("simpleParams ? true : false")
+        assert "ローカルLLM" in page.inner_text("#summaryStrip")
+        page.evaluate("document.getElementById('set_provider').value = 'openai';"
+                      "document.getElementById('set_provider').dispatchEvent(new Event('change'))")
+        page.click("#uiModeToggle [data-set-mode=pro]")
+        assert page.evaluate("document.getElementById('set_provider').value") == "openai"
+        assert page.evaluate("collectParams().provider") == "openai"
+        # saved and restored after a reload
+        page.click("#settingsBtn"); page.click("#settingsSaveBtn")
+        page.reload(wait_until="networkidle"); page.wait_for_timeout(300)
+        assert page.evaluate("collectParams().provider") == "openai"
+        assert errors == [], errors
+    finally:
+        browser.close()
+        pw.stop()

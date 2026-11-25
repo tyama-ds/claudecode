@@ -4945,7 +4945,8 @@ Output only the text (no JSON, no heading):"""
             ev_ids = _evidence_ids(sid)
             claimed_ids.update(ev_ids)
             cat = build_section_catalog(store.data_points, sid, ev_ids,
-                                        primary_domains=policy)
+                                        primary_domains=policy,
+                                        drop_mixed_periods=(style == "enhanced"))
             chart_yield["chapters"][str(sid)] = {"catalog": dict(cat.stats)}
             if not cat.is_empty():
                 catalogs[sid] = (cat, sd)
@@ -4971,7 +4972,8 @@ Output only the text (no JSON, no heading):"""
                     (sd.get("content") or "")[:400]
                 msgs = build_messages(f"{sid}. {title}", goal, cat.catalog_for_prompt(),
                                       max_panels=max_panels, language=language,
-                                      research_topic=getattr(session, "query", "") or "")
+                                      research_topic=getattr(session, "query", "") or "",
+                                      style=style)
                 resp = llm.generate(msgs["user"], system_prompt=msgs["system"])
                 status: dict = {}
                 panels = parse_panels(getattr(resp, "content", "") or "", status)
@@ -4987,7 +4989,7 @@ Output only the text (no JSON, no heading):"""
                     p["id"] = f"s{safe_sid}_{pid}"
                 vstats: dict = {}
                 valid, rejected = validate_panels(panels, cat.to_data(), max_panels=max_panels,
-                                                  stats=vstats)
+                                                  stats=vstats, style=style)
                 info = {"parsed": bool(status.get("ok")), "proposed": len(panels),
                         "over_limit": vstats.get("over_limit", 0)}
                 return sid, title, valid, [(p.get("id") if p else None, r) for p, r in rejected], None, info
@@ -5110,6 +5112,7 @@ Output only the text (no JSON, no heading):"""
                 ids.append(panel["id"])
             y.update({"rendered": len(ids), "render_failed": render_failed,
                       "panels": [{"id": p["id"], "form": p.get("form"),
+                                  "form_requested": p.get("form_requested"),
                                   "form_rendered": p.get("form_rendered"),
                                   "name_fixes": p.get("name_fixes") or [],
                                   "grounding": p.get("grounding"),
@@ -5162,6 +5165,14 @@ Output only the text (no JSON, no heading):"""
             ResearchWarnings.get_instance().add(ResearchWarnings.LOW, "AutoFigures", message)
         chart_yield["warnings"] = chart_warnings
         chart_yield["charts"] = len(figures)
+        # the forms the report's charts were drawn in (how bar-heavy it is)
+        form_counts: dict = {}
+        for ch in chart_yield.get("chapters", {}).values():
+            for pp in ch.get("panels") or []:
+                if pp.get("rendered"):
+                    f = pp.get("form_rendered") or pp.get("form") or "?"
+                    form_counts[f] = form_counts.get(f, 0) + 1
+        chart_yield["form_counts"] = form_counts
         self._write_chart_yield(figures_dir, chart_yield)
         try:
             page = render_html(page_panels, title=f"{getattr(session, 'query', '') or ''} — チャート",

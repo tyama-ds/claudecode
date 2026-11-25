@@ -444,6 +444,11 @@ def _plain_number(v, _pos=None) -> str:
     return str(int(r)) if abs(v - r) < 1e-9 else f"{v:g}"
 
 
+# the forms this renderer can draw (spec.FORMS_BY_STYLE decides which a
+# style may choose)
+_DRAWN_FORMS = ("bar", "hbar", "stacked_bar", "stacked_hbar", "line_xy")
+
+
 def _pick_form(panel: Dict[str, Any], style: str) -> str:
     """enhanced: a vertical bar chart whose labels would collide (many or
     long labels) is drawn as horizontal bars; the panel's semantic form is
@@ -493,6 +498,9 @@ def _render_locked(panel: Dict[str, Any], path: Path, language: str, dpi: Option
                              "ytick.color": INK, "font.size": 10 if style == "classic" else 8.5,
                              "figure.facecolor": "white"})
         form = _pick_form(panel, style)
+        if form not in _DRAWN_FORMS:
+            # never drawn as bars by default: the caller counts it as failed
+            raise ValueError(f"{panel.get('id')}: この形式は描画できません（{form!r}）")
         series = panel.get("series") or []
         labels = list(panel.get("labels") or [])
         unit = str(panel.get("unit") or (series[0].get("unit") if series else "") or "")
